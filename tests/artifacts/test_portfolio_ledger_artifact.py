@@ -28,9 +28,30 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_iterdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_replace,
+    filesystem_stat,
+    filesystem_walk,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+    open_filesystem_file,
+)
 from tests.helpers.binance_hft import KNOWN_NO_FUNDING
 from tests.helpers.portfolio_ledger import session_frame, write_test_sessions
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def _file_bytes(root: Path) -> dict[Path, bytes]:
+    return {
+        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        for parent, _directories, files in filesystem_walk(root)
+        for name in files
+    }
 
 
 @pytest.mark.parametrize("boundary", ("batch", "cross_session"))
@@ -97,11 +118,7 @@ def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
         )
         assert len(tuple(old.iter_chunks())) == 1
         assert ledger_artifact.summarize_portfolio_ledger(old)["net_pnl"] == 0.0
-        old_bytes = {
-            path.relative_to(old_root): path.read_bytes()
-            for path in old_root.rglob("*")
-            if path.is_file()
-        }
+        old_bytes = _file_bytes(old_root)
 
         def invalid(emit):
             if boundary == "batch":
@@ -120,12 +137,10 @@ def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
             ledger_artifact.write_portfolio_ledger_artifact(
                 candidate, envelope=envelope, produce=invalid
             )
-        assert not (candidate / "instances" / envelope.instance_identity).exists()
-        assert {
-            path.relative_to(old_root): path.read_bytes()
-            for path in old_root.rglob("*")
-            if path.is_file()
-        } == old_bytes
+        assert not filesystem_exists(
+            candidate / "instances" / envelope.instance_identity
+        )
+        assert _file_bytes(old_root) == old_bytes
         assert policy.used_memory_bytes == 0
 
 
@@ -269,7 +284,7 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
         and any(row.fill_id == fill_id for row in batch.diagnostics)
         for batch in batches
     )
-    old_manifest = (root / "manifest.json").read_bytes()
+    old_manifest = filesystem_read_bytes(root / "manifest.json")
     policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
     with (
         runtime_resource_policy_scope(policy),
@@ -282,7 +297,7 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
             envelope=envelope,
             produce=lambda emit: run(emit, policy, None),
         )
-    assert (root / "manifest.json").read_bytes() == old_manifest
+    assert filesystem_read_bytes(root / "manifest.json") == old_manifest
 
 
 def test_orphan_fill_and_unknown_delayed_fill_fail_closed(tmp_path):
@@ -324,7 +339,9 @@ def test_orphan_fill_and_unknown_delayed_fill_fail_closed(tmp_path):
         write_portfolio_ledger_artifact(
             tmp_path / "bad", envelope=_envelope(), produce=lambda emit: emit(bad)
         )
-    assert not (tmp_path / "bad" / "instances" / _envelope().instance_identity).exists()
+    assert not filesystem_exists(
+        tmp_path / "bad" / "instances" / _envelope().instance_identity
+    )
 
 
 def test_adjusted_return_terminal_nav_is_valued_at_actual_interval_end(
@@ -620,7 +637,7 @@ def test_portfolio_ledger_member_mutation_fails_closed(tmp_path: Path) -> None:
         envelope=_envelope(),
         ledger_chunks=(frame,),
     )
-    with (root / "valuations.parquet").open("ab") as handle:
+    with open_filesystem_file(root / "valuations.parquet", "ab") as handle:
         handle.write(b"mutation")
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         read_portfolio_ledger_artifact(root, expected_identity=root.name)
@@ -642,7 +659,7 @@ def test_portfolio_ledger_rejects_an_extra_persisted_member(tmp_path: Path) -> N
         envelope=_envelope(),
         ledger_chunks=(frame,),
     )
-    (root / "extra.parquet").write_bytes(b"not-a-ledger")
+    filesystem_write_bytes(root / "extra.parquet", b"not-a-ledger")
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         read_portfolio_ledger_artifact(root, expected_identity=root.name)
 
@@ -942,11 +959,7 @@ def test_portfolio_ledger_primary_error_survives_writer_close_failure(
             ledger_chunks=(first, second),
         )
     assert any("close also failed" in note for note in raised.value.__notes__)
-    from quant_research_platform.storage.identity import native_filesystem_path
-
-    assert not list(
-        Path(native_filesystem_path(tmp_path / "portfolio" / "instances")).iterdir()
-    )
+    assert not list(filesystem_iterdir(tmp_path / "portfolio" / "instances"))
 
 
 @pytest.mark.parametrize(
@@ -1022,13 +1035,13 @@ def test_portfolio_ledger_rechecks_outer_manifest_and_member_set_each_iteration(
     artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
     if mutation == "manifest":
         manifest_path = root / "manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
         manifest["members"].append(
             {"path": "extra.parquet", "size": 0, "sha256": "0" * 64}
         )
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     else:
-        (root / "extra.parquet").write_bytes(b"extra")
+        filesystem_write_bytes(root / "extra.parquet", b"extra")
     with pytest.raises(ValueError, match=f"^{error}$"):
         next(artifact.iter_chunks())
 
@@ -1198,10 +1211,14 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
             tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=sessions
         )
         artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-        original = {path.name: path.read_bytes() for path in root.iterdir()}
+        original = {
+            path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)
+        }
         if failure == "identity":
             copied = tmp_path / "copy" / root.name
-            shutil.copytree(root, copied)
+            shutil.copytree(
+                native_filesystem_path(root), native_filesystem_path(copied)
+            )
             artifact = read_portfolio_ledger_artifact(
                 copied, expected_identity=copied.name
             )
@@ -1217,10 +1234,10 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
         def mutate_member():
             if failure == "identity":
                 path = artifact.root / "valuations.parquet"
-                before = path.stat()
-                with path.open("ab") as handle:
+                before = filesystem_stat(path)
+                with open_filesystem_file(path, "ab") as handle:
                     handle.write(b"x")
-                assert path.stat().st_size == before.st_size + 1
+                assert filesystem_stat(path).st_size == before.st_size + 1
 
         primary = KeyboardInterrupt("ledger_consumer_primary")
         with monkeypatch.context() as patch:
@@ -1265,8 +1282,10 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
                 assert str(caught.value) == "dataset_file_identity_changed"
             if failure == "index_close":
                 assert len(closed_indexes) == 1
-                assert not closed_indexes[0].parent.exists()
-        assert {path.name: path.read_bytes() for path in root.iterdir()} == original
+                assert not filesystem_exists(closed_indexes[0].parent)
+        assert {
+            path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)
+        } == original
         assert policy.used_memory_bytes == 0
 
 
@@ -1422,9 +1441,9 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         saved["sections"]["portfolio"]["results"][0]["alpha_calibration"]
         == summary["alpha_calibration"]
     )
-    assert "alpha_calibration_zero_standard_error" in (
-        report_root / "report.md"
-    ).read_text(encoding="utf-8")
+    assert "alpha_calibration_zero_standard_error" in filesystem_read_text(
+        report_root / "report.md", encoding="utf-8"
+    )
 
 
 @pytest.mark.parametrize("engine", ("taker", "maker"))
@@ -1657,9 +1676,9 @@ def test_tiny_adjusted_notional_trade_cannot_reverse_target_direction(tmp_path):
         write_test_sessions(
             tmp_path / "wrong_direction", envelope=envelope, ledger_chunks=(frame,)
         )
-    assert not (
+    assert not filesystem_exists(
         tmp_path / "wrong_direction" / "instances" / envelope.instance_identity
-    ).exists()
+    )
 
 
 @pytest.mark.parametrize("entry", ("read", "iterate"))
@@ -1686,15 +1705,18 @@ def test_verified_member_identity_reaches_ledger_decoder(tmp_path, monkeypatch, 
     def replace_after_verification(*args, **kwargs):
         result = native(*args, **kwargs)
         member = root / "valuations.parquet"
-        table = pq.read_table(member)
+        table = pq.read_table(native_filesystem_path(member))
         rows = table.to_pylist()
         for row in rows:
             if row["phase"] == "end" and row["asset_id"] == "asset":
                 row["value"] = 120.0
                 row["mark_price"] = 1.2
         replacement = tmp_path / "replacement.parquet"
-        pq.write_table(pa.Table.from_pylist(rows, schema=table.schema), replacement)
-        replacement.replace(member)
+        pq.write_table(
+            pa.Table.from_pylist(rows, schema=table.schema),
+            native_filesystem_path(replacement),
+        )
+        filesystem_replace(replacement, member)
         return result
 
     monkeypatch.setattr(

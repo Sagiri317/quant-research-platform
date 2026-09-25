@@ -36,7 +36,14 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.schema import data_spec_payload
-from quant_research_platform.storage.identity import filesystem_read_text
+from quant_research_platform.storage.identity import (
+    filesystem_mkdir,
+    filesystem_read_text,
+    filesystem_rename,
+    filesystem_stat,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows.diagnostics import schema_inventory
 from tests.helpers.runtime_resources import capture_test_policy
@@ -189,10 +196,10 @@ def test_schema_inventory_keeps_all_current_roots_and_instances(
 )
 def test_schema_inventory_does_not_descend_nested_junction(tmp_path: Path) -> None:
     layer_root = tmp_path / "data" / "processed"
-    layer_root.mkdir(parents=True)
+    filesystem_mkdir(layer_root, parents=True)
     external = tmp_path / "external"
-    external.mkdir()
-    (external / "spec.json").write_text("{}", encoding="utf-8")
+    filesystem_mkdir(external)
+    filesystem_write_text(external / "spec.json", "{}", encoding="utf-8")
     junction = layer_root / "nested"
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
@@ -210,7 +217,7 @@ def test_schema_inventory_does_not_descend_nested_junction(tmp_path: Path) -> No
 )
 def test_schema_inventory_rejects_junction_project_root(tmp_path: Path) -> None:
     external = tmp_path / "external"
-    external.mkdir()
+    filesystem_mkdir(external)
     root = tmp_path / "project"
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(root), str(external)],
@@ -225,11 +232,13 @@ def test_schema_inventory_rejects_junction_project_root(tmp_path: Path) -> None:
 
 def test_schema_inventory_rejects_aliased_data_ancestor(tmp_path: Path) -> None:
     root = tmp_path / "project"
-    root.mkdir()
+    filesystem_mkdir(root)
     external = tmp_path / "external"
-    (external / "processed").mkdir(parents=True)
+    filesystem_mkdir(external / "processed", parents=True)
     try:
-        (root / "data").symlink_to(external, target_is_directory=True)
+        Path(native_filesystem_path(root / "data")).symlink_to(
+            native_filesystem_path(external), target_is_directory=True
+        )
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
 
@@ -239,10 +248,12 @@ def test_schema_inventory_rejects_aliased_data_ancestor(tmp_path: Path) -> None:
 
 def test_schema_inventory_rejects_alias_above_supplied_root(tmp_path: Path) -> None:
     target = tmp_path / "target"
-    (target / "project" / "data" / "processed").mkdir(parents=True)
+    filesystem_mkdir(target / "project" / "data" / "processed", parents=True)
     alias = tmp_path / "alias"
     try:
-        alias.symlink_to(target, target_is_directory=True)
+        Path(native_filesystem_path(alias)).symlink_to(
+            native_filesystem_path(target), target_is_directory=True
+        )
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
 
@@ -253,11 +264,13 @@ def test_schema_inventory_rejects_alias_above_supplied_root(tmp_path: Path) -> N
 def test_schema_inventory_rejects_spec_symlink(tmp_path: Path) -> None:
     layer_root = tmp_path / "data" / "processed"
     artifact_root = layer_root / "artifact"
-    artifact_root.mkdir(parents=True)
+    filesystem_mkdir(artifact_root, parents=True)
     external = tmp_path / "spec.json"
-    external.write_text("{}", encoding="utf-8")
+    filesystem_write_text(external, "{}", encoding="utf-8")
     try:
-        (artifact_root / "spec.json").symlink_to(external)
+        Path(native_filesystem_path(artifact_root / "spec.json")).symlink_to(
+            native_filesystem_path(external)
+        )
     except OSError as exc:
         pytest.skip(f"symlink_not_available: {exc}")
 
@@ -389,7 +402,7 @@ def test_schema_inventory_cli_keeps_one_policy_through_stream_write(
             observed.append(resource_policy)
             observed_reserved.append(policy.used_memory_bytes)
             cleanup_states.append(policy.state)
-            _output.write_text("{}", encoding="utf-8")
+            filesystem_write_text(_output, "{}", encoding="utf-8")
         return _output
 
     monkeypatch.setattr(private_cli, "write_schema_inventory", write)
@@ -449,7 +462,7 @@ def test_schema_inventory_streams_accumulated_items_over_budget(
 
     payload = json.loads(filesystem_read_text(output, encoding="utf-8"))
     assert len(payload["datasets"]) == len(artifact_roots)
-    assert output.stat().st_size > policy.memory_budget_bytes
+    assert filesystem_stat(output).st_size > policy.memory_budget_bytes
     assert policy.used_memory_bytes == 0
 
 
@@ -561,8 +574,8 @@ def test_schema_inventory_rejects_replacement_between_open_and_stats(
         return real_open(root, **kwargs)
 
     def replace_before_stats(session, *args, **kwargs):  # noqa: ANN001
-        current_root.rename(backup_root)
-        replacement_root.rename(current_root)
+        filesystem_rename(current_root, backup_root)
+        filesystem_rename(replacement_root, current_root)
         return real_aggregate(session, *args, **kwargs)
 
     monkeypatch.setattr(schema_inventory, "open_dataset_session", record_open)
@@ -643,9 +656,9 @@ def test_schema_inventory_rejects_forged_storage_summary(
         spec=spec,
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
     manifest.update(forged_summary)
-    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    filesystem_write_text(manifest_path, json.dumps(manifest) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match=error):
         with schema_inventory.iter_schema_inventory_items(tmp_path) as items:

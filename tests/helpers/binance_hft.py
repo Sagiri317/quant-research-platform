@@ -19,6 +19,12 @@ from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     RESEARCH_SYMBOLS,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 
 # Synthetic event fixtures explicitly declare this known no-funding interval.
@@ -192,7 +198,7 @@ def _row_timestamp_ms(row: dict[str, object]) -> int:
 def write_binance_hft_run(
     root: Path, *, count: int = 60, maker_liquidity: bool = False
 ) -> dict:
-    root.mkdir(parents=True)
+    filesystem_mkdir(root, parents=True)
     snapshot_rows = [
         _raw(
             1,
@@ -445,11 +451,11 @@ def write_binance_hft_run(
         },
     ]
     sidecar = root / "connection_intervals.jsonl.gz"
-    with gzip.open(sidecar, "wt", encoding="utf-8") as handle:
+    with gzip.open(native_filesystem_path(sidecar), "wt", encoding="utf-8") as handle:
         for interval in connection_intervals:
             handle.write(json.dumps(interval, separators=(",", ":")))
             handle.write("\n")
-    sidecar_bytes = sidecar.read_bytes()
+    sidecar_bytes = filesystem_read_bytes(sidecar)
     manifest = {
         "schema_id": "qrp-binance-recorder",
         "run_id": "workflow-run",
@@ -477,7 +483,8 @@ def write_binance_hft_run(
         },
         "files": files,
     }
-    (root / "run.json").write_text(
+    filesystem_write_text(
+        root / "run.json",
         json.dumps(manifest, separators=(",", ":")),
         encoding="utf-8",
     )
@@ -525,14 +532,14 @@ def _write_file(
         / "hour=00"
         / f"{symbol}_{FUTURES_MARKET_TYPE}_{data_kind}.jsonl.gz"
     )
-    path.parent.mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(path.parent, parents=True, exist_ok=True)
     maximum = 0
-    with gzip.open(path, "wb") as handle:
+    with gzip.open(native_filesystem_path(path), "wb") as handle:
         for row in rows:
             line = json.dumps(row, separators=(",", ":")).encode() + b"\n"
             maximum = max(maximum, len(line))
             handle.write(line)
-    raw = path.read_bytes()
+    raw = filesystem_read_bytes(path)
     return {
         "path": path.relative_to(root).as_posix(),
         "venue": "binance",

@@ -11,6 +11,7 @@ import sys
 from copy import deepcopy
 from dataclasses import replace
 from pathlib import Path
+from tempfile import TemporaryDirectory
 from uuid import uuid4
 
 import pytest
@@ -32,7 +33,17 @@ from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
 )
 from quant_research_platform.runtime import resources
-from quant_research_platform.storage.identity import native_filesystem_path
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_stat,
+    filesystem_walk,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+    open_filesystem_file,
+)
 from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact,
     write_semantic_artifact,
@@ -58,9 +69,10 @@ def _forbidden(*_args, **_kwargs):
 
 def _files(root):
     result = {}
-    for path in root.rglob("*"):
-        if path.is_file():
-            with path.open("rb") as handle:
+    for parent, _directories, files in filesystem_walk(root):
+        for name in files:
+            path = parent / name
+            with open_filesystem_file(path, "rb") as handle:
                 result[path.relative_to(root).as_posix()] = hashlib.file_digest(
                     handle, "sha256"
                 ).hexdigest()
@@ -79,7 +91,7 @@ def check_published_evidence_views(
     record = report_artifact.read_research_run_record(layout.research_run_path(run_id))
     target_id = f"{record.scenario_id}_report_artifact"
     logical = layout.semantic_artifact_root(profile.market_id, target_id)
-    root = Path(native_filesystem_path(layout.instance_root(logical, report_identity)))
+    root = layout.instance_root(logical, report_identity)
     envelope = read_semantic_artifact(root, expected_identity=report_identity)
     payload = report_artifact.read_research_report_artifact(
         root, expected_identity=report_identity
@@ -108,7 +120,7 @@ def check_published_evidence_views(
         write_markdown_evidence(staging / "report.md", archived_markdown)
 
     previous_root = layout.instance_root(logical, previous.instance_identity)
-    if previous_root.exists():
+    if filesystem_exists(previous_root):
         assert (
             report_artifact.read_research_report_artifact(
                 previous_root, expected_identity=previous.instance_identity
@@ -117,7 +129,7 @@ def check_published_evidence_views(
         )
     else:
         write_semantic_artifact(logical, previous, archived_writer)
-    assert (previous_root / "report.json").stat().st_size > 1024 * 1024
+    assert filesystem_stat(previous_root / "report.json").st_size > 1024 * 1024
     before = _files(layout.project_root / "data")
     guarded = replace(
         profile,
@@ -237,10 +249,10 @@ def check_published_evidence_views(
                         f"/api/0.1/runs/{run_id}/portfolios/not_in_run", params=params
                     ),
                 ]
-                saved = (root / "report.json").read_bytes()
+                saved = filesystem_read_bytes(root / "report.json")
                 try:
-                    (root / "report.json").write_bytes(
-                        b"invalid_private_payload_must_not_leak"
+                    filesystem_write_bytes(
+                        root / "report.json", b"invalid_private_payload_must_not_leak"
                     )
                     failures.append(
                         await client.get(
@@ -249,12 +261,14 @@ def check_published_evidence_views(
                         )
                     )
                 finally:
-                    (root / "report.json").write_bytes(saved)
-                saved_markdown = (root / "report.md").read_bytes()
+                    filesystem_write_bytes(root / "report.json", saved)
+                saved_markdown = filesystem_read_bytes(root / "report.md")
                 actual_read_markdown = report_artifact._read_utf8
 
                 def changed_after_validation(*args, **kwargs):
-                    (root / "report.md").write_bytes(b"x" * len(saved_markdown))
+                    filesystem_write_bytes(
+                        root / "report.md", b"x" * len(saved_markdown)
+                    )
                     return actual_read_markdown(*args, **kwargs)
 
                 try:
@@ -270,7 +284,7 @@ def check_published_evidence_views(
                         )
                         assert failed.status_code == 422
                 finally:
-                    (root / "report.md").write_bytes(saved_markdown)
+                    filesystem_write_bytes(root / "report.md", saved_markdown)
                 assert all(response.status_code in {404, 422} for response in failures)
                 assert all(
                     "invalid_private_payload" not in response.text
@@ -329,8 +343,8 @@ def _execute_notebook(
 
     repository = Path(__file__).resolve().parents[2]
     source = repository / "notebooks/research-interview-demo.ipynb"
-    source_bytes = source.read_bytes()
-    notebook = nbformat.read(source, as_version=4)
+    source_bytes = filesystem_read_bytes(source)
+    notebook = nbformat.read(native_filesystem_path(source), as_version=4)
     nbformat.validate(notebook)
     assert notebook.metadata.kernelspec.name == "quantlab313"
     assert all(
@@ -339,10 +353,9 @@ def _execute_notebook(
     )
     evidence = layout.project_root / ".run/notebook-evidence" / profile_id / uuid4().hex
     kernel = evidence / "kernels/quantlab313"
-    kernel.mkdir(parents=True)
-    empty_cwd = evidence / "empty-cwd"
-    empty_cwd.mkdir()
-    (kernel / "kernel.json").write_text(
+    filesystem_mkdir(kernel, parents=True)
+    filesystem_write_text(
+        kernel / "kernel.json",
         json.dumps(
             {
                 "argv": [
@@ -405,38 +418,48 @@ def _execute_notebook(
             "print('NOTEBOOK_SYNTHETIC_CHECKS_PASSED')\n"
         )
     )
-    env = {
-        **os.environ,
-        "PYTHONPATH": str(repository / "src"),
-        "PYTHONUTF8": "1",
-        "OMP_NUM_THREADS": "1",
-        "OPENBLAS_NUM_THREADS": "1",
-        "MKL_NUM_THREADS": "1",
-        "NUMEXPR_NUM_THREADS": "1",
-        "MPLCONFIGDIR": str(evidence / "mpl"),
-        "IPYTHONDIR": str(evidence / "ipython"),
-        "JUPYTER_RUNTIME_DIR": str(evidence / "runtime"),
-    }
 
     def execute(value):
-        manager = AsyncKernelManager(
-            kernel_name="quantlab313",
-            kernel_spec_manager=KernelSpecManager(kernel_dirs=[str(kernel.parent)]),
-        )
-        client = NotebookClient(
-            value,
-            km=manager,
-            kernel_name="quantlab313",
-            timeout=180,
-            record_timing=False,
-        )
-        with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
-            return runner.run(
-                client.async_execute(cleanup_kc=True, cwd=str(empty_cwd), env=env)
+        with TemporaryDirectory(prefix="qrp-nb-") as runtime_directory:
+            runtime_root = Path(runtime_directory)
+            empty_cwd = runtime_root / "empty-cwd"
+            empty_cwd.mkdir()
+            env = {
+                **os.environ,
+                "PYTHONPATH": str(repository / "src"),
+                "PYTHONUTF8": "1",
+                "OMP_NUM_THREADS": "1",
+                "OPENBLAS_NUM_THREADS": "1",
+                "MKL_NUM_THREADS": "1",
+                "NUMEXPR_NUM_THREADS": "1",
+                "MPLCONFIGDIR": str(runtime_root / "mpl"),
+                "IPYTHONDIR": str(runtime_root / "ipython"),
+                "JUPYTER_RUNTIME_DIR": str(runtime_root / "runtime"),
+            }
+            manager = AsyncKernelManager(
+                kernel_name="quantlab313",
+                kernel_spec_manager=KernelSpecManager(
+                    kernel_dirs=[str(native_filesystem_path(kernel.parent))]
+                ),
             )
+            client = NotebookClient(
+                value,
+                km=manager,
+                kernel_name="quantlab313",
+                timeout=180,
+                record_timing=False,
+            )
+            with asyncio.Runner(loop_factory=asyncio.SelectorEventLoop) as runner:
+                return runner.run(
+                    client.async_execute(
+                        cleanup_kc=True,
+                        cwd=str(empty_cwd),
+                        env=env,
+                    )
+                )
 
     executed = execute(notebook)
-    nbformat.write(executed, evidence / "executed.ipynb")
+    nbformat.write(executed, native_filesystem_path(evidence / "executed.ipynb"))
     images = []
     for cell in executed.cells:
         for output in cell.get("outputs", []):
@@ -445,9 +468,9 @@ def _execute_notebook(
                 images.append(base64.b64decode(encoded))
     assert images
     for index, data in enumerate(images):
-        (evidence / f"figure-{index}.png").write_bytes(data)
+        filesystem_write_bytes(evidence / f"figure-{index}.png", data)
     assert "NOTEBOOK_SYNTHETIC_CHECKS_PASSED" in json.dumps(executed)
-    assert source.read_bytes() == source_bytes
+    assert filesystem_read_bytes(source) == source_bytes
     parameters.source = parameters.source.replace(
         f"RUN_ID = {run_id!r}", f"RUN_ID = {other_run_id!r}"
     )
@@ -455,8 +478,9 @@ def _execute_notebook(
         execute(notebook)
     assert mismatch.value.ename == "ValueError"
     assert mismatch.value.evalue == "research_report_run_lineage_mismatch"
-    assert source.read_bytes() == source_bytes
-    (evidence / "validation.json").write_text(
+    assert filesystem_read_bytes(source) == source_bytes
+    filesystem_write_text(
+        evidence / "validation.json",
         json.dumps(
             {
                 "status": "PASS",

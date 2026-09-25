@@ -37,6 +37,19 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.datasets.schema import (
     logical_dtype_payload_from_frame,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_iterdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_stat,
+    filesystem_walk,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+    open_filesystem_file,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
     _issued_test_policy,
@@ -49,12 +62,24 @@ from tests.storage.low_level_fixtures import (
 )
 
 
+def _file_bytes(root: Path) -> dict[Path, bytes]:
+    return {
+        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        for parent, _directories, files in filesystem_walk(root)
+        for name in files
+    }
+
+
 @pytest.mark.parametrize("filtered", (False, True))
 def test_plain_reader_streams_normal_files_under_admitted_capacity(tmp_path, filtered):
     path = tmp_path / "plain-admission.parquet"
     table = pa.table({"value": np.arange(4096, dtype=np.int64)})
     pq.write_table(
-        table, path, use_dictionary=False, compression=None, row_group_size=2048
+        table,
+        native_filesystem_path(path),
+        use_dictionary=False,
+        compression=None,
+        row_group_size=2048,
     )
     expected = np.arange(1024 if filtered else 0, 4096, dtype=np.int64)
     delivered = 0
@@ -534,7 +559,7 @@ def test_declared_variable_width_member_decodes_multirow_batches(
     row_count = 5_000
     pq.write_table(
         pa.table({"value": [f"value-{index:05d}" for index in range(row_count)]}),
-        path,
+        native_filesystem_path(path),
     )
     conversions = 0
     original = dataset_reading._arrow_slice_to_pandas
@@ -571,7 +596,7 @@ def test_dataset_file_batches_refresh_headroom_after_internal_release(
     expected = pd.DataFrame({"value": np.arange(row_count, dtype=np.int64)})
     pq.write_table(
         dataset_physical.table_with_decoded_row_bounds(pa.Table.from_pandas(expected)),
-        path,
+        native_filesystem_path(path),
         row_group_size=row_count,
     )
     target_chunk_bytes = 16 * 1024
@@ -624,7 +649,11 @@ def test_metadata_free_batches_advance_without_delivering_oversized_payload(
 ) -> None:
     path = tmp_path / "skewed-variable-width.parquet"
     values = ["x"] * 1023 + ["y" * 1024**2]
-    pq.write_table(pa.table({"value": values}), path, use_dictionary=use_dictionary)
+    pq.write_table(
+        pa.table({"value": values}),
+        native_filesystem_path(path),
+        use_dictionary=use_dictionary,
+    )
 
     def no_native_pull(*args, **kwargs):
         pytest.fail("oversized decode unit reached the native decoder")
@@ -679,7 +708,7 @@ def test_dictionary_expansion_is_admitted_before_native_pull_and_bounded_complet
         }
     )
     with pq.ParquetWriter(
-        path,
+        native_filesystem_path(path),
         table.schema,
         compression="zstd",
         use_dictionary=True,
@@ -800,8 +829,10 @@ def test_dictionary_decode_preserves_supported_logical_types_and_keys(tmp_path, 
         }
     )
     path = tmp_path / "typed-dictionary.parquet"
-    pq.write_table(table, path, use_dictionary=True, row_group_size=128)
-    native = pq.read_table(path)
+    pq.write_table(
+        table, native_filesystem_path(path), use_dictionary=True, row_group_size=128
+    )
+    native = pq.read_table(native_filesystem_path(path))
     before = dataset_physical.dataset_file_identity(path)
     delivered = 0
     with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
@@ -834,7 +865,9 @@ def test_dictionary_physical_admission_uses_only_selected_rows_and_columns(
 ):
     path = tmp_path / "projected-dictionaries.parquet"
     schema = pa.schema([("id", pa.int64()), ("value", pa.string())])
-    with pq.ParquetWriter(path, schema, use_dictionary=True) as writer:
+    with pq.ParquetWriter(
+        native_filesystem_path(path), schema, use_dictionary=True
+    ) as writer:
         writer.write_table(
             pa.table({"id": list(range(4)), "value": ["small"] * 4}, schema=schema)
         )
@@ -912,7 +945,7 @@ def test_large_dictionary_output_keeps_native_and_cast_workspaces_bounded(
     path = tmp_path / "large-logical-output.parquet"
     pq.write_table(
         pa.table({"value": array}),
-        path,
+        native_filesystem_path(path),
         use_dictionary=True,
         store_schema=False,
         write_statistics=False,
@@ -1029,8 +1062,11 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
     tmp_path, monkeypatch, primary_failure
 ):
     path = tmp_path / "cancelled-dictionary.parquet"
-    pq.write_table(pa.table({"value": ["x" * (32 * 1024)] * 256}), path)
-    original_bytes = path.read_bytes()
+    pq.write_table(
+        pa.table({"value": ["x" * (32 * 1024)] * 256}),
+        native_filesystem_path(path),
+    )
+    original_bytes = filesystem_read_bytes(path)
     open_file = dataset_physical.open_filesystem_file
     constructor = pq.ParquetFile
     handles = []
@@ -1093,14 +1129,16 @@ def test_dictionary_reader_closes_same_handle_and_native_iterator(
     assert len(handles) == 1 and handles[0].closed
     assert iterator_closed == [True]
     assert reader_closed == [True]
-    assert path.read_bytes() == original_bytes
+    assert filesystem_read_bytes(path) == original_bytes
 
 
 def test_single_nested_dictionary_row_is_rejected_before_compaction(
     tmp_path, monkeypatch
 ):
     path = tmp_path / "large-nested-row.parquet"
-    pq.write_table(pa.table({"value": [["x" * (32 * 1024)] * 16]}), path)
+    pq.write_table(
+        pa.table({"value": [["x" * (32 * 1024)] * 16]}), native_filesystem_path(path)
+    )
     constructor = pq.ParquetFile
     pulled = []
 
@@ -1167,7 +1205,7 @@ def test_numeric_dictionary_is_admitted_before_native_pull(
     path = tmp_path / "numeric-dictionary.parquet"
     pq.write_table(
         table,
-        path,
+        native_filesystem_path(path),
         use_dictionary=True,
         dictionary_pagesize_limit=4 * 1024**2,
         write_statistics=False,
@@ -1930,8 +1968,8 @@ def test_reads_reject_nonnull_category_outside_declared_domain(
         frame,
         spec=make_processed_dataset_spec(f"forged_read_domain_{mode.value}"),
     )
-    part = next((root / "data").rglob("part-*.parquet"))
-    original = pq.ParquetFile(part).read()
+    part = next(filesystem_glob(root / "data", "**/part-*.parquet"))
+    original = pq.ParquetFile(native_filesystem_path(part)).read()
     asset_index = original.schema.get_field_index("asset_id")
     asset_type = original.schema.field(asset_index).type
     forged_asset = pa.DictionaryArray.from_arrays(
@@ -1946,16 +1984,17 @@ def test_reads_reject_nonnull_category_outside_declared_domain(
             ],
             schema=original.schema.remove_metadata(),
         ).replace_schema_metadata(original.schema.metadata),
-        part,
+        native_filesystem_path(part),
         compression="zstd",
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
     manifest["file_size_bytes"] = sum(
-        path.stat().st_size for path in (root / "data").rglob("part-*.parquet")
+        filesystem_stat(path).st_size
+        for path in filesystem_glob(root / "data", "**/part-*.parquet")
     )
     manifest["content_hash"] = fixture_dataset_content_hash(root)
-    manifest_path.write_text(json.dumps(manifest) + "\n", encoding="utf-8")
+    filesystem_write_text(manifest_path, json.dumps(manifest) + "\n", encoding="utf-8")
 
     with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):
         result = read_dataset(root, mode=mode)
@@ -2047,11 +2086,7 @@ def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
     original_root = make_dataset_artifact_root(tmp_path / "original", spec.data_id)
     root = make_dataset_artifact_root(tmp_path / "candidate", spec.data_id)
     write_dataset(original_root, frame, spec=spec)
-    original_bytes = {
-        path.relative_to(original_root): path.read_bytes()
-        for path in original_root.rglob("*")
-        if path.is_file()
-    }
+    original_bytes = _file_bytes(original_root)
 
     def forge(table):
         metadata = dict(table.schema.metadata)
@@ -2075,21 +2110,21 @@ def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
         monkeypatch.setattr(writing, "write_parquet_file", forged_write)
         with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
             write_dataset(root, frame, spec=spec)
-        assert not root.exists()
-        assert not tuple(root.parent.iterdir())
+        assert not filesystem_exists(root)
+        assert not tuple(filesystem_iterdir(root.parent))
     else:
         write_dataset(root, frame, spec=spec)
-        part = next((root / "data").rglob("*.parquet"))
-        with pq.ParquetFile(part) as parquet:
+        part = next(filesystem_glob(root / "data", "**/*.parquet"))
+        with pq.ParquetFile(native_filesystem_path(part)) as parquet:
             forged, logical = forge(parquet.read())
-        pq.write_table(forged, part, compression="zstd")
+        pq.write_table(forged, native_filesystem_path(part), compression="zstd")
         manifest_path = root / "_manifest" / "manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
         manifest["logical_dtypes"] = logical
         manifest["logical_dtype_hash"] = canonical_json_hash(logical)
-        manifest["file_size_bytes"] = part.stat().st_size
+        manifest["file_size_bytes"] = filesystem_stat(part).st_size
         manifest["content_hash"] = fixture_dataset_content_hash(root)
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
         policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
         with runtime_resource_policy_scope(policy):
             with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
@@ -2099,11 +2134,7 @@ def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
                 if mode == "chunked":
                     tuple(result)
             assert policy.used_memory_bytes == 0
-    assert {
-        path.relative_to(original_root): path.read_bytes()
-        for path in original_root.rglob("*")
-        if path.is_file()
-    } == original_bytes
+    assert _file_bytes(original_root) == original_bytes
 
 
 @pytest.mark.parametrize(
@@ -2153,7 +2184,7 @@ def test_nullable_integer_values_and_numeric_keys_remain_exact_with_nulls(
         }
     )
     write_dataset(root, frame, spec=make_processed_dataset_spec("nullable_precision"))
-    assert len(tuple((root / "data").rglob("*.parquet"))) == 1
+    assert len(tuple(filesystem_glob(root / "data", "**/*.parquet"))) == 1
     pd.testing.assert_frame_equal(read_dataset(root), frame, check_exact=True)
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     with runtime_resource_policy_scope(policy):
@@ -2182,20 +2213,20 @@ def test_nonnullable_boolean_rejects_physical_null_values(
     root = make_dataset_artifact_root(tmp_path, "boolean_null")
     frame = make_default_dataset_frame().iloc[:1].assign(value=True)
     write_dataset(root, frame, spec=make_processed_dataset_spec("boolean_null"))
-    part = next((root / "data").rglob("*.parquet"))
-    with pq.ParquetFile(part) as parquet:
+    part = next(filesystem_glob(root / "data", "**/*.parquet"))
+    with pq.ParquetFile(native_filesystem_path(part)) as parquet:
         table = parquet.read()
     table = table.set_column(
         table.schema.get_field_index("value"),
         table.schema.field("value"),
         pa.array([None], type=pa.bool_()),
     )
-    pq.write_table(table, part, compression="zstd")
+    pq.write_table(table, native_filesystem_path(part), compression="zstd")
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-    manifest["file_size_bytes"] = part.stat().st_size
+    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest["file_size_bytes"] = filesystem_stat(part).st_size
     manifest["content_hash"] = fixture_dataset_content_hash(root)
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="dataset_nonnullable_value_missing"):
         result = read_dataset(root, mode=mode)
         if mode is DatasetReadMode.CHUNKED:
@@ -2212,8 +2243,8 @@ def test_fingerprint_content_hash_preserves_registered_formula(tmp_path: Path) -
     hash_columns = tuple(dict.fromkeys((*spec.primary_key, *spec.required_columns)))
     reference_readback = pd.concat(
         tuple(
-            pd.read_parquet(path)
-            for path in sorted((root / "data").rglob("part-*.parquet"))
+            pd.read_parquet(native_filesystem_path(path))
+            for path in sorted(filesystem_glob(root / "data", "**/part-*.parquet"))
         ),
         ignore_index=True,
     )
@@ -2302,12 +2333,12 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
             member = path if not prediction_paths else tmp_path / "other.parquet"
             pq.write_table(
                 pa.Table.from_pandas(frame, preserve_index=False),
-                member,
+                native_filesystem_path(member),
                 use_dictionary=use_dictionary,
             )
             prediction_paths.append((model["quarter_id"], model["family_id"], member))
-            prediction_originals[member] = member.read_bytes()
-        original.write_bytes(prediction_originals[path])
+            prediction_originals[member] = filesystem_read_bytes(member)
+        filesystem_write_bytes(original, prediction_originals[path])
     else:
         pq.write_table(
             pa.table(
@@ -2317,12 +2348,12 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
                     "asset_id": ["asset"] * 256,
                 }
             ),
-            original,
+            native_filesystem_path(original),
             use_dictionary=use_dictionary,
             row_group_size=1,
         )
-        path.write_bytes(original.read_bytes())
-    original_bytes = original.read_bytes()
+        filesystem_write_bytes(path, filesystem_read_bytes(original))
+    original_bytes = filesystem_read_bytes(original)
     open_file = dataset_physical.open_filesystem_file
     constructor = pq.ParquetFile
     handles, reader_closed, iterator_closed = [], [], []
@@ -2399,10 +2430,10 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
         if failure == "decode_release":
             monkeypatch.setattr(MemoryLease, "close", fail_decode_release)
         if failure == "identity":
-            before = path.stat()
-            with path.open("ab") as handle:
+            before = filesystem_stat(path)
+            with open_filesystem_file(path, "ab") as handle:
                 handle.write(b"x")
-            assert path.stat().st_size == before.st_size + 1
+            assert filesystem_stat(path).st_size == before.st_size + 1
         error = (
             KeyboardInterrupt
             if consumer_primary
@@ -2427,13 +2458,13 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
     assert reader_closed == [use_dictionary] * readers
     assert iterator_closed == [True] * readers
     assert released_decode == ([True] * readers if failure == "decode_release" else [])
-    assert original.read_bytes() == original_bytes
+    assert filesystem_read_bytes(original) == original_bytes
     if failure != "identity":
-        assert path.read_bytes() == original_bytes
+        assert filesystem_read_bytes(path) == original_bytes
     if reader_kind == "prediction":
         for member, payload in prediction_originals.items():
             if member != path or failure != "identity":
-                assert member.read_bytes() == payload
+                assert filesystem_read_bytes(member) == payload
 
 
 @pytest.mark.parametrize("observer_kind", ("persisted", "batch"))
@@ -2441,8 +2472,8 @@ def test_declared_reader_preserves_observer_generator_exit(
     tmp_path, monkeypatch, observer_kind
 ):
     path = tmp_path / "observer.parquet"
-    pq.write_table(pa.table({"value": [1, 2, 3]}), path)
-    original = path.read_bytes()
+    pq.write_table(pa.table({"value": [1, 2, 3]}), native_filesystem_path(path))
+    original = filesystem_read_bytes(path)
     constructor = pq.ParquetFile
     closed = []
 
@@ -2478,7 +2509,7 @@ def test_declared_reader_preserves_observer_generator_exit(
         assert any("OSError" in note for note in getattr(primary, "__notes__", ()))
         assert policy.used_memory_bytes == 0
     assert closed == [True]
-    assert path.read_bytes() == original
+    assert filesystem_read_bytes(path) == original
 
 
 @pytest.mark.parametrize("forged_hint", (False, True))
@@ -2491,14 +2522,16 @@ def test_plain_compressed_page_is_admitted_before_decode(
         table = table.replace_schema_metadata({b"qrp.parquet-page-rows": b"1"})
     pq.write_table(
         table,
-        path,
+        native_filesystem_path(path),
         compression="zstd",
         use_dictionary=False,
         data_page_size=32 * 1024**2,
         write_batch_size=4096,
         row_group_size=4096,
     )
-    column = pq.ParquetFile(path).metadata.row_group(0).column(0)
+    column = (
+        pq.ParquetFile(native_filesystem_path(path)).metadata.row_group(0).column(0)
+    )
     assert column.total_compressed_size < 64 * 1024
     assert column.total_uncompressed_size > 16 * 1024**2
     original = pq.ParquetFile.iter_batches
@@ -2538,7 +2571,9 @@ def test_plain_compressed_page_is_admitted_before_decode(
 @pytest.mark.parametrize("offset", (-1, 0, 1))
 def test_real_reader_has_monotonic_admission_across_soft_target(tmp_path, offset):
     path = tmp_path / "one.parquet"
-    pq.write_table(pa.table({"value": [42]}), path, use_dictionary=False)
+    pq.write_table(
+        pa.table({"value": [42]}), native_filesystem_path(path), use_dictionary=False
+    )
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     with runtime_resource_policy_scope(policy):
         with policy.lease("test.retained", policy.memory_budget_bytes + offset):

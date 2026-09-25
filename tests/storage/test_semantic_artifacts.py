@@ -7,11 +7,24 @@ import pytest
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_iterdir,
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_replace,
+    filesystem_stat,
+    filesystem_write_bytes,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.semantic_artifacts import (
     discover_semantic_artifact_instances,
     read_semantic_artifact,
     write_semantic_artifact,
 )
+
+
+def _immediate_file_bytes(root: Path) -> dict[str, bytes]:
+    return {path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)}
 
 
 def _envelope() -> object:
@@ -32,8 +45,8 @@ def _envelope() -> object:
 
 def _write_artifact(tmp_path: Path) -> Path:
     def writer(staging: Path) -> None:
-        (staging / "model.json").write_bytes(b"model")
-        (staging / "model.pkl").write_bytes(b"predictor")
+        filesystem_write_bytes(staging / "model.json", b"model")
+        filesystem_write_bytes(staging / "model.pkl", b"predictor")
 
     return write_semantic_artifact(tmp_path / "model", _envelope(), writer)
 
@@ -42,7 +55,7 @@ def test_semantic_artifact_member_mutation_is_rejected_by_read_and_discovery(
     tmp_path: Path,
 ) -> None:
     root = _write_artifact(tmp_path)
-    (root / "model.pkl").write_bytes(b"changed")
+    filesystem_write_bytes(root / "model.pkl", b"changed")
 
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         read_semantic_artifact(root)
@@ -52,7 +65,7 @@ def test_semantic_artifact_member_mutation_is_rejected_by_read_and_discovery(
 
 def test_semantic_artifact_extra_member_is_rejected(tmp_path: Path) -> None:
     root = _write_artifact(tmp_path)
-    (root / "extra.bin").write_bytes(b"extra")
+    filesystem_write_bytes(root / "extra.bin", b"extra")
 
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         read_semantic_artifact(root)
@@ -104,13 +117,15 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
         return storage.write_semantic_artifact(
             tmp_path / name,
             _envelope(),
-            lambda staging: (staging / "model.bin").write_bytes(b"same model"),
+            lambda staging: filesystem_write_bytes(
+                staging / "model.bin", b"same model"
+            ),
             operational_metadata={"model_trial_ledgers": [reference]},
         )
 
     old = build("first")
     same = build("retry", threads=2)
-    before = (old / "manifest.json").read_bytes()
+    before = filesystem_read_bytes(old / "manifest.json")
     assert (
         storage.compare_semantic_artifacts(old, same, trial_layout=layout).status
         == "MATCH"
@@ -122,7 +137,7 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
             ).status
             == "CONTENT_MISMATCH"
         )
-    assert (old / "manifest.json").read_bytes() == before
+    assert filesystem_read_bytes(old / "manifest.json") == before
 
     import hashlib
 
@@ -144,12 +159,12 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
     left = storage.write_semantic_artifact(
         tmp_path / "collision_left",
         _envelope(),
-        lambda staging: (staging / "data.bin").write_bytes(b"AAAA"),
+        lambda staging: filesystem_write_bytes(staging / "data.bin", b"AAAA"),
     )
     right = storage.write_semantic_artifact(
         tmp_path / "collision_right",
         _envelope(),
-        lambda staging: (staging / "data.bin").write_bytes(b"BBBB"),
+        lambda staging: filesystem_write_bytes(staging / "data.bin", b"BBBB"),
     )
     assert storage.compare_semantic_artifacts(left, right).status == "CONTENT_MISMATCH"
 
@@ -233,11 +248,11 @@ def test_nested_inventory_descends_before_reading_next_sibling(tmp_path, monkeyp
 
     def writer(staging):
         for index in range(50):
-            (staging / f"empty-{index}").mkdir()
+            filesystem_mkdir(staging / f"empty-{index}")
         nested = staging / "z" / "inner"
-        nested.mkdir(parents=True)
-        (nested / "model.bin").write_bytes(b"nested")
-        (staging / "a.bin").write_bytes(b"root")
+        filesystem_mkdir(nested, parents=True)
+        filesystem_write_bytes(nested / "model.bin", b"nested")
+        filesystem_write_bytes(staging / "a.bin", b"root")
 
     actual_scandir = storage.filesystem_scandir
     opened = []
@@ -278,8 +293,8 @@ def test_inventory_closes_all_ancestors_without_replacing_primary(
     import quant_research_platform.storage.semantic_artifacts as storage
 
     def writer(staging):
-        (staging / "nested").mkdir()
-        (staging / "nested" / "bad.bin").write_bytes(b"bad")
+        filesystem_mkdir(staging / "nested")
+        filesystem_write_bytes(staging / "nested" / "bad.bin", b"bad")
 
     root = write_semantic_artifact(tmp_path / "model", _envelope(), writer)
     primary = KeyboardInterrupt("inventory primary")
@@ -329,20 +344,29 @@ def test_inventory_rejects_child_alias_before_scanning_external_content(
 
     root = _write_artifact(tmp_path)
     external = tmp_path / "external"
-    external.mkdir()
+    filesystem_mkdir(external)
     payload = external / "outside.bin"
-    payload.write_bytes(b"external synthetic content")
+    filesystem_write_bytes(payload, b"external synthetic content")
     alias = root / "alias"
     if alias_kind == "symlink":
         try:
-            alias.symlink_to(external, target_is_directory=True)
+            Path(native_filesystem_path(alias)).symlink_to(
+                native_filesystem_path(external), target_is_directory=True
+            )
         except OSError:
             pytest.skip("symlink_not_available")
     else:
         if os.name != "nt" or not hasattr(Path, "is_junction"):
             pytest.skip("junction_capability_required")
         created = subprocess.run(
-            ["cmd", "/c", "mklink", "/J", str(alias), str(external)],
+            [
+                "cmd",
+                "/c",
+                "mklink",
+                "/J",
+                native_filesystem_path(alias),
+                native_filesystem_path(external),
+            ],
             check=False,
             capture_output=True,
         )
@@ -357,7 +381,7 @@ def test_inventory_rejects_child_alias_before_scanning_external_content(
     monkeypatch.setattr(storage, "filesystem_scandir", scan)
     with pytest.raises(ValueError, match="semantic_artifact_member_invalid"):
         storage.read_semantic_artifact_record(root)
-    assert payload.read_bytes() == b"external synthetic content"
+    assert filesystem_read_bytes(payload) == b"external synthetic content"
 
 
 def test_inventory_limit_failure_preserves_published_artifact_and_parent(
@@ -367,8 +391,8 @@ def test_inventory_limit_failure_preserves_published_artifact_and_parent(
     from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     root = _write_artifact(tmp_path)
-    old_good = {path.name: path.read_bytes() for path in root.iterdir()}
-    before = set(root.parent.iterdir())
+    old_good = _immediate_file_bytes(root)
+    before = set(filesystem_iterdir(root.parent))
     candidate_fields = _envelope().payload()
     del candidate_fields["instance_identity"], candidate_fields["status"]
     candidate_fields["semantic_metadata"] = {"candidate": True}
@@ -377,14 +401,14 @@ def test_inventory_limit_failure_preserves_published_artifact_and_parent(
 
     def writer(staging):
         for index in range(257):
-            (staging / f"member-{index}.bin").write_bytes(b"small")
+            filesystem_write_bytes(staging / f"member-{index}.bin", b"small")
 
     with runtime_resource_policy_scope() as policy:
         with pytest.raises(ValueError, match="semantic_artifact_member_limit_exceeded"):
             write_semantic_artifact(tmp_path / "model", candidate, writer)
         assert policy.used_memory_bytes == 0
-    assert set(root.parent.iterdir()) == before
-    assert {path.name: path.read_bytes() for path in root.iterdir()} == old_good
+    assert set(filesystem_iterdir(root.parent)) == before
+    assert _immediate_file_bytes(root) == old_good
 
 
 @pytest.mark.parametrize("operation", ("discovery", "publication"))
@@ -395,8 +419,8 @@ def test_constant_directory_identity_cannot_hide_added_member(
     from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     root = _write_artifact(tmp_path)
-    old_good = {path.name: path.read_bytes() for path in root.iterdir()}
-    before = set(root.parent.iterdir())
+    old_good = _immediate_file_bytes(root)
+    before = set(filesystem_iterdir(root.parent))
     original_identity = storage._directory_identity
     observed, calls = {}, {}
 
@@ -405,7 +429,7 @@ def test_constant_directory_identity_cannot_hide_added_member(
             observed[path] = original_identity(path)
         calls[path] = calls.get(path, 0) + 1
         if operation == "publication" and calls[path] == 2:
-            (path / "late.bin").write_bytes(b"late")
+            filesystem_write_bytes(path / "late.bin", b"late")
         return observed[path]
 
     monkeypatch.setattr(storage, "_directory_identity", identity)
@@ -414,7 +438,7 @@ def test_constant_directory_identity_cannot_hide_added_member(
             original_read = storage.read_semantic_artifact
 
             def read(path, **kwargs):
-                (root.parent / "late").write_bytes(b"late")
+                filesystem_write_bytes(root.parent / "late", b"late")
                 return original_read(path, **kwargs)
 
             monkeypatch.setattr(storage, "read_semantic_artifact", read)
@@ -429,16 +453,16 @@ def test_constant_directory_identity_cannot_hide_added_member(
             candidate = build_business_manifest_envelope(**fields)
 
             def writer(staging):
-                (staging / "empty").mkdir()
-                (staging / "data.bin").write_bytes(b"data")
+                filesystem_mkdir(staging / "empty")
+                filesystem_write_bytes(staging / "data.bin", b"data")
 
             with pytest.raises(
                 ValueError, match="semantic_artifact_member_set_changed"
             ):
                 storage.write_semantic_artifact(tmp_path / "model", candidate, writer)
-            assert set(root.parent.iterdir()) == before
+            assert set(filesystem_iterdir(root.parent)) == before
         assert policy.used_memory_bytes == 0
-    assert {path.name: path.read_bytes() for path in root.iterdir()} == old_good
+    assert _immediate_file_bytes(root) == old_good
 
 
 @pytest.mark.parametrize("mutation", ("earlier_member", "member_set", "manifest"))
@@ -450,12 +474,12 @@ def test_comparison_rechecks_the_complete_round_before_match(
     import quant_research_platform.storage.semantic_artifacts as storage
 
     def writer(root):
-        (root / "a.bin").write_bytes(b"AAAA")
-        (root / "b.bin").write_bytes(b"BBBB")
+        filesystem_write_bytes(root / "a.bin", b"AAAA")
+        filesystem_write_bytes(root / "b.bin", b"BBBB")
 
     left = storage.write_semantic_artifact(tmp_path / "left", _envelope(), writer)
     right = storage.write_semantic_artifact(tmp_path / "right", _envelope(), writer)
-    old_good = {path.name: path.read_bytes() for path in left.iterdir()}
+    old_good = _immediate_file_bytes(left)
     original = storage.open_filesystem_file
     injected = []
 
@@ -468,24 +492,25 @@ def test_comparison_rechecks_the_complete_round_before_match(
         ):
             injected.append(True)
             if mutation == "member_set":
-                (right / "late.bin").write_bytes(b"late")
+                filesystem_write_bytes(right / "late.bin", b"late")
             else:
                 target = right / (
                     "a.bin" if mutation == "earlier_member" else "manifest.json"
                 )
                 replacement = tmp_path / "replacement"
-                replacement.write_bytes(
+                filesystem_write_bytes(
+                    replacement,
                     b"CCCC"
                     if mutation == "earlier_member"
-                    else target.read_bytes() + b" "
+                    else filesystem_read_bytes(target) + b" ",
                 )
-                replacement.replace(target)
+                filesystem_replace(replacement, target)
         return original(path, *args, **kwargs)
 
     monkeypatch.setattr(storage, "open_filesystem_file", opening)
     assert storage.compare_semantic_artifacts(left, right).status == "INSPECTION_FAILED"
     assert injected == [True]
-    assert {path.name: path.read_bytes() for path in left.iterdir()} == old_good
+    assert _immediate_file_bytes(left) == old_good
 
 
 @pytest.mark.parametrize(
@@ -514,20 +539,26 @@ def test_semantic_parquet_comparison_uses_exact_logical_rows(tmp_path, change):
         tmp_path / "old",
         _envelope(),
         lambda root: pq.write_table(
-            table, root / "table.parquet", compression="NONE", row_group_size=3
+            table,
+            native_filesystem_path(root / "table.parquet"),
+            compression="NONE",
+            row_group_size=3,
         ),
     )
     new = write_semantic_artifact(
         tmp_path / "new",
         _envelope(),
         lambda root: pq.write_table(
-            candidate, root / "table.parquet", compression="zstd", row_group_size=1
+            candidate,
+            native_filesystem_path(root / "table.parquet"),
+            compression="zstd",
+            row_group_size=1,
         ),
     )
-    before = (old / "manifest.json").read_bytes()
+    before = filesystem_read_bytes(old / "manifest.json")
     expected = "MATCH" if change == "encoding" else "CONTENT_MISMATCH"
     assert compare_semantic_artifacts(old, new).status == expected
-    assert (old / "manifest.json").read_bytes() == before
+    assert filesystem_read_bytes(old / "manifest.json") == before
 
 
 def test_identical_parquet_rebuild_does_not_require_decoded_payload_capacity(tmp_path):
@@ -547,7 +578,7 @@ def test_identical_parquet_rebuild_does_not_require_decoded_payload_capacity(tmp
         _envelope(),
         lambda root: pq.write_table(
             table,
-            root / "table.parquet",
+            native_filesystem_path(root / "table.parquet"),
             compression="zstd",
             use_dictionary=False,
             data_page_size=32 * 1024**2,
@@ -556,9 +587,12 @@ def test_identical_parquet_rebuild_does_not_require_decoded_payload_capacity(tmp
     new = write_semantic_artifact(
         tmp_path / "new",
         _envelope(),
-        lambda root: shutil.copyfile(old / "table.parquet", root / "table.parquet"),
+        lambda root: shutil.copyfile(
+            native_filesystem_path(old / "table.parquet"),
+            native_filesystem_path(root / "table.parquet"),
+        ),
     )
-    assert (old / "table.parquet").stat().st_size < 1024**2
+    assert filesystem_stat(old / "table.parquet").st_size < 1024**2
     with runtime_resource_policy_scope(explicit_cap_bytes=1024**2) as policy:
         assert compare_semantic_artifacts(old, new).status == "MATCH"
         assert policy.used_memory_bytes == 0
@@ -569,7 +603,7 @@ def test_member_inventory_round_trips_more_than_256_declared_members(tmp_path):
 
     def writer(staging):
         for index in range(265):
-            (staging / f"member-{index}.bin").write_bytes(str(index).encode())
+            filesystem_write_bytes(staging / f"member-{index}.bin", str(index).encode())
 
     root = write_semantic_artifact(tmp_path / "wide", _envelope(), writer)
     _, members = storage.read_semantic_artifact_record(root)
@@ -577,7 +611,7 @@ def test_member_inventory_round_trips_more_than_256_declared_members(tmp_path):
     assert {member["path"] for member in members} == {
         f"member-{i}.bin" for i in range(265)
     }
-    (root / "member-264.bin").write_bytes(b"changed")
+    filesystem_write_bytes(root / "member-264.bin", b"changed")
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         storage.read_semantic_artifact_record(root)
 
@@ -616,7 +650,7 @@ def test_parent_capture_is_preserved_even_for_same_content_replacement(
     read_semantic_artifact_record(root, expected_member_identities=identities)
     path = root / member
     replacement = tmp_path / "replacement"
-    replacement.write_bytes(path.read_bytes())
-    replacement.replace(path)
+    filesystem_write_bytes(replacement, filesystem_read_bytes(path))
+    filesystem_replace(replacement, path)
     with pytest.raises(ValueError, match="identity_changed"):
         read_semantic_artifact_record(root, expected_member_identities=identities)

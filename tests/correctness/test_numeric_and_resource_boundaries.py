@@ -50,7 +50,23 @@ from quant_research_platform.storage.datasets.schema import (
     _typed_category_value_payload,
     parse_logical_dtype_metadata,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_walk,
+    filesystem_write_bytes,
+    native_filesystem_path,
+    open_filesystem_file,
+)
 from tests.storage.test_semantic_artifacts import _envelope
+
+
+def _file_bytes(root):
+    return {
+        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        for parent, _directories, files in filesystem_walk(root)
+        for name in files
+    }
 
 
 @pytest.mark.parametrize(
@@ -248,8 +264,8 @@ def test_semantic_read_rechecks_earlier_members_and_manifest(
     tmp_path, monkeypatch, target
 ):
     def writer(path):
-        (path / "a.bin").write_bytes(b"first")
-        (path / "b.bin").write_bytes(b"last")
+        filesystem_write_bytes(path / "a.bin", b"first")
+        filesystem_write_bytes(path / "b.bin", b"last")
 
     root = semantic_artifacts.write_semantic_artifact(tmp_path, _envelope(), writer)
     original = semantic_artifacts._member_record
@@ -259,8 +275,9 @@ def test_semantic_read_rechecks_earlier_members_and_manifest(
         result = original(relative, path, identity=identity)
         visited.append(path)
         if len(visited) == 2:
-            (visited[0] if target == "member" else root / "manifest.json").write_bytes(
-                b"changed"
+            filesystem_write_bytes(
+                visited[0] if target == "member" else root / "manifest.json",
+                b"changed",
             )
         return result
 
@@ -271,7 +288,7 @@ def test_semantic_read_rechecks_earlier_members_and_manifest(
 
 def test_semantic_hash_workspace_uses_active_budget(tmp_path, monkeypatch):
     def writer(path):
-        with (path / "payload.bin").open("wb") as handle:
+        with open_filesystem_file(path / "payload.bin", "wb") as handle:
             for _ in range(64):
                 handle.write(b"x" * 65536)
 
@@ -436,12 +453,10 @@ def test_semantic_hash_io_failure_preserves_error_and_releases_budget(
     root = semantic_artifacts.write_semantic_artifact(
         tmp_path,
         _envelope(),
-        lambda path: (path / "payload.bin").write_bytes(b"payload"),
+        lambda path: filesystem_write_bytes(path / "payload.bin", b"payload"),
     )
     primary = error_type("synthetic_io_failure")
-    before = {
-        p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()
-    }
+    before = _file_bytes(root)
 
     def failed_hash(*args, **kwargs):
         raise primary
@@ -457,9 +472,7 @@ def test_semantic_hash_io_failure_preserves_error_and_releases_budget(
         else:
             assert caught.value is primary
         assert policy.used_memory_bytes == 0
-    assert before == {
-        p.relative_to(root): p.read_bytes() for p in root.rglob("*") if p.is_file()
-    }
+    assert before == _file_bytes(root)
 
 
 @pytest.mark.parametrize(
@@ -806,15 +819,15 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
                     n_groups=2,
                 )
             validate_output_bundle(bundle)
-            assert pd.read_parquet(bundle / "metrics.parquet").ic.tolist() == [expected]
-            assert pd.read_parquet(bundle / "ic_summary.parquet").mean_ic.tolist() == [
-                expected
-            ]
-            assert (
-                (bundle / "summary.md")
-                .read_text(encoding="utf-8")
-                .startswith("# Evaluation Summary")
-            )
+            assert pd.read_parquet(
+                native_filesystem_path(bundle / "metrics.parquet")
+            ).ic.tolist() == [expected]
+            assert pd.read_parquet(
+                native_filesystem_path(bundle / "ic_summary.parquet")
+            ).mean_ic.tolist() == [expected]
+            assert filesystem_read_text(
+                bundle / "summary.md", encoding="utf-8"
+            ).startswith("# Evaluation Summary")
         assert policy.used_memory_bytes == 0
 
 

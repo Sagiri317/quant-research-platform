@@ -28,6 +28,11 @@ from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     open_dataset_session,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_is_file,
+    filesystem_read_text,
+    filesystem_write_text,
+)
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_processed_dataset_spec,
@@ -132,7 +137,7 @@ def test_partitioned_empty_dataset_keeps_root_sentinel_for_windowed_reads(
         spec=make_processed_dataset_spec("windowed_empty_partition"),
     )
 
-    assert (root / "data" / "part-000.parquet").is_file()
+    assert filesystem_is_file(root / "data" / "part-000.parquet")
     window = TimeWindow("2015-01-01", "2015-12-31")
     with open_dataset_session(root, columns=None, time_window=window) as session:
         assert tuple(session.read_paths) == (root / "data" / "part-000.parquet",)
@@ -387,10 +392,10 @@ def test_selected_operations_reject_structurally_forged_full_history_summary(
         spec=make_processed_dataset_spec("selected_forged_summary"),
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
     manifest["date_min"] = "1900-01-01"
     manifest["date_max"] = "2099-12-31"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     window = TimeWindow("2015-01-01", "2015-12-31")
 
     for operation in (inspect_dataset, fingerprint_dataset):

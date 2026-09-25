@@ -26,6 +26,13 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_is_file,
+    filesystem_read_text,
+    filesystem_write_text,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
     _bound_first_frames,
@@ -46,13 +53,15 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
         root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
     )
     manifest = json.loads(
-        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
     )
-    spec_payload = json.loads((root / "spec.json").read_text(encoding="utf-8"))
+    spec_payload = json.loads(
+        filesystem_read_text(root / "spec.json", encoding="utf-8")
+    )
 
     assert result is None
-    assert (root / "data" / "year=2014" / "part-000.parquet").is_file()
-    assert (root / "data" / "year=2015" / "part-000.parquet").is_file()
+    assert filesystem_is_file(root / "data" / "year=2014" / "part-000.parquet")
+    assert filesystem_is_file(root / "data" / "year=2015" / "part-000.parquet")
     assert manifest["columns"] == ["market_id", "asset_id", "timestamp", "value"]
     assert manifest["schema_id"] == "qrp-dataset-manifest"
     assert manifest["partition_row_counts"] == {"year=2014": 1, "year=2015": 2}
@@ -80,7 +89,7 @@ def test_write_dataset_partitions_without_groupby_sort_copy(
     )
 
     manifest = json.loads(
-        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
     )
     assert manifest["partition_row_counts"] == {"year=2014": 1, "year=2015": 2}
 
@@ -208,9 +217,9 @@ def test_inspect_dataset_rejects_tampered_input_dataset_identity(
         },
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
     manifest["input_dataset_identities"]["demo_input"]["unknown"] = "x"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="invalid_input_dataset_identities_metadata"):
         inspect_dataset(root)
@@ -226,9 +235,9 @@ def test_inspect_dataset_rejects_parallel_input_fingerprint_lineage(
         spec=make_processed_dataset_spec("parallel_fingerprint_lineage"),
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
     manifest["input_fingerprints"] = {}
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(
         ValueError,
@@ -799,7 +808,7 @@ def test_writer_close_failure_precedes_publish_but_preserves_primary(
 
     assert source.close_calls == 1
     assert facade.close_calls == 0
-    assert root.exists() is (exit_mode == "target_exists")
+    assert filesystem_exists(root) is (exit_mode == "target_exists")
     for policy in cleanup_policies:
         if policy.state == "POISONED":
             policy._lock.close()  # noqa: SLF001
@@ -812,7 +821,7 @@ def test_write_dataset_preserves_schema_for_empty_chunks(tmp_path: Path) -> None
     write_dataset(root, [empty_chunk], spec=make_processed_dataset_spec("empty_schema"))
 
     manifest = json.loads(
-        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
     )
     materialized = read_dataset(root)
     inspection = inspect_dataset(root)
@@ -877,7 +886,7 @@ def test_write_dataset_rejects_invalid_empty_and_bad_rows(tmp_path: Path) -> Non
             missing_required,
             spec=make_processed_dataset_spec("missing_required"),
         )
-    assert not missing_root.exists()
+    assert not filesystem_exists(missing_root)
 
 
 @pytest.mark.parametrize(
@@ -942,8 +951,8 @@ def test_writer_key_index_uses_private_temporary_root(
         path.parent.parent == scratch_root and path.parent.name.startswith(".k-")
         for path in observed_database_paths
     )
-    assert not any(path.exists() for path in observed_database_paths)
-    assert not list(root.rglob(".owner.start"))
+    assert not any(filesystem_exists(path) for path in observed_database_paths)
+    assert not list(filesystem_glob(root, "**/.owner.start"))
 
 
 def test_single_short_string_key_row_uses_measured_conversion_size() -> None:

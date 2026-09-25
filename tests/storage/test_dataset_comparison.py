@@ -37,6 +37,13 @@ from quant_research_platform.storage.datasets.schema import (
     logical_dtype_payload_from_frame,
 )
 from quant_research_platform.storage.datasets.types import DatasetFingerprint
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_mkdir,
+    filesystem_stat,
+    native_filesystem_path,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
     _bound_first_frames,
@@ -244,8 +251,8 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
     )
     left = tmp_path / "left"
     right = tmp_path / "right"
-    left.mkdir()
-    right.mkdir()
+    filesystem_mkdir(left)
+    filesystem_mkdir(right)
     observed: list[RuntimeResourcePolicy] = []
     fingerprint_refs: list[weakref.ReferenceType[DatasetFingerprint]] = []
     active_contexts = 0
@@ -687,8 +694,8 @@ def test_compare_propagates_programmer_errors(
 ) -> None:
     left = tmp_path / "left_programmer_error"
     right = tmp_path / "right_programmer_error"
-    left.mkdir()
-    right.mkdir()
+    filesystem_mkdir(left)
+    filesystem_mkdir(right)
     monkeypatch.setattr(
         dataset_comparison,
         "open_dataset_session",
@@ -718,9 +725,12 @@ def test_compare_rejects_mutation_between_fingerprint_and_exact_pass(
         result = fingerprint(context, **kwargs)
         calls += 1
         if calls == 2:
-            part = next((left / "data").rglob("*.parquet"))
-            stat = part.stat()
-            os.utime(part, ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000))
+            part = next(filesystem_glob(left / "data", "**/*.parquet"))
+            stat = filesystem_stat(part)
+            os.utime(
+                native_filesystem_path(part),
+                ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000),
+            )
         return result
 
     monkeypatch.setattr(
@@ -756,10 +766,10 @@ def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
         index_rows(context, **kwargs)  # type: ignore[arg-type]
         if kwargs["namespace"] != mutated_side:
             return
-        part = next((context.root / "data").rglob("*.parquet"))
-        stat = part.stat()
+        part = next(filesystem_glob(context.root / "data", "**/*.parquet"))
+        stat = filesystem_stat(part)
         os.utime(
-            part,
+            native_filesystem_path(part),
             ns=(stat.st_atime_ns, stat.st_mtime_ns + 10_000_000),
         )
 
@@ -1200,7 +1210,7 @@ def _aggregate_streaming_case(tmp_path: Path, *, tmpfs_failure: bool) -> None:
                     root, chunks, spec=spec, resource_policy=policy, borrowed_input=True
                 )
             assert policy.used_memory_bytes == 0
-            assert not root.exists()
+            assert not filesystem_exists(root)
             return
         inspection = dataset_writing.write_dataset(
             root,

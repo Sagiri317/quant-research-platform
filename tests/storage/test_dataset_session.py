@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-import os
 from pathlib import Path
 
 import pandas as pd
@@ -21,6 +20,18 @@ from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
     write_dataset,
+)
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_is_file,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_replace,
+    filesystem_unlink,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
 )
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
@@ -104,10 +115,10 @@ def test_dataset_session_rejects_raw_contract_and_inventory_drift(
         time_window=None,
     ) as raw_session:
         spec_path = root / "spec.json"
-        spec_path.write_bytes(raw_session.spec_bytes + b" ")
+        filesystem_write_bytes(spec_path, raw_session.spec_bytes + b" ")
         with pytest.raises(ValueError, match="dataset_spec_identity_changed"):
             raw_session.verify()
-        spec_path.write_bytes(raw_session.spec_bytes)
+        filesystem_write_bytes(spec_path, raw_session.spec_bytes)
 
     with dataset_reading.open_dataset_session(
         root,
@@ -121,14 +132,14 @@ def test_dataset_session_rejects_raw_contract_and_inventory_drift(
         )
         with pytest.raises(ValueError, match="dataset_inventory_changed"):
             inventory_session.verify()
-        added.unlink()
+        filesystem_unlink(added)
 
     with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
     ) as removal_session:
-        removal_session.all_paths[0].unlink()
+        filesystem_unlink(removal_session.all_paths[0])
         with pytest.raises(ValueError, match="dataset_inventory_changed"):
             removal_session.verify()
 
@@ -159,8 +170,8 @@ def test_dataset_session_rejects_same_bytes_metadata_replacement(
     ) as session:
         path = root / relative_path
         replacement = path.with_name(f"{path.name}.replacement")
-        replacement.write_bytes(path.read_bytes())
-        os.replace(replacement, path)
+        filesystem_write_bytes(replacement, filesystem_read_bytes(path))
+        filesystem_replace(replacement, path)
 
         with pytest.raises(ValueError, match=error):
             session.verify()
@@ -183,7 +194,7 @@ def test_physical_decoder_rechecks_the_same_handle_after_decode(
         path = session.all_paths[0]
 
         def mutate_after_open(_metadata) -> None:  # noqa: ANN001
-            path.touch()
+            Path(native_filesystem_path(path)).touch()
 
         with pytest.raises(ValueError, match="dataset_file_identity_changed"):
             list(
@@ -214,7 +225,9 @@ def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
         receipt.session.verify()
         receipt.session.close()
         receipt.session.verify()
-        receipt_checks.append(receipt.exact_primary_key_index.database_path.is_file())
+        receipt_checks.append(
+            filesystem_is_file(receipt.exact_primary_key_index.database_path)
+        )
         assert receipt.exact_primary_key_index.add_table(
             pa.Table.from_pandas(frame, preserve_index=False)
         ) == len(frame)
@@ -238,7 +251,7 @@ def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
     assert receipt_checks == [True]
     assert len(observed_paths) == len(set(observed_paths))
     manifest = json.loads(
-        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
     )
     assert len(observed_paths) == manifest["file_count"]
 
@@ -256,9 +269,9 @@ def test_open_dataset_session_owns_and_closes_inventory(tmp_path: Path) -> None:
         time_window=None,
     ) as session:
         scratch = session.inventory.scratch_path
-        assert scratch.exists()
+        assert filesystem_exists(scratch)
 
-    assert not scratch.exists()
+    assert not filesystem_exists(scratch)
 
 
 def test_open_dataset_session_admits_metadata_before_decode(
@@ -376,7 +389,7 @@ def test_open_dataset_session_preserves_missing_manifest_preflight(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("missing_manifest_preflight"),
     )
-    (root / "_manifest" / "manifest.json").unlink()
+    filesystem_unlink(root / "_manifest" / "manifest.json")
     metadata_reads = 0
 
     def reject_metadata_read(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
@@ -642,7 +655,9 @@ def test_dataset_global_nullable_integer_plan_is_chunk_order_independent(
         assert str(read_dataset(root)["value"].dtype) == "Int64"
         manifests.append(
             json.loads(
-                (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+                filesystem_read_text(
+                    root / "_manifest" / "manifest.json", encoding="utf-8"
+                )
             )
         )
     assert manifests[0]["logical_dtypes"] == manifests[1]["logical_dtypes"]
@@ -684,7 +699,9 @@ def test_all_empty_logical_dtype_plan_is_chunk_order_independent(
         assert str(frame["value"].dtype) == "Int64"
         observed.append(
             json.loads(
-                (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+                filesystem_read_text(
+                    root / "_manifest" / "manifest.json", encoding="utf-8"
+                )
             )["logical_dtypes"]
         )
     assert observed[0] == observed[1]
@@ -768,9 +785,9 @@ def test_full_inspection_rejects_forged_persisted_date_summary(
         spec=make_processed_dataset_spec("forged_dates"),
     )
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
     manifest["date_min"] = "1900-01-01"
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="manifest_partition_date_mismatch"):
         inspect_dataset(root)
 
@@ -809,14 +826,14 @@ def test_persisted_identity_rejects_same_statistics_member_replacement(
     write_dataset(root, frame, spec=spec)
     write_dataset(replacement, changed, spec=spec)
     pd.testing.assert_frame_equal(read_dataset(root), frame, check_dtype=False)
-    (member,) = (root / "data").rglob("*.parquet")
-    (other,) = (replacement / "data").rglob("*.parquet")
-    original = member.read_bytes()
-    substituted = other.read_bytes()
+    (member,) = filesystem_glob(root / "data", "**/*.parquet")
+    (other,) = filesystem_glob(replacement / "data", "**/*.parquet")
+    original = filesystem_read_bytes(member)
+    substituted = filesystem_read_bytes(other)
     assert len(original) == len(substituted) and original != substituted
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = manifest_path.read_bytes()
-    member.write_bytes(substituted)
+    manifest = filesystem_read_bytes(manifest_path)
+    filesystem_write_bytes(member, substituted)
     with pytest.raises(ValueError, match="dataset_content_identity_changed"):
         operation(root)
-    assert manifest_path.read_bytes() == manifest
+    assert filesystem_read_bytes(manifest_path) == manifest

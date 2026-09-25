@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import builtins
-import os
 from datetime import time
 from pathlib import Path
 
@@ -20,6 +19,12 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets import (
     write_dataset,
+)
+from quant_research_platform.storage.identity import (
+    filesystem_read_bytes,
+    filesystem_replace,
+    filesystem_write_bytes,
+    native_filesystem_path,
 )
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.low_level_fixtures import (
@@ -271,8 +276,8 @@ def test_filtered_empty_chunk_rechecks_identity_after_yield(
         assert next(iterator).empty
         part = session.all_paths[0]
         replacement = tmp_path / f"replacement-{completion}.parquet"
-        replacement.write_bytes(part.read_bytes())
-        os.replace(replacement, part)
+        filesystem_write_bytes(replacement, filesystem_read_bytes(part))
+        filesystem_replace(replacement, part)
 
         if completion == "close":
             with pytest.raises(ValueError, match="dataset_file_identity_changed"):
@@ -306,8 +311,8 @@ def test_filtered_empty_chunk_final_verify_preserves_caller_primary(
                 assert next(iterator).empty
                 part = session.all_paths[0]
                 replacement = tmp_path / "replacement-primary.parquet"
-                replacement.write_bytes(part.read_bytes())
-                os.replace(replacement, part)
+                filesystem_write_bytes(replacement, filesystem_read_bytes(part))
+                filesystem_replace(replacement, part)
                 raise RuntimeError("primary_failure")
 
 
@@ -637,7 +642,10 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
     values: tuple[time, ...],
 ) -> None:
     path = tmp_path / "time.parquet"
-    pq.write_table(pa.table({"value": pa.array(values, type=data_type)}), path)
+    pq.write_table(
+        pa.table({"value": pa.array(values, type=data_type)}),
+        native_filesystem_path(path),
+    )
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )

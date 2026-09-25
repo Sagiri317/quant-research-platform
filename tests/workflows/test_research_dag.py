@@ -40,7 +40,21 @@ from quant_research_platform.research.protocols import a_share
 from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.types import DatasetComparison
 from quant_research_platform.storage.datasets.writing import write_dataset
-from quant_research_platform.storage.identity import content_hash_for_files
+from quant_research_platform.storage.identity import (
+    content_hash_for_files,
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_is_file,
+    filesystem_iterdir,
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_stat,
+    filesystem_unlink,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     read_dataset_manifest_evidence,
@@ -52,6 +66,21 @@ from tests.helpers.research_configuration import (
     research_configuration,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
+
+
+def _old_good_snapshot(root: Path) -> tuple[tuple[str, bytes, int, int, int], ...]:
+    return tuple(
+        (
+            path.relative_to(root).as_posix(),
+            filesystem_read_bytes(path),
+            info.st_ino,
+            info.st_size,
+            info.st_mtime_ns,
+        )
+        for path in filesystem_glob(root, "**/*")
+        if filesystem_is_file(path)
+        for info in (filesystem_stat(path),)
+    )
 
 
 def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
@@ -208,8 +237,8 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     raw_root = StorageLayout(project_root=tmp_path).raw_source_root(
         source_spec.source_id
     )
-    raw_root.mkdir(parents=True)
-    (raw_root / "formal_source.raw").write_bytes(b"formal")
+    filesystem_mkdir(raw_root, parents=True)
+    filesystem_write_bytes(raw_root / "formal_source.raw", b"formal")
     profile = replace(
         base,
         protocol=a_share.protocol,
@@ -294,7 +323,9 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         read_quarterly_model_artifact,
     )
 
-    model_payload = json.loads((model_root / "model.json").read_text(encoding="utf-8"))
+    model_payload = json.loads(
+        filesystem_read_text(model_root / "model.json", encoding="utf-8")
+    )
     assert set(model_payload) == {"schema_id", "model_id", "quarters"}
     assert model_payload["quarters"] == ["2019Q1", "2019Q2"]
     artifact = read_quarterly_model_artifact(
@@ -354,7 +385,6 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         RAW_PREDICTION_COLUMN,
         prediction_output_columns,
     )
-    from quant_research_platform.storage.identity import native_filesystem_path
     from quant_research_platform.storage.semantic_artifacts import (
         read_semantic_artifact,
     )
@@ -400,7 +430,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     layout = StorageLayout(tmp_path)
     first_record = read_research_run_record(layout.research_run_path(result["run_id"]))
     assert first_record.trial_ledgers
-    model_before = (model_root / "manifest.json").read_bytes()
+    model_before = filesystem_read_bytes(model_root / "manifest.json")
     reused = research.research_run(
         profile=profile,
         layout=layout,
@@ -429,7 +459,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     assert {item["run_id"] for item in rebuild_record.trial_ledgers} == {
         rebuilt["run_id"]
     }
-    assert (model_root / "manifest.json").read_bytes() == model_before
+    assert filesystem_read_bytes(model_root / "manifest.json") == model_before
     comparisons = {
         item["target_id"]: item["comparison_status"]
         for item in rebuilt["rebuild_evidence"]
@@ -796,7 +826,7 @@ def test_declared_processed_dependencies_are_not_removed_from_the_plan(
         panel_spec.kind,
         panel_spec.data_id,
     )
-    panel_root.mkdir(parents=True)
+    filesystem_mkdir(panel_root, parents=True)
     plan = research.plan_targets(
         profile=profile,
         action="dataset build",
@@ -907,9 +937,9 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
     data_id = "market_bars_1d"
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"before")
+    filesystem_write_bytes(marker, b"before")
     calls = 0
 
     def producer(**kwargs: object) -> InterimImportResult:
@@ -968,7 +998,7 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
         end_date="2020-12-31",
         data_ids=(data_id,),
     )
-    marker.write_bytes(b"after")
+    filesystem_write_bytes(marker, b"after")
     second = research.data_materialize(
         profile=profile,
         layout=layout,
@@ -985,7 +1015,7 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
     assert calls == 2
 
     instances = tuple(
-        (layout.interim_data_root("csmar", data_id) / "instances").iterdir()
+        filesystem_iterdir(layout.interim_data_root("csmar", data_id) / "instances")
     )
     assert {path.name for path in instances} == {first_identity, second_identity}
 
@@ -993,7 +1023,7 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
 
     def mutate_after_plan(**kwargs: object) -> dict[str, object]:
         result = plan(**kwargs)
-        marker.write_bytes(b"between-plan-and-reuse")
+        filesystem_write_bytes(marker, b"between-plan-and-reuse")
         return result
 
     monkeypatch.setattr(research, "_plan_targets", mutate_after_plan)
@@ -1069,9 +1099,9 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
     data_id = "market_bars_1d"
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     calls = 0
 
     def producer(**kwargs: object) -> InterimImportResult:
@@ -1134,17 +1164,7 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
         layout.interim_data_root("csmar", data_id),
         first["target_results"][0]["instance_identity"],
     )
-    before = tuple(
-        (
-            path.relative_to(old_root).as_posix(),
-            path.read_bytes(),
-            path.stat().st_ino,
-            path.stat().st_size,
-            path.stat().st_mtime_ns,
-        )
-        for path in old_root.rglob("*")
-        if path.is_file()
-    )
+    before = _old_good_snapshot(old_root)
 
     rebuild_plan = research.data_materialize(
         profile=profile,
@@ -1182,24 +1202,14 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
         rebuild=True,
     )
 
-    after = tuple(
-        (
-            path.relative_to(old_root).as_posix(),
-            path.read_bytes(),
-            path.stat().st_ino,
-            path.stat().st_size,
-            path.stat().st_mtime_ns,
-        )
-        for path in old_root.rglob("*")
-        if path.is_file()
-    )
+    after = _old_good_snapshot(old_root)
     assert rebuilt["status"] == "COMPLETE"
     assert rebuilt["target_results"][0]["status"] == "BUILT"
     assert rebuilt["target_results"][0]["instance_identity"] == old_root.name
     assert rebuilt["rebuild_evidence"][0]["comparison_status"] == "MATCH"
     assert before == after
     assert calls == 2
-    assert not tuple((tmp_path / ".run").glob(".r-*"))
+    assert not tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
     def mismatch(*_args: object, **_kwargs: object) -> DatasetComparison:
         return DatasetComparison(
@@ -1225,18 +1235,8 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
         "rebuild_comparison_content_mismatch"
     )
     assert failed["rebuild_evidence"][0]["comparison_status"] == "CONTENT_MISMATCH"
-    assert tuple((tmp_path / ".run").glob(".r-*"))
-    failed_snapshot = tuple(
-        (
-            path.relative_to(old_root).as_posix(),
-            path.read_bytes(),
-            path.stat().st_ino,
-            path.stat().st_size,
-            path.stat().st_mtime_ns,
-        )
-        for path in old_root.rglob("*")
-        if path.is_file()
-    )
+    assert tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
+    failed_snapshot = _old_good_snapshot(old_root)
     assert failed_snapshot == before
     assert calls == 3
 
@@ -1329,9 +1329,9 @@ def test_rebuild_comparison_mismatch_families_preserve_old_good(
 ) -> None:
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile(variant, marker=marker)
     layout = StorageLayout(project_root=tmp_path)
     first = research.data_materialize(
@@ -1346,17 +1346,7 @@ def test_rebuild_comparison_mismatch_families_preserve_old_good(
         layout.interim_data_root("csmar", data_id),
         first["target_results"][0]["instance_identity"],
     )
-    before = tuple(
-        (
-            path.relative_to(old_root).as_posix(),
-            path.read_bytes(),
-            path.stat().st_ino,
-            path.stat().st_size,
-            path.stat().st_mtime_ns,
-        )
-        for path in old_root.rglob("*")
-        if path.is_file()
-    )
+    before = _old_good_snapshot(old_root)
 
     rebuilt = research.data_materialize(
         profile=profile,
@@ -1368,17 +1358,7 @@ def test_rebuild_comparison_mismatch_families_preserve_old_good(
         rebuild=True,
     )
 
-    after = tuple(
-        (
-            path.relative_to(old_root).as_posix(),
-            path.read_bytes(),
-            path.stat().st_ino,
-            path.stat().st_size,
-            path.stat().st_mtime_ns,
-        )
-        for path in old_root.rglob("*")
-        if path.is_file()
-    )
+    after = _old_good_snapshot(old_root)
     assert rebuilt["status"] == "FAILED"
     assert rebuilt["target_results"][0]["status"] == "FAILED"
     assert rebuilt["target_results"][0]["reason"] == (
@@ -1387,7 +1367,7 @@ def test_rebuild_comparison_mismatch_families_preserve_old_good(
     assert rebuilt["rebuild_evidence"][0]["comparison_status"] == comparison_status
     assert before == after
     assert calls["count"] == 2
-    assert tuple((tmp_path / ".run").glob(".r-*"))
+    assert tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
 def test_rebuild_corrupt_old_good_returns_inspection_failed(
@@ -1395,9 +1375,9 @@ def test_rebuild_corrupt_old_good_returns_inspection_failed(
 ) -> None:
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
     first = research.data_materialize(
@@ -1412,7 +1392,7 @@ def test_rebuild_corrupt_old_good_returns_inspection_failed(
         layout.interim_data_root("csmar", data_id),
         first["target_results"][0]["instance_identity"],
     )
-    (old_root / "_manifest" / "manifest.json").unlink()
+    filesystem_unlink(old_root / "_manifest" / "manifest.json")
 
     rebuilt = research.data_materialize(
         profile=profile,
@@ -1431,7 +1411,7 @@ def test_rebuild_corrupt_old_good_returns_inspection_failed(
     )
     assert rebuilt["rebuild_evidence"][0]["comparison_status"] == ("INSPECTION_FAILED")
     assert calls["count"] == 2
-    assert tuple((tmp_path / ".run").glob(".r-*"))
+    assert tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
 def test_rebuild_compare_primary_is_preserved_with_candidate_evidence(
@@ -1440,9 +1420,9 @@ def test_rebuild_compare_primary_is_preserved_with_candidate_evidence(
 ) -> None:
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
     first = research.data_materialize(
@@ -1457,17 +1437,7 @@ def test_rebuild_compare_primary_is_preserved_with_candidate_evidence(
         layout.interim_data_root("csmar", data_id),
         first["target_results"][0]["instance_identity"],
     )
-    before = tuple(
-        (
-            path.relative_to(old_root).as_posix(),
-            path.read_bytes(),
-            path.stat().st_ino,
-            path.stat().st_size,
-            path.stat().st_mtime_ns,
-        )
-        for path in old_root.rglob("*")
-        if path.is_file()
-    )
+    before = _old_good_snapshot(old_root)
 
     class PrimaryError(Exception):
         pass
@@ -1489,21 +1459,11 @@ def test_rebuild_compare_primary_is_preserved_with_candidate_evidence(
             rebuild=True,
         )
 
-    after = tuple(
-        (
-            path.relative_to(old_root).as_posix(),
-            path.read_bytes(),
-            path.stat().st_ino,
-            path.stat().st_size,
-            path.stat().st_mtime_ns,
-        )
-        for path in old_root.rglob("*")
-        if path.is_file()
-    )
+    after = _old_good_snapshot(old_root)
     assert caught.value is primary
     assert before == after
     assert calls["count"] == 2
-    assert tuple((tmp_path / ".run").glob(".r-*"))
+    assert tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
 def test_rebuild_producer_primary_is_preserved_with_candidate_evidence(
@@ -1515,9 +1475,9 @@ def test_rebuild_producer_primary_is_preserved_with_candidate_evidence(
     primary = PrimaryError("producer failure")
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile(
         "value",
         marker=marker,
@@ -1551,7 +1511,7 @@ def test_rebuild_producer_primary_is_preserved_with_candidate_evidence(
     assert caught.value is primary
     assert read_dataset_manifest_evidence(old_root)["data_id"] == data_id
     assert calls["count"] == 2
-    assert tuple((tmp_path / ".run").glob(".r-*"))
+    assert tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
 def test_rebuild_validation_failure_reports_failed_without_empty_candidate(
@@ -1560,9 +1520,9 @@ def test_rebuild_validation_failure_reports_failed_without_empty_candidate(
     primary = ValueError("producer validation failure")
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile(
         "value",
         marker=marker,
@@ -1596,7 +1556,7 @@ def test_rebuild_validation_failure_reports_failed_without_empty_candidate(
     assert failed["target_results"][0]["reason"] == "interim_build_failed:valueerror"
     assert read_dataset_manifest_evidence(old_root)["data_id"] == data_id
     assert calls["count"] == 2
-    assert not tuple((tmp_path / ".run").glob(".r-*"))
+    assert not tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
 @pytest.mark.parametrize("exception_type", (KeyboardInterrupt, SystemExit))
@@ -1607,9 +1567,9 @@ def test_rebuild_producer_control_base_exception_preserves_candidate(
     primary = exception_type("producer control failure")
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile(
         "value",
         marker=marker,
@@ -1643,7 +1603,7 @@ def test_rebuild_producer_control_base_exception_preserves_candidate(
     assert caught.value is primary
     assert read_dataset_manifest_evidence(old_root)["data_id"] == data_id
     assert calls["count"] == 2
-    assert tuple((tmp_path / ".run").glob(".r-*"))
+    assert tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
 def test_rebuild_raw_mutation_before_candidate_build_blocks_without_empty_scratch(
@@ -1652,9 +1612,9 @@ def test_rebuild_raw_mutation_before_candidate_build_blocks_without_empty_scratc
 ) -> None:
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
     first = research.data_materialize(
@@ -1671,7 +1631,7 @@ def test_rebuild_raw_mutation_before_candidate_build_blocks_without_empty_scratc
 
     def mutate_after_plan(**kwargs: object) -> dict[str, object]:
         result = plan(**kwargs)
-        marker.write_bytes(b"changed")
+        filesystem_write_bytes(marker, b"changed")
         return result
 
     monkeypatch.setattr(research, "_plan_targets", mutate_after_plan)
@@ -1696,7 +1656,7 @@ def test_rebuild_raw_mutation_before_candidate_build_blocks_without_empty_scratc
     ]
     assert rebuilt["rebuild_evidence"] == []
     assert calls["count"] == 1
-    assert not tuple((tmp_path / ".run").glob(".r-*"))
+    assert not tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
     assert old_identity is not None
 
 
@@ -1705,9 +1665,9 @@ def test_rebuild_without_old_good_is_a_normal_immutable_build(
 ) -> None:
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
 
     result = research.data_materialize(
@@ -1724,7 +1684,7 @@ def test_rebuild_without_old_good_is_a_normal_immutable_build(
     assert result["target_results"][0]["status"] == "BUILT"
     assert result["rebuild_evidence"] == []
     assert calls["count"] == 1
-    assert not tuple((tmp_path / ".run").glob(".r-*"))
+    assert not tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
 def test_rebuild_blocked_before_materialization_cleans_empty_candidate(
@@ -1732,9 +1692,9 @@ def test_rebuild_blocked_before_materialization_cleans_empty_candidate(
 ) -> None:
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
     first = research.data_materialize(
@@ -1787,7 +1747,7 @@ def test_rebuild_blocked_before_materialization_cleans_empty_candidate(
     ]
     assert result["rebuild_evidence"] == []
     assert calls["count"] == 2
-    assert not tuple((tmp_path / ".run").glob(".r-*"))
+    assert not tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
 def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
@@ -1796,9 +1756,9 @@ def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
 ) -> None:
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
-    marker_root.mkdir(parents=True)
+    filesystem_mkdir(marker_root, parents=True)
     marker = marker_root / "source.raw"
-    marker.write_bytes(b"stable")
+    filesystem_write_bytes(marker, b"stable")
     profile, source_id, source_calls = _calendar_rebuild_profile(
         "value",
         marker=marker,
@@ -1906,7 +1866,7 @@ def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
     }
     assert source_calls["count"] == 2
     assert descendant_calls["count"] == 1
-    assert tuple((tmp_path / ".run").glob(".r-*"))
+    assert tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
 def test_csmar_dataset_action_discovers_nested_single_root(
@@ -1916,15 +1876,15 @@ def test_csmar_dataset_action_discovers_nested_single_root(
     layout = StorageLayout(project_root=tmp_path)
     raw_root = tmp_path / "data" / "raw"
     nested_root = raw_root / "csmar" / "calendar" / "history"
-    nested_root.mkdir(parents=True)
-    (nested_root / "native-calendar.csv").write_text(
+    filesystem_mkdir(nested_root, parents=True)
+    filesystem_write_text(
+        nested_root / "native-calendar.csv",
         "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n",
         encoding="utf-8",
     )
-    (
+    filesystem_write_text(
         nested_root / "csmar__special_treatment_changes__all_market_types__full__"
-        "export-20260605.csv"
-    ).write_text(
+        "export-20260605.csv",
         "bad,header\n",
         encoding="utf-8",
     )
@@ -1977,7 +1937,7 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
         research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
     )
     assert research_plan["status"] == "BLOCKED"
-    assert not (tmp_path / "data" / "runs").exists()
+    assert not filesystem_exists(tmp_path / "data" / "runs")
     assert all(target["decision"] != "REUSE" for target in research_plan["targets"])
 
     research_result = research.research_run(
@@ -2060,14 +2020,16 @@ def test_research_run_records_unexpected_failure_without_masking_primary(
             ),
         )
     assert raised.value is primary
-    records = tuple((tmp_path / "data/runs/research").glob("*.json"))
+    records = tuple(filesystem_glob(tmp_path / "data/runs/research", "*.json"))
     assert len(records) == 1
     record = read_research_run_record(records[0])
     assert record.status.value == "FAILED"
     assert record.failure_reason == "research_run_failed:runtimeerror"
     assert record.operation_evidence["reason"] == "operation_incomplete"
     assert record.operation_evidence["sample_count"] == 1
-    assert "SYNTHETIC_ROW_VALUE_X" not in records[0].read_text(encoding="utf-8")
+    assert "SYNTHETIC_ROW_VALUE_X" not in filesystem_read_text(
+        records[0], encoding="utf-8"
+    )
     monkeypatch.setattr(observations, "perf_counter", actual_clock)
 
     monkeypatch.setattr(
@@ -2092,7 +2054,7 @@ def test_inspect_and_status_never_treat_a_directory_as_a_complete_target(
     profile = research_profile()
     layout = StorageLayout(project_root=tmp_path)
     root = layout.research_dataset_root("a_share", "pv_all")
-    root.mkdir(parents=True)
+    filesystem_mkdir(root, parents=True)
 
     inspected = research.inspect(
         profile=profile,
@@ -2104,8 +2066,8 @@ def test_inspect_and_status_never_treat_a_directory_as_a_complete_target(
     assert inspected["status"] == "BLOCKED"
     assert inspected["blocker"] == "dataset_instances_missing"
     assert status == {"profile_id": profile.profile_id, "runs": []}
-    assert not (root / "spec.json").exists()
-    assert not (root / "_manifest").exists()
+    assert not filesystem_exists(root / "spec.json")
+    assert not filesystem_exists(root / "_manifest")
 
 
 def _crypto_plan_payload():
@@ -2200,7 +2162,7 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
     }
     configuration["research_plan"] = valid
     plan_file = tmp_path / "plan.json"
-    plan_file.write_text(json.dumps(configuration), encoding="utf-8")
+    filesystem_write_text(plan_file, json.dumps(configuration), encoding="utf-8")
     args = ["research", "run", "--project-root", str(tmp_path), "--plan"]
     missing = CliRunner().invoke(app, args)
     assert missing.exit_code == 2 and "research-plan" in missing.output
@@ -2364,7 +2326,7 @@ def test_target_local_validation_preserves_independent_production(
         ),
     )
     raw = tmp_path / "raw"
-    (raw / "csmar").mkdir(parents=True)
+    filesystem_mkdir(raw / "csmar", parents=True)
     kwargs = dict(
         profile=profile,
         layout=StorageLayout(tmp_path),
@@ -2401,8 +2363,8 @@ def test_source_hash_failure_keeps_run_failure_semantics(
 
     raw = tmp_path / "raw"
     marker = raw / "csmar" / "source.raw"
-    marker.parent.mkdir(parents=True)
-    marker.write_bytes(b"synthetic")
+    filesystem_mkdir(marker.parent, parents=True)
+    filesystem_write_bytes(marker, b"synthetic")
     profile, _, _ = _calendar_rebuild_profile("value", marker=marker)
     profile = replace(
         profile,
@@ -2447,7 +2409,7 @@ def test_source_hash_failure_keeps_run_failure_semantics(
         with pytest.raises(type(primary)) as caught:
             research.research_run(**kwargs)
         assert caught.value is primary
-    records = tuple((tmp_path / "data/runs/research").glob("*.json"))
+    records = tuple(filesystem_glob(tmp_path / "data/runs/research", "*.json"))
     assert len(records) == 1
     record = read_research_run_record(records[0])
     if failure != "missing":

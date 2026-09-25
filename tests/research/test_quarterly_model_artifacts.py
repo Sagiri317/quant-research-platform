@@ -63,6 +63,20 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_iterdir,
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_replace,
+    filesystem_stat,
+    filesystem_walk,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research as research_workflow
 from tests.helpers.research_configuration import configured_models
@@ -81,6 +95,14 @@ from tests.research.workflow_test_support import (
     fixture_refit_reference,
     fixture_validation_coverage,
 )
+
+
+def _file_bytes(root: Path) -> dict[Path, bytes]:
+    return {
+        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        for parent, _directories, files in filesystem_walk(root)
+        for name in files
+    }
 
 
 def _mock_prediction_dataset(monkeypatch, frame):
@@ -261,7 +283,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
             error="invalid_full_metadata",
         )
         assert len(payload["models"]) == 8
-        assert shard.stat().st_size < 1024**2
+        assert filesystem_stat(shard).st_size < 1024**2
         assert any(
             item["model_metadata"]["scaler"] is not None for item in payload["models"]
         )
@@ -577,9 +599,9 @@ def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alp
         resource_policy=None,
     )
     bundle = write_prediction_result(StorageLayout(project_root=tmp_path), result)
-    table = pd.read_parquet(bundle / "prediction.parquet").sort_values(
-        "asset_id", kind="mergesort"
-    )
+    table = pd.read_parquet(
+        native_filesystem_path(bundle / "prediction.parquet")
+    ).sort_values("asset_id", kind="mergesort")
     assert table["alpha_score"].tolist() == pytest.approx([-1.0 / 3.0, 0.0, 1.0 / 3.0])
     assert float(table["alpha_score"].mean()) == pytest.approx(0.0)
 
@@ -954,8 +976,8 @@ def test_model_member_mutation_is_rejected_before_loading_predictor(
     root = artifact.instance_root
     path = root / "models" / "2019Q1" / "linear_x.pkl"
     replacement = path.with_suffix(".replacement")
-    replacement.write_bytes(path.read_bytes())
-    replacement.replace(path)
+    filesystem_write_bytes(replacement, filesystem_read_bytes(path))
+    filesystem_replace(replacement, path)
     with monkeypatch.context() as patch:
         patch.setattr(
             persisted.pickle,
@@ -965,7 +987,7 @@ def test_model_member_mutation_is_rejected_before_loading_predictor(
         with pytest.raises(ValueError, match="model_artifact_model_invalid"):
             with persisted.read_quarterly_predictor(artifact, "2019Q1", "linear_x"):
                 pytest.fail("replaced physical member reached consumer")
-    path.write_bytes(b"mutated")
+    filesystem_write_bytes(path, b"mutated")
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
 
@@ -1812,11 +1834,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             assert predictor.estimator.alpha == refit_alpha
             probe = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
             before = predictor.predict(probe).copy()
-        original_bytes = {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        }
+        original_bytes = _file_bytes(root)
         for mutation in (
             "none_start",
             "early_start",
@@ -1839,10 +1857,12 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                     if relative == Path("manifest.json"):
                         continue
                     destination = staging / relative
-                    destination.parent.mkdir(parents=True, exist_ok=True)
-                    destination.write_bytes(content)
+                    filesystem_mkdir(destination.parent, parents=True, exist_ok=True)
+                    filesystem_write_bytes(destination, content)
                 metadata_path = staging / "models/2019Q1/metadata.json"
-                payload = json.loads(metadata_path.read_text(encoding="utf-8"))
+                payload = json.loads(
+                    filesystem_read_text(metadata_path, encoding="utf-8")
+                )
                 entry = payload["models"][0]
                 altered = entry["model_metadata"]
                 if mutation == "none_start":
@@ -1911,7 +1931,9 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                             state_bytes=owned.lease.reserved_bytes,
                         )
                         model = None
-                metadata_path.write_text(json.dumps(payload), encoding="utf-8")
+                filesystem_write_text(
+                    metadata_path, json.dumps(payload), encoding="utf-8"
+                )
 
             altered_root = write_semantic_artifact(
                 tmp_path / mutation,
@@ -1936,11 +1958,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                 ):
                     pass
             assert policy.used_memory_bytes == 0
-        assert {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        } == original_bytes
+        assert _file_bytes(root) == original_bytes
         with persisted._read_model_member(
             root,
             artifact.member_records,
@@ -2108,7 +2126,9 @@ def test_model_publication_rejects_self_consistent_wrong_trial_provenance(
                     ),
                     trial_layout=layout,
                 )
-        assert not (logical_root / "instances" / _envelope().instance_identity).exists()
+        assert not filesystem_exists(
+            logical_root / "instances" / _envelope().instance_identity
+        )
     assert policy.used_memory_bytes == 0
 
 
@@ -2287,7 +2307,6 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
         read_quarterly_predictor,
     )
     from quant_research_platform.runtime import resources
-    from quant_research_platform.storage.identity import native_filesystem_path
 
     layout = StorageLayout(tmp_path)
     template = _quarterly_result(
@@ -2404,12 +2423,8 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
             np.testing.assert_allclose(
                 predictor.predict(pd.DataFrame({"x": [1.0, 2.0]})), [3.0, 5.0]
             )
-        old_good = {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        }
-        previous = set(root.parent.iterdir())
+        old_good = _file_bytes(root)
+        previous = set(filesystem_iterdir(root.parent))
         dump = persisted.pickle.dump
         calls = []
 
@@ -2437,12 +2452,8 @@ def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
         assert paths and all(
             path.is_relative_to(native_filesystem_path(logical)) for path in paths
         )
-        assert set(root.parent.iterdir()) == previous
-        assert {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        } == old_good
+        assert set(filesystem_iterdir(root.parent)) == previous
+        assert _file_bytes(root) == old_good
         assert policy.used_memory_bytes == 0
 
 
@@ -2594,7 +2605,9 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                             yield owned
                             if change:
                                 path = root / "spec.json"
-                                path.write_bytes(path.read_bytes() + b" ")
+                                filesystem_write_bytes(
+                                    path, filesystem_read_bytes(path) + b" "
+                                )
                         finally:
                             if owned.lease.active:
                                 owned.release(owner="test.model")
@@ -2608,12 +2621,8 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                         trial_layout=layout,
                         verify_source=session.verify,
                     )
-                    old_good = {
-                        p.relative_to(good): p.read_bytes()
-                        for p in good.rglob("*")
-                        if p.is_file()
-                    }
-                    previous = set(good.parent.iterdir())
+                    old_good = _file_bytes(good)
+                    previous = set(filesystem_iterdir(good.parent))
                     with pytest.raises(
                         ValueError, match="dataset_spec_identity_changed"
                     ):
@@ -2625,12 +2634,8 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                             trial_layout=layout,
                             verify_source=session.verify,
                         )
-                    assert set(good.parent.iterdir()) == previous
-                    assert {
-                        p.relative_to(good): p.read_bytes()
-                        for p in good.rglob("*")
-                        if p.is_file()
-                    } == old_good
+                    assert set(filesystem_iterdir(good.parent)) == previous
+                    assert _file_bytes(good) == old_good
                     return ()
                 if mutation in {"cancel", "exception"}:
                     iterator = iter(read())
@@ -2643,18 +2648,20 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                     return ()
                 if mutation == "part":
                     part = session.read_paths[0]
-                    part.write_bytes(part.read_bytes() + b" ")
+                    filesystem_write_bytes(part, filesystem_read_bytes(part) + b" ")
                 elif mutation in {"spec", "manifest"}:
                     path = (
                         root / "spec.json"
                         if mutation == "spec"
                         else root / "_manifest" / "manifest.json"
                     )
-                    path.write_bytes(path.read_bytes() + b" ")
+                    filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
                 else:
                     path = root / "data" / "year=2025" / "part-00000.parquet"
-                    path.parent.mkdir()
-                    path.write_bytes(session.all_paths[0].read_bytes())
+                    filesystem_mkdir(path.parent)
+                    filesystem_write_bytes(
+                        path, filesystem_read_bytes(session.all_paths[0])
+                    )
                 return tuple(read())
 
             monkeypatch.setattr(production, "_build_a_share_quarterly_models", exercise)
@@ -2698,7 +2705,7 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                     run()
             assert observed == [True]
             assert policy.used_memory_bytes == baseline
-        assert not scratch.exists()
+        assert not filesystem_exists(scratch)
         assert policy.used_memory_bytes == 0
 
 
@@ -2870,7 +2877,7 @@ def test_model_member_io_preserves_failure_class(
 
             def write_crypto_member(stage):
                 directory = stage / "models/fold_1"
-                directory.mkdir(parents=True)
+                filesystem_mkdir(directory, parents=True)
                 with persisted.read_quarterly_predictor(
                     artifact, "2019Q1", "linear_regression", resource_policy=policy
                 ) as model:
@@ -2906,11 +2913,7 @@ def test_model_member_io_preserves_failure_class(
             if consumer == "staged"
             else None
         )
-        original_bytes = {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        }
+        original_bytes = _file_bytes(root)
         primary = (
             FileNotFoundError("model_missing")
             if failure == "missing"
@@ -2983,16 +2986,12 @@ def test_model_member_io_preserves_failure_class(
             assert caught.value is primary
         assert all(handle.closed for handle in handles)
         assert policy.used_memory_bytes == 0
-        assert {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        } == original_bytes
+        assert _file_bytes(root) == original_bytes
         if consumer == "staged":
-            assert not (
+            assert not filesystem_exists(
                 tmp_path / "staged/instances" / _envelope().instance_identity
-            ).exists()
-            assert not tuple((tmp_path / "staged").rglob(".a-*"))
+            )
+            assert not tuple(filesystem_glob(tmp_path / "staged", "**/.a-*"))
 
 
 @pytest.mark.parametrize(
@@ -3299,7 +3298,7 @@ def _small_common_coverage_case(tmp_path, *, fail_refit_scaler=False, monkeypatc
                 if fail_refit_scaler == "cancel"
                 else "RuntimeError"
             }
-            assert not tuple((tmp_path / "models").glob(".*staging*"))
+            assert not tuple(filesystem_glob(tmp_path / "models", ".*staging*"))
             assert policy.used_memory_bytes == 0
             return
         root = write_quarterly_model_artifact(
@@ -3313,7 +3312,7 @@ def _small_common_coverage_case(tmp_path, *, fail_refit_scaler=False, monkeypatc
             root, expected_identity=envelope.instance_identity, trial_layout=layout
         )
         coverage = saved.quarterly_selections["2019Q1"]["common_validation_coverage"]
-        keys = pd.read_parquet(root / coverage["path"])
+        keys = pd.read_parquet(native_filesystem_path(root / coverage["path"]))
         assert coverage["row_count"] == 15
         assert set(keys.asset_id) == {f"asset_{i}" for i in (2, 3, 4, 5, 7)}
         assert len(saved.trial_ledgers) == 8
@@ -3404,8 +3403,11 @@ def test_validation_coverage_readback_ignores_physical_key_interleaving(tmp_path
     ):
         root = tmp_path / name
         path = root / metadata["path"]
-        path.parent.mkdir(parents=True)
-        pq.write_table(pa.Table.from_pandas(physical_rows, preserve_index=False), path)
+        filesystem_mkdir(path.parent, parents=True)
+        pq.write_table(
+            pa.Table.from_pandas(physical_rows, preserve_index=False),
+            native_filesystem_path(path),
+        )
         _validate_validation_coverage(
             root, "2019Q1", metadata, scope, member_identities=None
         )

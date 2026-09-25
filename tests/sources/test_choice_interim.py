@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import shutil
+from pathlib import Path
 
 import pandas as pd
 import pytest
@@ -22,6 +23,17 @@ from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
     read_dataset,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_is_dir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_unlink,
+    filesystem_walk,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 from tests.helpers.choice_raw import SDK, response, write_css
@@ -30,6 +42,16 @@ from tests.helpers.research_configuration import research_configuration
 FIELDS = tuple(field for fields in FINANCIAL_FIELDS.values() for field in fields)
 DATE_FIELDS = ("STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE")
 CODE = "000001.SZ"
+
+
+def _file_hashes(root: Path) -> dict[Path, str]:
+    return {
+        (parent / name).relative_to(root): hashlib.sha256(
+            filesystem_read_bytes(parent / name)
+        ).hexdigest()
+        for parent, _directories, files in filesystem_walk(root)
+        for name in files
+    }
 
 
 def _disclosure(
@@ -164,7 +186,7 @@ def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_pat
                 data_ids=("financial_income",),
                 resource_policy=policy,
             )
-        assert first.is_dir() and policy.used_memory_bytes == 0
+        assert filesystem_is_dir(first) and policy.used_memory_bytes == 0
 
 
 def test_disclosure_and_financial_superset_is_one_raw_response(tmp_path):
@@ -311,7 +333,7 @@ def test_unfetched_field_is_blocked_and_other_coordinates_cannot_fill_it(
         )
         if foreign is None:
             assert fields[-1] in details
-        assert not layout.interim_data_root("choice", data_id).exists()
+        assert not filesystem_exists(layout.interim_data_root("choice", data_id))
         assert policy.used_memory_bytes == 0
     if foreign is None:
         with choice_session(SDK(response())) as session:
@@ -370,7 +392,9 @@ def test_overlapping_single_field_conflict_including_provider_null_is_rejected(
     ) as caught:
         interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
     assert any("request_identities=" in note for note in caught.value.__notes__)
-    assert not layout.interim_data_root("choice", "financial_balance").exists()
+    assert not filesystem_exists(
+        layout.interim_data_root("choice", "financial_balance")
+    )
 
 
 def test_same_day_branch_conflict_is_not_hidden_by_the_current_canonical_value(
@@ -385,7 +409,9 @@ def test_same_day_branch_conflict_is_not_hidden_by_the_current_canonical_value(
             _snapshot(session, layout, "2020-02-01", [new] * 14, branch=branch)
     with pytest.raises(ValueError, match="choice_financial_version_values_conflict"):
         interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
-    assert not layout.interim_data_root("choice", "financial_balance").exists()
+    assert not filesystem_exists(
+        layout.interim_data_root("choice", "financial_balance")
+    )
 
 
 def test_missing_predecessor_is_not_a_proven_all_null_snapshot(tmp_path):
@@ -483,7 +509,9 @@ def test_source_primary_exception_survives_index_cleanup_failure(tmp_path, monke
         assert caught.value is primary
         assert any("RuntimeError" in note for note in primary.__notes__)
         assert policy.used_memory_bytes == 0
-    assert not layout.interim_data_root("choice", "financial_balance").exists()
+    assert not filesystem_exists(
+        layout.interim_data_root("choice", "financial_balance")
+    )
 
 
 def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
@@ -744,11 +772,7 @@ def test_raw_mutation_before_publish_preserves_old_good(
         layout=layout, data_ids=("financial_balance",)
     )
     good_root = good.artifact_roots["financial_balance"]
-    before = {
-        path.relative_to(good_root): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in good_root.rglob("*")
-        if path.is_file()
-    }
+    before = _file_hashes(good_root)
     candidate_layout = StorageLayout(tmp_path / "candidate")
     candidate = candidate_layout.interim_data_root("choice", "financial_balance")
     actual_rows = interim._rows
@@ -757,13 +781,18 @@ def test_raw_mutation_before_publish_preserves_old_good(
         yield from actual_rows(*args)
         if mutation == "add":
             shutil.copytree(
-                added, layout.raw_source_root("choice") / "css" / added.name
+                native_filesystem_path(added),
+                native_filesystem_path(
+                    layout.raw_source_root("choice") / "css" / added.name
+                ),
             )
         elif mutation == "remove":
-            (snapshot / "response.csv").unlink()
+            filesystem_unlink(snapshot / "response.csv")
         else:
             path = snapshot / "response.csv"
-            path.write_bytes(path.read_bytes().replace(b"100.0", b"101.0", 1))
+            filesystem_write_bytes(
+                path, filesystem_read_bytes(path).replace(b"100.0", b"101.0", 1)
+            )
 
     monkeypatch.setattr(interim, "_rows", mutating_rows)
     with pytest.raises(ValueError, match="choice_raw_identity_changed"):
@@ -772,12 +801,8 @@ def test_raw_mutation_before_publish_preserves_old_good(
             raw_root=layout.raw_source_root("choice"),
             data_ids=("financial_balance",),
         )
-    assert not candidate.exists()
-    assert before == {
-        path.relative_to(good_root): hashlib.sha256(path.read_bytes()).hexdigest()
-        for path in good_root.rglob("*")
-        if path.is_file()
-    }
+    assert not filesystem_exists(candidate)
+    assert before == _file_hashes(good_root)
 
 
 def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identity(
@@ -809,10 +834,9 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
     good = interim.materialize_interim_data(layout=layout)
     assert opened == [True, False]
     before = {
-        path: hashlib.sha256(path.read_bytes()).hexdigest()
+        root / relative: digest
         for root in good.artifact_roots.values()
-        for path in root.rglob("*")
-        if path.is_file()
+        for relative, digest in _file_hashes(root).items()
     }
     original_write = interim.write_dataset
     published = []
@@ -824,13 +848,14 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
         if len(published) == 1:
             before.update(
                 {
-                    path: hashlib.sha256(path.read_bytes()).hexdigest()
-                    for path in args[0].rglob("*")
-                    if path.is_file()
+                    args[0] / relative: digest
+                    for relative, digest in _file_hashes(args[0]).items()
                 }
             )
             raw = snapshot / "response.csv"
-            raw.write_bytes(raw.read_bytes().replace(b"100.0", b"101.0", 1))
+            filesystem_write_bytes(
+                raw, filesystem_read_bytes(raw).replace(b"100.0", b"101.0", 1)
+            )
         return result
 
     monkeypatch.setattr(interim, "write_dataset", mutate_after_first_publication)
@@ -841,9 +866,11 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
     assert published == ["financial_balance"]
     assert opened == [True, False, True]
     assert active == 0
-    assert not candidate.interim_data_root("choice", "financial_income").exists()
+    assert not filesystem_exists(
+        candidate.interim_data_root("choice", "financial_income")
+    )
     assert all(
-        hashlib.sha256(path.read_bytes()).hexdigest() == digest
+        hashlib.sha256(filesystem_read_bytes(path)).hexdigest() == digest
         for path, digest in before.items()
     )
 
@@ -868,7 +895,7 @@ def test_raw_metadata_invalid_is_source_local(tmp_path, mutation):
     with choice_session(SDK(response())) as session:
         root, _ = _disclosure(session, layout)
     sidecar = root / "response.metadata.json"
-    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    payload = json.loads(filesystem_read_text(sidecar, encoding="utf-8"))
     if mutation == "metadata_missing":
         del payload["metadata"]
     elif mutation == "metadata_type":
@@ -882,9 +909,11 @@ def test_raw_metadata_invalid_is_source_local(tmp_path, mutation):
     elif mutation == "cutoff_type":
         payload["metadata"]["request"]["cutoff"] = 1
     elif mutation == "csv_missing":
-        (root / "response.csv").unlink()
-    sidecar.write_text(
-        "{" if mutation == "json_corrupt" else json.dumps(payload), encoding="utf-8"
+        filesystem_unlink(root / "response.csv")
+    filesystem_write_text(
+        sidecar,
+        "{" if mutation == "json_corrupt" else json.dumps(payload),
+        encoding="utf-8",
     )
     with runtime_resource_policy_scope() as policy:
         with pytest.raises(ValueError):
@@ -904,9 +933,9 @@ def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path)
     with choice_session(SDK(response())) as session:
         root, _ = _disclosure(session, layout)
     sidecar = root / "response.metadata.json"
-    payload = json.loads(sidecar.read_text(encoding="utf-8"))
+    payload = json.loads(filesystem_read_text(sidecar, encoding="utf-8"))
     del payload["metadata"]["request"]
-    sidecar.write_text(json.dumps(payload), encoding="utf-8")
+    filesystem_write_text(sidecar, json.dumps(payload), encoding="utf-8")
     profile = research_profile()
     result = research.research_run(
         profile=profile,

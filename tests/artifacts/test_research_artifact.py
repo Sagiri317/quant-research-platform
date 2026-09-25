@@ -18,7 +18,19 @@ from quant_research_platform.contracts.business_manifest import (
 )
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.reports.a_share import REQUIRED_REPORT_SECTIONS
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_iterdir,
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_write_bytes,
+)
 from quant_research_platform.storage.semantic_artifacts import write_semantic_artifact
+
+
+def _files(root: Path) -> dict[str, bytes]:
+    return {path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)}
 
 
 def _report() -> tuple[object, dict[str, object]]:
@@ -92,7 +104,7 @@ def test_report_keeps_numeric_byte_counts_and_rejects_stock_strings(tmp_path):
         saved["sections"]["run observations"]["metrics"]["read_bytes"]["value"]
         == 393216
     )
-    assert "393,216" in (root / "report.md").read_text(encoding="utf-8")
+    assert "393,216" in filesystem_read_text(root / "report.md", encoding="utf-8")
     payload["sections"]["Data/Coverage"]["sample"] = "600000.SH"
     with pytest.raises(ValueError, match="unsafe_evidence: stock_sample"):
         write_research_report_artifact(
@@ -126,7 +138,7 @@ def test_research_report_rejects_payload_envelope_mismatch_before_publish(
             envelope=envelope,
             payload=changed,
         )
-    assert not logical_root.exists()
+    assert not filesystem_exists(logical_root)
 
 
 def test_research_report_reader_rejects_persisted_envelope_mismatch(
@@ -158,7 +170,7 @@ def test_research_report_reader_rejects_persisted_envelope_mismatch(
         write_json_evidence(staging / "report.json", payload)
         write_markdown_evidence(
             staging / "report.md",
-            (valid_root / "report.md").read_text(encoding="utf-8"),
+            filesystem_read_text(valid_root / "report.md", encoding="utf-8"),
         )
 
     invalid_root = tmp_path / "invalid"
@@ -183,7 +195,7 @@ def test_report_reader_preserves_valid_published_markdown_from_another_renderer(
         write_markdown_evidence(staging / "report.md", previous_markdown)
 
     root = write_semantic_artifact(tmp_path / "report", envelope, writer)
-    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    before = _files(root)
 
     def forbidden(_payload):
         raise AssertionError("reader_rerendered_published_markdown")
@@ -193,7 +205,7 @@ def test_report_reader_preserves_valid_published_markdown_from_another_renderer(
         research.read_research_report_artifact(root, expected_identity=root.name)
         == payload
     )
-    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+    assert _files(root) == before
 
 
 def test_report_markdown_lists_every_formal_result_without_json_walls(tmp_path):
@@ -214,7 +226,7 @@ def test_report_markdown_lists_every_formal_result_without_json_walls(tmp_path):
     root = write_research_report_artifact(
         tmp_path / "report", envelope=envelope, payload=payload
     )
-    markdown = (root / "report.md").read_text(encoding="utf-8")
+    markdown = filesystem_read_text(root / "report.md", encoding="utf-8")
     assert "| candidate_id | metric_id | value | status | reason |" in markdown
     assert all(f"| candidate_{index} |" in markdown for index in range(24))
     assert (
@@ -235,7 +247,7 @@ def test_large_report_round_trip_and_resource_failure_preserves_old_artifact(tmp
     }
     logical = tmp_path / "large"
     root = write_research_report_artifact(logical, envelope=envelope, payload=payload)
-    original = (root / "report.json").read_bytes()
+    original = filesystem_read_bytes(root / "report.json")
     assert len(original) > 1024 * 1024
     assert (
         read_research_report_artifact(
@@ -253,10 +265,10 @@ def test_large_report_round_trip_and_resource_failure_preserves_old_artifact(tmp
                 tmp_path / "rejected", envelope=envelope, payload=payload
             )
         assert policy.used_memory_bytes == 0
-    assert (root / "report.json").read_bytes() == original
-    assert not (
+    assert filesystem_read_bytes(root / "report.json") == original
+    assert not filesystem_exists(
         tmp_path / "rejected" / "instances" / envelope.instance_identity
-    ).exists()
+    )
 
 
 @pytest.mark.parametrize("directory", [False, True])
@@ -267,7 +279,7 @@ def test_run_evidence_preserves_json_file_boundary_error(tmp_path, directory):
 
     path = tmp_path / "run_missing.json"
     if directory:
-        path.mkdir()
+        filesystem_mkdir(path)
     with runtime_resource_policy_scope() as policy:
         for reader in (read_manifest, read_research_run_record):
             with pytest.raises(ValueError, match="^dataset_metadata_file_invalid$"):
@@ -285,14 +297,14 @@ def test_report_parser_binds_actual_bytes_to_verified_member(tmp_path, monkeypat
         tmp_path / "report", envelope=envelope, payload=payload
     )
     member = root / "report.json"
-    original = member.read_bytes()
+    original = filesystem_read_bytes(member)
     replacement = original.replace(b"0.25", b"0.75")
     assert replacement != original and len(replacement) == len(original)
     original_reader = research.read_json_evidence
 
     def interleaved_reader(path, **kwargs):
         assert path == member
-        member.write_bytes(replacement)
+        filesystem_write_bytes(member, replacement)
         return original_reader(path, **kwargs)
 
     monkeypatch.setattr(research, "read_json_evidence", interleaved_reader)
@@ -300,6 +312,6 @@ def test_report_parser_binds_actual_bytes_to_verified_member(tmp_path, monkeypat
         with pytest.raises(ValueError, match="report_payload_invalid"):
             read_research_report_artifact(root, expected_identity=root.name)
         assert policy.used_memory_bytes == 0
-    member.write_bytes(original)
+    filesystem_write_bytes(member, original)
     monkeypatch.setattr(research, "read_json_evidence", original_reader)
     assert read_research_report_artifact(root, expected_identity=root.name) == payload

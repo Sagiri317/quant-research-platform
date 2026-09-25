@@ -13,7 +13,14 @@ from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.storage.identity import native_filesystem_path
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_read_bytes,
+    filesystem_stat,
+    filesystem_write_bytes,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.semantic_artifacts import write_semantic_artifact
 from tests.helpers.research_configuration import research_configuration
 from tests.helpers.runtime_resources import capture_test_policy
@@ -330,7 +337,7 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
                         expected_identity=envelope.instance_identity,
                         validate_tables=missing_validator,
                     )
-            assert not (tmp_path / "missing-validator").exists()
+            assert not filesystem_exists(tmp_path / "missing-validator")
             assert policy.used_memory_bytes == 0
             return
         if mutation == "truncate":
@@ -362,7 +369,7 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
                 table_group="crypto_maker_calibration",
                 validate_tables=validate_maker_calibration,
             )
-        assert not tuple((tmp_path / "rejected" / "instances").glob("*"))
+        assert not tuple(filesystem_glob(tmp_path / "rejected" / "instances", "*"))
 
         def write_corruption(staging):
             for name, frame in tables.items():
@@ -904,7 +911,9 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                 with artifact.table(f"{name}.parquet") as actual:
                     pd.testing.assert_frame_equal(actual, frame)
             roots.append(root)
-            with pq.ParquetFile(root / "crypto_maker_events.parquet") as parquet:
+            with pq.ParquetFile(
+                native_filesystem_path(root / "crypto_maker_events.parquet")
+            ) as parquet:
                 group_counts.append(parquet.num_row_groups)
             assert policy.used_memory_bytes == 0
     assert group_counts[0] > group_counts[1]
@@ -963,7 +972,7 @@ def test_incremental_maker_publication_preserves_old_good_and_primary(
             )
         assert caught.value is primary and written == 2
         assert read_semantic_artifact_record(good) == before
-        assert not tuple((tmp_path / "candidate" / "instances").glob("*"))
+        assert not tuple(filesystem_glob(tmp_path / "candidate" / "instances", "*"))
         statistics.read_statistics_artifact(
             good,
             expected_identity=envelope.instance_identity,
@@ -1182,12 +1191,15 @@ def test_streamed_calibration_rechecks_member_bytes_after_consumption(
             if not changed:
                 changed = True
                 path = root / "crypto_maker_calibration.parquet"
-                before = path.stat()
-                content = bytearray(path.read_bytes())
+                before = filesystem_stat(path)
+                content = bytearray(filesystem_read_bytes(path))
                 content[4] ^= 1
-                path.write_bytes(content)
-                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
-                assert path.stat().st_mtime_ns == before.st_mtime_ns
+                filesystem_write_bytes(path, content)
+                os.utime(
+                    native_filesystem_path(path),
+                    ns=(before.st_atime_ns, before.st_mtime_ns),
+                )
+                assert filesystem_stat(path).st_mtime_ns == before.st_mtime_ns
 
         monkeypatch.setattr(portfolio, "_calibration_headers", mutate_after_headers)
         with pytest.raises(

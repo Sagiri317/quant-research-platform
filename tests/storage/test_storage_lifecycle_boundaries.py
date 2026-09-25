@@ -46,13 +46,21 @@ _PRIMARY_EXCEPTION_TYPES = (
 )
 
 
+def _file_bytes(root: Path) -> dict[Path, bytes]:
+    return {
+        (parent / name).relative_to(root): identity.filesystem_read_bytes(parent / name)
+        for parent, _directories, files in identity.filesystem_walk(root)
+        for name in files
+    }
+
+
 @pytest.mark.parametrize("primary_type", (*_PRIMARY_EXCEPTION_TYPES, OSError))
 def test_content_hash_close_preserves_primary_and_closes_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary_type
 ) -> None:
     path = tmp_path / "hash.bin"
-    path.write_bytes(b"synthetic")
-    raw = path.open("rb")
+    identity.filesystem_write_bytes(path, b"synthetic")
+    raw = identity.open_filesystem_file(path, "rb")
     primary = primary_type("hash_primary")
     closed = []
 
@@ -136,10 +144,12 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
     monkeypatch.setattr(key_owner, "gettempdir", lambda: str(alias))
     monkeypatch.setattr(inventory_owner, "gettempdir", lambda: str(alias))
     target = tmp_path / "target"
-    target.mkdir()
+    identity.filesystem_mkdir(target)
     alias = tmp_path / "alias"
     try:
-        alias.symlink_to(target, target_is_directory=True)
+        Path(identity.native_filesystem_path(alias)).symlink_to(
+            identity.native_filesystem_path(target), target_is_directory=True
+        )
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
 
@@ -158,7 +168,7 @@ def test_write_and_scratch_owners_reject_aliased_parent_before_access(
     for operation in operations:
         with pytest.raises(ValueError):
             operation()
-    assert not tuple(target.iterdir())
+    assert not tuple(identity.filesystem_iterdir(target))
 
 
 @pytest.mark.parametrize(
@@ -209,7 +219,7 @@ def test_scratch_owner_cleans_retained_temp_after_post_create_gate_failure(
 
     assert caught.value is gate_failure
     assert len(created) == 1
-    assert not created[0].exists()
+    assert not identity.filesystem_exists(created[0])
 
 
 @pytest.mark.parametrize(
@@ -252,7 +262,7 @@ def test_scratch_owner_cleans_when_database_constructor_raises(
 
     assert caught.value is primary
     assert len(database_paths) == 1
-    assert not database_paths[0].parent.exists()
+    assert not identity.filesystem_exists(database_paths[0].parent)
 
 
 def _policy(megabytes: int) -> RuntimeResourcePolicy:
@@ -637,11 +647,13 @@ def _patch_open_session_metadata_preflight(
 ) -> tuple[dict[str, str], dict[str, str]]:
     spec = {"schema_id": "qrp-dataset-spec"}
     manifest = {"schema_id": "qrp-dataset-manifest", "content_hash": "0" * 64}
-    (root / "data").mkdir(parents=True)
-    (root / "_manifest").mkdir()
-    (root / "spec.json").write_text(json.dumps(spec), encoding="utf-8")
-    (root / "_manifest" / "manifest.json").write_text(
-        json.dumps(manifest), encoding="utf-8"
+    identity.filesystem_mkdir(root / "data", parents=True)
+    identity.filesystem_mkdir(root / "_manifest")
+    identity.filesystem_write_text(
+        root / "spec.json", json.dumps(spec), encoding="utf-8"
+    )
+    identity.filesystem_write_text(
+        root / "_manifest" / "manifest.json", json.dumps(manifest), encoding="utf-8"
     )
     monkeypatch.setattr(
         dataset_reading,
@@ -819,12 +831,8 @@ def test_dataset_writer_closes_session_once_across_result_failures(
         dataset_writing.write_dataset(
             previous, frame, spec=spec, resource_policy=policy, borrowed_input=True
         )
-        original_bytes = {
-            path.relative_to(previous): path.read_bytes()
-            for path in previous.rglob("*")
-            if path.is_file()
-        }
-        members = set(root.parent.iterdir())
+        original_bytes = _file_bytes(previous)
+        members = set(identity.filesystem_iterdir(root.parent))
         close_calls = []
         original_close = dataset_reading.DatasetSession.close
         original_lease = RuntimeResourcePolicy.lease
@@ -872,12 +880,8 @@ def test_dataset_writer_closes_session_once_across_result_failures(
         assert len(close_calls) == 1
         assert not close_calls[0]._lease.active
         assert policy.used_memory_bytes == 0
-        assert set(root.parent.iterdir()) == members
-        assert {
-            path.relative_to(previous): path.read_bytes()
-            for path in previous.rglob("*")
-            if path.is_file()
-        } == original_bytes
+        assert set(identity.filesystem_iterdir(root.parent)) == members
+        assert _file_bytes(previous) == original_bytes
 
 
 @pytest.mark.parametrize("long_path", (False, True))
@@ -1505,8 +1509,8 @@ def test_bounded_manifest_read_preserves_body_primary_over_handle_close(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "manifest.json"
-    path.write_text('{"schema_id":"qrp-test"}', encoding="utf-8")
-    metadata = path.stat()
+    identity.filesystem_write_text(path, '{"schema_id":"qrp-test"}', encoding="utf-8")
+    metadata = identity.filesystem_stat(path)
     primary = primary_type("body_primary")
     monkeypatch.setattr(
         manifests,
@@ -1525,8 +1529,8 @@ def test_compare_runtime_admission_failure_is_not_mapped(
 ) -> None:
     left = tmp_path / "left"
     right = tmp_path / "right"
-    left.mkdir()
-    right.mkdir()
+    identity.filesystem_mkdir(left)
+    identity.filesystem_mkdir(right)
     monkeypatch.setattr(
         comparison,
         "current_runtime_resource_policy",
@@ -1543,8 +1547,8 @@ def test_compare_expected_storage_validation_still_maps(
 ) -> None:
     left = tmp_path / "left"
     right = tmp_path / "right"
-    left.mkdir()
-    right.mkdir()
+    identity.filesystem_mkdir(left)
+    identity.filesystem_mkdir(right)
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024 * 1024,
         explicit_cap_bytes=1 * 1024 * 1024,
@@ -1584,11 +1588,13 @@ def test_artifact_root_rejects_exact_or_ancestor_alias(
     alias_kind: str,
 ) -> None:
     target = tmp_path / "target"
-    target.mkdir()
+    identity.filesystem_mkdir(target)
     alias = tmp_path / "alias"
     if alias_kind == "symlink":
         try:
-            alias.symlink_to(target, target_is_directory=True)
+            Path(identity.native_filesystem_path(alias)).symlink_to(
+                identity.native_filesystem_path(target), target_is_directory=True
+            )
         except OSError as exc:
             pytest.skip(f"symlink_not_available: {exc}")
     else:
@@ -1629,9 +1635,12 @@ def test_artifact_root_ordinary_chain_preserves_candidate_spelling(
 def test_dataset_file_identity_accepts_single_external_hardlink(tmp_path: Path) -> None:
     source = tmp_path / "source.bin"
     alias = tmp_path / "alias.bin"
-    source.write_bytes(b"payload")
+    identity.filesystem_write_bytes(source, b"payload")
     try:
-        os.link(source, alias)
+        os.link(
+            identity.native_filesystem_path(source),
+            identity.native_filesystem_path(alias),
+        )
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
 
@@ -1642,11 +1651,13 @@ def test_dataset_file_identity_accepts_single_external_hardlink(tmp_path: Path) 
 
 def test_dataset_file_identity_rejects_ancestor_alias(tmp_path: Path) -> None:
     target = tmp_path / "target"
-    target.mkdir()
-    (target / "part.bin").write_bytes(b"payload")
+    identity.filesystem_mkdir(target)
+    identity.filesystem_write_bytes(target / "part.bin", b"payload")
     alias = tmp_path / "alias"
     try:
-        alias.symlink_to(target, target_is_directory=True)
+        Path(identity.native_filesystem_path(alias)).symlink_to(
+            identity.native_filesystem_path(target), target_is_directory=True
+        )
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
 
@@ -1656,11 +1667,15 @@ def test_dataset_file_identity_rejects_ancestor_alias(tmp_path: Path) -> None:
 
 def test_bounded_metadata_reader_rejects_ancestor_alias(tmp_path: Path) -> None:
     target = tmp_path / "target"
-    target.mkdir()
-    (target / "manifest.json").write_text('{"schema_id":"test"}', encoding="utf-8")
+    identity.filesystem_mkdir(target)
+    identity.filesystem_write_text(
+        target / "manifest.json", '{"schema_id":"test"}', encoding="utf-8"
+    )
     alias = tmp_path / "alias"
     try:
-        alias.symlink_to(target, target_is_directory=True)
+        Path(identity.native_filesystem_path(alias)).symlink_to(
+            identity.native_filesystem_path(target), target_is_directory=True
+        )
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
 
@@ -1860,16 +1875,16 @@ def test_compare_internal_recheck_blocks_new_ancestor_alias_before_exists(
 
 def test_shared_scratch_removes_only_exact_owned_paths(tmp_path: Path) -> None:
     owned_file = tmp_path / "owned-file"
-    owned_file.write_bytes(b"x")
+    identity.filesystem_write_bytes(owned_file, b"x")
     owned_directory = tmp_path / "owned-directory"
-    owned_directory.mkdir()
-    (owned_directory / "part").write_bytes(b"x")
+    identity.filesystem_mkdir(owned_directory)
+    identity.filesystem_write_bytes(owned_directory / "part", b"x")
 
     scratch_owner.remove_owned_scratch(owned_file)
     scratch_owner.remove_owned_scratch(owned_directory)
 
-    assert not owned_file.exists()
-    assert not owned_directory.exists()
+    assert not identity.filesystem_exists(owned_file)
+    assert not identity.filesystem_exists(owned_directory)
 
 
 @pytest.mark.parametrize("size", (0, 3, 2 * 1024**2 + 7))
@@ -1879,7 +1894,7 @@ def test_content_hash_digest_and_live_workspace_fit_one_lease(tmp_path, size):
 
     path = tmp_path / "content.bin"
     payload = b"x" * size
-    path.write_bytes(payload)
+    identity.filesystem_write_bytes(path, payload)
     digest = hashlib.sha256()
     for value in ("member", hashlib.sha256(payload).hexdigest()):
         encoded = value.encode()
@@ -1902,14 +1917,16 @@ def test_content_hash_digest_and_live_workspace_fit_one_lease(tmp_path, size):
 
 def test_content_hash_rechecks_earlier_members_before_return(tmp_path, monkeypatch):
     first, last = tmp_path / "first", tmp_path / "last"
-    first.write_bytes(b"original")
-    last.write_bytes(b"last")
+    identity.filesystem_write_bytes(first, b"original")
+    identity.filesystem_write_bytes(last, b"last")
     real_hash = identity._hash_file_content
 
     def mutate_earlier(path, *args, **kwargs):
         result = real_hash(path, *args, **kwargs)
         if path == last:
-            first.write_bytes(b"changed after its own final verification")
+            identity.filesystem_write_bytes(
+                first, b"changed after its own final verification"
+            )
         return result
 
     monkeypatch.setattr(identity, "_hash_file_content", mutate_earlier)
@@ -1927,7 +1944,7 @@ def test_content_identity_distinguishes_invalid_from_fatal(
     import errno
 
     path = tmp_path / "member"
-    path.write_bytes(b"synthetic")
+    identity.filesystem_write_bytes(path, b"synthetic")
     primary = {
         "missing": FileNotFoundError(errno.ENOENT, "missing"),
         "memory": MemoryError("primary"),
@@ -1976,17 +1993,19 @@ def test_source_identity_preserves_serious_io(tmp_path, monkeypatch, source, bou
                 data={"000001.SZ": ["2020/1/30"]},
             )
         root, data_id = layout.raw_source_root("choice"), "financial_balance"
-        path = next(root.rglob("response.metadata.json"))
+        path = next(identity.filesystem_glob(root, "**/response.metadata.json"))
         owner = choice
     elif source == "csmar":
         root, data_id = tmp_path, "trading_calendar"
         path = root / "native-calendar.csv"
-        path.write_text("Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n")
+        identity.filesystem_write_text(
+            path, "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n", encoding="utf-8"
+        )
         owner = csmar
     else:
         root = _write_reference_root(tmp_path / "raw") / "reference"
         data_id = reference.A_SHARE_FEE_SCHEDULE_DATA_ID
-        path = next(root.rglob("*.csv"))
+        path = next(identity.filesystem_glob(root, "**/*.csv"))
         owner = reference
     primary = OSError(errno.EIO, "primary")
     from quant_research_platform.sources.csmar import raw_schemas
@@ -2055,7 +2074,11 @@ def test_persisted_storage_boundaries_preserve_serious_io(
     else:
         root = _write_artifact(tmp_path)
         logical = root.parent.parent
-    before = {path: path.read_bytes() for path in root.rglob("*") if path.is_file()}
+    before = {
+        path: identity.filesystem_read_bytes(path)
+        for path in identity.filesystem_glob(root, "**/*")
+        if identity.filesystem_is_file(path)
+    }
 
     def fail(*args, **kwargs):
         raise primary
@@ -2143,7 +2166,9 @@ def test_persisted_storage_boundaries_preserve_serious_io(
                     semantic.read_semantic_artifact(root)
             assert caught.value is primary
         assert policy.used_memory_bytes == 0
-    assert all(path.read_bytes() == value for path, value in before.items())
+    assert all(
+        identity.filesystem_read_bytes(path) == value for path, value in before.items()
+    )
 
 
 @pytest.mark.parametrize("operation", ("read", "inspect", "fingerprint"))
@@ -2290,12 +2315,12 @@ def test_verified_file_handle_binds_decoder_and_preserves_primary(tmp_path, phas
 
     path = tmp_path / "member.bin"
     replacement = tmp_path / "replacement.bin"
-    path.write_bytes(b"trusted")
-    replacement.write_bytes(b"changed")
+    identity.filesystem_write_bytes(path, b"trusted")
+    identity.filesystem_write_bytes(replacement, b"changed")
     expected = dataset_file_identity(path)
     opened = replacement if phase == "before" else path
     primary = RuntimeError("decode failed")
-    with opened.open("rb") as handle:
+    with identity.open_filesystem_file(opened, "rb") as handle:
         if phase == "before":
             with pytest.raises(ValueError, match="dataset_file_identity_changed"):
                 with verified_file_handle(path, handle, expected_identity=expected):
@@ -2306,7 +2331,7 @@ def test_verified_file_handle_binds_decoder_and_preserves_primary(tmp_path, phas
             ) as caught:
                 with verified_file_handle(path, handle, expected_identity=expected):
                     assert handle.read() == b"trusted"
-                    with path.open("r+b") as mutating:
+                    with identity.open_filesystem_file(path, "r+b") as mutating:
                         mutating.write(b"changed-content")
                         mutating.truncate()
                     if phase == "primary":

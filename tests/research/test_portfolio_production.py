@@ -46,6 +46,7 @@ from quant_research_platform.research.portfolios.risk import (
 from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.datasets import DatasetReadMode
+from quant_research_platform.storage.identity import filesystem_mkdir
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.portfolio_ledger import session_frame, write_test_sessions
 
@@ -320,7 +321,7 @@ def _build_producer(
     roots = {}
     for target_id, identity in identities.items():
         root = tmp_path / target_id / identity
-        root.mkdir(parents=True)
+        filesystem_mkdir(root, parents=True)
         roots[target_id] = root
     layout = StorageLayout(project_root=tmp_path).with_target_roots(roots)
     calls: list[tuple[str, DatasetReadMode, TimeWindow | None]] = []

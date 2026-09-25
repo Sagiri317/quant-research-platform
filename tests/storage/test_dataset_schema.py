@@ -33,6 +33,12 @@ from quant_research_platform.storage.datasets.schema import (
     logical_dtype_metadata_bytes,
     logical_dtype_payload_from_frame,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_mkdir,
+    filesystem_read_text,
+    native_filesystem_path,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
     _ARROW_SCALAR_LOGICAL_DTYPE_CASES,
@@ -109,8 +115,10 @@ def test_writer_rejects_missing_persisted_logical_dtype_metadata(
     root = make_dataset_artifact_root(tmp_path, "missing_logical_dtype")
 
     def write_without_metadata(table, path):  # noqa: ANN001
-        path.parent.mkdir(parents=True, exist_ok=True)
-        pq.write_table(table.replace_schema_metadata(None), path)
+        filesystem_mkdir(path.parent, parents=True, exist_ok=True)
+        pq.write_table(
+            table.replace_schema_metadata(None), native_filesystem_path(path)
+        )
         return path
 
     monkeypatch.setattr(
@@ -757,7 +765,7 @@ def test_empty_unordered_category_domain_unions_with_nonempty_domain(
         chunks = (nonempty, empty) if reverse else (empty, nonempty)
         write_dataset(root, chunks, spec=make_processed_dataset_spec(name))
         manifest = json.loads(
-            (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+            filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
         )
         with dataset_reading.open_dataset_session(
             root,
@@ -848,7 +856,7 @@ def test_empty_ordered_category_domain_mismatch_is_not_ignored(
 
     with pytest.raises(ValueError, match="dataset_ordered_categorical_mismatch"):
         write_dataset(root, chunks, spec=make_processed_dataset_spec(name))
-    assert not root.exists()
+    assert not filesystem_exists(root)
 
 
 @pytest.mark.parametrize("empty_chunks", (False, True))

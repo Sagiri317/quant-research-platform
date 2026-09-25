@@ -13,9 +13,25 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 )
 from quant_research_platform.research.predictions import alignment
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.storage.identity import (
+    filesystem_glob,
+    filesystem_read_bytes,
+    filesystem_stat,
+    filesystem_unlink,
+    filesystem_walk,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.binance_hft import hft_research_plan
 from tests.helpers.research_configuration import research_configuration
+
+
+def _trial_records(project_root: Path) -> tuple[Path, ...]:
+    return tuple(
+        sorted(filesystem_glob(project_root / "data/runs/trials", "**/records/*.json"))
+    )
 
 
 class _PredictionLookup:
@@ -230,7 +246,7 @@ def test_crypto_valid_selected_windows_reach_training(tmp_path, selected_folds):
             )
         assert len(calls) == 1
         assert policy.used_memory_bytes == 0
-    assert not tuple((tmp_path / "models" / "instances").glob("*"))
+    assert not tuple(filesystem_glob(tmp_path / "models" / "instances", "*"))
 
 
 def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
@@ -353,8 +369,6 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     )
     import pyarrow.parquet as pq
 
-    from quant_research_platform.storage.identity import native_filesystem_path
-
     with runtime_resource_policy_scope() as policy:
         for entry in saved.models:
             key = (entry["fold_id"], entry["model_id"])
@@ -467,9 +481,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         )
         frame = expected = None
         assert policy.used_memory_bytes == 0
-    before = tuple(
-        sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
-    )
+    before = _trial_records(layout.project_root)
 
     def no_fit(*args, **kwargs):
         raise AssertionError("REUSE must not fit")
@@ -546,12 +558,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             mode_results[target_id]["instance_identity"]
             == targets[target_id]["instance_identity"]
         )
-    assert (
-        tuple(
-            sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
-        )
-        == before
-    )
+    assert _trial_records(layout.project_root) == before
 
     mode_profile = bind_research_configuration(
         research_profile(CRYPTO_PROFILE_ID), mode_configuration
@@ -621,11 +628,11 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
 
     def persisted_files():
         return {
-            path.relative_to(layout.project_root).as_posix(): sha256(
-                path.read_bytes()
+            (parent / name).relative_to(layout.project_root).as_posix(): sha256(
+                filesystem_read_bytes(parent / name)
             ).hexdigest()
-            for path in layout.project_root.rglob("*")
-            if path.is_file()
+            for parent, _directories, files in filesystem_walk(layout.project_root)
+            for name in files
         }
 
     before_missing_execution = persisted_files()
@@ -645,8 +652,8 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         )
     assert persisted_files() == before_missing_execution
     eth_metadata = raw.parent / "funding/ETHUSDT/response.metadata.json"
-    saved_metadata = eth_metadata.read_bytes()
-    eth_metadata.unlink()
+    saved_metadata = filesystem_read_bytes(eth_metadata)
+    filesystem_unlink(eth_metadata)
     try:
         with monkeypatch.context() as patch:
             patch.setattr(fitting, "_fit_model_result_owned_from_frames", no_fit)
@@ -674,14 +681,14 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
                 "status"
             ] == ("BLOCKED" if candidate.asset_id == "eth_usdt" else "REUSED")
     finally:
-        eth_metadata.write_bytes(saved_metadata)
+        filesystem_write_bytes(eth_metadata, saved_metadata)
     btc_metadata = raw.parent / "funding/BTCUSDT/response.metadata.json"
-    saved_metadata = btc_metadata.read_bytes()
+    saved_metadata = filesystem_read_bytes(btc_metadata)
     incomplete = json.loads(saved_metadata)
     incomplete["metadata"]["coverage"]["end_ns"] = 8_000_000_000
-    btc_metadata.write_text(json.dumps(incomplete), encoding="utf-8")
+    filesystem_write_text(btc_metadata, json.dumps(incomplete), encoding="utf-8")
     old_good = {
-        execution_targets[candidate.candidate_id].target_id: (
+        execution_targets[candidate.candidate_id].target_id: filesystem_read_bytes(
             layout.instance_root(
                 layout.semantic_artifact_root(
                     "crypto", execution_targets[candidate.candidate_id].target_id
@@ -691,7 +698,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
                 ],
             )
             / "manifest.json"
-        ).read_bytes()
+        )
         for candidate in takers
     }
     try:
@@ -738,13 +745,14 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
                     ),
                     old_identity,
                 )
-                assert (old_root / "manifest.json").read_bytes() == old_good[
-                    execution_targets[candidate.candidate_id].target_id
-                ]
+                assert (
+                    filesystem_read_bytes(old_root / "manifest.json")
+                    == old_good[execution_targets[candidate.candidate_id].target_id]
+                )
                 read_portfolio_ledger_artifact(old_root, expected_identity=old_identity)
             assert policy.used_memory_bytes == 0
     finally:
-        btc_metadata.write_bytes(saved_metadata)
+        filesystem_write_bytes(btc_metadata, saved_metadata)
     from tests.research.crypto_report_test_support import check_crypto_report_lifecycle
 
     check_crypto_report_lifecycle(
@@ -756,12 +764,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         targets=targets,
         monkeypatch=monkeypatch,
     )
-    assert (
-        tuple(
-            sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
-        )
-        == before
-    )
+    assert _trial_records(layout.project_root) == before
     from tests.research.crypto_model_test_support import (
         check_crypto_fold_boundaries,
         check_crypto_model_staging,
@@ -815,9 +818,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             "maker": {**plan["execution"]["maker"], "min_calibration_samples": 100000},
         },
     }
-    before_insufficient_trials = tuple(
-        sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
-    )
+    before_insufficient_trials = _trial_records(layout.project_root)
     insufficient = research.research_run(
         profile=profile,
         layout=layout,
@@ -864,12 +865,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             insufficient_targets[target]["instance_identity"]
             == targets[target]["instance_identity"]
         ), target
-    assert (
-        tuple(
-            sorted((layout.project_root / "data/runs/trials").rglob("records/*.json"))
-        )
-        == before_insufficient_trials
-    )
+    assert _trial_records(layout.project_root) == before_insufficient_trials
 
 
 @pytest.mark.complete_chain
@@ -898,19 +894,23 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(tm
         manifest = write_binance_hft_run(raw, count=count, maker_liquidity=True)
         if name == "future_gap":
             sidecar = raw / "connection_intervals.jsonl.gz"
-            with gzip.open(sidecar, "rt") as stream:
+            with gzip.open(native_filesystem_path(sidecar), "rt") as stream:
                 intervals = [json.loads(line) for line in stream]
             for interval in intervals:
                 interval["closed_at"] = "1970-01-01T00:00:08.350000Z"
                 interval["closed_monotonic_ns"] = 8_350_000_000
                 interval["close_reason"] = "connection_problem"
-            with gzip.open(sidecar, "wt") as stream:
+            with gzip.open(native_filesystem_path(sidecar), "wt") as stream:
                 for interval in intervals:
                     stream.write(json.dumps(interval) + "\n")
             descriptor = manifest["capture"]["connection_intervals"]
-            descriptor["compressed_bytes"] = sidecar.stat().st_size
-            descriptor["sha256"] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
-            (raw / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+            descriptor["compressed_bytes"] = filesystem_stat(sidecar).st_size
+            descriptor["sha256"] = hashlib.sha256(
+                filesystem_read_bytes(sidecar)
+            ).hexdigest()
+            filesystem_write_text(
+                raw / "run.json", json.dumps(manifest), encoding="utf-8"
+            )
         write_hft_funding_fixture(raw)
         profile = research_profile(CRYPTO_PROFILE_ID)
         plan = hft_research_plan()
@@ -994,7 +994,9 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
             "depth": "depth@0ms",
             "agg_trades": "aggTrade",
         }[kind]
-        with gzip.open(recorder / member["path"], "rt") as stream:
+        with gzip.open(
+            native_filesystem_path(recorder / member["path"]), "rt"
+        ) as stream:
             for line in stream:
                 record = json.loads(line)
                 stamp = origin + pd.Timedelta(record["observed_time_ns"], unit="ns")
@@ -1045,14 +1047,14 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
             for stamp, _, value in native
             if (stamp >= boundary) == bool(index)
         )
-        path.write_bytes(gzip.compress(rows, mtime=0))
+        filesystem_write_bytes(path, gzip.compress(rows, mtime=0))
         slices.append(path)
     raw = tmp_path / "archive"
     import_slices(
         raw, date="2026-09-01", offset_minutes=1430, slices=slices, byte_budget=1024**2
     )
     settlements = tmp_path / "settlements.json"
-    settlements.write_text("[]", encoding="utf-8")
+    filesystem_write_text(settlements, "[]", encoding="utf-8")
     start_ms = pd.Timestamp("2026-09-01T23:50:00Z").value // 1_000_000
     with open_market_source(raw) as source:
         for symbol in ("BTCUSDT", "ETHUSDT"):

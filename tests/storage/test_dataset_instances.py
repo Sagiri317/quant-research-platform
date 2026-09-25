@@ -1,15 +1,18 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
 
 import quant_research_platform.storage.datasets.instances as dataset_instances
+from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
     build_business_manifest_envelope,
 )
 from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.storage.datasets import (
     inspect_dataset,
     read_dataset,
@@ -19,7 +22,19 @@ from quant_research_platform.storage.datasets.instances import (
     discover_dataset_instances,
 )
 from quant_research_platform.storage.datasets.schema import data_spec_payload
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_is_dir,
+    filesystem_mkdir,
+    filesystem_rename,
+    filesystem_unlink,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.workflows import research
+from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
@@ -72,7 +87,56 @@ def test_two_immutable_instances_round_trip_and_discover_deterministically(
     assert len(read_dataset(first)) == len(make_default_dataset_frame())
     discovered = discover_dataset_instances(logical_root)
     assert discovered == tuple(sorted((first, second), key=lambda path: path.name))
-    assert (logical_root / "instances").is_dir()
+    assert filesystem_is_dir(logical_root / "instances")
+
+
+@pytest.mark.parametrize("deep_root", (False, True))
+def test_research_instance_round_trip_discovery_and_inspect_at_variable_roots(
+    tmp_path: Path,
+    deep_root: bool,
+) -> None:
+    project_root = tmp_path
+    if deep_root:
+        while len(str(project_root / "data/research/a_share/demo")) <= 260:
+            project_root /= "segment_" + "a" * 32
+    layout = StorageLayout(project_root)
+    spec = make_demo_research_dataset_spec(
+        factor_columns=("value",),
+        label_columns=("label",),
+        filter_columns=(),
+        context_columns=(),
+    )
+    envelope = _envelope(spec, seed=1)
+    logical_root = layout.research_dataset_root(spec.market_id, spec.data_id)
+    instance_root = layout.instance_root(logical_root, envelope.instance_identity)
+    if deep_root:
+        assert len(str(instance_root)) > 260
+    frame = make_default_dataset_frame()
+    frame["label"] = [0.1, 0.2, 0.3]
+    write_dataset(
+        instance_root,
+        frame,
+        spec=spec,
+        instance_metadata={"common_manifest": envelope},
+    )
+
+    assert inspect_dataset(instance_root).row_count == len(frame)
+    assert len(read_dataset(instance_root)) == len(frame)
+    assert discover_dataset_instances(logical_root) == (instance_root,)
+    profile = replace(
+        research_profile(), research_datasets=ResearchDatasetCatalog((spec,))
+    )
+    result = research.inspect(profile=profile, layout=layout, dataset_id=spec.data_id)
+    assert result["status"] == "BLOCKED"
+    assert result["blocker"] == "request_identity_required"
+    assert result["instances"] == [
+        {
+            "instance_identity": envelope.instance_identity,
+            "status": "COMPLETE",
+            "schema_identity": envelope.schema_identity,
+            "row_count": len(frame),
+        }
+    ]
 
 
 def test_discovery_rejects_bare_and_mismatched_instance_directories(
@@ -82,25 +146,25 @@ def test_discovery_rejects_bare_and_mismatched_instance_directories(
     logical_root = make_dataset_artifact_root(tmp_path, "demo")
     valid = _write_instance(logical_root, spec, _envelope(spec, seed=1))
     instances_root = logical_root / "instances"
-    (instances_root / "not-an-instance").mkdir()
+    filesystem_mkdir(instances_root / "not-an-instance")
     with pytest.raises(ValueError, match="dataset_instance_child_invalid"):
         discover_dataset_instances(logical_root)
 
-    (instances_root / "not-an-instance").rmdir()
+    Path(native_filesystem_path(instances_root / "not-an-instance")).rmdir()
     unexpected_file = instances_root / "unexpected"
-    unexpected_file.write_bytes(b"not-an-instance")
+    filesystem_write_bytes(unexpected_file, b"not-an-instance")
     with pytest.raises(ValueError, match="dataset_instance_child_invalid"):
         discover_dataset_instances(logical_root)
-    unexpected_file.unlink()
+    filesystem_unlink(unexpected_file)
 
     bare = instances_root / ("d" * 64)
-    bare.mkdir()
+    filesystem_mkdir(bare)
     with pytest.raises(ValueError, match="dataset_instance_invalid"):
         discover_dataset_instances(logical_root)
 
-    bare.rmdir()
+    Path(native_filesystem_path(bare)).rmdir()
     renamed = instances_root / ("e" * 64)
-    valid.rename(renamed)
+    filesystem_rename(valid, renamed)
     with pytest.raises(ValueError, match="dataset_instance_identity_mismatch"):
         discover_dataset_instances(logical_root)
 
@@ -149,7 +213,7 @@ def test_dataset_writer_rejects_common_manifest_cross_binding(
             spec=spec,
             instance_metadata={"common_manifest": bad},
         )
-    assert not instance_root.exists()
+    assert not filesystem_exists(instance_root)
 
 
 @pytest.mark.parametrize("fixed_directory_identity", (False, True))
@@ -175,7 +239,7 @@ def test_discovery_rejects_instances_directory_mutation(
         monkeypatch.setattr(dataset_instances, "_directory_identity", identity)
 
     def mutate_directory(entry: Path) -> dict[str, object]:
-        (instances_root / "late").write_bytes(b"late")
+        filesystem_write_bytes(instances_root / "late", b"late")
         return read_manifest(entry)
 
     monkeypatch.setattr(
@@ -185,7 +249,7 @@ def test_discovery_rejects_instances_directory_mutation(
     )
     with pytest.raises(ValueError, match="dataset_instance_identity_changed"):
         discover_dataset_instances(logical_root)
-    assert valid.exists()
+    assert filesystem_exists(valid)
 
 
 def test_discovery_rejects_symlink_instance_child(tmp_path: Path) -> None:
@@ -193,10 +257,12 @@ def test_discovery_rejects_symlink_instance_child(tmp_path: Path) -> None:
     logical_root = make_dataset_artifact_root(tmp_path, "demo")
     _write_instance(logical_root, spec, _envelope(spec, seed=1))
     outside = tmp_path / "outside"
-    outside.mkdir()
+    filesystem_mkdir(outside)
     alias = logical_root / "instances" / ("f" * 64)
     try:
-        alias.symlink_to(outside, target_is_directory=True)
+        Path(native_filesystem_path(alias)).symlink_to(
+            native_filesystem_path(outside), target_is_directory=True
+        )
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
 
@@ -207,11 +273,7 @@ def test_discovery_rejects_symlink_instance_child(tmp_path: Path) -> None:
 def test_exact_requested_instance_ignores_corrupt_history_but_discovery_rejects(
     tmp_path, monkeypatch
 ):
-    from dataclasses import replace
-
     from quant_research_platform.catalog.processed import ProcessedDataCatalog
-    from quant_research_platform.profiles.research import research_profile
-    from quant_research_platform.workflows import research
 
     spec = make_processed_dataset_spec("demo")
     profile = replace(research_profile(), processed=ProcessedDataCatalog((spec,)))
@@ -219,7 +281,9 @@ def test_exact_requested_instance_ignores_corrupt_history_but_discovery_rejects(
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     good = _write_instance(root, spec, _envelope(spec, seed=1))
     bad = _write_instance(root, spec, _envelope(spec, seed=2))
-    (bad / "_manifest" / "manifest.json").write_text("invalid", encoding="utf-8")
+    filesystem_write_text(
+        bad / "_manifest" / "manifest.json", "invalid", encoding="utf-8"
+    )
     assert research._matching_instance(
         profile=profile, layout=layout, target_id="demo", requested_identity=good.name
     ) == (good.name, None)

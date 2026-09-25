@@ -40,6 +40,19 @@ from quant_research_platform.sources.binance.replay import (
     iter_reconstructed_depth,
     open_recorder_run,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_rename,
+    filesystem_stat,
+    filesystem_unlink,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+    open_filesystem_file,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 
 
@@ -359,9 +372,9 @@ def _write_file(
     rows: list[dict[str, object]],
 ) -> dict[str, object]:
     path = root / "date=2026-08-27" / "hour=00" / f"{market_type}_{data_kind}.jsonl.gz"
-    path.parent.mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(path.parent, parents=True, exist_ok=True)
     max_record_bytes = 0
-    with gzip.open(path, "wb") as handle:
+    with gzip.open(native_filesystem_path(path), "wb") as handle:
         for row in rows:
             line = (
                 json.dumps(
@@ -374,7 +387,7 @@ def _write_file(
             )
             max_record_bytes = max(max_record_bytes, len(line))
             handle.write(line)
-    raw = path.read_bytes()
+    raw = filesystem_read_bytes(path)
     return {
         "path": path.relative_to(root).as_posix(),
         "venue": "binance",
@@ -397,7 +410,7 @@ def _write_run(
     *,
     run_id: str = "run-1",
 ) -> dict[str, object]:
-    root.mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(root, parents=True, exist_ok=True)
     file_manifests = [
         _write_file(
             root,
@@ -433,11 +446,11 @@ def _write_run(
                 }
             )
     sidecar = root / "connection_intervals.jsonl.gz"
-    with gzip.open(sidecar, "wt", encoding="utf-8") as handle:
+    with gzip.open(native_filesystem_path(sidecar), "wt", encoding="utf-8") as handle:
         for interval in connection_intervals:
             handle.write(json.dumps(interval, separators=(",", ":")))
             handle.write("\n")
-    sidecar_bytes = sidecar.read_bytes()
+    sidecar_bytes = filesystem_read_bytes(sidecar)
     market_types = sorted({market for market, *_ in files})
     recording_scope = (
         SPOT_L2_RECORDING_SCOPE
@@ -470,7 +483,8 @@ def _write_run(
         },
         "files": file_manifests,
     }
-    (root / "run.json").write_text(
+    filesystem_write_text(
+        root / "run.json",
         json.dumps(manifest, separators=(",", ":")),
         encoding="utf-8",
     )
@@ -494,7 +508,7 @@ def test_recorder_run_retains_manifest_lease_through_final_verification(
         ],
     )
     retained_bound = (
-        replay.json_record_working_set_bytes((root / "run.json").stat().st_size)
+        replay.json_record_working_set_bytes(filesystem_stat(root / "run.json").st_size)
         + 64 * 1024
     )
     observed: list[int] = []
@@ -695,7 +709,7 @@ def test_invalid_manifest_releases_decode_inside_owner_lease(
         ],
     )
     expected_bound = (
-        replay.json_record_working_set_bytes((root / "run.json").stat().st_size)
+        replay.json_record_working_set_bytes(filesystem_stat(root / "run.json").st_size)
         + 64 * 1024
     )
     released: list[int] = []
@@ -925,7 +939,7 @@ def test_connection_coverage_rechecks_disk_and_removes_scratch_on_failure(
             index.close()
 
     assert len(calls) == 2
-    assert not scratch_path.exists()
+    assert not filesystem_exists(scratch_path)
 
 
 @pytest.mark.parametrize(
@@ -1198,7 +1212,7 @@ def test_run_rejects_unlisted_or_hash_mismatched_file(tmp_path: Path) -> None:
         ],
     )
     extra = root / "extra.jsonl.gz"
-    with gzip.open(extra, "wt", encoding="utf-8") as handle:
+    with gzip.open(native_filesystem_path(extra), "wt", encoding="utf-8") as handle:
         handle.write("{}\n")
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
 
@@ -1207,13 +1221,13 @@ def test_run_rejects_unlisted_or_hash_mismatched_file(tmp_path: Path) -> None:
             with open_recorder_run(root, policy):
                 pass
 
-    extra.unlink()
+    filesystem_unlink(extra)
     declared = next(
         path
-        for path in root.rglob("*.jsonl.gz")
+        for path in filesystem_glob(root, "**/*.jsonl.gz")
         if path.name == "usd_s_m_futures_depth.jsonl.gz"
     )
-    declared.write_bytes(declared.read_bytes() + b"tampered")
+    filesystem_write_bytes(declared, filesystem_read_bytes(declared) + b"tampered")
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     with runtime_resource_policy_scope(policy):
         with pytest.raises(ValueError, match="file_identity_mismatch"):
@@ -1609,7 +1623,7 @@ def test_raw_decode_is_admitted_before_json_allocation(tmp_path: Path) -> None:
         ],
     )
     manifest["files"][0]["max_record_bytes"] = 1_000_000
-    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
     policy = capture_test_policy(available_memory_bytes=256 * 1024)
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
@@ -1777,22 +1791,22 @@ def test_hourly_owner_files_merge_transitive_ranges_with_bounded_handles(
         original = tmp_path / "next_hour" / item["path"]
         item["path"] = item["path"].replace("hour=00", "hour=01")
         target = root / item["path"]
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(original.read_bytes())
+        filesystem_mkdir(target.parent, parents=True, exist_ok=True)
+        filesystem_write_bytes(target, filesystem_read_bytes(original))
         manifest["files"].append(item)
     sidecar = root / "connection_intervals.jsonl.gz"
-    with gzip.open(sidecar, "rt", encoding="utf-8") as handle:
+    with gzip.open(native_filesystem_path(sidecar), "rt", encoding="utf-8") as handle:
         intervals = [json.loads(line) for line in handle]
-    with gzip.open(sidecar, "wt", encoding="utf-8") as handle:
+    with gzip.open(native_filesystem_path(sidecar), "wt", encoding="utf-8") as handle:
         for row in intervals:
             row["closed_at"] = "2026-08-27T01:00:01.000000Z"
             row["closed_monotonic_ns"] = 3_601_000_000_000
             handle.write(json.dumps(row) + "\n")
-    raw = sidecar.read_bytes()
+    raw = filesystem_read_bytes(sidecar)
     manifest["capture"]["connection_intervals"].update(
         compressed_bytes=len(raw), sha256=hashlib.sha256(raw).hexdigest()
     )
-    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
     real_open = replay.open_filesystem_file
     handles = []
     high_water = 0
@@ -1852,12 +1866,16 @@ def test_recorder_run_rejects_aliased_input_paths(tmp_path, alias_kind):
         if alias_kind == "member":
             member = root / manifest["files"][0]["path"]
             outside = tmp_path / "outside.jsonl.gz"
-            member.rename(outside)
-            member.symlink_to(outside)
+            filesystem_rename(member, outside)
+            Path(native_filesystem_path(member)).symlink_to(
+                native_filesystem_path(outside)
+            )
         else:
             alias = tmp_path / "alias"
             target = root if alias_kind == "root" else root.parent
-            alias.symlink_to(target, target_is_directory=True)
+            Path(native_filesystem_path(alias)).symlink_to(
+                native_filesystem_path(target), target_is_directory=True
+            )
             input_root = alias if alias_kind == "root" else alias / root.name
     except OSError as error:
         pytest.skip(f"filesystem symlink unavailable: {error}")
@@ -1883,7 +1901,7 @@ def test_recorder_run_rejects_replaced_root_and_preserves_primary(
         root,
         [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
     )
-    original = (root / "run.json").read_bytes()
+    original = filesystem_read_bytes(root / "run.json")
     moved = tmp_path / "moved"
     primary = KeyboardInterrupt("consumer_primary")
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
@@ -1892,8 +1910,8 @@ def test_recorder_run_rejects_replaced_root_and_preserves_primary(
             KeyboardInterrupt if consumer_primary else ValueError
         ) as raised:
             with open_recorder_run(root, policy):
-                root.rename(moved)
-                root.mkdir()
+                filesystem_rename(root, moved)
+                filesystem_mkdir(root)
                 if consumer_primary:
                     raise primary
         if consumer_primary:
@@ -1902,7 +1920,7 @@ def test_recorder_run_rejects_replaced_root_and_preserves_primary(
         else:
             assert str(raised.value) == "binance_raw_export_identity_changed"
         assert policy.used_memory_bytes == 0
-    assert (moved / "run.json").read_bytes() == original
+    assert filesystem_read_bytes(moved / "run.json") == original
 
 
 def test_recorder_run_rejects_member_replacement_between_capture_and_open(
@@ -1914,15 +1932,16 @@ def test_recorder_run_rejects_member_replacement_between_capture_and_open(
         [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
     )
     member = root / manifest["files"][0]["path"]
-    original = member.read_bytes()
+    original = filesystem_read_bytes(member)
     original_open = replay.open_filesystem_file
     mutated = []
 
     def mutate_before_open(path, *args, **kwargs):
         if path == member and not mutated:
-            before = member.stat()
+            before = filesystem_stat(member)
             os.utime(
-                member, ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000)
+                native_filesystem_path(member),
+                ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000_000),
             )
             mutated.append(True)
         return original_open(path, *args, **kwargs)
@@ -1935,7 +1954,7 @@ def test_recorder_run_rejects_member_replacement_between_capture_and_open(
                 pytest.fail("replaced recorder member admitted")
         assert policy.used_memory_bytes == 0
     assert mutated == [True]
-    assert member.read_bytes() == original
+    assert filesystem_read_bytes(member) == original
 
 
 @pytest.mark.parametrize("consumer_primary", (False, True))
@@ -1950,7 +1969,7 @@ def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
         [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
     )
     member = root / manifest["files"][0]["path"]
-    original = member.read_bytes()
+    original = filesystem_read_bytes(member)
     primary = KeyboardInterrupt("consumer_primary")
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
     with runtime_resource_policy_scope(policy):
@@ -1960,12 +1979,12 @@ def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
             with open_recorder_run(root, policy) as run:
                 with closing_iterator(run.iter_records()) as records:
                     assert next(records)["capture_seq"] == 1
-                    before = member.stat()
+                    before = filesystem_stat(member)
                     os.utime(
-                        member,
+                        native_filesystem_path(member),
                         ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000),
                     )
-                    assert member.stat().st_mtime_ns != before.st_mtime_ns
+                    assert filesystem_stat(member).st_mtime_ns != before.st_mtime_ns
                     if consumer_primary:
                         raise primary
                     list(records)
@@ -1975,7 +1994,7 @@ def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
         else:
             assert str(raised.value) == "binance_raw_export_identity_changed"
         assert policy.used_memory_bytes == 0
-    assert member.read_bytes() == original
+    assert filesystem_read_bytes(member) == original
 
 
 def test_connection_queries_do_not_materialize_long_history(tmp_path):
@@ -1990,10 +2009,10 @@ def test_connection_queries_do_not_materialize_long_history(tmp_path):
         root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
     )
     sidecar = root / "connection_intervals.jsonl.gz"
-    with gzip.open(sidecar, "rt", encoding="utf-8") as stream:
+    with gzip.open(native_filesystem_path(sidecar), "rt", encoding="utf-8") as stream:
         original = json.loads(next(stream))
     start = datetime(2020, 1, 1, tzinfo=UTC)
-    with gzip.open(sidecar, "wt", encoding="utf-8") as stream:
+    with gzip.open(native_filesystem_path(sidecar), "wt", encoding="utf-8") as stream:
         stream.write(json.dumps(original) + "\n")
         for index in range(2000):
             opened = start + timedelta(seconds=2 * index)
@@ -2004,12 +2023,14 @@ def test_connection_queries_do_not_materialize_long_history(tmp_path):
                 closed_at=(opened + timedelta(seconds=1)).isoformat(),
             )
             stream.write(json.dumps(row) + "\n")
-    with sidecar.open("rb") as stream:
+    with open_filesystem_file(sidecar, "rb") as stream:
         digest = hashlib.file_digest(stream, "sha256").hexdigest()
     manifest["capture"]["connection_intervals"].update(
-        record_count=2001, compressed_bytes=sidecar.stat().st_size, sha256=digest
+        record_count=2001,
+        compressed_bytes=filesystem_stat(sidecar).st_size,
+        sha256=digest,
     )
-    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2, explicit_cap_bytes=16 * 1024**2
     )
@@ -2171,26 +2192,28 @@ def test_default_multisymbol_reader_merges_same_named_rest_streams(tmp_path):
                 original = source / item["path"]
                 item["path"] = "eth/" + item["path"]
                 target = root / item["path"]
-                target.parent.mkdir(parents=True, exist_ok=True)
-                target.write_bytes(original.read_bytes())
+                filesystem_mkdir(target.parent, parents=True, exist_ok=True)
+                filesystem_write_bytes(target, filesystem_read_bytes(original))
         manifests.append(manifest)
     intervals = []
     for source in (root, tmp_path / "eth"):
-        with gzip.open(source / "connection_intervals.jsonl.gz", "rt") as handle:
+        with gzip.open(
+            native_filesystem_path(source / "connection_intervals.jsonl.gz"), "rt"
+        ) as handle:
             intervals.extend(json.loads(line) for line in handle)
     sidecar = root / "connection_intervals.jsonl.gz"
-    with gzip.open(sidecar, "wt") as handle:
+    with gzip.open(native_filesystem_path(sidecar), "wt") as handle:
         for row in intervals:
             handle.write(json.dumps(row) + "\n")
     manifest = manifests[0]
     manifest["files"].extend(manifests[1]["files"])
-    payload = sidecar.read_bytes()
+    payload = filesystem_read_bytes(sidecar)
     manifest["capture"]["connection_intervals"].update(
         record_count=len(intervals),
         compressed_bytes=len(payload),
         sha256=hashlib.sha256(payload).hexdigest(),
     )
-    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
     with runtime_resource_policy_scope() as policy:
         with open_recorder_run(root, policy) as run:
             assert [row["capture_seq"] for row in run.iter_records()] == list(
@@ -2260,7 +2283,7 @@ def test_native_connection_must_match_record_symbol_and_stream(
                 == 1
             )
     sidecar = root / "connection_intervals.jsonl.gz"
-    with gzip.open(sidecar, "rt") as handle:
+    with gzip.open(native_filesystem_path(sidecar), "rt") as handle:
         intervals = [json.loads(line) for line in handle]
     interval = intervals[0]
     interval["stream"] = {
@@ -2268,13 +2291,13 @@ def test_native_connection_must_match_record_symbol_and_stream(
         "other_kind": "btcusdt@aggTrade" if kind == "depth" else "btcusdt@depth@100ms",
         "other_frequency": "btcusdt@depth@0ms",
     }[wrong_stream]
-    with gzip.open(sidecar, "wt") as handle:
+    with gzip.open(native_filesystem_path(sidecar), "wt") as handle:
         for interval in intervals:
             handle.write(json.dumps(interval) + "\n")
     member = manifest["capture"]["connection_intervals"]
-    member["compressed_bytes"] = sidecar.stat().st_size
-    member["sha256"] = hashlib.sha256(sidecar.read_bytes()).hexdigest()
-    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    member["compressed_bytes"] = filesystem_stat(sidecar).st_size
+    member["sha256"] = hashlib.sha256(filesystem_read_bytes(sidecar)).hexdigest()
+    filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
     with runtime_resource_policy_scope() as policy:
         error = (
             "binance_replay_connection_coverage_invalid"
@@ -2317,7 +2340,7 @@ def test_native_file_stream_matches_symbol_and_kind(tmp_path, stream):
         ],
     )
     manifest["files"][0]["stream"] = stream
-    (root / "run.json").write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
     with runtime_resource_policy_scope() as policy:
         with (
             pytest.raises(ValueError, match="binance_replay_file_manifest_invalid"),
@@ -2404,17 +2427,17 @@ def test_raw_identity_rejects_disappearance_after_initial_stat(
     tmp_path, monkeypatch, replace_parent
 ):
     parent = tmp_path / "parent"
-    parent.mkdir()
+    filesystem_mkdir(parent)
     path = parent / "member"
-    path.write_bytes(b"synthetic")
+    filesystem_write_bytes(path, b"synthetic")
     capture = replay.dataset_file_identity
 
     def remove_before_capture(candidate):
         assert candidate == path
-        path.unlink()
+        filesystem_unlink(path)
         if replace_parent:
-            parent.rmdir()
-            parent.write_bytes(b"synthetic")
+            os.rmdir(native_filesystem_path(parent))
+            filesystem_write_bytes(parent, b"synthetic")
         return capture(candidate)
 
     monkeypatch.setattr(replay, "dataset_file_identity", remove_before_capture)

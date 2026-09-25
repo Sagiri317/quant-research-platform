@@ -33,6 +33,13 @@ from quant_research_platform.storage.datasets.schema import (
     physical_schema_columns,
     physical_schema_from_schema,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_mkdir,
+    filesystem_read_text,
+    filesystem_stat,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.parquet import inspect_dataset_part
 
 
@@ -176,7 +183,7 @@ def make_dataset_artifact_root(
 
 def fixture_dataset_content_hash(root: Path) -> str:
     """Give crafted physical fixtures an honest outer content binding."""
-    spec = json.loads((root / "spec.json").read_text(encoding="utf-8"))
+    spec = json.loads(filesystem_read_text(root / "spec.json", encoding="utf-8"))
     with runtime_resource_policy_scope() as policy:
         with DatasetSessionInventory(
             data_root=root / "data", resource_policy=policy
@@ -216,8 +223,9 @@ def write_low_level_parquet_artifact(
         "column_roles": _column_roles(frame.columns, effective_primary_key),
     }
     root = Path(artifact_root)
-    root.mkdir(parents=True, exist_ok=True)
-    (root / "spec.json").write_text(
+    filesystem_mkdir(root, parents=True, exist_ok=True)
+    filesystem_write_text(
+        root / "spec.json",
         render_qrp_json_object(spec) + "\n",
         encoding="utf-8",
     )
@@ -228,7 +236,7 @@ def write_low_level_parquet_artifact(
         result["_fixture_year"] = pd.to_datetime(result["timestamp"]).dt.year
         for year, year_frame in result.groupby("_fixture_year"):
             year_root = data_root / f"year={int(year)}"
-            year_root.mkdir(parents=True, exist_ok=True)
+            filesystem_mkdir(year_root, parents=True, exist_ok=True)
             path = year_root / "part-000.parquet"
             _write_fixture_parquet(
                 year_frame.drop(columns=["_fixture_year"]),
@@ -236,7 +244,7 @@ def write_low_level_parquet_artifact(
             )
             paths.append(path)
     else:
-        data_root.mkdir(parents=True, exist_ok=True)
+        filesystem_mkdir(data_root, parents=True, exist_ok=True)
         path = data_root / "part-000.parquet"
         _write_fixture_parquet(frame, path)
         paths.append(path)
@@ -255,7 +263,7 @@ def _write_runtime_manifest(
     row_count = 0
     partition_row_counts: dict[str, int] = {}
     for path in sorted(paths):
-        parquet_file = pq.ParquetFile(path)
+        parquet_file = pq.ParquetFile(native_filesystem_path(path))
         schemas.append(
             physical_schema_from_schema(parquet_file.schema_arrow.remove_metadata())
         )
@@ -288,7 +296,7 @@ def _write_runtime_manifest(
         "partition_count": len(partition_row_counts),
         "partitions": sorted(partition_row_counts),
         "file_count": len(paths),
-        "file_size_bytes": sum(path.stat().st_size for path in paths),
+        "file_size_bytes": sum(filesystem_stat(path).st_size for path in paths),
         "row_count": row_count,
         "date_min": (
             None
@@ -310,8 +318,9 @@ def _write_runtime_manifest(
         "validation_status": "PASS",
     }
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest_path.parent.mkdir(parents=True, exist_ok=True)
-    manifest_path.write_text(
+    filesystem_mkdir(manifest_path.parent, parents=True, exist_ok=True)
+    filesystem_write_text(
+        manifest_path,
         render_qrp_json_object(manifest) + "\n",
         encoding="utf-8",
     )
@@ -322,7 +331,7 @@ def _write_fixture_parquet(frame: pd.DataFrame, path: Path) -> None:
     table = pa.Table.from_pandas(frame, preserve_index=False).replace_schema_metadata(
         {b"qrp.logical-dtypes": logical_dtype_metadata_bytes(logical_dtypes)}
     )
-    pq.write_table(table, path)
+    pq.write_table(table, native_filesystem_path(path))
 
 
 def _column_roles(

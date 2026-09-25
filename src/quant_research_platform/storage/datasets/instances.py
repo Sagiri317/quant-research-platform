@@ -15,6 +15,7 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_scandir,
     filesystem_stat,
+    path_is_filesystem_alias,
     require_unaliased_path,
     validate_instance_identity,
 )
@@ -52,7 +53,7 @@ def discover_dataset_instances(
     result: list[Path] = []
     for name in names:
         entry = instances_root / name
-        if entry.is_symlink() or not entry.is_dir(follow_symlinks=False):
+        if path_is_filesystem_alias(entry):
             raise ValueError("dataset_instance_child_invalid")
         try:
             validate_instance_identity(name)

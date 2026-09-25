@@ -17,11 +17,23 @@ from quant_research_platform.sources.choice.raw_exports import (
     choice_session,
     read_choice_response,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_glob,
+    filesystem_iterdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_write_bytes,
+    filesystem_write_text,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
 from tests.helpers.choice_raw import SDK
 from tests.helpers.choice_raw import response as _response
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def _immediate_file_bytes(root: Path) -> dict[str, bytes]:
+    return {path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)}
 
 
 def _request(endpoint: str = "ctr") -> ChoiceRequest:
@@ -69,7 +81,7 @@ def test_official_shapes_roundtrip_and_exact_reuse(
     with choice_session(sdk) as session:
         root = session.fetch(layout, request)
         assert root.is_relative_to(tmp_path / "data/raw/choice")
-        original = (root / "response.csv").read_bytes()
+        original = filesystem_read_bytes(root / "response.csv")
         assert session.fetch(layout, request) == root
         assert sdk.calls == 1
         with read_choice_response(
@@ -78,7 +90,7 @@ def test_official_shapes_roundtrip_and_exact_reuse(
             assert restored == vars(response)
             actual = copy.deepcopy(restored)
         assert actual == vars(response)
-        assert (root / "response.csv").read_bytes() == original
+        assert filesystem_read_bytes(root / "response.csv") == original
         assert session.policy.used_memory_bytes == 0
     assert sdk.stops == 1
     metadata = read_manifest(root / "response.metadata.json")
@@ -108,7 +120,7 @@ def test_documented_ctr_report_type_is_forwarded_and_persisted_exactly(tmp_path:
     )
     with choice_session(sdk) as session:
         root = session.fetch(StorageLayout(tmp_path), request)
-        before = {path.name: path.read_bytes() for path in root.iterdir()}
+        before = _immediate_file_bytes(root)
         assert session.fetch(StorageLayout(tmp_path), request) == root
         assert sdk.calls == 1 and sdk.last_arguments == request.arguments
         with read_choice_response(
@@ -118,7 +130,7 @@ def test_documented_ctr_report_type_is_forwarded_and_persisted_exactly(tmp_path:
         metadata = read_manifest(root / "response.metadata.json")["metadata"]
         assert metadata["request"]["arguments"] == list(request.arguments)
         assert metadata["scope"]["research_cutoff_applied"] is False
-        assert before == {path.name: path.read_bytes() for path in root.iterdir()}
+        assert before == _immediate_file_bytes(root)
         assert session.policy.used_memory_bytes == 0
     assert sdk.stops == 1
 
@@ -152,10 +164,12 @@ def test_corrupt_completed_response_refuses_reuse_without_overwriting(
     with choice_session(sdk) as session:
         root = session.fetch(StorageLayout(tmp_path), request)
         sidecar = root / "response.metadata.json"
-        metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+        metadata = json.loads(filesystem_read_text(sidecar, encoding="utf-8"))
         if corruption == "value":
             csv = root / "response.csv"
-            csv.write_bytes(csv.read_bytes().replace(b"12", b"13"))
+            filesystem_write_bytes(
+                csv, filesystem_read_bytes(csv).replace(b"12", b"13")
+            )
         elif corruption == "request":
             metadata["metadata"]["request"]["sdk_version"] = "different-sdk"
         elif corruption == "column":
@@ -165,15 +179,15 @@ def test_corrupt_completed_response_refuses_reuse_without_overwriting(
         else:
             metadata["metadata"]["scope"]["after_cutoff_count"] = 1
         if corruption != "value":
-            sidecar.write_text(json.dumps(metadata), encoding="utf-8")
-        before = {path.name: path.read_bytes() for path in root.iterdir()}
+            filesystem_write_text(sidecar, json.dumps(metadata), encoding="utf-8")
+        before = _immediate_file_bytes(root)
         with pytest.raises(ValueError):
             session.fetch(StorageLayout(tmp_path), request)
         with pytest.raises(ValueError):
             with read_choice_response(root, request, resource_policy=session.policy):
                 pytest.fail("corrupt raw became visible")
         assert sdk.calls == 1
-        assert before == {path.name: path.read_bytes() for path in root.iterdir()}
+        assert before == _immediate_file_bytes(root)
 
 
 def test_empty_success_and_failed_attempt_then_explicit_success(tmp_path: Path) -> None:
@@ -183,7 +197,9 @@ def test_empty_success_and_failed_attempt_then_explicit_success(tmp_path: Path) 
         with pytest.raises(RuntimeError, match="choice_query_failed:10001001"):
             session.fetch(StorageLayout(tmp_path), request)
         failures = list(
-            (tmp_path / "data/raw/choice/ctr/failed").rglob("response.metadata.json")
+            filesystem_glob(
+                tmp_path / "data/raw/choice/ctr/failed", "**/response.metadata.json"
+            )
         )
         assert len(failures) == 1
         assert read_manifest(failures[0])["metadata"]["status"] == "FAILED"
@@ -256,15 +272,15 @@ def test_invalid_shape_or_oversize_preserves_old_good(tmp_path: Path) -> None:
     sdk = SDK(_response(Indicators=["QKMZ"], Data={"0": [1]}))
     with choice_session(sdk) as session:
         root = session.fetch(StorageLayout(tmp_path), request)
-        original = (root / "response.csv").read_bytes()
+        original = filesystem_read_bytes(root / "response.csv")
         for values in ([1, 2], ["x" * (65536 + 1)]):
             sdk.response = _response(Indicators=["QKMZ"], Data={"0": values})
             different = replace(request, sdk_version="other-sdk")
             with pytest.raises(ValueError):
                 session.fetch(StorageLayout(tmp_path), different)
-            assert (root / "response.csv").read_bytes() == original
+            assert filesystem_read_bytes(root / "response.csv") == original
             assert session.policy.used_memory_bytes == 0
-        assert len(list(root.parent.iterdir())) == 1
+        assert len(list(filesystem_iterdir(root.parent))) == 1
 
 
 def test_atomic_failure_preserves_primary_and_session_exclusivity(
@@ -289,7 +305,7 @@ def test_atomic_failure_preserves_primary_and_session_exclusivity(
     assert caught.value is primary
     assert any("choice logout" in note for note in primary.__notes__)
     assert sdk.stops == 1
-    assert not list(tmp_path.rglob("response.csv"))
+    assert not list(filesystem_glob(tmp_path, "**/response.csv"))
 
 
 @pytest.mark.parametrize(

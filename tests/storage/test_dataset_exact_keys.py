@@ -16,6 +16,15 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_is_file,
+    filesystem_iterdir,
+    filesystem_mkdir,
+    filesystem_write_bytes,
+    native_filesystem_path,
+)
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
@@ -47,7 +56,7 @@ def test_writer_rejects_inconsistent_ordered_categorical_domains(
             spec=make_processed_dataset_spec("ordered_categorical_parts"),
         )
 
-    assert not root.exists()
+    assert not filesystem_exists(root)
 
 
 def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
@@ -61,7 +70,7 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
     assert module_spec is not None, "storage exact key index module is missing"
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     index_root = tmp_path / "index"
-    index_root.mkdir()
+    filesystem_mkdir(index_root)
     index = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id", "timestamp"),
     )
@@ -80,7 +89,7 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
 
     with index:
         database_path = index.database_path
-        assert database_path.is_file()
+        assert filesystem_is_file(database_path)
         assert index.add_table(pa.Table.from_pandas(first, preserve_index=False)) == 0
         assert (
             index.add_table(
@@ -89,10 +98,10 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
             == 1
         )
         for suffix in ("-journal", "-wal", "-shm"):
-            Path(f"{database_path}{suffix}").write_bytes(b"scratch")
+            filesystem_write_bytes(Path(f"{database_path}{suffix}"), b"scratch")
 
-    assert not database_path.exists()
-    assert list(index_root.iterdir()) == []
+    assert not filesystem_exists(database_path)
+    assert list(filesystem_iterdir(index_root)) == []
 
     numeric = module.ExactPrimaryKeyIndex(
         primary_key=("numeric_key",),
@@ -114,7 +123,7 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
             )
             == 1
         )
-    assert list(index_root.iterdir()) == []
+    assert list(filesystem_iterdir(index_root)) == []
 
     exceptional = module.ExactPrimaryKeyIndex(
         primary_key=("asset_id",),
@@ -123,8 +132,8 @@ def test_exact_primary_key_index_is_spillable_exact_and_cleans_up(
         with exceptional:
             exceptional_path = exceptional.database_path
             raise RuntimeError("stop")
-    assert not exceptional_path.exists()
-    assert list(index_root.iterdir()) == []
+    assert not filesystem_exists(exceptional_path)
+    assert list(filesystem_iterdir(index_root)) == []
 
 
 def test_exact_key_index_cleans_scratch_when_sqlite_connect_fails(
@@ -147,7 +156,7 @@ def test_exact_key_index_cleans_scratch_when_sqlite_connect_fails(
     with pytest.raises(module.sqlite3.OperationalError):
         index.__enter__()
 
-    assert list(tmp_path.iterdir()) == []
+    assert list(filesystem_iterdir(tmp_path)) == []
 
 
 def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk(
@@ -237,7 +246,7 @@ def test_exact_key_tmpfs_row_stream_keeps_capacity_for_sibling_owner(
                 with policy.lease("test.sibling", 64 * 1024):
                     assert policy.used_memory_bytes <= policy.explicit_memory_cap_bytes
         assert policy.used_memory_bytes == 0
-    assert not list(tmp_path.glob(".k-*"))
+    assert not list(filesystem_glob(tmp_path, ".k-*"))
 
 
 def test_exact_key_tmpfs_low_disk_uses_row_credit_before_batch(
@@ -318,7 +327,7 @@ def test_exact_key_tmpfs_low_disk_uses_row_credit_before_batch(
                 assert index.identity_payload_count(namespace="dataset") == 2
                 assert observed_growth and max(observed_growth) <= free_disk
         assert policy.used_memory_bytes == 0
-    assert not list(tmp_path.glob(".k-*"))
+    assert not list(filesystem_glob(tmp_path, ".k-*"))
 
 
 def test_comparison_tmpfs_reuses_bounded_row_payload_lease(
@@ -375,7 +384,7 @@ def test_comparison_tmpfs_reuses_bounded_row_payload_lease(
                 with policy.lease("test.sibling", 64 * 1024):
                     assert policy.used_memory_bytes <= policy.explicit_memory_cap_bytes
         assert policy.used_memory_bytes == 0
-    assert not list(tmp_path.glob(".k-*"))
+    assert not list(filesystem_glob(tmp_path, ".k-*"))
 
 
 def test_exact_key_tmpfs_large_btree_split_stays_within_admitted_pages(
@@ -458,7 +467,7 @@ def test_exact_key_tmpfs_large_btree_split_stays_within_admitted_pages(
                     ).fetchone() == (bytes(payload), None)
                 assert policy.used_memory_bytes <= policy.explicit_memory_cap_bytes
         assert policy.used_memory_bytes == 0
-    assert not list(tmp_path.glob(".k-*"))
+    assert not list(filesystem_glob(tmp_path, ".k-*"))
 
 
 def test_exact_key_tmpfs_lookup_admits_matched_namespace_write(
@@ -517,7 +526,7 @@ def test_exact_key_tmpfs_lookup_admits_matched_namespace_write(
                     actual_namespace="prediction-matched",
                 ) == (0, 0)
         assert policy.used_memory_bytes == 0
-    assert not list(tmp_path.glob(".k-*"))
+    assert not list(filesystem_glob(tmp_path, ".k-*"))
 
 
 def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
@@ -661,9 +670,9 @@ def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
     assert sorted(read_dataset(root)["asset_id"].astype(str).tolist()) == sorted(
         frame["asset_id"].astype(str).tolist()
     )
-    part = next((root / "data").rglob("part-*.parquet"))
+    part = next(filesystem_glob(root / "data", "**/part-*.parquet"))
     persisted_key_schema = pa.schema(
-        [pq.ParquetFile(part).schema_arrow.field("asset_id")]
+        [pq.ParquetFile(native_filesystem_path(part)).schema_arrow.field("asset_id")]
     )
     assert tracked_schemas
     assert all(
@@ -685,8 +694,8 @@ def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
             spec=make_processed_dataset_spec("duplicate_across_chunks"),
         )
 
-    assert not root.exists()
-    assert not list(root.parent.glob(".a-*"))
+    assert not filesystem_exists(root)
+    assert not list(filesystem_glob(root.parent, ".a-*"))
 
 
 def test_write_dataset_rejects_existing_root_without_overwrite(tmp_path: Path) -> None:
@@ -725,4 +734,4 @@ def test_write_dataset_rejects_writer_scratch_name_as_final_artifact_root(
             root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
         )
 
-    assert not root.exists()
+    assert not filesystem_exists(root)

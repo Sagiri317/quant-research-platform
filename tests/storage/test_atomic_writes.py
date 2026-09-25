@@ -16,6 +16,13 @@ from quant_research_platform.storage.errors import OutputAlreadyExistsError
 from quant_research_platform.storage.identity import native_filesystem_path
 
 
+def _long_parent(tmp_path: Path) -> Path:
+    parent = tmp_path
+    while len(str(parent / "file")) <= 260:
+        parent /= "segment_" + "a" * 32
+    return parent
+
+
 def test_atomic_directory_writer_failure_removes_only_operation_temp(
     tmp_path: Path,
 ) -> None:
@@ -97,7 +104,9 @@ def test_publish_no_replace_preserves_concurrent_winner(
     long_path: bool,
 ) -> None:
     if long_path:
-        tmp_path = tmp_path / ("long" * 25) / ("path" * 25)
+        tmp_path = _long_parent(tmp_path)
+        assert len(str(tmp_path / "candidate.tmp")) > 260
+        assert len(str(tmp_path / "output.txt")) > 260
         Path(native_filesystem_path(tmp_path)).mkdir(parents=True)
     source = tmp_path / "candidate.tmp"
     target = tmp_path / "output.txt"
@@ -149,10 +158,11 @@ def test_atomic_directory_publishes_writer_result(tmp_path: Path) -> None:
 
 
 def test_long_scratch_and_existing_target_use_native_io(tmp_path):
-    parent = tmp_path / ("long" * 25) / ("path" * 25)
+    parent = _long_parent(tmp_path)
     native_parent = Path(native_filesystem_path(parent))
     native_parent.mkdir(parents=True)
     existing = parent / "existing.txt"
+    assert len(str(existing)) > 260
     Path(native_filesystem_path(existing)).write_text("old", encoding="utf-8")
     with pytest.raises(OutputAlreadyExistsError):
         atomic.reject_if_exists(existing)
@@ -172,9 +182,10 @@ def test_long_scratch_and_existing_target_use_native_io(tmp_path):
 def test_atomic_long_paths_create_parents_keep_old_good_and_preserve_primary(
     tmp_path, monkeypatch, kind
 ):
-    parent = tmp_path / ("long" * 25) / ("path" * 25)
+    parent = _long_parent(tmp_path)
     final = parent / kind
     assert len(str(final)) > 260
+    assert len(str(parent / "failed")) > 260
     if kind == "file":
         assert atomic_write_text(final, "old") == final
 

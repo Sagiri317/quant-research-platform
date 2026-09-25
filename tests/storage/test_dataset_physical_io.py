@@ -37,6 +37,16 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.datasets.schema import (
     logical_dtype_payload_from_frame,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_rename,
+    filesystem_replace,
+    filesystem_write_bytes,
+    native_filesystem_path,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
     _bound_first_frames,
@@ -77,10 +87,10 @@ def test_session_detects_part_manifest_and_same_size_identity_changes(
         time_window=None,
     ) as session:
         manifest_path = root / "_manifest" / "manifest.json"
-        manifest_path.write_bytes(session.manifest_bytes + b" ")
+        filesystem_write_bytes(manifest_path, session.manifest_bytes + b" ")
         with pytest.raises(ValueError, match="dataset_manifest_identity_changed"):
             session.verify()
-        manifest_path.write_bytes(session.manifest_bytes)
+        filesystem_write_bytes(manifest_path, session.manifest_bytes)
 
     with dataset_reading.open_dataset_session(
         root,
@@ -88,9 +98,9 @@ def test_session_detects_part_manifest_and_same_size_identity_changes(
         time_window=None,
     ) as session:
         part = session.all_paths[0]
-        raw = bytearray(part.read_bytes())
+        raw = bytearray(filesystem_read_bytes(part))
         raw[len(raw) // 2] ^= 1
-        part.write_bytes(raw)
+        filesystem_write_bytes(part, raw)
         with pytest.raises(ValueError, match="dataset_file_identity_changed"):
             session.verify()
 
@@ -109,8 +119,8 @@ def test_session_detects_part_replacement_after_issue(tmp_path: Path) -> None:
     ) as session:
         part = session.all_paths[0]
         replacement = tmp_path / "replacement.parquet"
-        replacement.write_bytes(part.read_bytes())
-        replacement.replace(part)
+        filesystem_write_bytes(replacement, filesystem_read_bytes(part))
+        filesystem_replace(replacement, part)
         with pytest.raises(ValueError, match="dataset_file_identity_changed"):
             session.verify()
 
@@ -189,8 +199,8 @@ def test_staged_validator_wrong_keys_rejects_and_cleans_atomic_state(
                 explicit_cap_bytes=32 * 1024 * 1024,
             ),
         )
-    assert not root.exists()
-    assert not list(root.parent.glob(".a-*"))
+    assert not filesystem_exists(root)
+    assert not list(filesystem_glob(root.parent, ".a-*"))
 
 
 def test_noncanonical_year_partition_is_rejected_with_and_without_window(
@@ -202,8 +212,8 @@ def test_noncanonical_year_partition_is_rejected_with_and_without_window(
         make_default_dataset_frame().iloc[:1],
         spec=make_processed_dataset_spec("canonical_year"),
     )
-    canonical = next((root / "data").glob("year=*"))
-    canonical.rename(canonical.with_name("year=02014"))
+    canonical = next(filesystem_glob(root / "data", "year=*"))
+    filesystem_rename(canonical, canonical.with_name("year=02014"))
 
     for window in (None, TimeWindow("2014-01-01", "2014-12-31")):
         with pytest.raises(ValueError, match="invalid_dataset_part_files"):
@@ -572,7 +582,7 @@ def test_physical_owner_releases_raw_batch_before_bounded_yield(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     path = tmp_path / "part.parquet"
-    pq.write_table(pa.table({"value": [1, 2]}), path)
+    pq.write_table(pa.table({"value": [1, 2]}), native_filesystem_path(path))
     raw_reference: weakref.ReferenceType[pa.RecordBatch] | None = None
 
     def replace_raw(raw_batch, *_args, **_kwargs):  # noqa: ANN001, ANN002, ANN003
@@ -627,9 +637,9 @@ def test_manifest_structural_truth_rejects_impossible_counts_and_dates(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("manifest_truth"),
     )
-    spec = json.loads((root / "spec.json").read_text(encoding="utf-8"))
+    spec = json.loads(filesystem_read_text(root / "spec.json", encoding="utf-8"))
     manifest = json.loads(
-        (root / "_manifest" / "manifest.json").read_text(encoding="utf-8")
+        filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
     )
     manifest.update(mutation)
     with pytest.raises(ValueError, match=error):
@@ -671,7 +681,9 @@ def test_session_metadata_reader_rejects_oversize_before_buffering(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("bounded_metadata"),
     )
-    (root / "_manifest" / "manifest.json").write_bytes(b" " * (1024 * 1024 + 1))
+    filesystem_write_bytes(
+        root / "_manifest" / "manifest.json", b" " * (1024 * 1024 + 1)
+    )
     with pytest.raises(ValueError, match="dataset_metadata_file_too_large"):
         with dataset_reading.open_dataset_session(
             root,
@@ -977,7 +989,7 @@ def test_dataset_parquet_disk_preflight_precedes_native_write(
     )
     assert captured["reserve_bytes"] == expected
     assert native_writes == 0
-    assert not path.exists()
+    assert not filesystem_exists(path)
     assert str(raised.value) == "dataset_disk_preflight"
     assert policy.used_memory_bytes == 0
     assert policy.state == "CLOSED"
@@ -1075,7 +1087,7 @@ def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(
     )
 
     assert result.row_count == row_count
-    assert len(tuple(root.glob("data/**/*.parquet"))) > 1
+    assert len(tuple(filesystem_glob(root, "data/**/*.parquet"))) > 1
     assert policy.used_memory_bytes == 0
 
 
@@ -1123,7 +1135,10 @@ def test_parquet_writers_admit_one_page_above_soft_target(tmp_path, offset, writ
             if writer == "dataset":
                 path = tmp_path / "over-soft.parquet"
                 dataset_writing.write_parquet_file(table, path)
-                assert pq.read_table(path).to_pydict() == table.to_pydict()
+                assert (
+                    pq.read_table(native_filesystem_path(path)).to_pydict()
+                    == table.to_pydict()
+                )
             else:
                 persisted, resources, batch_rows, _ = (
                     dataset_physical._parquet_table_write_state(table)

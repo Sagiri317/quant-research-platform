@@ -20,6 +20,16 @@ from quant_research_platform.storage.datasets.reading import (
     read_dataset,
 )
 from quant_research_platform.storage.experiments import read_trial_ledger_reference
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_iterdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_walk,
+    filesystem_write_bytes,
+    filesystem_write_text,
+)
 
 
 def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkeypatch):
@@ -261,7 +271,7 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
         evaluation_asset_ids=tuple(entry["evaluation_asset_ids"]),
     )
     logical_root = prediction_root.parent.parent
-    prior = {p.name for p in prediction_root.parent.iterdir()}
+    prior = {p.name for p in filesystem_iterdir(prediction_root.parent)}
     with runtime_resource_policy_scope() as policy:
         for index, (stamp, asset) in enumerate(
             (("05.500000", "btc_usdt"), ("04.500000", "eth_usdt"))
@@ -318,7 +328,7 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
                 ValueError, match="crypto_prediction_fold_scope_misaligned"
             ):
                 write_semantic_artifact(logical_root, envelope, write)
-            assert {p.name for p in prediction_root.parent.iterdir()} == prior
+            assert {p.name for p in filesystem_iterdir(prediction_root.parent)} == prior
             assert read_semantic_artifact_record(prediction_root) == old
             assert policy.used_memory_bytes == 0
 
@@ -356,7 +366,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
     contract = saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
     protocol = profile.protocol(contract["scenario_id"])
     logical_root = saved.instance_root.parent.parent
-    previous_instances = {p.name for p in saved.instance_root.parent.iterdir()}
+    previous_instances = {
+        p.name for p in filesystem_iterdir(saved.instance_root.parent)
+    }
     with runtime_resource_policy_scope() as policy:
         from quant_research_platform.research.protocols.crypto_hft import (
             HFT_FACTOR_COLUMNS,
@@ -436,22 +448,30 @@ def check_crypto_model_staging(*, layout, profile, saved):
                     native_filesystem_path(saved.instance_root),
                     native_filesystem_path(copied),
                 )
-                manifest_path = Path(native_filesystem_path(copied / "manifest.json"))
-                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest_path = copied / "manifest.json"
+                manifest = json.loads(
+                    filesystem_read_text(manifest_path, encoding="utf-8")
+                )
                 manifest["operational_metadata"]["model_trial_ledgers"][0] = reference
                 relative = f"models/{saved.models[0]['fold_id']}/metadata.json"
-                metadata_path = Path(native_filesystem_path(copied / relative))
-                metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+                metadata_path = copied / relative
+                metadata = json.loads(
+                    filesystem_read_text(metadata_path, encoding="utf-8")
+                )
                 metadata["models"][0]["trial_semantic_identity"] = reference[
                     "semantic_identity"
                 ]
-                metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
-                raw = metadata_path.read_bytes()
+                filesystem_write_text(
+                    metadata_path, json.dumps(metadata), encoding="utf-8"
+                )
+                raw = filesystem_read_bytes(metadata_path)
                 member = next(
                     row for row in manifest["members"] if row["path"] == relative
                 )
                 member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
-                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+                filesystem_write_text(
+                    manifest_path, json.dumps(manifest), encoding="utf-8"
+                )
                 with pytest.raises(
                     ValueError, match="crypto_model_trial_binding_invalid"
                 ):
@@ -474,12 +494,12 @@ def check_crypto_model_staging(*, layout, profile, saved):
             )
             relative = f"models/{entry['fold_id']}/{entry['model_id']}.pkl"
             raw = pickle.dumps(wrong, protocol=pickle.HIGHEST_PROTOCOL)
-            Path(native_filesystem_path(copied / relative)).write_bytes(raw)
-            manifest_path = Path(native_filesystem_path(copied / "manifest.json"))
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            filesystem_write_bytes(copied / relative, raw)
+            manifest_path = copied / "manifest.json"
+            manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
             member = next(row for row in manifest["members"] if row["path"] == relative)
             member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
-            manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+            filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
             changed = persisted.read_crypto_model_artifact(
                 copied,
                 expected_identity=saved.envelope["instance_identity"],
@@ -598,9 +618,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
             assert policy.used_memory_bytes == 0
             assert read_semantic_artifact_record(saved.instance_root) == original
             assert {
-                p.name for p in saved.instance_root.parent.iterdir()
+                p.name for p in filesystem_iterdir(saved.instance_root.parent)
             } == previous_instances
-            assert not tuple(logical_root.glob(".*staging*"))
+            assert not tuple(filesystem_glob(logical_root, ".*staging*"))
         validation = None
         for index, failure in enumerate(
             (
@@ -761,10 +781,10 @@ def check_crypto_model_staging(*, layout, profile, saved):
                         "lease close also failed" in note for note in primary.__notes__
                     )
             assert {
-                p.name for p in saved.instance_root.parent.iterdir()
+                p.name for p in filesystem_iterdir(saved.instance_root.parent)
             } == previous_instances
             assert read_semantic_artifact_record(saved.instance_root) == original
-            assert not tuple(logical_root.glob(".*staging*"))
+            assert not tuple(filesystem_glob(logical_root, ".*staging*"))
             assert policy.used_memory_bytes == 0
 
 
@@ -911,6 +931,15 @@ def check_crypto_wide_fold_artifact(
 def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
     """Exercise one real fitted artifact and two terminal refit failures."""
     import hashlib
+
+    def file_hashes(root):
+        return {
+            (parent / name).relative_to(root): hashlib.sha256(
+                filesystem_read_bytes(parent / name)
+            ).hexdigest()
+            for parent, _directories, files in filesystem_walk(root)
+            for name in files
+        }
 
     from quant_research_platform.contracts.business_manifest import (
         build_business_manifest_envelope,
@@ -1115,11 +1144,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             )
             assert np.isfinite(predictions).all()
         assert policy.used_memory_bytes == 0
-        original = {
-            p.relative_to(root): hashlib.sha256(p.read_bytes()).hexdigest()
-            for p in root.rglob("*")
-            if p.is_file()
-        }
+        original = file_hashes(root)
         for index, error in enumerate(
             (RuntimeError("refit_failure"), KeyboardInterrupt("refit_cancel"))
         ):
@@ -1144,11 +1169,9 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             assert refitted[0].status == (
                 "failed" if isinstance(error, Exception) else "abandoned"
             )
-            assert not (logical_root / "instances" / other.instance_identity).exists()
-            assert original == {
-                p.relative_to(root): hashlib.sha256(p.read_bytes()).hexdigest()
-                for p in root.rglob("*")
-                if p.is_file()
-            }
+            assert not filesystem_exists(
+                logical_root / "instances" / other.instance_identity
+            )
+            assert original == file_hashes(root)
             assert policy.used_memory_bytes == 0
         assert len(observed_attempts) == 3

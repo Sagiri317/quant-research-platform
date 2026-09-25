@@ -33,6 +33,20 @@ from quant_research_platform.storage.datasets import (
     read_dataset,
     write_dataset,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_is_file,
+    filesystem_iterdir,
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_rename,
+    filesystem_stat,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+)
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
     _bound_first_frames,
@@ -258,9 +272,9 @@ def test_chunked_session_inventory_is_removed_on_early_close(
     )
     chunks = read_dataset(root, mode=DatasetReadMode.CHUNKED)
     next(chunks)
-    assert list(tmp_path.glob(".i-*"))
+    assert list(filesystem_glob(tmp_path, ".i-*"))
     chunks.close()  # type: ignore[attr-defined]
-    assert not list(tmp_path.glob(".i-*"))
+    assert not list(filesystem_glob(tmp_path, ".i-*"))
 
 
 def test_dataset_inventory_cleanup_removes_sqlite_sidecars(
@@ -271,7 +285,7 @@ def test_dataset_inventory_cleanup_removes_sqlite_sidecars(
         lambda: str(tmp_path),
     )
     data_root = tmp_path / "data"
-    data_root.mkdir()
+    filesystem_mkdir(data_root)
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with runtime_resource_policy_scope(policy):
         inventory = dataset_inventory.DatasetSessionInventory(
@@ -279,15 +293,15 @@ def test_dataset_inventory_cleanup_removes_sqlite_sidecars(
             resource_policy=policy,
         )
         scratch = inventory.scratch_path
-        assert (scratch / "i.db").is_file()
+        assert filesystem_is_file(scratch / "i.db")
         assert inventory._connection is not None
         assert inventory._connection.execute("PRAGMA cache_size").fetchone() == (-1,)
         inventory.close()
         assert policy.used_memory_bytes == 0
-    assert not scratch.exists()
-    assert not list(tmp_path.glob(".i-*"))
-    assert not list(tmp_path.rglob("i.db-wal"))
-    assert not list(tmp_path.rglob("i.db-shm"))
+    assert not filesystem_exists(scratch)
+    assert not list(filesystem_glob(tmp_path, ".i-*"))
+    assert not list(filesystem_glob(tmp_path, "**/i.db-wal"))
+    assert not list(filesystem_glob(tmp_path, "**/i.db-shm"))
 
 
 def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
@@ -299,7 +313,7 @@ def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
         lambda: str(tmp_path),
     )
     data_root = tmp_path / "data"
-    data_root.mkdir()
+    filesystem_mkdir(data_root)
     low_policy = capture_test_policy(
         available_memory_bytes=64 * 1024,
         explicit_cap_bytes=1024,
@@ -312,7 +326,7 @@ def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
             data_root=data_root,
             resource_policy=low_policy,
         )
-    assert not list(tmp_path.glob(".i-*"))
+    assert not list(filesystem_glob(tmp_path, ".i-*"))
 
     root = make_dataset_artifact_root(tmp_path, "inventory_inspection_failure")
     write_dataset(
@@ -332,7 +346,7 @@ def test_dataset_inventory_low_budget_and_inspection_failure_clean_up(
             time_window=None,
         ):
             pass
-    assert not list(tmp_path.glob(".i-*"))
+    assert not list(filesystem_glob(tmp_path, ".i-*"))
 
 
 def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) -> None:
@@ -346,14 +360,14 @@ def test_dataset_session_inventory_preserves_numeric_part_order(tmp_path: Path) 
         tuple(frame.iloc[index : index + 1].copy() for index in range(len(frame))),
         spec=make_processed_dataset_spec("inventory_numeric_order"),
     )
-    parts = sorted((root / "data").rglob("part-*.parquet"))
+    parts = sorted(filesystem_glob(root / "data", "**/part-*.parquet"))
     part_indices = tuple(range(998, 998 + len(parts)))
     for path, part_index in zip(parts, part_indices, strict=True):
-        path.rename(path.with_name(f"part-{part_index}.parquet"))
+        filesystem_rename(path, path.with_name(f"part-{part_index}.parquet"))
     manifest_path = root / "_manifest" / "manifest.json"
-    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
     manifest["content_hash"] = fixture_dataset_content_hash(root)
-    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
 
     with dataset_reading.open_dataset_session(
         root,
@@ -656,7 +670,7 @@ def test_dataset_inventory_insert_disk_failure_cleans_scratch(
             pass
 
     assert reserve_calls == 2
-    assert not list(tmp_path.glob(".i-*"))
+    assert not list(filesystem_glob(tmp_path, ".i-*"))
 
 
 def test_dataset_inventory_init_failure_closes_local_connection_and_scratch(
@@ -679,7 +693,7 @@ def test_dataset_inventory_init_failure_closes_local_connection_and_scratch(
 
     connection = FailingConnection()
     data_root = tmp_path / "data"
-    data_root.mkdir()
+    filesystem_mkdir(data_root)
     monkeypatch.setattr(dataset_inventory.sqlite3, "connect", lambda _path: connection)
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
 
@@ -693,7 +707,7 @@ def test_dataset_inventory_init_failure_closes_local_connection_and_scratch(
         )
 
     assert connection.closed
-    assert not list(tmp_path.glob(".i-*"))
+    assert not list(filesystem_glob(tmp_path, ".i-*"))
 
 
 def test_inspection_window_file_count_counts_consecutive_file_batches_once(
@@ -970,8 +984,8 @@ def test_private_writer_releases_result_when_publish_loses_race(
     def publish_after_writer(final_root, writer):  # noqa: ANN001
         def race_writer(temp_root):  # noqa: ANN001
             result = writer(temp_root)
-            final_root.mkdir()
-            (final_root / "winner").write_text("winner", encoding="utf-8")
+            filesystem_mkdir(final_root)
+            filesystem_write_text(final_root / "winner", "winner", encoding="utf-8")
             return result
 
         return real_atomic_write_directory(final_root, race_writer)
@@ -997,8 +1011,8 @@ def test_private_writer_releases_result_when_publish_loses_race(
             (),
         )
 
-    assert (root / "winner").read_text(encoding="utf-8") == "winner"
-    assert not list(tmp_path.glob(".a-*"))
+    assert filesystem_read_text(root / "winner", encoding="utf-8") == "winner"
+    assert not list(filesystem_glob(tmp_path, ".a-*"))
 
 
 def test_compare_uses_one_fingerprint_lease_per_side(
@@ -1041,10 +1055,10 @@ def test_bounded_metadata_reader_accepts_single_external_hardlink(
     tmp_path: Path,
 ) -> None:
     external = tmp_path / "external.json"
-    external.write_text('{"schema_id":"outside"}', encoding="utf-8")
+    filesystem_write_text(external, '{"schema_id":"outside"}', encoding="utf-8")
     candidate = tmp_path / "manifest.json"
     try:
-        os.link(external, candidate)
+        os.link(native_filesystem_path(external), native_filesystem_path(candidate))
     except OSError:
         pytest.skip("hardlink_not_available")
     assert storage_manifests.read_bounded_qrp_json(candidate)[1] == {
@@ -1170,17 +1184,15 @@ def test_writer_releases_previous_publication_before_requesting_next(
 def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
     tmp_path, monkeypatch, kind, failure
 ):
-    from quant_research_platform.storage.identity import native_filesystem_path
-
     artifact = tmp_path / "artifact-volume"
     data = artifact / "data"
-    data.mkdir(parents=True)
+    filesystem_mkdir(data, parents=True)
     sentinel = artifact / "old-good"
-    sentinel.write_bytes(b"old-good")
+    filesystem_write_bytes(sentinel, b"old-good")
     part = data / "part-00000.parquet"
-    pq.write_table(pa.table({"key": ["a"]}), part)
+    pq.write_table(pa.table({"key": ["a"]}), native_filesystem_path(part))
     temporary_root = tmp_path / "temporary-volume"
-    temporary_root.mkdir()
+    filesystem_mkdir(temporary_root)
     owner = dataset_key_tracking if kind == "keys" else dataset_inventory
     monkeypatch.setattr(owner, "gettempdir", lambda: str(temporary_root))
     native_connect = owner.sqlite3.connect
@@ -1240,7 +1252,7 @@ def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
                     assert scratch.parent == temporary_root
                     assert not scratch.is_relative_to(artifact)
                     if os.name == "posix":
-                        assert scratch.stat().st_mode & 0o777 == 0o700
+                        assert filesystem_stat(scratch).st_mode & 0o777 == 0o700
                     blocked = failure == "write"
 
                     def write():
@@ -1261,11 +1273,11 @@ def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
                         else index.path_count(selected=False)
                     )
                     assert count == (0 if blocked else 1)
-                assert not scratch.exists()
+                assert not filesystem_exists(scratch)
         assert policy.used_memory_bytes == 0
     assert probed and set(probed) == {native_temporary_root}
-    assert sentinel.read_bytes() == b"old-good"
-    assert list(temporary_root.iterdir()) == []
+    assert filesystem_read_bytes(sentinel) == b"old-good"
+    assert list(filesystem_iterdir(temporary_root)) == []
 
 
 def test_dataset_inventory_tmpfs_growth_rejects_captured_capacity(tmp_path):
@@ -1293,7 +1305,7 @@ def test_inventory_shares_exact_metadata_without_losing_part_variants(tmp_path):
     from quant_research_platform.storage.parquet import _part_metadata
 
     data_root = tmp_path / "data"
-    data_root.mkdir()
+    filesystem_mkdir(data_root)
     policy = capture_test_policy(available_memory_bytes=4 * 1024**2)
     expected = {}
     repeated_bytes = 0
@@ -1313,8 +1325,8 @@ def test_inventory_shares_exact_metadata_without_losing_part_variants(tmp_path):
                 )
                 table = table.replace_schema_metadata({b"qrp.logical-dtypes": logical})
                 path = data_root / f"part-{index}.parquet"
-                pq.write_table(table, path)
-                with pq.ParquetFile(path) as parquet:
+                pq.write_table(table, native_filesystem_path(path))
+                with pq.ParquetFile(native_filesystem_path(path)) as parquet:
                     metadata = _part_metadata(
                         parquet, identity=dataset_file_identity(path)
                     )

@@ -23,6 +23,13 @@ from quant_research_platform.sources.reference.a_share_fees import (
     A_SHARE_FEE_SIDECAR_NAME,
     FEE_CSV_COLUMNS,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_stat,
+    filesystem_write_text,
+    open_filesystem_file,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.choice_raw import SDK, response, write_css
 
@@ -30,7 +37,7 @@ from tests.helpers.choice_raw import SDK, response, write_css
 def _write_csmar(root, data_id, rows, *, extra_columns=()):
     columns = (*RAW_TABLE_CONTRACTS[data_id].required_columns, *extra_columns)
     path = root / f"csmar__{data_id}__synthetic__full__export-20260101.csv"
-    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+    with open_filesystem_file(path, "w", encoding="utf-8-sig", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=columns)
         writer.writeheader()
         writer.writerows(rows)
@@ -48,7 +55,7 @@ def write_a_share_raw_fixture(
 def _write_raw(layout, policy, benchmark_total_return_indices):
     raw_root = layout.raw_source_root("csmar").parent
     root = Path(raw_root) / "csmar"
-    root.mkdir(parents=True)
+    filesystem_mkdir(root, parents=True)
     # Preserve 312 warm-up sessions before formal training starts in 2014.
     sessions = pd.bdate_range("2012-10-01", "2019-09-30")
     # Active enhancement requires the risk owner's 100-asset cross-section floor.
@@ -266,7 +273,7 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
 
     _write_csmar(root, "index_market", index_rows())
     schedule_root = Path(raw_root) / "reference/a_share_fee_schedule"
-    schedule_root.mkdir(parents=True)
+    filesystem_mkdir(schedule_root, parents=True)
     schedule = schedule_root / A_SHARE_FEE_CSV_NAME
     rows = []
     for fee_code, direction, rate in (
@@ -290,15 +297,20 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
             }
         )
         rows.append(row)
-    with schedule.open("w", encoding="utf-8-sig", newline="") as handle:
+    with open_filesystem_file(
+        schedule, "w", encoding="utf-8-sig", newline=""
+    ) as handle:
         writer = csv.DictWriter(handle, fieldnames=FEE_CSV_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
-    (schedule_root / A_SHARE_FEE_SIDECAR_NAME).write_text(
+    filesystem_write_text(
+        schedule_root / A_SHARE_FEE_SIDECAR_NAME,
         json.dumps(
             {
-                "file_sha256": hashlib.sha256(schedule.read_bytes()).hexdigest(),
-                "file_bytes": schedule.stat().st_size,
+                "file_sha256": hashlib.sha256(
+                    filesystem_read_bytes(schedule)
+                ).hexdigest(),
+                "file_bytes": filesystem_stat(schedule).st_size,
                 "row_count": len(rows),
                 "fields_raw": list(FEE_CSV_COLUMNS),
             }

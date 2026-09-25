@@ -1,7 +1,6 @@
 """Actual run-id report publication, reuse, partial evidence, and resource faults."""
 
 import json
-from pathlib import Path
 
 import pytest
 
@@ -11,13 +10,26 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_RESEARCH_DATASET_ID,
 )
 from quant_research_platform.runtime import resources
-from quant_research_platform.storage.identity import native_filesystem_path
+from quant_research_platform.storage.identity import (
+    filesystem_is_file,
+    filesystem_iterdir,
+    filesystem_read_bytes,
+    filesystem_write_bytes,
+    filesystem_write_text,
+)
 from quant_research_platform.workflows import research
 
 
 def check_crypto_report_lifecycle(
     *, layout, profile, complete_run, reused_run, blocked_run, targets, monkeypatch
 ):
+    def files(root):
+        return {
+            path.name: filesystem_read_bytes(path)
+            for path in filesystem_iterdir(root)
+            if filesystem_is_file(path)
+        }
+
     captured = []
     actual_capture = resources._capture_runtime_resource_policy
     actual_write = research.write_research_report_artifact
@@ -60,19 +72,11 @@ def check_crypto_report_lifecycle(
         assert len(captured) == 2 and all(
             policy.used_memory_bytes == 0 for policy in captured
         )
-        old_root = Path(
-            native_filesystem_path(
-                layout.instance_root(
-                    logical, report["target_result"]["instance_identity"]
-                )
-            )
+        old_root = layout.instance_root(
+            logical, report["target_result"]["instance_identity"]
         )
-        before = {
-            path.name: path.read_bytes()
-            for path in old_root.iterdir()
-            if path.is_file()
-        }
-        instances = {path.name for path in (logical / "instances").iterdir()}
+        before = files(old_root)
+        instances = {path.name for path in filesystem_iterdir(logical / "instances")}
         primary = KeyboardInterrupt("report_write_interrupted")
         real_evidence = report_artifact.write_json_evidence
         real_close = resources.MemoryLease.close
@@ -98,12 +102,10 @@ def check_crypto_report_lifecycle(
             assert raised.value is primary
             assert any("release also failed" in note for note in primary.__notes__)
         assert captured[-1].state == "CLOSED" and captured[-1].used_memory_bytes == 0
-        assert {path.name for path in (logical / "instances").iterdir()} == instances
         assert {
-            path.name: path.read_bytes()
-            for path in old_root.iterdir()
-            if path.is_file()
-        } == before
+            path.name for path in filesystem_iterdir(logical / "instances")
+        } == instances
+        assert files(old_root) == before
         partial = research.report_build(
             profile=profile, layout=layout, run_id=blocked_run["run_id"]
         )
@@ -125,11 +127,11 @@ def check_crypto_report_lifecycle(
             layout.processed_data_root(panel.market_id, panel.kind, panel.data_id),
             targets[HFT_PANEL_DATA_ID]["instance_identity"],
         )
-        metadata = Path(native_filesystem_path(root / "_manifest" / "manifest.json"))
-        saved = metadata.read_bytes()
+        metadata = root / "_manifest" / "manifest.json"
+        saved = filesystem_read_bytes(metadata)
         changed = json.loads(saved)
         changed.pop("producer_diagnostics")
-        metadata.write_text(json.dumps(changed), encoding="utf-8")
+        filesystem_write_text(metadata, json.dumps(changed), encoding="utf-8")
         try:
             failed = research.report_build(
                 profile=profile, layout=layout, run_id=complete_run["run_id"]
@@ -150,14 +152,10 @@ def check_crypto_report_lifecycle(
                 == "DEFINED"
             )
         finally:
-            metadata.write_bytes(saved)
+            filesystem_write_bytes(metadata, saved)
         assert all(
             policy.state == "CLOSED" and policy.used_memory_bytes == 0
             for policy in captured
         )
         assert resources.current_runtime_resource_policy() is None
-        assert {
-            path.name: path.read_bytes()
-            for path in old_root.iterdir()
-            if path.is_file()
-        } == before
+        assert files(old_root) == before

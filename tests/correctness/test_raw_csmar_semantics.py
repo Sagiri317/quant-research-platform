@@ -11,7 +11,30 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar import interim, raw_exports, raw_schemas
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_iterdir,
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_rename,
+    filesystem_unlink,
+    filesystem_walk,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+    open_filesystem_file,
+)
 from tests.helpers.runtime_resources import capture_test_policy
+
+
+def _file_bytes(root: Path) -> dict[Path, bytes]:
+    return {
+        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        for parent, _directories, files in filesystem_walk(root)
+        for name in files
+    }
 
 
 def _analyst_rows():
@@ -59,10 +82,10 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, "analyst_forecast", _analyst_rows())
-    raw_path = next(raw.glob("*.csv"))
-    original = raw_path.read_bytes()
+    raw_path = next(filesystem_glob(raw, "*.csv"))
+    original = filesystem_read_bytes(raw_path)
     with runtime_resource_policy_scope() as policy:
         result = interim.materialize_interim_data(
             layout=layout,
@@ -75,7 +98,7 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
         root = result.artifact_roots["analyst_forecast"]
         saved = read_dataset(root, resource_policy=policy)
         manifest = json.loads(
-            (root / "_manifest/manifest.json").read_text(encoding="utf-8")
+            filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
         )
         assert manifest["producer_diagnostics"]["source_row_counts"] == {
             "raw_rows": 8,
@@ -138,7 +161,7 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
         assert persisted.loc[1, "log_analyst_coverage"] == pytest.approx(np.log(3))
         assert persisted.forward_earnings_yield_fy2.isna().all()
         assert policy.used_memory_bytes == 0
-    assert raw_path.read_bytes() == original
+    assert filesystem_read_bytes(raw_path) == original
 
 
 def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
@@ -154,7 +177,7 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, "analyst_forecast", _analyst_rows()[5:])
     with runtime_resource_policy_scope() as policy:
         result = interim.materialize_interim_data(
@@ -167,7 +190,7 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
         empty = read_dataset(root, resource_policy=policy)
         assert empty.empty
         manifest = json.loads(
-            (root / "_manifest/manifest.json").read_text(encoding="utf-8")
+            filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
         )
         counts = manifest["producer_diagnostics"]["source_row_counts"]
         assert counts["raw_rows"] == counts["excluded_missing_required_rows"] == 3
@@ -199,7 +222,7 @@ def test_analyst_duplicate_report_key_is_folded_and_counted_across_chunks(tmp_pa
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     row = _analyst_rows()[0]
     _write_csmar(raw, "analyst_forecast", [row, row])
     with runtime_resource_policy_scope() as policy:
@@ -244,7 +267,7 @@ def test_invalid_analyst_raw_preserves_published_dataset(tmp_path, column, value
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, "analyst_forecast", _analyst_rows()[:1])
     with runtime_resource_policy_scope() as policy:
         result = interim.materialize_interim_data(
@@ -288,7 +311,7 @@ def test_calendar_raw_rejects_nonintegers_and_preserves_old_good(
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     row = {"Markettype": "4", "Clddt": "2025-01-03", "Daywk": "5", "State": "O"}
     _write_csmar(raw, "trading_calendar", [row])
     with runtime_resource_policy_scope() as policy:
@@ -384,7 +407,7 @@ def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> 
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     row = dict.fromkeys(
         raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns, 1.0
     )
@@ -404,11 +427,7 @@ def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> 
         root = result.artifact_roots["market_bars_1d"]
         loaded = read_dataset(root, resource_policy=policy)
         assert loaded.volume.iloc[0] == 3.0 and loaded.amount.iloc[0] == 4.0
-        before = {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        }
+        before = _file_bytes(root)
         row["Ahvaltrd_D"] = None
         _write_csmar(raw, "market_bars_1d", [row])
         with pytest.raises(
@@ -420,11 +439,7 @@ def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> 
                 data_ids=("market_bars_1d",),
                 resource_policy=policy,
             )
-        assert {
-            path.relative_to(root): path.read_bytes()
-            for path in root.rglob("*")
-            if path.is_file()
-        } == before
+        assert _file_bytes(root) == before
         assert policy.used_memory_bytes == 0
 
 
@@ -451,7 +466,7 @@ def test_index_weight_handoff_releases_raw_frame_before_persisting_normalized_ro
 
     layout = StorageLayout(tmp_path)
     root = layout.raw_source_root("csmar")
-    root.mkdir(parents=True)
+    filesystem_mkdir(root, parents=True)
     sessions = pd.bdate_range("2019-03-01", periods=21 if memory_cap is None else 63)
     _write_csmar(
         root,
@@ -572,7 +587,8 @@ def test_index_weights_raw_date_and_constituent_name_remain_text(
     tmp_path: Path,
 ) -> None:
     path = tmp_path / "csmar__index_weights__synthetic__full__export-20260101.csv"
-    path.write_text(
+    filesystem_write_text(
+        path,
         "Indexcd,Enddt,Stkcd,Constdnme,Weight\n000905,2019-01-02,000001,合成证券,1.0\n",
         encoding="utf-8-sig",
     )
@@ -590,7 +606,8 @@ def test_raw_csv_batch_accounting_visits_row_sizes_only_linearly(tmp_path, monke
 
     dates = pd.date_range("2020-01-01", periods=512).strftime("%Y-%m-%d").tolist()
     path = tmp_path / "csmar__trading_calendar__synthetic__full__export-20260101.csv"
-    path.write_text(
+    filesystem_write_text(
+        path,
         "Markettype,Clddt,Daywk,State\n"
         + "".join(f"4,{stamp},1,O\n" for stamp in dates),
         encoding="utf-8",
@@ -630,9 +647,11 @@ def test_raw_export_discovery_contract_keeps_csv_only(
         "csmar__trading_calendar__all_market_types__19901219_20261231__"
         "export-20260605.txt"
     )
-    csv_export.write_text("Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n")
-    xlsx_export.write_bytes(b"spreadsheet-bytes")
-    txt_description.write_text("Clddt\tcalendar date\n", encoding="utf-8")
+    filesystem_write_text(
+        csv_export, "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n", encoding="utf-8"
+    )
+    filesystem_write_bytes(xlsx_export, b"spreadsheet-bytes")
+    filesystem_write_text(txt_description, "Clddt\tcalendar date\n", encoding="utf-8")
 
     assert raw_exports.SUPPORTED_RAW_EXPORT_SUFFIXES == {".csv"}
     assert [
@@ -647,7 +666,9 @@ def test_raw_export_discovery_contract_keeps_csv_only(
         ".metadata.json",
     )
     assert not raw_schemas.inspect_raw_export_file(csv_export).has_metadata
-    csv_export.with_suffix(".metadata.json").write_text("{}", encoding="utf-8")
+    filesystem_write_text(
+        csv_export.with_suffix(".metadata.json"), "{}", encoding="utf-8"
+    )
     assert raw_schemas.inspect_raw_export_file(csv_export).has_metadata
     with pytest.raises(ValueError, match="Invalid CSMAR raw filename"):
         raw_schemas.parse_raw_filename(xlsx_export)
@@ -662,12 +683,14 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
     unrelated = tmp_path / (
         "csmar__stock_master__all_market_types__full__export-20260605.csv"
     )
-    bars.write_text(
+    filesystem_write_text(
+        bars,
         ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
         + "\n",
         encoding="utf-8",
     )
-    unrelated.write_text(
+    filesystem_write_text(
+        unrelated,
         ",".join(raw_exports.RAW_TABLE_CONTRACTS["stock_master"].required_columns)
         + "\n",
         encoding="utf-8",
@@ -681,19 +704,21 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
         assert first is not None
 
         sidecar = bars.with_suffix(".metadata.json")
-        sidecar.write_text("{}", encoding="utf-8")
+        filesystem_write_text(sidecar, "{}", encoding="utf-8")
         assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
-        sidecar.write_text('{"row_count": 1}', encoding="utf-8")
+        filesystem_write_text(sidecar, '{"row_count": 1}', encoding="utf-8")
         assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
 
-        unrelated.write_text(
+        filesystem_write_text(
+            unrelated,
             ",".join(raw_exports.RAW_TABLE_CONTRACTS["stock_master"].required_columns)
             + "\n# unrelated\n",
             encoding="utf-8",
         )
         assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
 
-        bars.write_text(
+        filesystem_write_text(
+            bars,
             ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
             + "\n# changed\n",
             encoding="utf-8",
@@ -703,7 +728,7 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
         assert second != first
 
         renamed = tmp_path / "renamed-market-file.csv"
-        bars.rename(renamed)
+        filesystem_rename(bars, renamed)
         assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
         bars = renamed
 
@@ -711,7 +736,8 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
             "csmar__market_bars_1d__all_market_types__full__"
             "part-01__export-20260605.csv"
         )
-        shard.write_text(
+        filesystem_write_text(
+            shard,
             ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
             + "\n",
             encoding="utf-8",
@@ -719,7 +745,7 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
         third = interim.source_content_identity(tmp_path, "market_bars_1d")
         assert third is not None
         assert third != second
-        shard.unlink()
+        filesystem_unlink(shard)
         assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
         assert policy.used_memory_bytes == 0
 
@@ -733,14 +759,16 @@ def test_csmar_source_identity_uses_only_one_recursive_root(
     primary = tmp_path / "raw"
     nested = primary / "calendar" / "history"
     sibling = tmp_path / "sibling-root"
-    nested.mkdir(parents=True)
-    sibling.mkdir()
+    filesystem_mkdir(nested, parents=True)
+    filesystem_mkdir(sibling)
     columns = raw_exports.RAW_TABLE_CONTRACTS["trading_calendar"].required_columns
-    (nested / "native-calendar.csv").write_text(
+    filesystem_write_text(
+        nested / "native-calendar.csv",
         ",".join(columns) + "\n",
         encoding="utf-8",
     )
-    (sibling / "native-calendar.csv").write_text(
+    filesystem_write_text(
+        sibling / "native-calendar.csv",
         ",".join(columns) + "\n",
         encoding="utf-8",
     )
@@ -749,24 +777,26 @@ def test_csmar_source_identity_uses_only_one_recursive_root(
         identity = interim.source_content_identity(primary, "trading_calendar")
         assert identity is not None
         raw_only = primary / "raw_only"
-        raw_only.mkdir()
+        filesystem_mkdir(raw_only)
         raw_only_file = raw_only / "native-calendar.csv"
-        raw_only_file.write_text(
+        filesystem_write_text(
+            raw_only_file,
             ",".join(columns) + "\n4,2020-01-03,5,C\n",
             encoding="utf-8",
         )
         assert interim.source_content_identity(primary, "trading_calendar") == identity
-        raw_only_file.write_text(
+        filesystem_write_text(
+            raw_only_file,
             ",".join(columns) + "\n4,2020-01-04,6,O\n",
             encoding="utf-8",
         )
         assert interim.source_content_identity(primary, "trading_calendar") == identity
-        raw_only_file.unlink()
+        filesystem_unlink(raw_only_file)
         assert interim.source_content_identity(primary, "trading_calendar") == identity
         assert interim.source_content_identity(sibling, "trading_calendar") is not None
         assert interim.source_content_identity(primary, "stock_master") is None
         assert policy.used_memory_bytes == 0
-    assert not tuple(tmp_path.glob(".k-*/k.db"))
+    assert not tuple(filesystem_glob(tmp_path, ".k-*/k.db"))
 
 
 def test_csmar_identity_ignores_unrequested_bad_schema_and_cleans_scratch(
@@ -780,20 +810,21 @@ def test_csmar_identity_ignores_unrequested_bad_schema_and_cleans_scratch(
     calendar = tmp_path / (
         "csmar__trading_calendar__all_market_types__full__export-20260605.csv"
     )
-    calendar.write_text(
+    filesystem_write_text(
+        calendar,
         "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n",
         encoding="utf-8",
     )
     unrelated = tmp_path / (
         "csmar__special_treatment_changes__all_market_types__full__export-20260605.csv"
     )
-    unrelated.write_text("bad,header\n", encoding="utf-8")
+    filesystem_write_text(unrelated, "bad,header\n", encoding="utf-8")
 
     with runtime_resource_policy_scope(None) as policy:
         identity = interim.source_content_identity(tmp_path, "trading_calendar")
         assert identity is not None
         assert policy.used_memory_bytes == 0
-    assert not tuple(tmp_path.parent.glob(".k-*/k.db"))
+    assert not tuple(filesystem_glob(tmp_path.parent, ".k-*/k.db"))
 
 
 @pytest.mark.parametrize(
@@ -811,10 +842,10 @@ def test_csmar_materialization_binds_inspected_content_to_plan(
 
     layout = StorageLayout(tmp_path)
     source = tmp_path / "raw" / "csmar"
-    source.mkdir(parents=True)
+    filesystem_mkdir(source, parents=True)
     calendar = source / "native-calendar.csv"
     original = "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n"
-    calendar.write_text(original, encoding="utf-8")
+    filesystem_write_text(calendar, original, encoding="utf-8")
     built = research.data_materialize(
         profile=research_profile(),
         layout=layout,
@@ -832,26 +863,26 @@ def test_csmar_materialization_binds_inspected_content_to_plan(
     metadata = {
         "common_manifest": read_dataset_manifest_evidence(root)["common_manifest"]
     }
-    old_good = {
-        path.relative_to(root): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
+    old_good = _file_bytes(root)
     target = StorageLayout(tmp_path / "candidate").interim_data_root(
         "csmar", "trading_calendar"
     )
-    target.parent.mkdir(parents=True)
+    filesystem_mkdir(target.parent, parents=True)
     unrelated = target.parent / "keep.txt"
-    unrelated.write_text("keep", encoding="utf-8")
-    previous_members = set(target.parent.iterdir())
+    filesystem_write_text(unrelated, "keep", encoding="utf-8")
+    previous_members = set(filesystem_iterdir(target.parent))
 
     def mutate():
         if mutation == "staged_added":
-            (source / "extra-calendar.csv").write_text(original, encoding="utf-8")
+            filesystem_write_text(
+                source / "extra-calendar.csv", original, encoding="utf-8"
+            )
         elif mutation == "staged_removed":
-            calendar.unlink()
+            filesystem_unlink(calendar)
         else:
-            calendar.write_text(original.replace(",O", ",C"), encoding="utf-8")
+            filesystem_write_text(
+                calendar, original.replace(",O", ",C"), encoding="utf-8"
+            )
 
     if mutation == "planned":
         mutate()
@@ -879,9 +910,11 @@ def test_csmar_materialization_binds_inspected_content_to_plan(
 
         monkeypatch.setattr(interim, "write_dataset", write)
     else:
-        (
-            source / "csmar__stock_master__all_market_types__full__export-20260605.csv"
-        ).write_text("bad,header\n", encoding="utf-8")
+        filesystem_write_text(
+            source / "csmar__stock_master__all_market_types__full__export-20260605.csv",
+            "bad,header\n",
+            encoding="utf-8",
+        )
 
     with runtime_resource_policy_scope() as policy:
 
@@ -907,19 +940,15 @@ def test_csmar_materialization_binds_inspected_content_to_plan(
                 read_dataset_manifest_evidence(target)["common_manifest"]
                 == metadata["common_manifest"]
             )
-            assert set(target.parent.iterdir()) == previous_members | {target}
+            assert set(filesystem_iterdir(target.parent)) == previous_members | {target}
         else:
             with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
                 materialize()
-            assert set(target.parent.iterdir()) == previous_members
-            assert not target.exists()
+            assert set(filesystem_iterdir(target.parent)) == previous_members
+            assert not filesystem_exists(target)
         assert policy.used_memory_bytes == 0
-    assert {
-        path.relative_to(root): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    } == old_good
-    assert unrelated.read_text(encoding="utf-8") == "keep"
+    assert _file_bytes(root) == old_good
+    assert filesystem_read_text(unrelated, encoding="utf-8") == "keep"
 
 
 @pytest.mark.parametrize(
@@ -933,7 +962,7 @@ def test_financial_raw_decoder_preserves_text_and_normalizes_values(
     path = tmp_path / f"{dataset}.csv"
     columns = raw_exports.RAW_TABLE_CONTRACTS[dataset].required_columns
     row = _financial_fixture_row(columns)
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with open_filesystem_file(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
         writer.writerow(row)
@@ -973,7 +1002,7 @@ def test_financial_raw_decoder_rejects_invalid_numeric_fact(
         columns,
         invalid_numeric_column=numeric_column,
     )
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with open_filesystem_file(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(handle, lineterminator="\n")
         writer.writerow(columns)
         writer.writerow(row)
@@ -992,7 +1021,7 @@ def test_provider_header_bound_accepts_160_and_rejects_161_fields(
             *(f"Optional{index}" for index in range(width - len(required))),
         )
         path = tmp_path / f"provider-{width}.csv"
-        path.write_text(",".join(columns) + "\n", encoding="utf-8")
+        filesystem_write_text(path, ",".join(columns) + "\n", encoding="utf-8")
         if width == 160:
             inspection = raw_schemas.inspect_raw_export_file(path)
             assert inspection.columns == columns
@@ -1028,33 +1057,36 @@ def test_csmar_identity_rejects_requested_bad_schema_and_cleans_scratch(
     requested = tmp_path / (
         "csmar__trading_calendar__all_market_types__full__export-20260605.csv"
     )
-    requested.write_text("bad,header\n", encoding="utf-8")
+    filesystem_write_text(requested, "bad,header\n", encoding="utf-8")
 
     with runtime_resource_policy_scope(None) as policy:
         with pytest.raises(ValueError, match="csmar_raw_export_"):
             interim.source_content_identity(tmp_path, "trading_calendar")
         assert policy.used_memory_bytes == 0
-    assert not tuple(tmp_path.parent.glob(".k-*/k.db"))
+    assert not tuple(filesystem_glob(tmp_path.parent, ".k-*/k.db"))
 
 
 def test_dirty_index_info_csv_audit_counts_and_semantics(
     tmp_path: Path, monkeypatch
 ) -> None:
     scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    monkeypatch.setattr(raw_schemas.tempfile, "tempdir", str(scratch))
+    filesystem_mkdir(scratch)
+    monkeypatch.setattr(
+        raw_schemas.tempfile, "tempdir", native_filesystem_path(scratch)
+    )
     temporary_file = raw_schemas.tempfile.TemporaryFile
     handles = []
 
     def open_scratch(*args, **kwargs):
-        assert kwargs["dir"] == scratch
+        assert Path(kwargs["dir"]) == Path(native_filesystem_path(scratch))
         handle = temporary_file(*args, **kwargs)
         handles.append(handle)
         return handle
 
     monkeypatch.setattr(raw_schemas.tempfile, "TemporaryFile", open_scratch)
     index_path = tmp_path / "index_info_dirty.csv"
-    index_path.write_text(
+    filesystem_write_text(
+        index_path,
         "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
         "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
         "000985,benchmark,2014-01-02,2013-12-31,-9666,all shares,"
@@ -1077,7 +1109,7 @@ def test_dirty_index_info_csv_audit_counts_and_semantics(
     )
 
     assert len(handles) >= 2 and all(handle.closed for handle in handles)
-    assert not list(scratch.iterdir())
+    assert not list(filesystem_iterdir(scratch))
 
     assert audit == {
         "metadata_row_count": 1,
@@ -1124,7 +1156,8 @@ def test_index_info_long_row_requires_one_unambiguous_field_split(
     tmp_path: Path, tail, expected
 ) -> None:
     index_path = tmp_path / "index_info_long.csv"
-    index_path.write_text(
+    filesystem_write_text(
+        index_path,
         "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
         "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
         "000985,benchmark,2014-01-02,2013-12-31,1000," + tail + "\n",
@@ -1160,7 +1193,7 @@ def test_index_info_parser_streams_bounded_chunks_without_a_full_frame_surface(
         }
         for position in range(3)
     ]
-    pd.DataFrame(rows).to_csv(path, index=False)
+    pd.DataFrame(rows).to_csv(native_filesystem_path(path), index=False)
 
     chunks = _collect_raw_chunks(path, "index_info", chunksize=1)
 
@@ -1179,7 +1212,7 @@ def test_read_export_header_preserves_keyboard_interrupt_over_close_failure(
     primary = KeyboardInterrupt("header_interrupted")
     close_calls = 0
     path = tmp_path / "export.csv"
-    path.write_text('"quoted\nvalue",header\n', encoding="utf-8")
+    filesystem_write_text(path, '"quoted\nvalue",header\n', encoding="utf-8")
     original_close = raw_schemas._BoundedCsvRecords.close
 
     def interrupted(_self):
@@ -1212,7 +1245,7 @@ def test_non_index_raw_iteration_bounds_requested_chunks_across_text_widths(
             "Daywk": ["3"] * 5,
             "State": ["x" * text_width] * 5,
         }
-    ).to_csv(path, index=False)
+    ).to_csv(native_filesystem_path(path), index=False)
 
     chunks = _collect_raw_chunks(path, "trading_calendar", chunksize=4)
 
@@ -1221,8 +1254,8 @@ def test_non_index_raw_iteration_bounds_requested_chunks_across_text_widths(
 
 
 def _audit_index_info_csv(path: Path) -> dict[str, object]:
-    physical_line_count = len(path.read_text(encoding="utf-8").splitlines())
-    with path.open("r", encoding="utf-8", newline="") as handle:
+    physical_line_count = len(filesystem_read_text(path, encoding="utf-8").splitlines())
+    with open_filesystem_file(path, "r", encoding="utf-8", newline="") as handle:
         reader = csv.reader(handle)
         header = next(reader)
         rows = list(reader)
@@ -1294,7 +1327,7 @@ def test_legal_provider_width_uses_bounded_fast_path(
     fields = [f"field_{position}" for position in range(width)]
     if quoted:
         fields[0] = '字段,"示例"'
-    with path.open("w", encoding="utf-8", newline="") as handle:
+    with open_filesystem_file(path, "w", encoding="utf-8", newline="") as handle:
         writer = csv.writer(
             handle, quoting=csv.QUOTE_ALL if quoted else csv.QUOTE_MINIMAL
         )
@@ -1355,9 +1388,13 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
     for size in (1, 2, 8):
         layout = StorageLayout(tmp_path / str(size))
         raw = layout.raw_source_root("csmar")
-        raw.mkdir(parents=True)
+        filesystem_mkdir(raw, parents=True)
         _write_csmar(raw, data_id, rows)
-        hashes.append(hashlib.sha256(next(raw.glob("*.csv")).read_bytes()).hexdigest())
+        hashes.append(
+            hashlib.sha256(
+                filesystem_read_bytes(next(filesystem_glob(raw, "*.csv")))
+            ).hexdigest()
+        )
         with runtime_resource_policy_scope() as policy:
             result = interim.materialize_interim_data(
                 layout=layout,
@@ -1406,18 +1443,14 @@ def test_csmar_conflicting_duplicate_keeps_prior_published_dataset(tmp_path, chu
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     first = _analyst_rows()[0]
     _write_csmar(raw, "analyst_forecast", [first])
     with runtime_resource_policy_scope() as policy:
         original = interim.materialize_interim_data(
             layout=layout, data_ids=("analyst_forecast",), resource_policy=policy
         ).artifact_roots["analyst_forecast"]
-        old_good = {
-            path.relative_to(original): path.read_bytes()
-            for path in original.rglob("*")
-            if path.is_file()
-        }
+        old_good = _file_bytes(original)
         _write_csmar(raw, "analyst_forecast", [first, {**first, "Feps": 999}])
         candidate = layout.instance_root(original, "f" * 64)
         with pytest.raises(
@@ -1429,12 +1462,8 @@ def test_csmar_conflicting_duplicate_keeps_prior_published_dataset(tmp_path, chu
                 chunksize=chunksize,
                 resource_policy=policy,
             )
-        assert not candidate.exists()
-        assert {
-            path.relative_to(original): path.read_bytes()
-            for path in original.rglob("*")
-            if path.is_file()
-        } == old_good
+        assert not filesystem_exists(candidate)
+        assert _file_bytes(original) == old_good
         assert policy.used_memory_bytes == 0
 
 
@@ -1454,7 +1483,7 @@ def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cle
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     row = {
         "Indexcd": "000852",
         "Enddt": "2019-03-01",
@@ -1496,11 +1525,7 @@ def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cle
             chunksize=2,
             resource_policy=policy,
         ).artifact_roots["index_weights"]
-        old_good = {
-            path.relative_to(original): path.read_bytes()
-            for path in original.rglob("*")
-            if path.is_file()
-        }
+        old_good = _file_bytes(original)
         candidate = layout.instance_root(original, "e" * 64)
         monkeypatch.setattr(
             interim, "_transform_interim_chunk", transform_with_one_capacity_failure
@@ -1522,7 +1547,7 @@ def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cle
             with pytest.raises(KeyboardInterrupt) as caught:
                 interim.materialize_interim_data(**request)
             assert caught.value is primary
-            assert not candidate.exists()
+            assert not filesystem_exists(candidate)
         else:
             interim.materialize_interim_data(**request)
             saved = read_dataset(candidate, resource_policy=policy)
@@ -1536,7 +1561,8 @@ def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cle
             )
         assert pending and all(not lease.active for lease in pending)
         assert {
-            relative: (original / relative).read_bytes() for relative in old_good
+            relative: filesystem_read_bytes(original / relative)
+            for relative in old_good
         } == old_good
         assert policy.used_memory_bytes == 0
 
@@ -1546,7 +1572,9 @@ def test_csmar_inspection_keeps_fatal_source_failure(
     tmp_path, monkeypatch, primary_type
 ):
     path = tmp_path / "native-calendar.csv"
-    path.write_text("Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n")
+    filesystem_write_text(
+        path, "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n", encoding="utf-8"
+    )
     primary = primary_type("primary")
 
     def fail(*args, **kwargs):
@@ -1619,7 +1647,7 @@ def test_index_membership_raw_text_survives_public_materialization(
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     rows = [
         {
             "Indexcd": "000905",
@@ -1637,8 +1665,8 @@ def test_index_membership_raw_text_survives_public_materialization(
         )
     ]
     _write_csmar(raw, "index_membership", rows)
-    path = next(raw.glob("*.csv"))
-    original = path.read_bytes()
+    path = next(filesystem_glob(raw, "*.csv"))
+    original = filesystem_read_bytes(path)
     with runtime_resource_policy_scope() as policy:
         if bad_numeric:
             with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
@@ -1674,7 +1702,7 @@ def test_index_membership_raw_text_survives_public_materialization(
                 "2020-01-04",
             ]
         assert policy.used_memory_bytes == 0
-    assert path.read_bytes() == original
+    assert filesystem_read_bytes(path) == original
 
 
 @pytest.mark.parametrize("chunksize", [1, 10])
@@ -1687,7 +1715,7 @@ def test_index_membership_preserves_native_codes_and_venue_type_identity(
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     identities = [
         ("000001", "SSE", 1),
         ("000001", "SZSE", 1),
@@ -1778,8 +1806,8 @@ def test_csv_unicode_fast_heap_is_covered_by_live_leases(
     from tests.helpers.runtime_resources import capture_test_policy
 
     scratch = tmp_path / "scratch"
-    scratch.mkdir()
-    monkeypatch.setenv("TMPDIR", str(scratch))
+    filesystem_mkdir(scratch)
+    monkeypatch.setenv("TMPDIR", str(native_filesystem_path(scratch)))
     monkeypatch.setattr(tempfile, "tempdir", None)
     expected = ["a" * size + suffix, "b" * size + suffix]
     encoded_fields = [f'"{value}"' for value in expected] if quoted else expected
@@ -1787,7 +1815,7 @@ def test_csv_unicode_fast_heap_is_covered_by_live_leases(
     if finish == "invalid":
         payload = payload[:-1] + b"\xff\n"
     path = tmp_path / "unicode.csv"
-    path.write_bytes(payload)
+    filesystem_write_bytes(path, payload)
     process = psutil.Process()
     descriptors = (
         process.num_fds if hasattr(process, "num_fds") else process.num_handles
@@ -1823,7 +1851,7 @@ def test_csv_unicode_fast_heap_is_covered_by_live_leases(
     assert descriptors() <= fd_before
     assert all(Path(item.path).name != path.name for item in process.open_files())
     assert process.num_threads() <= threads_before
-    assert list(scratch.iterdir()) == []
+    assert list(filesystem_iterdir(scratch)) == []
 
 
 def test_csv_unicode_insufficient_budget_fails_before_decode_and_releases(tmp_path):
@@ -1831,7 +1859,9 @@ def test_csv_unicode_insufficient_budget_fails_before_decode_and_releases(tmp_pa
     from tests.helpers.runtime_resources import capture_test_policy
 
     path = tmp_path / "unicode.csv"
-    path.write_text("a" * 460800 + "😀," + "b" * 460800 + "😀\n", encoding="utf-8")
+    filesystem_write_text(
+        path, "a" * 460800 + "😀," + "b" * 460800 + "😀\n", encoding="utf-8"
+    )
     with runtime_resource_policy_scope(
         capture_test_policy(
             available_memory_bytes=64 * 1024**2, explicit_cap_bytes=4 * 1024**2
@@ -1853,7 +1883,7 @@ def test_expired_csv_records_do_not_retain_previous_unicode_payload(tmp_path):
 
     text = "a" * 460800 + "😀," + "b" * 460800 + "😀\n"
     path = tmp_path / "records.csv"
-    path.write_text(text * 3, encoding="utf-8")
+    filesystem_write_text(path, text * 3, encoding="utf-8")
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
@@ -1889,9 +1919,11 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
     from quant_research_platform.workflows import research
 
     raw = tmp_path / "raw/csmar"
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     source = raw / "native-calendar.csv"
-    source.write_text("Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n")
+    filesystem_write_text(
+        source, "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n", encoding="utf-8"
+    )
     arguments = dict(
         profile=research_profile(),
         raw_root=raw.parent,
@@ -1904,11 +1936,7 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
     with runtime_resource_policy_scope() as policy:
         result = research.data_materialize(layout=normal_layout, **arguments)
         assert result["status"] == "COMPLETE"
-        originals = {
-            path: path.read_bytes()
-            for path in normal_layout.project_root.rglob("*")
-            if path.is_file()
-        }
+        originals = _file_bytes(normal_layout.project_root)
         primary = failure_type("parent_failure")
         native_check = interim.require_unaliased_path
         native_stat = interim.filesystem_stat
@@ -1945,9 +1973,11 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
                 assert caught.value is primary
         assert calls == [raw]
         assert policy.used_memory_bytes == 0
-        assert all(path.read_bytes() == content for path, content in originals.items())
-        assert not tuple(failed_layout.project_root.rglob(".a-*"))
-        assert not tuple(failed_layout.project_root.rglob("manifest.json"))
+        assert _file_bytes(normal_layout.project_root) == originals
+        assert not tuple(filesystem_glob(failed_layout.project_root, "**/.a-*"))
+        assert not tuple(
+            filesystem_glob(failed_layout.project_root, "**/manifest.json")
+        )
 
 
 @pytest.mark.parametrize("exponent", (0, 600, -600))
@@ -1965,7 +1995,7 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(tmp_path, expo
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     sessions = pd.date_range("2019-08-01", periods=3)
     prices = [math.ldexp(multiplier, exponent) for multiplier in (1.0, 1.0, 1.5)]
     rows = []
@@ -2083,7 +2113,7 @@ def test_csmar_pending_copy_admits_payload_before_concurrent_allocation(
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
-    raw.mkdir(parents=True)
+    filesystem_mkdir(raw, parents=True)
     _write_csmar(
         raw,
         "index_weights",
@@ -2196,7 +2226,7 @@ def test_csmar_pending_copy_admits_payload_before_concurrent_allocation(
         assert not copies
         assert not worker_errors
         assert policy.used_memory_bytes == 0
-    assert not list(tmp_path.rglob("manifest.json"))
+    assert not list(filesystem_glob(tmp_path, "**/manifest.json"))
 
 
 def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_path):
@@ -2204,12 +2234,12 @@ def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_pa
     outputs = []
     for directory in ("stock_master", "market_cap"):
         root = tmp_path / directory
-        root.mkdir()
+        filesystem_mkdir(root)
         path = root / "unknown.csv"
-        path.write_text(payload)
+        filesystem_write_text(path, payload, encoding="utf-8")
         outputs.append(raw_schemas.inspect_raw_export_file(path).dataset)
     assert outputs == ["market_cap", "market_cap"]
     conflict = tmp_path / "TRDNEW_Co.csv"
-    conflict.write_text(payload)
+    filesystem_write_text(conflict, payload, encoding="utf-8")
     with pytest.raises(ValueError, match="table_identity_conflict"):
         raw_schemas.inspect_raw_export_file(conflict)

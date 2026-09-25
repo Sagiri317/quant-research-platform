@@ -10,6 +10,10 @@ from typer.main import get_command
 from typer.testing import CliRunner
 
 from quant_research_platform.interfaces.private_cli import app
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_read_text,
+)
 from quant_research_platform.workflows.diagnostics.schema_inventory import (
     iter_schema_inventory_items,
 )
@@ -17,7 +21,9 @@ from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
 
 def test_private_entrypoint_contains_only_schema_inventory() -> None:
-    payload = tomllib.loads(Path("pyproject.toml").read_text(encoding="utf-8"))
+    payload = tomllib.loads(
+        filesystem_read_text(Path("pyproject.toml"), encoding="utf-8")
+    )
     assert payload["project"]["scripts"]["qrp-private"] == (
         "quant_research_platform.interfaces.private_cli:main"
     )
@@ -53,7 +59,7 @@ def test_schema_inventory_private_command_writes_current_local_artifact(
         ],
     )
     assert result.exit_code == 0, result.output
-    payload = json.loads(output.read_text(encoding="utf-8"))
+    payload = json.loads(filesystem_read_text(output, encoding="utf-8"))
     assert payload["schema_id"] == "qrp-schema-inventory"
     assert payload["datasets"]
 
@@ -67,7 +73,7 @@ def test_schema_inventory_rejects_overwrite_and_empty_roots(tmp_path: Path) -> N
     )
     assert missing.exit_code != 0
     assert "schema_inventory_no_datasets_found" in missing.output
-    assert not output.exists()
+    assert not filesystem_exists(output)
 
     root = tmp_path / "data" / "interim" / "csmar" / "market_bars_1d"
     write_low_level_parquet_artifact(

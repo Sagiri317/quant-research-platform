@@ -36,6 +36,15 @@ from quant_research_platform.sources.reference.a_share_fees import (
     FEE_CSV_COLUMNS,
     load_a_share_fee_source,
 )
+from quant_research_platform.storage.identity import (
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_stat,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    open_filesystem_file,
+)
 
 
 def execute_continuous_target(*args, **kwargs):
@@ -221,7 +230,7 @@ def _real_fee_schedule(tmp_path: Path) -> FeeSchedule:
 
 def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
     source_root = tmp_path / "a_share_fee_schedule"
-    source_root.mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(source_root, parents=True, exist_ok=True)
     csv_path = source_root / A_SHARE_FEE_CSV_NAME
     sidecar_path = source_root / A_SHARE_FEE_SIDECAR_NAME
     row_specs = [
@@ -292,17 +301,20 @@ def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
         )
         for spec in row_specs
     ]
-    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+    with open_filesystem_file(
+        csv_path, "w", encoding="utf-8-sig", newline=""
+    ) as handle:
         writer = csv.DictWriter(handle, fieldnames=FEE_CSV_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
     metadata = {
-        "file_sha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
-        "file_bytes": csv_path.stat().st_size,
+        "file_sha256": hashlib.sha256(filesystem_read_bytes(csv_path)).hexdigest(),
+        "file_bytes": filesystem_stat(csv_path).st_size,
         "row_count": len(rows),
         "fields_raw": list(FEE_CSV_COLUMNS),
     }
-    sidecar_path.write_text(
+    filesystem_write_text(
+        sidecar_path,
         json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
@@ -341,9 +353,10 @@ def _source_row(
 
 
 def _rewrite_sidecar(sidecar_path: Path, **changes: object) -> None:
-    metadata = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    metadata = json.loads(filesystem_read_text(sidecar_path, encoding="utf-8"))
     metadata.update(changes)
-    sidecar_path.write_text(
+    filesystem_write_text(
+        sidecar_path,
         json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
@@ -394,7 +407,7 @@ def test_fee_source_rejects_sidecar_count_and_byte_mutations(
     field: str,
 ) -> None:
     _csv_path, sidecar_path = _copy_fee_source(tmp_path)
-    metadata = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    metadata = json.loads(filesystem_read_text(sidecar_path, encoding="utf-8"))
     _rewrite_sidecar(sidecar_path, **{field: metadata[field] + 1})
 
     with pytest.raises(ValueError, match="a_share_fee_source_(row_count|metadata)"):
@@ -403,18 +416,20 @@ def test_fee_source_rejects_sidecar_count_and_byte_mutations(
 
 def test_fee_source_rejects_csv_hash_and_schema_mutations(tmp_path: Path) -> None:
     csv_path, sidecar_path = _copy_fee_source(tmp_path)
-    csv_path.write_bytes(csv_path.read_bytes() + b"\n")
+    filesystem_write_bytes(csv_path, filesystem_read_bytes(csv_path) + b"\n")
     with pytest.raises(ValueError, match="a_share_fee_source_metadata_invalid"):
         load_a_share_fee_source(reference_root=csv_path.parent.parent)
 
     csv_path, sidecar_path = _copy_fee_source(tmp_path / "schema")
-    raw = csv_path.read_text(encoding="utf-8-sig")
-    csv_path.write_text(raw.replace("市场", "市场X", 1), encoding="utf-8-sig")
-    digest = hashlib.sha256(csv_path.read_bytes()).hexdigest()
+    raw = filesystem_read_text(csv_path, encoding="utf-8-sig")
+    filesystem_write_text(
+        csv_path, raw.replace("市场", "市场X", 1), encoding="utf-8-sig"
+    )
+    digest = hashlib.sha256(filesystem_read_bytes(csv_path)).hexdigest()
     _rewrite_sidecar(
         sidecar_path,
         file_sha256=digest,
-        file_bytes=csv_path.stat().st_size,
+        file_bytes=filesystem_stat(csv_path).st_size,
     )
     with pytest.raises(ValueError, match="a_share_fee_source_schema_invalid"):
         load_a_share_fee_source(reference_root=csv_path.parent.parent)

@@ -20,14 +20,36 @@ from quant_research_platform.sources.reference.interim import (
     A_SHARE_FEE_SIDECAR_NAME,
 )
 from quant_research_platform.storage.datasets.reading import read_dataset
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_iterdir,
+    filesystem_mkdir,
+    filesystem_read_bytes,
+    filesystem_read_text,
+    filesystem_stat,
+    filesystem_walk,
+    filesystem_write_bytes,
+    filesystem_write_text,
+    native_filesystem_path,
+    open_filesystem_file,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from quant_research_platform.workflows import research
 
 
+def _file_bytes(root: Path) -> dict[Path, bytes]:
+    return {
+        (parent / name).relative_to(root): filesystem_read_bytes(parent / name)
+        for parent, _directories, files in filesystem_walk(root)
+        for name in files
+    }
+
+
 def _write_reference_root(root: Path, *, commission: float = 0.0003) -> Path:
     schedule_root = root / "reference" / "a_share_fee_schedule"
-    schedule_root.mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(schedule_root, parents=True, exist_ok=True)
     csv_path = schedule_root / A_SHARE_FEE_CSV_NAME
     rows = [
         _row(
@@ -55,17 +77,20 @@ def _write_reference_root(root: Path, *, commission: float = 0.0003) -> Path:
             0.001,
         ),
     ]
-    with csv_path.open("w", encoding="utf-8-sig", newline="") as handle:
+    with open_filesystem_file(
+        csv_path, "w", encoding="utf-8-sig", newline=""
+    ) as handle:
         writer = csv.DictWriter(handle, fieldnames=FEE_CSV_COLUMNS)
         writer.writeheader()
         writer.writerows(rows)
     sidecar = {
-        "file_sha256": hashlib.sha256(csv_path.read_bytes()).hexdigest(),
-        "file_bytes": csv_path.stat().st_size,
+        "file_sha256": hashlib.sha256(filesystem_read_bytes(csv_path)).hexdigest(),
+        "file_bytes": filesystem_stat(csv_path).st_size,
         "row_count": len(rows),
         "fields_raw": list(FEE_CSV_COLUMNS),
     }
-    (schedule_root / A_SHARE_FEE_SIDECAR_NAME).write_text(
+    filesystem_write_text(
+        schedule_root / A_SHARE_FEE_SIDECAR_NAME,
         json.dumps(sidecar, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -172,9 +197,10 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
     sidecar_path = (
         raw_root / "reference" / "a_share_fee_schedule" / A_SHARE_FEE_SIDECAR_NAME
     )
-    sidecar = json.loads(sidecar_path.read_text(encoding="utf-8"))
+    sidecar = json.loads(filesystem_read_text(sidecar_path, encoding="utf-8"))
     sidecar["notes"] = "identity mutation"
-    sidecar_path.write_text(
+    filesystem_write_text(
+        sidecar_path,
         json.dumps(sidecar, ensure_ascii=False),
         encoding="utf-8",
     )
@@ -215,11 +241,7 @@ def test_fee_source_identity_race_preserves_old_good(
     metadata = {
         "common_manifest": read_dataset_manifest_evidence(root)["common_manifest"]
     }
-    old_good = {
-        path.relative_to(root): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    }
+    old_good = _file_bytes(root)
     target = (
         root
         if existing_target
@@ -228,10 +250,10 @@ def test_fee_source_identity_race_preserves_old_good(
         )
     )
     target_layout = layout.with_target_roots({A_SHARE_FEE_SCHEDULE_DATA_ID: target})
-    target.parent.mkdir(parents=True, exist_ok=True)
+    filesystem_mkdir(target.parent, parents=True, exist_ok=True)
     unrelated = target.parent / "unrelated.txt"
-    unrelated.write_text("keep", encoding="utf-8")
-    previous_members = set(target.parent.iterdir())
+    filesystem_write_text(unrelated, "keep", encoding="utf-8")
+    previous_members = set(filesystem_iterdir(target.parent))
     if mutation == "planned":
         _write_reference_root(raw_root, commission=0.0004)
     elif mutation == "loaded":
@@ -269,27 +291,23 @@ def test_fee_source_identity_race_preserves_old_good(
                 resource_policy=policy,
             )
         assert policy.used_memory_bytes == 0
-    assert {
-        path.relative_to(root): path.read_bytes()
-        for path in root.rglob("*")
-        if path.is_file()
-    } == old_good
-    assert set(target.parent.iterdir()) == previous_members
-    assert unrelated.read_text(encoding="utf-8") == "keep"
+    assert _file_bytes(root) == old_good
+    assert set(filesystem_iterdir(target.parent)) == previous_members
+    assert filesystem_read_text(unrelated, encoding="utf-8") == "keep"
     if not existing_target:
-        assert not target.exists()
+        assert not filesystem_exists(target)
 
 
 def test_fee_identity_rechecks_sidecar_after_rows(tmp_path, monkeypatch):
     from quant_research_platform.sources.reference import a_share_fees
 
     root = _write_reference_root(tmp_path / "raw") / "reference"
-    sidecar = next(root.rglob("*.metadata.json"))
+    sidecar = next(filesystem_glob(root, "**/*.metadata.json"))
     original = a_share_fees._read_rows
 
     def read_then_change(*args):
         rows = original(*args)
-        sidecar.write_bytes(sidecar.read_bytes() + b" ")
+        filesystem_write_bytes(sidecar, filesystem_read_bytes(sidecar) + b" ")
         return rows
 
     monkeypatch.setattr(a_share_fees, "_read_rows", read_then_change)
@@ -303,7 +321,7 @@ def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
     from quant_research_platform.sources.reference import a_share_fees
 
     root = _write_reference_root(tmp_path / "raw") / "reference"
-    path = next(root.rglob("*.csv"))
+    path = next(filesystem_glob(root, "**/*.csv"))
     primary = MemoryError("primary")
 
     class Handle(io.BufferedReader):
@@ -314,7 +332,7 @@ def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
             super().close()
             raise OSError("secondary")
 
-    handle = Handle(io.FileIO(path))
+    handle = Handle(io.FileIO(native_filesystem_path(path)))
     monkeypatch.setattr(a_share_fees, "open_filesystem_file", lambda _: handle)
     with pytest.raises(MemoryError) as caught:
         load_a_share_fee_source(reference_root=root)

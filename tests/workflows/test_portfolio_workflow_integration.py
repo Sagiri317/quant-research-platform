@@ -64,6 +64,15 @@ from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import (
     content_hash_for_files,
+    filesystem_exists,
+    filesystem_glob,
+    filesystem_is_file,
+    filesystem_mkdir,
+    filesystem_read_text,
+    filesystem_rename,
+    filesystem_unlink,
+    filesystem_write_bytes,
+    filesystem_write_text,
     native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
@@ -840,10 +849,10 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_
 
     forged_path = layout.research_run_path("run_forged_not_accessed")
     forged["run_id"] = "run_forged_not_accessed"
-    forged_path.write_text(json.dumps(forged), encoding="utf-8")
+    filesystem_write_text(forged_path, json.dumps(forged), encoding="utf-8")
     with pytest.raises(ValueError, match="research_run_record_invalid"):
         read_research_run_record(forged_path)
-    forged_path.unlink()
+    filesystem_unlink(forged_path)
     with pytest.raises(ValueError, match="research_run_holdout_evidence_invalid"):
         replace(
             record,
@@ -1092,8 +1101,8 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         marker = (
             tmp_path / "data/raw" / str(spec.source_id) / f"{spec.data_id}.synthetic"
         )
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_bytes(spec.data_id.encode())
+        filesystem_mkdir(marker.parent, parents=True, exist_ok=True)
+        filesystem_write_bytes(marker, spec.data_id.encode())
     previous = len(captured)
     development = research.research_run(
         profile=profile,
@@ -1151,8 +1160,8 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     model_hash = content_hash_for_files(
         (
             (item.relative_to(model_root).as_posix(), item)
-            for item in model_root.rglob("*")
-            if item.is_file()
+            for item in filesystem_glob(model_root, "**/*")
+            if filesystem_is_file(item)
         ),
         error="model_hash_invalid",
     )
@@ -1354,9 +1363,9 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 == "MATCH"
             )
         assert policy.used_memory_bytes == 0
-    assert not rebuild_layout.semantic_artifact_root(
-        "a_share", source_model.target_id
-    ).exists()
+    assert not filesystem_exists(
+        rebuild_layout.semantic_artifact_root("a_share", source_model.target_id)
+    )
     sources = []
     for candidate in profile.protocol("pv_all").portfolio_candidates():
         target_id = f"pv_all_{candidate.candidate_id}_ledger"
@@ -1486,8 +1495,8 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         content_hash_for_files(
             (
                 (item.relative_to(model_root).as_posix(), item)
-                for item in model_root.rglob("*")
-                if item.is_file()
+                for item in filesystem_glob(model_root, "**/*")
+                if filesystem_is_file(item)
             ),
             error="model_hash_invalid",
         )
@@ -1509,8 +1518,8 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             / str(spec.source_id)
             / f"{spec.data_id}.synthetic"
         )
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_bytes(spec.data_id.encode("utf-8"))
+        filesystem_mkdir(marker.parent, parents=True, exist_ok=True)
+        filesystem_write_bytes(marker, spec.data_id.encode("utf-8"))
     request = {
         "start": "2019-01-02",
         "end": "2019-01-15",
@@ -1693,13 +1702,19 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     bundle = champion_root / "outputs" / protocol.persisted_prediction_target_id
     damaged = tmp_path / "missing_family"
     shutil.copytree(native_filesystem_path(bundle), native_filesystem_path(damaged))
-    values = pd.read_parquet(damaged / "prediction.parquet")
+    values = pd.read_parquet(native_filesystem_path(damaged / "prediction.parquet"))
     missing_family = "pv_all_ridge_regression"
     values = values.loc[~values.family_id.eq(missing_family)]
-    values.to_parquet(damaged / "prediction.parquet", index=False)
-    manifest = json.loads((damaged / "manifest.json").read_text(encoding="utf-8"))
+    values.to_parquet(
+        native_filesystem_path(damaged / "prediction.parquet"), index=False
+    )
+    manifest = json.loads(
+        filesystem_read_text(damaged / "manifest.json", encoding="utf-8")
+    )
     manifest["metadata"]["prediction_metadata"]["prediction_rows"] = len(values)
-    (damaged / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+    filesystem_write_text(
+        damaged / "manifest.json", json.dumps(manifest), encoding="utf-8"
+    )
     model = research.read_quarterly_model_artifact(
         layout.instance_root(
             layout.semantic_artifact_root(
@@ -2040,7 +2055,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
 
     statistics_manifest = statistics_root / "manifest.json"
     saved_statistics_manifest = statistics_root / "manifest.saved"
-    statistics_manifest.rename(saved_statistics_manifest)
+    filesystem_rename(statistics_manifest, saved_statistics_manifest)
     try:
         damaged_report = research.report_build(
             profile=profile,
@@ -2048,7 +2063,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             run_id=reused["run_id"],
         )
     finally:
-        saved_statistics_manifest.rename(statistics_manifest)
+        filesystem_rename(saved_statistics_manifest, statistics_manifest)
     assert damaged_report["source_run_status"] == "COMPLETE"
     assert damaged_report["status"] == "FAILED"
     assert damaged_report["report"]["sections"]["factor diagnostics"] == {
