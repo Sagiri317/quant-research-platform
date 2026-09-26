@@ -351,8 +351,11 @@ def load_a_share_run_evidence(
     trial_status = "DEFINED"
     for reference in trial_refs.values():
         try:
-            _plan, records = read_model_trial_ledger_reference(layout, reference)
-            trial_counts.update(item.status for item in records)
+            with read_model_trial_ledger_reference(layout, reference) as (
+                _plan,
+                records,
+            ):
+                trial_counts.update(item.status for item in records)
         except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
             trial_status = "FAILED"
             issues.append(

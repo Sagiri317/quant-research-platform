@@ -99,11 +99,10 @@ def test_trial_ledger_is_append_only_and_retains_failed_and_abandoned(
 
     first_path = append_trial_record(root, plan, failed)
     second_path = append_trial_record(root, plan, abandoned)
-    records = read_trial_ledger(root, plan)
-
-    assert first_path != second_path
-    assert [record.status for record in records] == ["failed", "abandoned"]
-    assert [record.attempt_index for record in records] == [1, 2]
+    with read_trial_ledger(root, plan) as (_saved_plan, records):
+        assert first_path != second_path
+        assert [record.status for record in records] == ["failed", "abandoned"]
+        assert [record.attempt_index for record in records] == [1, 2]
     with pytest.raises(ValueError, match="^trial_attempt_not_next$"):
         append_trial_record(root, plan, failed)
     completed = _record(plan, event_id="event-3", attempt_index=3, status="completed")
@@ -119,7 +118,8 @@ def test_trial_ledger_is_append_only_and_retains_failed_and_abandoned(
             plan,
             _record(plan, event_id="event-4", attempt_index=4, status="attempted"),
         )
-    assert read_trial_ledger(root, plan) == (failed, abandoned, completed)
+    with read_trial_ledger(root, plan) as (_saved_plan, ledger_records_3):
+        assert ledger_records_3 == (failed, abandoned, completed)
     assert {
         path.relative_to(root): path.read_bytes()
         for path in root.rglob("*")
@@ -187,7 +187,8 @@ def test_trial_ledger_uses_exact_bounded_storage_membership(tmp_path: Path) -> N
     (root / "rogue.txt").write_text("not a ledger member", encoding="utf-8")
 
     with pytest.raises(ValueError, match="^dataset_metadata_directory_member_invalid$"):
-        read_trial_ledger(root, plan)
+        with read_trial_ledger(root, plan):
+            pass
 
 
 def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
@@ -287,14 +288,16 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
         return result, recorder
 
     (_, _metadata), first = select("run_first")
-    records = read_trial_ledger(first.root)
-    assert [record.status for record in records] == ["completed", "completed"]
-    assert all(record.metrics["validation_rows"] == 3 for record in records)
-    assert all(record.metrics["n_train"] == 3 for record in records)
-    assert all(
-        record.normalized_parameters == plan.candidate_parameters[record.candidate_id]
-        for record in records
-    )
+    with read_trial_ledger(first.root) as (_saved_plan, records):
+        assert [record.status for record in records] == ["completed", "completed"]
+        assert all(record.metrics["validation_rows"] == 3 for record in records)
+        assert all(record.metrics["n_train"] == 3 for record in records)
+        assert all(
+            record.normalized_parameters
+            == plan.candidate_parameters[record.candidate_id]
+            for record in records
+        )
+        first_event_id = records[0].event_id
     # OOS and holdout labels cannot alter validation or the selected config.
     frame.loc[frame.timestamp >= "2020-01-03", "label"] = -100000.0
     (_, _), second = select("run_retry")
@@ -302,7 +305,8 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
         first.reference()["semantic_identity"]
         == second.reference()["semantic_identity"]
     )
-    assert records[0].event_id != read_trial_ledger(second.root)[0].event_id
+    with read_trial_ledger(second.root) as (_saved_plan, ledger_records_11):
+        assert first_event_id != ledger_records_11[0].event_id
 
     for phase in ("fit", "validation", "abandon"):
         primary = (
@@ -325,13 +329,13 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
             with pytest.raises(type(primary)) as caught:
                 select(f"run_{phase}")
         assert caught.value is primary
-        failed = read_trial_ledger(
+        with read_trial_ledger(
             layout.trial_ledger_root(f"run_{phase}", plan.experiment_id)
-        )
-        assert len(failed) == 1  # second config was registered, never attempted.
-        assert failed[0].status == ("abandoned" if phase == "abandon" else "failed")
-        assert failed[0].undefined_reasons == {"failure": type(primary).__name__}
-        assert "private text" not in str(failed[0].payload())
+        ) as (_saved_plan, failed):
+            assert len(failed) == 1  # second config was registered, never attempted.
+            assert failed[0].status == ("abandoned" if phase == "abandon" else "failed")
+            assert failed[0].undefined_reasons == {"failure": type(primary).__name__}
+            assert "private text" not in str(failed[0].payload())
     import quant_research_platform.research.experiments as experiments
 
     primary = ValueError("fit primary")
@@ -342,7 +346,15 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
     def fail_record(root, plan, record):
         if record.status == "attempted":
             return append_trial_record(root, plan, record)
-        raise OSError("record write failed")
+        from quant_research_platform.runtime.resources import (
+            current_runtime_resource_policy,
+        )
+
+        policy = current_runtime_resource_policy()
+        with policy.lease(
+            "test.failure_record_capacity", policy.working_set_headroom_bytes
+        ):
+            return append_trial_record(root, plan, record)
 
     with monkeypatch.context() as patch:
         patch.setattr(
@@ -397,7 +409,8 @@ def test_model_trial_read_validates_metrics_without_restricting_generic_experime
         )
         root = layout.trial_ledger_root(record.run_id, plan.experiment_id)
         append_trial_record(root, plan, record)
-        assert read_trial_ledger(root) == (record,)
+        with read_trial_ledger(root) as (_saved_plan, ledger_records_9):
+            assert ledger_records_9 == (record,)
         reference = {
             "run_id": record.run_id,
             "experiment_id": plan.experiment_id,
@@ -405,7 +418,8 @@ def test_model_trial_read_validates_metrics_without_restricting_generic_experime
             "semantic_identity": trial_ledger_semantic_identity(plan, (record,)),
         }
         with pytest.raises(ValueError, match="invalid_model"):
-            read_model_trial_ledger_reference(layout, reference)
+            with read_model_trial_ledger_reference(layout, reference):
+                pass
 
 
 def test_started_trial_survives_without_finish_and_terminal_is_identity_bound(tmp_path):
@@ -414,14 +428,17 @@ def test_started_trial_survives_without_finish_and_terminal_is_identity_bound(tm
     start = _record(plan, event_id="started", attempt_index=1, status="attempted")
     started_path = append_trial_record(root, plan, start)
     original = started_path.read_bytes()
-    assert read_trial_ledger(root, plan) == (start,)
+    with read_trial_ledger(root, plan) as (_saved_plan, ledger_records_6):
+        assert ledger_records_6 == (start,)
     terminal = replace(start, event_id="finished", status="abandoned")
     with pytest.raises(ValueError, match="trial_terminal_identity_mismatch"):
         append_trial_record(root, plan, replace(terminal, random_seed=99))
-    assert read_trial_ledger(root, plan) == (start,)
+    with read_trial_ledger(root, plan) as (_saved_plan, ledger_records_7):
+        assert ledger_records_7 == (start,)
     append_trial_record(root, plan, terminal)
     assert started_path.read_bytes() == original
-    assert read_trial_ledger(root, plan) == (terminal,)
+    with read_trial_ledger(root, plan) as (_saved_plan, ledger_records_8):
+        assert ledger_records_8 == (terminal,)
     with pytest.raises(ValueError, match="trial_attempt_not_next"):
         append_trial_record(root, plan, terminal)
 
@@ -490,11 +507,11 @@ os._exit(17)
         timeout=30,
     )
     assert child.returncode == 17
-    records = read_trial_ledger(
+    with read_trial_ledger(
         StorageLayout(tmp_path).trial_ledger_root("run_test", plan.experiment_id),
         plan,
-    )
-    assert len(records) == 1 and records[0].status == "attempted"
+    ) as (_saved_plan, records):
+        assert len(records) == 1 and records[0].status == "attempted"
 
 
 def test_run_ledger_references_have_no_arbitrary_member_limit(tmp_path):
@@ -517,16 +534,20 @@ def test_run_ledger_references_have_no_arbitrary_member_limit(tmp_path):
         available_memory_bytes=1024**3, explicit_cap_bytes=1024
     )
     with runtime_resource_policy_scope(policy):
-        with pytest.raises(MemoryError):
-            research_run_trial_references(layout, "run_test")
+        with pytest.raises(
+            ValueError, match="trial_ledger_working_set_exceeds_memory_capacity"
+        ):
+            with research_run_trial_references(layout, "run_test"):
+                pass
         assert policy.used_memory_bytes == 0
-    references = research_run_trial_references(layout, "run_test")
-    assert len(references) == 1026
-    assert len({item["experiment_id"] for item in references}) == 1026
+    with research_run_trial_references(layout, "run_test") as references:
+        assert len(references) == 1026
+        assert len({item["experiment_id"] for item in references}) == 1026
     root = layout.trial_ledger_root("run_test")
     (root / "invalid").write_text("not a ledger", encoding="utf-8")
     with pytest.raises(ValueError, match="trial_run_members_invalid"):
-        research_run_trial_references(layout, "run_test")
+        with research_run_trial_references(layout, "run_test"):
+            pass
 
 
 @pytest.mark.parametrize(
@@ -558,3 +579,237 @@ def test_trial_json_container_types_are_not_normalized(field):
     )
     with pytest.raises(ValueError, match="trial_record_payload_invalid"):
         TrialRecord.from_payload(payload)
+
+
+@pytest.mark.parametrize("cap", (1, None))
+def test_trial_recorder_rejects_before_publication_and_preserves_attempt(tmp_path, cap):
+    from quant_research_platform.contracts.models import ModelSpec
+    from quant_research_platform.research.experiments import TrialRecorder
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    layout = StorageLayout(tmp_path)
+    spec = ModelSpec(
+        model_id="ridge",
+        model_algorithm="ridge_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+        random_seed=7,
+        hyperparameters={"alpha": 1.0},
+    )
+    recorder = TrialRecorder(layout, "run_low_cap", _plan())
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024, explicit_cap_bytes=cap
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            ValueError, match="trial_ledger_working_set_exceeds_memory_capacity"
+        ):
+            recorder.begin(spec, common_coverage_id="coverage")
+        assert not recorder.root.exists()
+        assert policy.used_memory_bytes == 0
+    attempted = recorder.begin(spec, common_coverage_id="coverage")
+    original = {path.name: path.read_bytes() for path in recorder.root.rglob("*.json")}
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024, explicit_cap_bytes=cap
+    )
+    primary = KeyboardInterrupt("synthetic")
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            ValueError, match="trial_ledger_working_set_exceeds_memory_capacity"
+        ):
+            recorder.finish(attempted, error=primary)
+        assert policy.used_memory_bytes == 0
+    assert {
+        path.name: path.read_bytes() for path in recorder.root.rglob("*.json")
+    } == original
+    with read_trial_ledger(recorder.root) as (_, records):
+        assert len(records) == 1 and records[0].status == "attempted"
+
+
+def test_trial_ledger_cumulative_scope_admission_and_model_overlap(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage import manifests
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    root, plan = tmp_path / "ledger", _plan()
+    for index in range(1, 4):
+        append_trial_record(
+            root,
+            plan,
+            _record(
+                plan, event_id=f"event-{index}", attempt_index=index, status="failed"
+            ),
+        )
+    original = {path.name: path.read_bytes() for path in root.rglob("*.json")}
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with read_trial_ledger(root) as (saved, records):
+            held = policy.used_memory_bytes
+            assert saved == plan and len(records) == 3 and held > 0
+        assert policy.used_memory_bytes == 0
+        for primary in (RuntimeError("consumer"), KeyboardInterrupt("consumer")):
+            with pytest.raises(type(primary)) as caught:
+                with read_trial_ledger(root):
+                    raise primary
+            assert caught.value is primary
+            assert policy.used_memory_bytes == 0
+    reads = []
+    read = manifests.read_bounded_qrp_json
+
+    def observed(path, **kwargs):
+        reads.append(path.name)
+        return read(path, **kwargs)
+
+    monkeypatch.setattr(manifests, "read_bounded_qrp_json", observed)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2, explicit_cap_bytes=held
+    )
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("research.model.selection", held // 2):
+            with pytest.raises(
+                ValueError, match="trial_ledger_working_set_exceeds_memory_capacity"
+            ):
+                with read_trial_ledger(root):
+                    pytest.fail("ledger exceeded model overlap capacity")
+            assert policy.used_memory_bytes == held // 2
+        assert policy.used_memory_bytes == 0
+    assert len(reads) < 3
+    assert {path.name: path.read_bytes() for path in root.rglob("*.json")} == original
+
+
+def test_first_plan_readback_precedes_first_trial_publication(tmp_path, monkeypatch):
+    from quant_research_platform.storage import experiments
+
+    plan = _plan()
+    record = _record(plan, event_id="first", attempt_index=1, status="attempted")
+    write = experiments.atomic_write_json
+
+    def corrupt_first_plan(path, payload):
+        if path.name == "plan.json":
+            payload = {**payload, "target_id": "other-target"}
+        return write(path, payload)
+
+    monkeypatch.setattr(experiments, "atomic_write_json", corrupt_first_plan)
+    root = tmp_path / "ledger"
+    with pytest.raises(ValueError, match="trial_plan_mismatch"):
+        append_trial_record(root, plan, record)
+    assert (root / "plan.json").is_file()
+    assert not tuple((root / "records").iterdir())
+
+
+@pytest.mark.parametrize("member", ("plan", "record"))
+@pytest.mark.parametrize("extra_byte", (0, 1))
+@pytest.mark.parametrize("existing", (False, True))
+def test_trial_json_disk_limit_is_checked_before_publication(
+    tmp_path, member, extra_byte, existing
+):
+    from hashlib import sha256
+
+    from quant_research_platform.contracts.json_codec import (
+        MAX_QRP_JSON_BYTES,
+        render_qrp_json_object,
+    )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    root = tmp_path / "ledger"
+    plan = _plan()
+    padding = "研究" + chr(10) + '"'
+    disk_size = MAX_QRP_JSON_BYTES + extra_byte
+    if member == "plan":
+        plan = replace(plan, input_lineage=(padding,))
+        remaining = disk_size - len(
+            (render_qrp_json_object(plan.protocol_payload()) + "\n").encode("utf-8")
+        )
+        plan = replace(plan, input_lineage=(padding + "x" * remaining,))
+    record = _record(
+        plan, event_id="new", attempt_index=2 if existing else 1, status="failed"
+    )
+    if member == "record":
+        record = replace(record, artifact_lineage=(padding,))
+        remaining = disk_size - len(
+            (render_qrp_json_object(record.payload()) + "\n").encode("utf-8")
+        )
+        record = replace(record, artifact_lineage=(padding + "x" * remaining,))
+    payload = plan.protocol_payload() if member == "plan" else record.payload()
+    assert len((render_qrp_json_object(payload) + "\n").encode("utf-8")) == disk_size
+
+    def identities():
+        return {
+            path.relative_to(root): sha256(path.read_bytes()).hexdigest()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    with runtime_resource_policy_scope(explicit_cap_bytes=512 * 1024**2) as policy:
+        if existing:
+            saved_plan = _plan() if member == "plan" and extra_byte else plan
+            append_trial_record(
+                root,
+                saved_plan,
+                _record(saved_plan, event_id="first", attempt_index=1, status="failed"),
+            )
+        original = identities()
+        if extra_byte:
+            with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
+                append_trial_record(root, plan, record)
+            assert root.exists() is existing
+            assert identities() == original
+        else:
+            path = append_trial_record(root, plan, record)
+            checked = root / "plan.json" if member == "plan" else path
+            assert checked.stat().st_size == MAX_QRP_JSON_BYTES
+            assert checked.read_bytes().endswith(b"\n")
+            with read_trial_ledger(root, plan) as (saved, records):
+                assert saved == plan
+                assert records[-1] == record
+                assert len(records) == (2 if existing else 1)
+        assert policy.used_memory_bytes == 0
+
+
+def test_trial_ledger_root_stops_real_directory_scan_at_third_member(
+    tmp_path, monkeypatch
+):
+    from contextlib import contextmanager
+
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage import experiments
+
+    root = tmp_path / "ledger"
+    plan = _plan()
+    append_trial_record(
+        root, plan, _record(plan, event_id="first", attempt_index=1, status="failed")
+    )
+    for index in range(64):
+        (root / f"unexpected_{index:03d}").write_bytes(b"")
+    consumed = []
+    closed = []
+    scan = experiments.filesystem_scandir
+
+    @contextmanager
+    def observed(path):
+        try:
+            with scan(path) as entries:
+
+                def counted():
+                    for entry in entries:
+                        consumed.append(entry.name)
+                        yield entry
+
+                yield counted()
+        finally:
+            closed.append(True)
+
+    monkeypatch.setattr(experiments, "filesystem_scandir", observed)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(
+            ValueError, match="^dataset_metadata_directory_member_invalid$"
+        ):
+            with read_trial_ledger(root):
+                pytest.fail("unexpected ledger members were accepted")
+        assert policy.used_memory_bytes == 0
+    assert len(consumed) == 3
+    assert closed == [True]

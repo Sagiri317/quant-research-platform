@@ -166,46 +166,49 @@ def fixture_quarterly_results(results, *, validation_keys=None):
 def fixture_refit_reference(
     layout, reference, metadata, *, candidate_parameters=None, fit_keys=None
 ):
-    selection_plan, records = read_model_trial_ledger_reference(layout, reference)
-    value = records[0].payload()["normalized_parameters"]
-    spec = ModelSpec(
-        **{
-            **value,
-            "input_factor_columns": tuple(value["input_factor_columns"]),
-            "input_feature_columns": tuple(value["input_feature_columns"]),
-        }
-    )
-    refit = _refit_model_spec(
-        spec,
-        candidate_parameters=(
-            dict(spec.hyperparameters)
-            if candidate_parameters is None
-            else candidate_parameters
-        ),
-        n_train=metadata["rows_after_input_label_dropna"],
-        quarter_id=quarter_id_for_fold(selection_plan.folds[0]),
-        root_seed=selection_plan.random_seed,
-    )
-    coverage = ModelSampleCoverage({"fixture_refit": model_spec_payload(refit)})
-    if fit_keys is None:
-        fit_keys = pd.DataFrame(
-            {
-                "timestamp": pd.date_range(
-                    metadata["train_start"],
-                    metadata["train_end"],
-                    periods=metadata["rows_after_input_label_dropna"],
-                ),
-                "asset_id": ["asset_0"] * metadata["rows_after_input_label_dropna"],
+    with read_model_trial_ledger_reference(layout, reference) as (
+        selection_plan,
+        records,
+    ):
+        value = records[0].payload()["normalized_parameters"]
+        spec = ModelSpec(
+            **{
+                **value,
+                "input_factor_columns": tuple(value["input_factor_columns"]),
+                "input_feature_columns": tuple(value["input_feature_columns"]),
             }
         )
-    coverage.add(fit_keys)
-    metadata["fit_coverage_id"] = coverage.semantic_identity
-    selection_recorder = TrialRecorder(layout, reference["run_id"], selection_plan)
-    recorder, attempted = selection_recorder.begin_refit(
-        refit, common_coverage_id=coverage.semantic_identity
-    )
-    recorder.finish(attempted, model_metadata=metadata)
-    return recorder.reference()
+        refit = _refit_model_spec(
+            spec,
+            candidate_parameters=(
+                dict(spec.hyperparameters)
+                if candidate_parameters is None
+                else candidate_parameters
+            ),
+            n_train=metadata["rows_after_input_label_dropna"],
+            quarter_id=quarter_id_for_fold(selection_plan.folds[0]),
+            root_seed=selection_plan.random_seed,
+        )
+        coverage = ModelSampleCoverage({"fixture_refit": model_spec_payload(refit)})
+        if fit_keys is None:
+            fit_keys = pd.DataFrame(
+                {
+                    "timestamp": pd.date_range(
+                        metadata["train_start"],
+                        metadata["train_end"],
+                        periods=metadata["rows_after_input_label_dropna"],
+                    ),
+                    "asset_id": ["asset_0"] * metadata["rows_after_input_label_dropna"],
+                }
+            )
+        coverage.add(fit_keys)
+        metadata["fit_coverage_id"] = coverage.semantic_identity
+        selection_recorder = TrialRecorder(layout, reference["run_id"], selection_plan)
+        recorder, attempted = selection_recorder.begin_refit(
+            refit, common_coverage_id=coverage.semantic_identity
+        )
+        recorder.finish(attempted, model_metadata=metadata)
+        return recorder.reference()
 
 
 def _selection_metadata(

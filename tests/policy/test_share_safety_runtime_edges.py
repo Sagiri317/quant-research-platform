@@ -247,6 +247,57 @@ def test_sanitizer_redacts_explicit_authorization_and_private_key(
     assert sanitize_shared_text(text) == "[credential]"
 
 
+@pytest.mark.parametrize(
+    "text",
+    (
+        '{"password": "SYNTHETIC_SECRET"}',
+        "{'password': 'SYNTHETIC_SECRET'}",
+        '{"nested": {"api_key" : "SYNTHETIC_SECRET"}}',
+        '{"access_token": "SYNTHETIC_SECRET"}',
+        '{"client_secret": "SYNTHETIC_SECRET"}',
+        '{"ssh_private_key": "SYNTHETIC_SECRET"}',
+        '{"x-api-key": "SYNTHETIC_SECRET"}',
+        '{"Authorization": "Bearer SYNTHETIC_SECRET"}',
+        "{'auth': 'Basic SYNTHETIC_SECRET'}",
+    ),
+)
+def test_quoted_credentials_share_the_text_and_metadata_boundary(text: str) -> None:
+    assert unsafe_for_share_reason(text) == "credential"
+    assert evidence_json_value_unsafe_reason({"message": text}) == "credential"
+    assert (
+        evidence_text_stream_unsafe_reason((text[:8].encode(), text[8:].encode()))
+        == "credential"
+    )
+    with pytest.raises(
+        ValueError, match="unsafe_internal_artifact_metadata: credential"
+    ):
+        assert_internal_artifact_metadata_safe({"message": text})
+    assert "SYNTHETIC_SECRET" not in sanitize_shared_text(text)
+
+
+@pytest.mark.parametrize(
+    "text",
+    (
+        r'{"password": "SYNTHETIC_HEAD\"SYNTHETIC_TAIL"}',
+        r"{'password': 'SYNTHETIC_HEAD\'SYNTHETIC_TAIL'}",
+        'private_key="SYNTHETIC_HEAD\nSYNTHETIC_TAIL"',
+        r'{"Authorization": "Bearer SYNTHETIC_HEAD\"SYNTHETIC_TAIL"}',
+        '{"Authorization": "SYNTHETIC_HEAD"}',
+        'password="SYNTHETIC_HEAD',
+        "password='SYNTHETIC_TAIL",
+        '{"token":\n"SYNTHETIC_HEAD"}',
+        '{"token"\n \n:\n"SYNTHETIC_HEAD"}',
+        "auth:\n'Basic SYNTHETIC_TAIL'",
+    ),
+)
+def test_credential_redaction_consumes_the_entire_quoted_value(text: str) -> None:
+    assert unsafe_for_share_reason(text) == "credential"
+    assert evidence_text_stream_unsafe_reason((text.encode(),)) == "credential"
+    sanitized = sanitize_shared_text(text)
+    assert "SYNTHETIC_HEAD" not in sanitized
+    assert "SYNTHETIC_TAIL" not in sanitized
+
+
 def test_sanitizer_redacts_absolute_private_repo_path_as_one_token() -> None:
     text = "/workspace/qrp/data/research/a_share/demo/_manifest/manifest.json"
 
@@ -467,3 +518,46 @@ def test_internal_artifact_metadata_safety_is_owned_by_runtime(
         match=f"unsafe_internal_artifact_metadata: {reason}",
     ):
         assert_internal_artifact_metadata_safe(payload)
+
+
+@pytest.mark.parametrize("key", ["_token", "_api_key", "🔑_token"])
+def test_leading_separator_credentials_match_structured_keys(key):
+    import json
+
+    from quant_research_platform.policy.share_safety import (
+        evidence_text_stream_unsafe_reason,
+    )
+
+    value = {key: "SYNTHETIC_CANARY"}
+    text = json.dumps(value, ensure_ascii=False)
+    assert evidence_json_value_unsafe_reason(value) == "credential"
+    assert unsafe_for_share_reason(text) == "credential"
+    assert evidence_text_stream_unsafe_reason([text.encode()]) == "credential"
+    assert "SYNTHETIC_CANARY" not in sanitize_shared_text(text)
+
+
+@pytest.mark.parametrize("chunk_size", [1, 2048])
+@pytest.mark.parametrize(
+    ("text", "expected"),
+    [
+        ("MARKET_ID=synthetic\nordinary\nASSET_ID=synthetic", "row_sample"),
+        ("market_id\n=synthetic\nordinary\nasset_id=synthetic", "row_sample"),
+        ("asset_id\n=synthetic\nordinary\ntimestamp\n=synthetic", "row_sample"),
+        ("market_id\n\n=synthetic\nordinary\nasset_id\n=synthetic\n", "row_sample"),
+        ("asset_id=synthetic market_id=synthetic", None),
+        ("timestamp=synthetic asset_id=synthetic\n", None),
+        ("ASSET_ID=synthetic\nordinary\nMARKET_ID=synthetic\n", None),
+    ],
+)
+def test_streamed_fields_keep_case_boundaries_and_order(text, expected, chunk_size):
+    from quant_research_platform.policy.share_safety import (
+        evidence_text_stream_unsafe_reason,
+    )
+
+    assert unsafe_for_share_reason(text) == expected
+    payload = text.encode()
+    chunks = (
+        payload[offset : offset + chunk_size]
+        for offset in range(0, len(payload), chunk_size)
+    )
+    assert evidence_text_stream_unsafe_reason(chunks) == expected

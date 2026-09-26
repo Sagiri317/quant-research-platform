@@ -4,9 +4,10 @@ from __future__ import annotations
 
 import hashlib
 import sqlite3
+import sys
 import tempfile
-from collections.abc import Callable, Collection, Iterable, Iterator
-from contextlib import ExitStack, closing, contextmanager
+from collections.abc import Callable, Collection, Iterable
+from contextlib import closing, contextmanager
 from fractions import Fraction
 from math import log
 from pathlib import Path
@@ -28,13 +29,12 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import (
     MODEL_SELECTION_METRIC_DIRECTIONS,
-    _model_algorithm_facts,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.experiments import TrialRecorder
 from quant_research_platform.research.features.transforms import (
-    canonical_feature_validity_columns,
+    model_input_validity_columns,
 )
 from quant_research_platform.research.filtering import (
     _filter_working_set_bound,
@@ -50,8 +50,9 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
-    require_free_disk_headroom,
+    runtime_resource_policy_scope,
 )
+from quant_research_platform.storage._scratch_ownership import ScratchReservation
 
 VALIDATION_METRIC_COLUMNS = ("validation_ic", "validation_rankic", "validation_mse")
 VALIDATION_METRIC_REASON_COLUMNS = (
@@ -61,7 +62,6 @@ VALIDATION_METRIC_REASON_COLUMNS = (
 TEST_METRIC_COLUMNS = ("test_ic", "test_rankic", "test_mse")
 _MODEL_SELECTION_SQLITE_CACHE_BYTES = 64 * 1024
 _MODEL_SELECTION_SQLITE_PAGE_BYTES = 4096
-_MODEL_SELECTION_SQLITE_ROW_DISK_BYTES = 512
 _MODEL_SELECTION_SQLITE_STARTUP_BYTES = 64 * _MODEL_SELECTION_SQLITE_PAGE_BYTES
 _MODEL_SELECTION_METRIC_RESERVE_BYTES = 256 * 1024
 _CROSS_SECTIONAL_METRIC_QUERY = """
@@ -106,42 +106,57 @@ ORDER BY timestamp_ns, row_id
 
 
 @contextmanager
-def _model_selection_scratch() -> Iterator[str]:
-    scratch = tempfile.TemporaryDirectory(prefix="qrp-model-selection-")
-    scratch_path = scratch.__enter__()
-    try:
-        yield scratch_path
-    except BaseException as primary:
-        try:
-            scratch.__exit__(type(primary), primary, primary.__traceback__)
-        except BaseException as cleanup_error:
-            primary.add_note(
-                "model selection scratch cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
-            )
-        raise
-    else:
-        scratch.__exit__(None, None, None)
+def _model_selection_database(policy):
+    """Retain scratch admission until both the connection and directory close."""
 
-
-@contextmanager
-def _model_selection_database(
-    scratch_path: str,
-) -> Iterator[sqlite3.Connection]:
-    database = sqlite3.connect(f"{scratch_path}/validation.sqlite")
-    try:
-        yield database
-    except BaseException as primary:
+    with ScratchReservation(
+        Path(tempfile.gettempdir()), resource_policy=policy
+    ) as reservation:
+        directory = tempfile.TemporaryDirectory(prefix="qrp-model-selection-")
+        database = None
+        metric_lease = None
         try:
-            database.close()
-        except BaseException as cleanup_error:
-            primary.add_note(
-                "model selection database close also failed: "
-                f"{type(cleanup_error).__name__}"
+            policy.require_working_set(
+                _MODEL_SELECTION_METRIC_RESERVE_BYTES,
+                error="model_selection_working_set_exceeds_memory_capacity",
             )
-        raise
-    else:
-        database.close()
+            metric_lease = policy.lease(
+                "research.model.selection.metric", _MODEL_SELECTION_METRIC_RESERVE_BYTES
+            )
+            database = sqlite3.connect(f"{directory.name}/validation.sqlite")
+            yield database, reservation, metric_lease
+        finally:
+            primary = sys.exception()
+            failure = None
+            closed = False
+            try:
+                if database is not None:
+                    database.close()
+                closed = True
+                if metric_lease is not None:
+                    metric_lease.close()
+            except BaseException as exc:
+                failure = exc
+            try:
+                directory.cleanup()
+            except BaseException as exc:
+                if failure is None:
+                    failure = exc
+                else:
+                    failure.add_note(
+                        "model selection directory cleanup also failed: "
+                        f"{type(exc).__name__}"
+                    )
+            else:
+                if closed:
+                    reservation.resize(0)
+            if failure is not None:
+                if primary is None:
+                    raise failure
+                primary.add_note(
+                    "model selection scratch cleanup also failed: "
+                    f"{type(failure).__name__}"
+                )
 
 
 def validate_trial_metric_columns(
@@ -233,14 +248,8 @@ def model_validation_inputs(specs):
         dict.fromkeys(
             column
             for spec in specs
-            for column in (
-                *canonical_feature_validity_columns(spec.input_columns),
-                *(
-                    spec.input_columns
-                    if _model_algorithm_facts(spec.model_algorithm).input_kind
-                    != "rank_ensemble_inputs"
-                    else ()
-                ),
+            for column in model_input_validity_columns(
+                spec.input_columns, spec.model_algorithm
             )
         )
     )
@@ -332,112 +341,105 @@ def evaluate_model_trial_metrics_from_chunks(
         else ModelSampleCoverage(expected_coverage.scope)
     )
 
-    policy = current_runtime_resource_policy()
-    with ExitStack() as operation:
-        if policy is not None:
-            operation.enter_context(
-                policy.lease(
-                    "research.model.selection.metric",
-                    _MODEL_SELECTION_METRIC_RESERVE_BYTES,
-                )
-            )
-        with _model_selection_scratch() as scratch:
-            with _model_selection_database(scratch) as database:
-                database.execute(
-                    f"PRAGMA page_size={_MODEL_SELECTION_SQLITE_PAGE_BYTES}"
-                )
-                database.execute("PRAGMA temp_store=FILE")
-                database.execute(
-                    f"PRAGMA cache_size=-{_MODEL_SELECTION_SQLITE_CACHE_BYTES // 1024}"
-                )
-                database.execute("PRAGMA synchronous=NORMAL")
-                _admit_model_selection_disk_growth(
-                    database,
-                    Path(scratch),
-                    row_count=0,
-                )
-                database.execute(
-                    "CREATE TABLE validation_rows ("
-                    "row_id INTEGER PRIMARY KEY, "
-                    "asset_id, "
-                    "timestamp_ns INTEGER NOT NULL, "
-                    "label REAL NOT NULL, "
-                    "prediction REAL NOT NULL"
-                    ")"
-                )
-                source = iter(chunks)
-                with closing_iterator(source):
-                    for item in source:
-                        owned_lease = (
-                            item.lease if isinstance(item, OwnedValue) else None
-                        )
-                        frame = item.value if isinstance(item, OwnedValue) else item
-                        if frame.empty:
-                            if owned_lease is not None:
-                                owned_lease.close()
-                            continue
+    with (
+        runtime_resource_policy_scope() as policy,
+        _model_selection_database(policy) as (database, scratch, metric_lease),
+    ):
+        database.execute(f"PRAGMA page_size={_MODEL_SELECTION_SQLITE_PAGE_BYTES}")
+        database.execute("PRAGMA temp_store=FILE")
+        database.execute(
+            f"PRAGMA cache_size=-{_MODEL_SELECTION_SQLITE_CACHE_BYTES // 1024}"
+        )
+        database.execute("PRAGMA synchronous=NORMAL")
+        database.execute("PRAGMA threads=0")
+        database.execute("PRAGMA mmap_size=0")
+        row_count = 0
+        _admit_model_selection_storage(
+            database, scratch, policy, metric_lease, row_count=0
+        )
+        database.execute(
+            "CREATE TABLE validation_rows ("
+            "row_id INTEGER PRIMARY KEY, "
+            "timestamp_ns INTEGER NOT NULL, "
+            "label REAL NOT NULL, "
+            "prediction REAL NOT NULL"
+            ")"
+        )
+        source = iter(chunks)
+        with closing_iterator(source):
+            for item in source:
+                owned_lease = item.lease if isinstance(item, OwnedValue) else None
+                frame = item.value if isinstance(item, OwnedValue) else item
+                if frame.empty:
+                    if owned_lease is not None:
+                        owned_lease.close()
+                    continue
+                try:
+                    if coverage is not None:
+                        coverage.add(frame)
+                    _admit_model_selection_storage(
+                        database,
+                        scratch,
+                        policy,
+                        metric_lease,
+                        row_count=row_count + len(frame),
+                    )
+                    _insert_metric_chunk(
+                        database,
+                        frame,
+                        label_column=label_column,
+                        prediction_column=prediction_column,
+                    )
+                    row_count += len(frame)
+                except BaseException as primary:
+                    if owned_lease is not None:
                         try:
-                            if coverage is not None:
-                                coverage.add(frame)
-                            _admit_model_selection_disk_growth(
-                                database,
-                                Path(scratch),
-                                row_count=len(frame),
+                            owned_lease.close()
+                        except BaseException as cleanup_error:
+                            primary.add_note(
+                                "metric chunk lease release also failed: "
+                                f"{type(cleanup_error).__name__}"
                             )
-                            _insert_metric_chunk(
-                                database,
-                                frame,
-                                label_column=label_column,
-                                prediction_column=prediction_column,
-                            )
-                        except BaseException as primary:
-                            if owned_lease is not None:
-                                try:
-                                    owned_lease.close()
-                                except BaseException as cleanup_error:
-                                    primary.add_note(
-                                        "metric chunk lease release also failed: "
-                                        f"{type(cleanup_error).__name__}"
-                                    )
-                            raise
-                        else:
-                            if owned_lease is not None:
-                                owned_lease.close()
-                if coverage is not None and (
-                    coverage.semantic_identity != expected_coverage.semantic_identity
-                    or coverage.row_count != expected_coverage.row_count
-                ):
-                    raise ValueError("model_trial_common_coverage_mismatch")
-                database.commit()
-                validation_row_count = int(
-                    database.execute("SELECT COUNT(*) FROM validation_rows").fetchone()[
-                        0
-                    ]
-                )
-                if validation_row_count == 0:
-                    raise ValueError("empty_model_selection_validation_window")
-                _admit_model_selection_disk_growth(
-                    database,
-                    Path(scratch),
-                    row_count=validation_row_count,
-                )
-                (
-                    validation_rows,
-                    validation_mse,
-                    validation_ic,
-                    validation_ic_reason,
-                    validation_rankic,
-                    validation_rankic_reason,
-                ) = _cross_sectional_metric_summary(database)
-                return {
-                    "model_id": model_id,
-                    "validation_rows": validation_rows,
-                    "validation_ic": validation_ic,
-                    "validation_ic_reason": validation_ic_reason,
-                    "validation_rankic": validation_rankic,
-                    "validation_rankic_reason": validation_rankic_reason,
-                    "validation_mse": validation_mse,
-                }
+                    raise
+                else:
+                    if owned_lease is not None:
+                        owned_lease.close()
+        if coverage is not None and (
+            coverage.semantic_identity != expected_coverage.semantic_identity
+            or coverage.row_count != expected_coverage.row_count
+        ):
+            raise ValueError("model_trial_common_coverage_mismatch")
+        database.commit()
+        validation_row_count = int(
+            database.execute("SELECT COUNT(*) FROM validation_rows").fetchone()[0]
+        )
+        if validation_row_count == 0:
+            raise ValueError("empty_model_selection_validation_window")
+        _admit_model_selection_storage(
+            database,
+            scratch,
+            policy,
+            metric_lease,
+            row_count=validation_row_count,
+            query=True,
+        )
+        (
+            validation_rows,
+            validation_mse,
+            validation_ic,
+            validation_ic_reason,
+            validation_rankic,
+            validation_rankic_reason,
+        ) = _cross_sectional_metric_summary(database)
+        return {
+            "model_id": model_id,
+            "validation_rows": validation_rows,
+            "validation_ic": validation_ic,
+            "validation_ic_reason": validation_ic_reason,
+            "validation_rankic": validation_rankic,
+            "validation_rankic_reason": validation_rankic_reason,
+            "validation_mse": validation_mse,
+        }
 
 
 def _cross_sectional_metric_summary(
@@ -593,34 +595,87 @@ def _trial_correlation_summary(
     return float(result["mean"]), None
 
 
-def _admit_model_selection_disk_growth(
-    database: sqlite3.Connection,
-    scratch_path: Path,
+def _admit_model_selection_storage(
+    database,
+    scratch,
+    policy,
+    metric_lease,
     *,
     row_count: int,
+    query: bool = False,
 ) -> None:
-    growth_bytes = max(
-        _MODEL_SELECTION_SQLITE_STARTUP_BYTES,
-        max(1, row_count) * _MODEL_SELECTION_SQLITE_ROW_DISK_BYTES,
-    )
-    require_free_disk_headroom(
-        scratch_path,
-        reserve_bytes=2 * growth_bytes,
-    )
-    growth_pages = (
-        growth_bytes + _MODEL_SELECTION_SQLITE_PAGE_BYTES - 1
-    ) // _MODEL_SELECTION_SQLITE_PAGE_BYTES
-    for schema in ("main", "temp"):
-        current_pages = int(
-            database.execute(f"PRAGMA {schema}.page_count").fetchone()[0]
+    native_bytes = _MODEL_SELECTION_METRIC_RESERVE_BYTES
+    scratch_bytes = _MODEL_SELECTION_SQLITE_STARTUP_BYTES + 128 * row_count
+    if query:
+        options = dict(
+            value.split("=", 1)
+            for (value,) in database.execute("PRAGMA compile_options")
+            if "=" in value
         )
-        if row_count > 0 and schema == "temp":
-            current_pages = int(
-                database.execute("PRAGMA temp.max_page_count").fetchone()[0]
+        page = max(
+            _MODEL_SELECTION_SQLITE_PAGE_BYTES,
+            int(options.get("DEFAULT_PAGE_SIZE", "4096")),
+        )
+        default_cache = int(options.get("DEFAULT_CACHE_SIZE", "-2000"))
+        cache_bytes = (
+            -default_cache * 1024 if default_cache < 0 else default_cache * page
+        )
+        # This SQL has six sorters and five independent numeric window B-trees.
+        # A ten-field record is <=91 bytes (<=128 with SorterRecord/alignment).
+        # B-tree cells are <=103 bytes; 384/row covers one-third-full pages.
+        if options.get("TEMP_STORE") == "3":
+            # This compile option forces memory even after PRAGMA temp_store=FILE.
+            # SQLite uses one allocation per record, no PMAs and no bulk realloc;
+            # every temporary B-tree page must also remain resident.
+            native_bytes += 6 * 128 * row_count
+            native_bytes += 10 * (4 * page + 384 * row_count)
+        else:
+            # 4096/row covers main, all five trees, PMAs and their merge files.
+            scratch_bytes = 64 * page + 4096 * row_count
+            # QRP does not change SQLITE_CONFIG_PMASZ or install a custom cache.
+            # SQLite's built-in defaults can be overridden by compile options.
+            # See src/vdbesort.c, src/btree.c and cache_size/cache_spill pragmas.
+            pma_bytes = max(
+                int(options.get("SORTER_PMASZ", "250"))
+                * _MODEL_SELECTION_SQLITE_PAGE_BYTES,
+                _MODEL_SELECTION_SQLITE_CACHE_BYTES,
             )
-        database.execute(
-            f"PRAGMA {schema}.max_page_count={current_pages + growth_pages}"
+            # threads=0 permits one realloc: six buffers plus its old one.
+            native_bytes += 7 * min(
+                2 * max(_MODEL_SELECTION_SQLITE_PAGE_BYTES, 128 * row_count),
+                pma_bytes,
+            )
+            # Each tree has four cursors. 128 extra pages cover pinned paths
+            # (SQLite's max depth is 20), balancing and spill beyond cache_size.
+            # Doubling storage covers native page headers and allocator space.
+            native_bytes += 10 * min(
+                4 * page + 384 * row_count,
+                cache_bytes + 128 * page,
+            )
+            # A full PMA holds at least threshold-128 bytes before the next row.
+            # All leaf readers and each level of the 16-way merge tree coexist;
+            # each owns a page, a <=128-byte record and bounded metadata.
+            if 128 * row_count > pma_bytes:
+                readers = level = (128 * row_count + pma_bytes - 129) // (
+                    pma_bytes - 128
+                )
+                while level > 1:
+                    level = (level + 15) // 16
+                    readers += level
+                native_bytes += 6 * readers * (_MODEL_SELECTION_SQLITE_PAGE_BYTES + 512)
+    growth = native_bytes - metric_lease.reserved_bytes
+    if growth > 0:
+        policy.require_working_set(
+            growth, error="model_selection_working_set_exceeds_memory_capacity"
         )
+        metric_lease.grow(growth)
+    scratch.resize(scratch_bytes)
+    # main.max_page_count constrains this database, not anonymous sorters/trees;
+    # their complete lifetimes are covered by the reservation above.
+    main_bytes = _MODEL_SELECTION_SQLITE_STARTUP_BYTES + 128 * row_count
+    database.execute(
+        f"PRAGMA main.max_page_count={main_bytes // _MODEL_SELECTION_SQLITE_PAGE_BYTES}"
+    )
 
 
 def _insert_metric_chunk(
@@ -663,19 +718,15 @@ def _insert_metric_chunk(
         error="invalid_trial_metric_timestamp",
     )
     timestamp_ns = timestamps.astype("int64").to_numpy(copy=False)
-    assets = frame["asset_id"].to_numpy(copy=False)
     database.executemany(
-        "INSERT INTO validation_rows(asset_id, timestamp_ns, label, prediction) "
-        "VALUES (?, ?, ?, ?)",
+        "INSERT INTO validation_rows(timestamp_ns, label, prediction) VALUES (?, ?, ?)",
         (
             (
-                asset,
                 int(timestamp),
                 float(label),
                 float(prediction),
             )
-            for asset, timestamp, label, prediction in zip(
-                assets,
+            for timestamp, label, prediction in zip(
                 timestamp_ns,
                 label_values.to_numpy(dtype="float64", copy=False),
                 prediction_values.to_numpy(dtype="float64", copy=False),
@@ -810,7 +861,9 @@ def select_prediction_model_spec(
                     *dataset_spec.primary_key,
                     *common_validation_input_columns,
                     *candidate_spec.input_columns,
-                    *canonical_feature_validity_columns(candidate_spec.input_columns),
+                    *model_input_validity_columns(
+                        candidate_spec.input_columns, candidate_spec.model_algorithm
+                    ),
                     label_column,
                     *training_availability_columns(label_column),
                     *required_filter_columns(prediction_spec.sample_filter_mode),
@@ -983,9 +1036,8 @@ def iter_validation_prediction_chunks(
         candidate_spec.input_columns,
         model_result.prediction_model,
     )
-    rank_inputs_allow_missing = (
-        _model_algorithm_facts(candidate_spec.model_algorithm).input_kind
-        == "rank_ensemble_inputs"
+    prediction_inputs = model_input_validity_columns(
+        candidate_spec.input_columns, candidate_spec.model_algorithm
     )
     output_columns = (
         "timestamp",
@@ -1038,20 +1090,6 @@ def iter_validation_prediction_chunks(
                         filtered,
                         label_column=candidate_spec.label_column,
                     )
-                    prediction_inputs = tuple(
-                        dict.fromkeys(
-                            (
-                                *canonical_feature_validity_columns(
-                                    candidate_spec.input_columns
-                                ),
-                                *(
-                                    candidate_spec.input_columns
-                                    if not rank_inputs_allow_missing
-                                    else ()
-                                ),
-                            )
-                        )
-                    )
                     prediction_rows = filtered.loc[
                         filtered.loc[:, list(prediction_inputs)].notna().all(axis=1)
                     ]
@@ -1062,11 +1100,7 @@ def iter_validation_prediction_chunks(
                         feature_columns=(
                             usable_input_columns
                             if usable_input_columns is not None
-                            else canonical_feature_validity_columns(
-                                candidate_spec.input_columns
-                            )
-                            if rank_inputs_allow_missing
-                            else candidate_spec.input_columns
+                            else prediction_inputs
                         ),
                         target_column=candidate_spec.label_column,
                     )

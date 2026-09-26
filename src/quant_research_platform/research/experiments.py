@@ -33,11 +33,10 @@ class TrialRecorder:
         self.index = 0
 
     def begin(self, spec: ModelSpec, *, common_coverage_id: str) -> TrialRecord:
-        self.index += 1
         record = TrialRecord(
             run_id=self.run_id,
             event_id=f"event_{uuid4().hex}",
-            attempt_index=self.index,
+            attempt_index=self.index + 1,
             experiment_id=self.plan.experiment_id,
             protocol_hash=self.plan.protocol_hash,
             candidate_family_id=self.plan.candidate_family_id,
@@ -62,6 +61,7 @@ class TrialRecorder:
             artifact_lineage=self.plan.input_lineage,
         )
         append_trial_record(self.root, self.plan, record)
+        self.index = record.attempt_index
         return record
 
     def begin_refit(self, spec: ModelSpec, *, common_coverage_id: str):
@@ -122,7 +122,6 @@ class TrialRecorder:
         terminal = replace(
             record,
             event_id=f"event_{uuid4().hex}",
-            attempt_index=self.index,
             status=status,
             metrics=values,
             thread_settings=threads,
@@ -133,10 +132,10 @@ class TrialRecorder:
         append_trial_record(self.root, self.plan, terminal)
 
     def reference(self) -> dict[str, str]:
-        records = read_trial_ledger(self.root, self.plan)
-        return {
-            "run_id": self.run_id,
-            "experiment_id": self.plan.experiment_id,
-            "protocol_hash": self.plan.protocol_hash,
-            "semantic_identity": trial_ledger_semantic_identity(self.plan, records),
-        }
+        with read_trial_ledger(self.root, self.plan) as (plan, records):
+            return {
+                "run_id": self.run_id,
+                "experiment_id": self.plan.experiment_id,
+                "protocol_hash": self.plan.protocol_hash,
+                "semantic_identity": trial_ledger_semantic_identity(self.plan, records),
+            }

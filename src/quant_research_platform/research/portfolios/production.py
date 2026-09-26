@@ -28,6 +28,9 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.features.transforms import (
+    model_input_validity_columns,
+)
 from quant_research_platform.research.filtering import (
     A_SHARE_ELIGIBILITY_FACTS,
     a_share_eligibility,
@@ -218,6 +221,8 @@ def build_portfolio_ledger(
     optimizer_config: OptimizerConfig | None = None,
     frozen_calibration: AlphaCalibration | None = None,
     prediction_lookup: object,
+    persisted_model: object,
+    access_window: str,
     assumptions: ExecutionAssumptions,
     resource_policy: RuntimeResourcePolicy | None,
     fee_schedule_from_frame: Callable[..., object],
@@ -288,6 +293,35 @@ def build_portfolio_ledger(
             output_start - pd.DateOffset(months=12),
         ).date(),
         pd.Timestamp(output_window.end).date(),
+    )
+    validity_by_quarter = {
+        item["quarter_id"]: model_input_validity_columns(
+            item["model_metadata"]["input_columns"],
+            item["model_metadata"]["model_algorithm"],
+        )
+        for item in persisted_model.prediction_models(
+            prediction_window, access_window=access_window
+        )
+        if item["family_id"]
+        == (
+            persisted_model.quarterly_selections[item["source_quarter"]][
+                "selected_family_id"
+            ]
+            if candidate.prediction_selector == "champion"
+            else candidate.prediction_selector
+        )
+    }
+    dataset_columns = tuple(
+        dict.fromkeys(
+            (
+                *_DATASET_COLUMNS,
+                *(
+                    column
+                    for columns in validity_by_quarter.values()
+                    for column in columns
+                ),
+            )
+        )
     )
     alpha_start = max(session_start, pd.Timestamp(prediction_window.start))
     calibration_intervals = calibration_intervals.loc[
@@ -425,7 +459,7 @@ def build_portfolio_ledger(
             dataset_frames = input_channels.enter_context(
                 closing_iterator(
                     _iter_input_sessions(
-                        dataset_root, _DATASET_COLUMNS, history, resource_policy
+                        dataset_root, dataset_columns, history, resource_policy
                     )
                 )
             )
@@ -500,7 +534,7 @@ def build_portfolio_ledger(
                         assert factor_risk is not None
                         dataset = _read_next_session(
                             dataset_frames,
-                            _DATASET_COLUMNS,
+                            dataset_columns,
                             decision_timestamp,
                             retained,
                         )
@@ -591,6 +625,9 @@ def build_portfolio_ledger(
                             alpha = _prediction_alpha(
                                 dataset,
                                 prediction_lookup,
+                                validity_by_quarter[
+                                    str(decision_timestamp.to_period("Q"))
+                                ],
                             )
                             if alpha is not None:
                                 retained.enter_context(
@@ -629,7 +666,7 @@ def build_portfolio_ledger(
                     if not enhanced:
                         dataset = _read_next_session(
                             dataset_frames,
-                            _DATASET_COLUMNS,
+                            dataset_columns,
                             decision_timestamp,
                             retained,
                         )
@@ -654,7 +691,13 @@ def build_portfolio_ledger(
                         _validate_input_keys(dataset, panel)
                         _validate_input_keys(dataset, execution)
                         if not enhanced:
-                            alpha = _prediction_alpha(dataset, prediction_lookup)
+                            alpha = _prediction_alpha(
+                                dataset,
+                                prediction_lookup,
+                                validity_by_quarter[
+                                    str(decision_timestamp.to_period("Q"))
+                                ],
+                            )
                             retained.enter_context(
                                 _retain_payload(
                                     alpha,
@@ -1301,11 +1344,7 @@ def _build_session(
         raise ValueError("portfolio_state_invalid")
     eligible = _bool_series(dataset["eligible"], "portfolio_eligibility_invalid")
     alpha = alpha.reindex(dataset.index)
-    if (
-        alpha.loc[eligible].isna().any()
-        or not np.isfinite(alpha.loc[eligible].to_numpy(dtype="float64")).all()
-    ):
-        raise ValueError("portfolio_prediction_values_invalid")
+    prediction_eligible = eligible & alpha.notna()
     optimization: OptimizationResult | None = None
     if target_override is not None:
         target = target_override.copy(deep=True)
@@ -1318,7 +1357,7 @@ def _build_session(
     ):
         target = build_simple_target_weights(
             alpha,
-            eligible=eligible,
+            eligible=prediction_eligible,
             method=(
                 "float_cap_weight"
                 if candidate.construction == "top20_float_cap"
@@ -1498,13 +1537,19 @@ def _build_session(
 def _prediction_alpha(
     dataset: pd.DataFrame,
     prediction_lookup: object,
+    validity_columns: tuple[str, ...],
 ) -> pd.Series:
-    dataset = _session_frame(dataset, _DATASET_COLUMNS).set_index(
+    dataset = _session_frame(
+        dataset, tuple(dict.fromkeys((*_DATASET_COLUMNS, *validity_columns)))
+    ).set_index(
         "asset_id",
         drop=False,
     )
     eligible = _bool_series(dataset["eligible"], "portfolio_eligibility_invalid")
-    required_rows = dataset.loc[eligible, ["timestamp", "asset_id"]]
+    prediction_eligible = eligible & dataset.loc[:, list(validity_columns)].notna().all(
+        axis=1
+    )
+    required_rows = dataset.loc[prediction_eligible, ["timestamp", "asset_id"]]
     alpha = pd.Series(np.nan, index=dataset.index, dtype="float64")
     if required_rows.empty:
         return alpha
@@ -1519,8 +1564,10 @@ def _prediction_alpha(
             raise ValueError("missing_required_prediction_keys")
         alpha.loc[required_rows["asset_id"]] = np.asarray(values, dtype="float64")
     if (
-        alpha.loc[eligible].isna().any()
-        or not np.isfinite(alpha.loc[eligible].to_numpy(dtype="float64")).all()
+        alpha.loc[prediction_eligible].isna().any()
+        or not np.isfinite(
+            alpha.loc[prediction_eligible].to_numpy(dtype="float64")
+        ).all()
     ):
         raise ValueError("portfolio_prediction_values_invalid")
     return alpha

@@ -11,6 +11,7 @@ import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
 from quant_research_platform.contracts.features import FeatureTransformSpec
+from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -30,6 +31,18 @@ def canonical_feature_validity_columns(input_columns):
                 values.append(_CANONICAL_FEATURE_PREFIXES[0] + column[len(prefix) :])
                 break
     return tuple(dict.fromkeys(values))
+
+
+def model_input_validity_columns(input_columns, model_algorithm):
+    """Own structural and direct-input validity for every model consumer."""
+    direct = (
+        ()
+        if _model_algorithm_facts(model_algorithm).input_kind == "rank_ensemble_inputs"
+        else input_columns
+    )
+    return tuple(
+        dict.fromkeys((*canonical_feature_validity_columns(input_columns), *direct))
+    )
 
 
 def apply_feature_transforms(

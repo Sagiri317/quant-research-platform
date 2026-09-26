@@ -618,7 +618,7 @@ def research_run(
             if plan:
                 return result
             run_id = f"run_{uuid4().hex}"
-            record = _research_run_record(
+            _write_research_run_record(
                 layout=layout,
                 run_id=run_id,
                 profile=profile,
@@ -643,7 +643,6 @@ def research_run(
                 ),
                 holdout_not_accessed=True,
             )
-            write_research_run_record(layout.research_run_path(run_id), record)
             return {**result, "run_id": run_id}
         if plan:
             return plan_targets(
@@ -694,7 +693,7 @@ def research_run(
             )
         except BaseException as primary:
             try:
-                record = _research_run_record(
+                _write_research_run_record(
                     layout=layout,
                     run_id=run_id,
                     profile=profile,
@@ -708,14 +707,13 @@ def research_run(
                     failure_reason=f"research_run_failed:{type(primary).__name__.lower()}",
                     operation_evidence=operation_evidence,
                 )
-                write_research_run_record(layout.research_run_path(run_id), record)
             except BaseException as record_error:
                 primary.add_note(
                     "research run record write also failed: "
                     f"{type(record_error).__name__}"
                 )
             raise
-        record = _research_run_record(
+        _write_research_run_record(
             layout=layout,
             run_id=run_id,
             profile=profile,
@@ -728,7 +726,6 @@ def research_run(
             status=RunStatus(result["status"]),
             operation_evidence=operation_evidence,
         )
-        write_research_run_record(layout.research_run_path(run_id), record)
         return {**result, "run_id": run_id}
 
 
@@ -1966,7 +1963,18 @@ def _build_semantic_target(
             expected_run_id=f"run_{prediction_target}",
             time_window=prediction_window,
             family_selection=candidate.prediction_selector,
-        ) as (_manifest, prediction_lookup):
+        ) as (prediction_manifest, prediction_lookup):
+            lineage = prediction_manifest["metadata"]["model_metadata"]
+            persisted = read_quarterly_model_artifact(
+                _target_instance_root(
+                    profile,
+                    target_layout,
+                    lineage["model_artifact_id"],
+                    lineage["model_artifact_identity"],
+                ),
+                expected_identity=lineage["model_artifact_identity"],
+                trial_layout=target_layout,
+            )
             portfolio_chunks = binding.producer(
                 candidate=candidate,
                 layout=target_layout,
@@ -1977,6 +1985,8 @@ def _build_semantic_target(
                 prediction_window=prediction_window,
                 frozen_calibration=protocol.frozen_alpha,
                 prediction_lookup=prediction_lookup,
+                persisted_model=persisted,
+                access_window=target_protocol["access_window"],
                 assumptions=protocol.execution_assumptions,
                 risk_config=protocol.risk_config,
                 optimizer_config=protocol.optimizer_config,
@@ -2031,7 +2041,7 @@ def _output_spec_for_target(
     )
 
 
-def _research_run_record(
+def _write_research_run_record(
     *,
     run_id: str,
     layout: StorageLayout,
@@ -2046,7 +2056,7 @@ def _research_run_record(
     operation_evidence: Mapping[str, object],
     failure_reason: str | None = None,
     holdout_not_accessed: bool = False,
-) -> ResearchRunRecord:
+) -> None:
     references: list[ResearchRunTargetResult] = []
     for result in target_results:
         planned = target_references.get(result.target_id)
@@ -2073,31 +2083,33 @@ def _research_run_record(
             )
         )
     protocol_snapshot = protocol.manifest()
-    return ResearchRunRecord(
-        run_id=run_id,
-        trial_ledgers=research_run_trial_references(layout, run_id),
-        profile_id=profile.profile_id,
-        scenario_id=protocol.scenario_id,
-        protocol=protocol_snapshot,
-        protocol_identity=canonical_json_hash(protocol_snapshot),
-        research_window=research_window,
-        software_identity=software_identity.identity_hash,
-        terminal_targets=terminal_targets,
-        target_results=tuple(references),
-        status=status,
-        operation_evidence=operation_evidence,
-        failure_reason=failure_reason,
-        holdout_evidence={"qualification": "HOLDOUT_NOT_ACCESSED", "prior_runs": []}
-        if holdout_not_accessed
-        else _holdout_evidence(
-            layout=layout,
-            profile=profile,
-            protocol=protocol,
+    with research_run_trial_references(layout, run_id) as trial_ledgers:
+        record = ResearchRunRecord(
+            run_id=run_id,
+            trial_ledgers=trial_ledgers,
+            profile_id=profile.profile_id,
+            scenario_id=protocol.scenario_id,
+            protocol=protocol_snapshot,
+            protocol_identity=canonical_json_hash(protocol_snapshot),
             research_window=research_window,
             software_identity=software_identity.identity_hash,
+            terminal_targets=terminal_targets,
             target_results=tuple(references),
-        ),
-    )
+            status=status,
+            operation_evidence=operation_evidence,
+            failure_reason=failure_reason,
+            holdout_evidence={"qualification": "HOLDOUT_NOT_ACCESSED", "prior_runs": []}
+            if holdout_not_accessed
+            else _holdout_evidence(
+                layout=layout,
+                profile=profile,
+                protocol=protocol,
+                research_window=research_window,
+                software_identity=software_identity.identity_hash,
+                target_results=tuple(references),
+            ),
+        )
+        write_research_run_record(layout.research_run_path(run_id), record)
 
 
 def _holdout_evidence(

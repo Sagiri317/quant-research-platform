@@ -18,6 +18,10 @@ from quant_research_platform.contracts.experiments import (
     legal_training_rows,
     training_availability_columns,
 )
+from quant_research_platform.contracts.json_codec import (
+    bounded_rendered_qrp_json_object_size,
+    json_record_working_set_bytes,
+)
 from quant_research_platform.contracts.models import (
     _model_algorithm_facts,
     model_spec_payload,
@@ -34,9 +38,6 @@ from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
 )
 from quant_research_platform.research.experiments import TrialRecorder
-from quant_research_platform.research.features.transforms import (
-    canonical_feature_validity_columns,
-)
 from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.fitting import (
     iter_legal_training_chunks,
@@ -328,137 +329,154 @@ def _build_a_share_quarterly_models(
                 coverage_path = on_validation_coverage(quarter, coverage_frames())
                 if not coverage.row_count:
                     raise ValueError("empty_model_selection_validation_window")
-                winner_specs, selection_metadata, trial_ledgers, config_indices = (
-                    _select_model_family_winners(
-                        selection_spec=selection_spec,
-                        training_counts=training_counts,
-                        validation_coverage=coverage,
-                        validation_input_columns=common_inputs,
-                        dataset_spec=dataset_spec,
-                        model_catalog=model_catalog,
-                        chunks=chunks,
-                        model_ids=model_ids,
-                        tie_break_order=tie_break_order,
-                        quarter_id=quarter_id_for_fold(quarter),
-                        root_seed=root_seed,
-                        layout=layout,
-                        run_id=run_id,
-                        research_protocol_identity=research_protocol_identity,
-                        model_target_id=model_target_id,
-                        quarter=quarter,
-                        holdout_window=holdout_window,
-                        backend_versions=backend_versions,
-                        research_configuration=research_configuration,
-                    )
-                )
-                selection_metadata["common_validation_coverage"] = {
-                    "path": coverage_path,
-                    "semantic_identity": coverage.semantic_identity,
-                    "row_count": coverage.row_count,
-                }
-                for family_id, reference in zip(model_ids, trial_ledgers, strict=True):
-                    selected_spec = winner_specs[family_id]
-                    selected_configuration = next(
-                        item
-                        for item in research_configuration["models"]
-                        if item["model_id"] == family_id
-                    )
-                    selection_plan, _selection_records = (
-                        read_model_trial_ledger_reference(layout, reference)
-                    )
-                    refit_recorder = refit_attempt = fit_coverage = None
-
-                    def begin_refit(
-                        spec,
-                        training,
-                        *,
-                        selection_plan=selection_plan,
-                        quarter=quarter,
-                        reference=reference,
-                    ):
-                        nonlocal refit_recorder, refit_attempt, fit_coverage
-                        fit_coverage = _refit_sample_coverage(
-                            selection_plan,
-                            spec,
-                            training,
-                            fitting_cutoff=quarter.validation.end,
-                        )
-                        selection_recorder = TrialRecorder(
-                            layout, run_id, selection_plan
-                        )
-                        refit_recorder, refit_attempt = selection_recorder.begin_refit(
-                            spec, common_coverage_id=fit_coverage.semantic_identity
-                        )
-
-                    try:
-                        model_result, model_lease = _fit_selected_model_result(
-                            dataset_spec=dataset_spec,
-                            selected_spec=selected_spec,
+                with current_runtime_resource_policy().lease(
+                    "research.model.trial_references", 0
+                ) as trial_reference_lease:
+                    winner_specs, selection_metadata, trial_ledgers, config_indices = (
+                        _select_model_family_winners(
+                            selection_spec=selection_spec,
+                            trial_reference_lease=trial_reference_lease,
                             training_counts=training_counts,
+                            validation_coverage=coverage,
+                            validation_input_columns=common_inputs,
+                            dataset_spec=dataset_spec,
+                            model_catalog=model_catalog,
                             chunks=chunks,
-                            fitting_cutoff=time_value_isoformat(
-                                quarter.validation.end, date_only=True
-                            ),
+                            model_ids=model_ids,
+                            tie_break_order=tie_break_order,
                             quarter_id=quarter_id_for_fold(quarter),
                             root_seed=root_seed,
-                            candidate_parameters=selected_configuration.get(
-                                "parameter_candidates",
-                                [selected_configuration["hyperparameters"]],
-                            )[config_indices[family_id]],
-                            on_fit_start=begin_refit,
+                            layout=layout,
+                            run_id=run_id,
+                            research_protocol_identity=research_protocol_identity,
+                            model_target_id=model_target_id,
+                            quarter=quarter,
+                            holdout_window=holdout_window,
+                            backend_versions=backend_versions,
+                            research_configuration=research_configuration,
                         )
-                        model_result.metadata["fit_coverage_id"] = (
-                            fit_coverage.semantic_identity
+                    )
+                    selection_metadata["common_validation_coverage"] = {
+                        "path": coverage_path,
+                        "semantic_identity": coverage.semantic_identity,
+                        "row_count": coverage.row_count,
+                    }
+                    for family_id, reference in zip(
+                        model_ids, trial_ledgers, strict=True
+                    ):
+                        selected_spec = winner_specs[family_id]
+                        selected_configuration = next(
+                            item
+                            for item in research_configuration["models"]
+                            if item["model_id"] == family_id
                         )
-                        refit_recorder.finish(
-                            refit_attempt, model_metadata=model_result.metadata
-                        )
-                    except BaseException as primary:
-                        if refit_attempt is not None:
-                            try:
-                                refit_recorder.finish(refit_attempt, error=primary)
-                            except BaseException as record_error:
-                                primary.add_note(
-                                    "refit trial recording also failed: "
-                                    + type(record_error).__name__
+                        with read_model_trial_ledger_reference(layout, reference) as (
+                            selection_plan,
+                            _selection_records,
+                        ):
+                            refit_recorder = refit_attempt = fit_coverage = None
+
+                            def begin_refit(
+                                spec,
+                                training,
+                                *,
+                                selection_plan=selection_plan,
+                                quarter=quarter,
+                                reference=reference,
+                            ):
+                                nonlocal refit_recorder, refit_attempt, fit_coverage
+                                fit_coverage = _refit_sample_coverage(
+                                    selection_plan,
+                                    spec,
+                                    training,
+                                    fitting_cutoff=quarter.validation.end,
                                 )
-                        raise
-                    item = QuarterlyModelResult(
-                        quarter=quarter,
-                        model_id=selected_spec.model_id,
-                        model_result=model_result,
-                        family_id=family_id,
-                        selection_metadata=selection_metadata,
-                        trial_ledgers=(reference, refit_recorder.reference()),
-                    )
-                    owned_item = (
-                        OwnedValue(item, model_lease)
-                        if model_lease is not None
-                        else item
-                    )
-                    try:
-                        yield owned_item
-                    finally:
-                        ownership = (
-                            owned_item if isinstance(owned_item, OwnedValue) else None
-                        )
-                        primary = sys.exception()
-                        item = None
-                        model_result = None
-                        model_lease = None
-                        owned_item = None
-                        if ownership is not None and ownership.lease.active:
-                            try:
-                                ownership.release(owner="research.model.artifact")
-                            except BaseException as cleanup_error:
-                                if primary is not None:
-                                    primary.add_note(
-                                        "quarterly model lease release also failed: "
-                                        f"{type(cleanup_error).__name__}"
+                                selection_recorder = TrialRecorder(
+                                    layout, run_id, selection_plan
+                                )
+                                refit_recorder, refit_attempt = (
+                                    selection_recorder.begin_refit(
+                                        spec,
+                                        common_coverage_id=fit_coverage.semantic_identity,
                                     )
-                                else:
-                                    raise
-                        ownership = None
+                                )
+
+                            try:
+                                model_result, model_lease = _fit_selected_model_result(
+                                    dataset_spec=dataset_spec,
+                                    selected_spec=selected_spec,
+                                    training_counts=training_counts,
+                                    chunks=chunks,
+                                    fitting_cutoff=time_value_isoformat(
+                                        quarter.validation.end, date_only=True
+                                    ),
+                                    quarter_id=quarter_id_for_fold(quarter),
+                                    root_seed=root_seed,
+                                    candidate_parameters=selected_configuration.get(
+                                        "parameter_candidates",
+                                        [selected_configuration["hyperparameters"]],
+                                    )[config_indices[family_id]],
+                                    on_fit_start=begin_refit,
+                                )
+                                model_result.metadata["fit_coverage_id"] = (
+                                    fit_coverage.semantic_identity
+                                )
+                                refit_recorder.finish(
+                                    refit_attempt, model_metadata=model_result.metadata
+                                )
+                            except BaseException as primary:
+                                if refit_attempt is not None:
+                                    try:
+                                        refit_recorder.finish(
+                                            refit_attempt, error=primary
+                                        )
+                                    except BaseException as record_error:
+                                        primary.add_note(
+                                            "refit trial recording also failed: "
+                                            + type(record_error).__name__
+                                        )
+                                raise
+                            item = QuarterlyModelResult(
+                                quarter=quarter,
+                                model_id=selected_spec.model_id,
+                                model_result=model_result,
+                                family_id=family_id,
+                                selection_metadata=selection_metadata,
+                                trial_ledgers=(reference, refit_recorder.reference()),
+                            )
+                            owned_item = (
+                                OwnedValue(item, model_lease)
+                                if model_lease is not None
+                                else item
+                            )
+                            try:
+                                yield owned_item
+                            finally:
+                                ownership = (
+                                    owned_item
+                                    if isinstance(owned_item, OwnedValue)
+                                    else None
+                                )
+                                primary = sys.exception()
+                                item = None
+                                model_result = None
+                                model_lease = None
+                                owned_item = None
+                                if ownership is not None and ownership.lease.active:
+                                    try:
+                                        ownership.release(
+                                            owner="research.model.artifact"
+                                        )
+                                    except BaseException as cleanup_error:
+                                        if primary is not None:
+                                            primary.add_note(
+                                                "quarterly model lease release "
+                                                "also failed: "
+                                                f"{type(cleanup_error).__name__}"
+                                            )
+                                        else:
+                                            raise
+                                ownership = None
         finally:
             if model_lease is not None and model_lease.active:
                 primary = sys.exception()
@@ -623,6 +641,7 @@ def _selection_model_specs(base_spec, parameters, *, n_train, root_seed, quarter
 def _select_model_family_winners(
     *,
     selection_spec: PredictionSpec,
+    trial_reference_lease: MemoryLease,
     training_counts,
     validation_coverage,
     validation_input_columns,
@@ -727,6 +746,15 @@ def _select_model_family_winners(
             trial_recorder=recorder,
         )
         reference = recorder.reference()
+        reference_bytes = json_record_working_set_bytes(
+            bounded_rendered_qrp_json_object_size(
+                reference, lazy_arrays={}, max_bytes=sys.maxsize
+            )
+        )
+        current_runtime_resource_policy().require_working_set(
+            reference_bytes, error="trial_ledger_working_set_exceeds_memory_capacity"
+        )
+        trial_reference_lease.grow(reference_bytes)
         trial_ledgers.append(reference)
         winner_specs[family_id] = winner_spec
         config_indices[family_id] = trial_ids.index(winner_spec.model_id)
@@ -807,12 +835,6 @@ def _count_training_rows(
         sample_filter_mode=model_spec.sample_filter_mode,
     )
     count = 0
-    required_input_columns = (
-        canonical_feature_validity_columns(model_spec.input_columns)
-        if _model_algorithm_facts(model_spec.model_algorithm).input_kind
-        == "rank_ensemble_inputs"
-        else model_spec.input_columns
-    )
     for frame in iter_legal_training_chunks(
         chunks(
             read_columns,
@@ -822,7 +844,8 @@ def _count_training_rows(
         ),
         train_end=pd.Timestamp(train_end),
         label_column=model_spec.label_column,
-        input_columns=required_input_columns,
+        input_columns=model_spec.input_columns,
+        model_algorithm=model_spec.model_algorithm,
     ):
         count += len(frame)
     if count <= 0:

@@ -35,7 +35,6 @@ from quant_research_platform.research.filtering import (
 )
 from quant_research_platform.research.protocols.a_share import SCENARIO_IDS
 from quant_research_platform.runtime.resources import (
-    MemoryLease,
     OwnedValue,
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
@@ -384,9 +383,9 @@ def _join_processed_inputs(
                         ),
                     )
                 )
-                transformed = _apply_feature_transforms(
+                transformed = apply_feature_transforms(
                     assembled,
-                    dataset_spec,
+                    dataset_spec.feature_transforms,
                     resource_lease=transformed_lease,
                 )
                 transformed_lease.shrink_to(pandas_frame_payload_bytes(transformed))
@@ -834,21 +833,6 @@ def _a_share_model_target(frame: pd.DataFrame) -> pd.Series:
             continue
         target.loc[valid] = _stable_zscore(values.loc[valid])
     return target
-
-
-def _apply_feature_transforms(
-    frame: pd.DataFrame,
-    dataset_spec: ResearchDatasetSpec,
-    *,
-    resource_lease: MemoryLease | None = None,
-) -> pd.DataFrame:
-    if not dataset_spec.feature_transforms:
-        return frame
-    return apply_feature_transforms(
-        frame,
-        dataset_spec.feature_transforms,
-        resource_lease=resource_lease,
-    )
 
 
 def _input_dataset_identities(

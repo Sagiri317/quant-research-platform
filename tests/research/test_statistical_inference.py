@@ -522,3 +522,155 @@ def test_multiple_comparison_aligns_unlabeled_benchmark_to_model_rows(
         assert result.superior_models == tuple(expected.superior_models)
     with pytest.raises(ValueError, match="^loss_matrix_length_mismatch$"):
         entry(container(benchmark[:-1]), models, block_size=4, repetitions=99, seed=17)
+
+
+def test_cscv_preserves_finite_extreme_scale_against_decimal_oracle():
+    from decimal import Decimal, localcontext
+    from itertools import combinations
+
+    from quant_research_platform.research.statistics import _candidate_sharpes
+
+    matrix = np.random.default_rng(431).uniform(0.2, 1.2, size=(8, 2))
+    slices = np.array_split(np.arange(len(matrix)), 4)
+
+    def oracle(values):
+        with localcontext() as context:
+            context.prec = 80
+            scores = []
+            for column in values.T:
+                data = [Decimal.from_float(float(value)) for value in column]
+                mean = sum(data) / len(data)
+                deviation = (
+                    sum((value - mean) ** 2 for value in data) / (len(data) - 1)
+                ).sqrt()
+                scores.append(float(mean / deviation))
+            return np.asarray(scores)
+
+    overfit = 0
+    for selected in combinations(range(4), 2):
+        train = np.concatenate([slices[index] for index in selected])
+        test = np.concatenate(
+            [slices[index] for index in range(4) if index not in selected]
+        )
+        winner = int(np.argmax(oracle(matrix[train])))
+        overfit += oracle(matrix[test])[winner] < oracle(matrix[test])[1 - winner]
+        for scale in (1.0, 1e308):
+            np.testing.assert_allclose(
+                _candidate_sharpes(matrix[train] * scale, np.zeros_like(matrix[train])),
+                oracle(matrix[train] * scale),
+                rtol=8 * np.finfo("float64").eps,
+                atol=0.0,
+            )
+    for scale in (1.0, 1e308):
+        result = cscv_pbo(matrix * scale, slice_count=4, max_combinations=6)
+        assert result.status == "DEFINED"
+        assert result.pbo == overfit / 6
+
+
+def test_cscv_subnormal_observations_keep_original_roundoff_resolution():
+    from quant_research_platform.research.statistics import _candidate_sharpes
+
+    matrix = np.arange(1, 9, dtype="float64").reshape(4, 2) * 1e-310
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        assert _candidate_sharpes(matrix, np.ones_like(matrix)) is None
+    for invalid in (-1.0, np.nan, np.inf):
+        with pytest.raises(ValueError, match="return_roundoff_invalid"):
+            cscv_pbo(matrix, slice_count=4, max_combinations=6, return_roundoff=invalid)
+
+
+@pytest.mark.parametrize(
+    "values,errors,expected",
+    [
+        ([-1.7e308, 1.7e308], 0.0, 0.0),
+        ([-1.7e308, 1.7e308], 1.7e308, None),
+        ([1.7e308, 1.7e308], 1.7e308, None),
+        ([-1.7e308, -1.7e308], 1.7e308, None),
+        ([1e-310, 2e-310], 1.7e308, None),
+        ([-1.7e308, 1.7e308], 1e308, 0.0),
+    ],
+)
+def test_cscv_extreme_finite_ratios_and_uncertainty_intervals(values, errors, expected):
+    from quant_research_platform.research.statistics import (
+        _candidate_sharpes,
+        return_standard_deviation,
+    )
+
+    with np.errstate(over="raise", invalid="raise", divide="raise"):
+        result = _candidate_sharpes(
+            np.asarray(values)[:, None], np.full((len(values), 1), errors)
+        )
+        if expected is None:
+            assert result is None
+            assert return_standard_deviation(values, roundoff=errors) == 0.0
+        else:
+            np.testing.assert_array_equal(result, [expected])
+
+
+def test_return_interval_overlap_preserves_extreme_and_subnormal_separation():
+    from decimal import Decimal
+
+    from quant_research_platform.research.statistics import _return_intervals_overlap
+
+    limit = np.finfo("float64").max
+    tiny = np.nextafter(0.0, 1.0)
+    cases = [
+        ([tiny, 2 * tiny, limit], [0.0, 0.0, limit]),
+        ([-limit, limit], [limit, limit]),
+        ([-limit, -limit], [0.0, 0.0]),
+        ([limit, limit], [0.0, 0.0]),
+        ([-limit, 0.0], [0.0, limit]),
+        ([0.0, limit], [limit, 0.0]),
+        ([-limit, 0.0, limit], [limit, 0.0, limit]),
+        ([-limit, limit], [np.nextafter(limit, 0.0)] * 2),
+    ]
+    for values, errors in cases:
+        lower = [
+            Decimal.from_float(value) - Decimal.from_float(error)
+            for value, error in zip(values, errors, strict=True)
+        ]
+        upper = [
+            Decimal.from_float(value) + Decimal.from_float(error)
+            for value, error in zip(values, errors, strict=True)
+        ]
+        with np.errstate(over="raise", invalid="raise", divide="raise"):
+            result = _return_intervals_overlap(np.asarray(values), np.asarray(errors))
+        assert bool(result) == (max(lower) <= min(upper))
+
+
+@pytest.mark.parametrize("exponent", [-500, 0, 500])
+@pytest.mark.parametrize("sign", [-1.0, 1.0])
+def test_return_roundoff_separates_intervals_with_equal_rounded_endpoints(
+    exponent, sign
+):
+    from fractions import Fraction
+
+    from quant_research_platform.research.statistics import return_standard_deviation
+
+    values = np.ldexp(np.array([0.5, 1.0, 2.0]) * sign, exponent)
+    errors = np.ldexp(np.array([0.5, 0.0, np.nextafter(1.0, 0.0)]), exponent)
+    lower = [
+        Fraction(float(value)) - Fraction(float(error))
+        for value, error in zip(values, errors, strict=True)
+    ]
+    upper = [
+        Fraction(float(value)) + Fraction(float(error))
+        for value, error in zip(values, errors, strict=True)
+    ]
+    assert max(lower) > min(upper)
+    assert return_standard_deviation(values, roundoff=errors) == pytest.approx(
+        np.std(values, ddof=1), rel=1e-15, abs=0.0
+    )
+    errors[-1] = np.ldexp(1.0, exponent)
+    assert return_standard_deviation(values, roundoff=errors) == 0.0
+
+
+def test_cscv_keeps_disjoint_uncertainty_intervals_defined():
+    matrix = np.tile([[1.0, 0.1], [2.0, 0.3]], (4, 1))
+    errors = np.tile([[0.0, 0.0], [np.nextafter(1.0, 0.0), 0.0]], (4, 1))
+    result = cscv_pbo(matrix, slice_count=4, max_combinations=6, return_roundoff=errors)
+    assert result.status == "DEFINED"
+    assert result.pbo == 0.0
+    errors[1::2, 0] = 1.0
+    result = cscv_pbo(matrix, slice_count=4, max_combinations=6, return_roundoff=errors)
+    assert result.status == "UNDEFINED"
+    assert result.reason == "candidate_sharpe_undefined"

@@ -434,6 +434,7 @@ def test_prediction_releases_previous_model_array():
             input_columns=("feature",),
             predictor=predict,
             build_state=_PredictionBuildState(),
+            validity_columns=("feature",),
         )
         try:
             for item in stream:

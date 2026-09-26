@@ -8,11 +8,10 @@ from contextlib import ExitStack
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
-    canonical_feature_validity_columns,
+    model_input_validity_columns,
 )
 from quant_research_platform.research.filtering import (
     _filter_working_set_bound,
@@ -39,19 +38,7 @@ def _required_prediction_rows(
         metadata_key="sample_filter_mode",
     )
     eligible = eligible.dropna(
-        subset=list(
-            dict.fromkeys(
-                (
-                    *canonical_feature_validity_columns(input_columns),
-                    *(
-                        input_columns
-                        if _model_algorithm_facts(model_algorithm).input_kind
-                        != "rank_ensemble_inputs"
-                        else ()
-                    ),
-                )
-            )
-        )
+        subset=list(model_input_validity_columns(input_columns, model_algorithm))
     )
     timestamps = strict_timestamp_series(
         eligible["timestamp"],

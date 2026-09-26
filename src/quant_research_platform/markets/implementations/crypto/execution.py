@@ -4,14 +4,12 @@ from __future__ import annotations
 
 import json
 import struct
-import tempfile
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import groupby
-from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
@@ -48,7 +46,6 @@ from quant_research_platform.research.protocols.crypto_hft import (
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
-    require_free_disk_headroom,
 )
 from quant_research_platform.storage._scratch_ownership import (
     handle_preserving_primary,
@@ -61,7 +58,6 @@ from quant_research_platform.storage.exact_keys import (
 
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
 _UTC_DAY_NS = 86_400_000_000_000
-_PENDING_MARKOUT_DISK_CHECK_BYTES = 1024 * 1024
 _PENDING_MARKOUT_LENGTH = struct.Struct(">Q")
 _PENDING_MARKOUT_JSON_OVERHEAD_BYTES = 64 * 1024
 _EXECUTION_WORKSPACE_BYTES = 256 * 1024
@@ -259,13 +255,8 @@ class _PendingMarkouts:
         on_fill: Callable[[Mapping[str, Any]], None] | None,
         resource_policy: RuntimeResourcePolicy,
     ) -> None:
-        self._temp_root = Path(tempfile.gettempdir())
-        require_free_disk_headroom(
-            self._temp_root,
-            reserve_bytes=2 * _PENDING_MARKOUT_DISK_CHECK_BYTES,
-        )
-        self._disk_bytes_remaining = _PENDING_MARKOUT_DISK_CHECK_BYTES
-        self._file = tempfile.TemporaryFile(mode="w+b")
+        self._scratch = reserved_temporary_file(resource_policy=resource_policy)
+        self._file, self._reservation = self._scratch.__enter__()
         self._read_offset = 0
         self._next: tuple[OwnedValue[dict[str, Any]], int] | None = None
         self._metrics = metrics
@@ -286,13 +277,7 @@ class _PendingMarkouts:
             if primary is None:
                 self.expire_all()
         except BaseException as cleanup_error:
-            if primary is not None:
-                primary.add_note(
-                    "execution pending markout flush also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-            else:
-                cleanup_failure = cleanup_error
+            cleanup_failure = cleanup_error
         try:
             self._discard_next()
         except BaseException as release_error:
@@ -307,7 +292,7 @@ class _PendingMarkouts:
             else:
                 cleanup_failure.add_note(note)
         try:
-            self._file.close()
+            self._scratch.__exit__(None, None, None)
         except BaseException as close_error:
             if primary is not None:
                 primary.add_note(
@@ -342,15 +327,7 @@ class _PendingMarkouts:
             if len(payload) > max_payload_bytes:
                 raise AssertionError("hft_pending_markout_json_bound_invalid")
             record_bytes = _PENDING_MARKOUT_LENGTH.size + len(payload)
-            if record_bytes > self._disk_bytes_remaining:
-                admitted = max(_PENDING_MARKOUT_DISK_CHECK_BYTES, record_bytes)
-                require_free_disk_headroom(
-                    self._temp_root,
-                    reserve_bytes=2 * admitted,
-                )
-                self._disk_bytes_remaining = admitted
-            self._disk_bytes_remaining -= record_bytes
-            self._file.seek(0, 2)
+            self._reservation.resize(self._file.seek(0, 2) + record_bytes)
             self._file.write(_PENDING_MARKOUT_LENGTH.pack(len(payload)))
             self._file.write(payload)
             self._file.flush()
@@ -408,6 +385,11 @@ class _PendingMarkouts:
         self._file.seek(self._read_offset)
         header = self._file.read(_PENDING_MARKOUT_LENGTH.size)
         if not header:
+            if self._read_offset:
+                self._file.seek(0)
+                self._file.truncate()
+                self._reservation.resize(0)
+                self._read_offset = 0
             return None
         if len(header) != _PENDING_MARKOUT_LENGTH.size:
             raise RuntimeError("hft_pending_markout_record_invalid")
@@ -1460,88 +1442,104 @@ def _maker_new_order(order_id, side, quantity, state, row, config):
     )
 
 
-@contextmanager
-def _calibration_event_replays(source, policy):
-    """Decode a sample's native path once; replay bounded economic hypotheses."""
-    with reserved_temporary_file(resource_policy=policy) as (spool, reservation):
-        maximum = 0
-        with closing_iterator(source):
-            for event in source:
-                bound = (
-                    4096
-                    + 128
-                    * (
-                        len(getattr(event, "bids", ()))
-                        + len(getattr(event, "asks", ()))
-                    )
-                    + 8
-                    * sum(
-                        len(value)
-                        for value in vars(event).values()
-                        if isinstance(value, str)
-                    )
-                )
-                with policy.lease("crypto.calibration.event_encode", bound):
-                    payload = (
-                        json.dumps(
-                            vars(event), separators=(",", ":"), allow_nan=False
-                        ).encode()
-                        + b"\n"
-                    )
-                    reservation.resize(spool.tell() + len(payload))
-                    spool.write(payload)
-                    maximum = max(maximum, len(payload))
-                    payload = None
-            event = None
-
-        def replay():
-            spool.seek(0)
-            active = None
-            try:
-                while True:
-                    lease = policy.lease(
-                        "crypto.calibration.event_decode",
-                        json_record_working_set_bytes(maximum),
-                    )
-                    try:
-                        payload = spool.readline(maximum + 1)
-                        if not payload:
-                            return
-                        lease.shrink_to(json_record_working_set_bytes(len(payload)))
-                        event = SimpleNamespace(**parse_qrp_json_object(payload))
-                        payload = None
-                        if event.kind == "book":
-                            previous = active
-                            active = OwnedValue(event, lease)
-                            lease = None
-                            try:
-                                yield event
-                            finally:
-                                if previous is not None:
-                                    previous.release(owner="crypto.calibration.event")
-                        else:
-                            yield event
-                        event = None
-                    finally:
-                        if lease is not None:
-                            lease.close()
-            finally:
-                if active is not None:
-                    active.release(owner="crypto.calibration.event")
-
-        yield replay
-
-
 class MakerCalibration:
-    """Stream shared validation samples and replay only their event windows."""
+    """Reuse one bounded spool; recompute each decision's economic response."""
 
     def __init__(self, samples, events, *, resource_policy):
         self.samples = samples
         self.events = events
         self.policy = resource_policy
+        self._native = None
+        self._native_resources = ExitStack()
 
     def close(self):
-        self.samples = self.events = None
+        self.samples = self.events = self._native = None
+        self._native_resources.close()
+
+    @contextmanager
+    def _event_replays(self, source):
+        if self._native is None:
+            self._native = self._native_resources.enter_context(
+                reserved_temporary_file(resource_policy=self.policy)
+            )
+        spool, reservation = self._native
+        policy = self.policy
+
+        def release_window():
+            spool.seek(0)
+            spool.truncate()
+            reservation.resize(0)
+
+        with handle_preserving_primary(ExitStack()) as window:
+            window.callback(release_window)
+            maximum = 0
+            with closing_iterator(source):
+                for event in source:
+                    bound = (
+                        4096
+                        + 128
+                        * (
+                            len(getattr(event, "bids", ()))
+                            + len(getattr(event, "asks", ()))
+                        )
+                        + 8
+                        * sum(
+                            len(value)
+                            for value in vars(event).values()
+                            if isinstance(value, str)
+                        )
+                    )
+                    with policy.lease("crypto.calibration.event_encode", bound):
+                        payload = (
+                            json.dumps(
+                                vars(event), separators=(",", ":"), allow_nan=False
+                            ).encode()
+                            + b"\n"
+                        )
+                        reservation.resize(spool.tell() + len(payload))
+                        spool.write(payload)
+                        maximum = max(maximum, len(payload))
+                        payload = None
+                event = None
+
+            def replay():
+                spool.seek(0)
+                active = None
+                try:
+                    while True:
+                        lease = policy.lease(
+                            "crypto.calibration.event_decode",
+                            json_record_working_set_bytes(maximum),
+                        )
+                        try:
+                            payload = spool.readline(maximum + 1)
+                            if not payload:
+                                return
+                            lease.shrink_to(json_record_working_set_bytes(len(payload)))
+                            event = SimpleNamespace(**parse_qrp_json_object(payload))
+                            payload = None
+                            if event.kind == "book":
+                                previous = active
+                                active = OwnedValue(event, lease)
+                                lease = None
+                                try:
+                                    yield event
+                                finally:
+                                    if previous is not None:
+                                        previous.release(
+                                            owner="crypto.calibration.event"
+                                        )
+                            else:
+                                yield event
+                            event = None
+                        finally:
+                            if lease is not None:
+                                lease.close()
+                finally:
+                    if active is not None:
+                        active.release(owner="crypto.calibration.event")
+
+            yield replay
 
     @contextmanager
     def _book(self, event_id):
@@ -1703,186 +1701,209 @@ class MakerCalibration:
         fee_bps,
         funding,
     ):
-        with (
-            self.policy.lease(
-                "crypto.maker.calibration.query",
-                max(
-                    65536,
-                    512 * (len(state.bids) + len(state.asks))
-                    + 2048 * (len(commands) + len(funding) + 1),
+        try:
+            with (
+                self.policy.lease(
+                    "crypto.maker.calibration.query",
+                    max(
+                        65536,
+                        512 * (len(state.bids) + len(state.asks))
+                        + 2048 * (len(commands) + len(funding) + 1),
+                    ),
                 ),
-            ),
-            self.policy.lease("storage.exact_keys", EXACT_KEY_SQLITE_CACHE_BYTES),
-            ExactPrimaryKeyIndex(
-                primary_key=(),
-            ) as spill,
-        ):
-            sign = 1.0 if new_order.side == "buy" else -1.0
-            mid = _mid(state)
-            forecast = _positive(
-                mid * (1.0 + prediction), "hft_prediction_price_invalid"
-            )
-            limit = new_order.remaining
-            keep_gain = cancel_gain = 0.0
-            sample_count = 0
-
-            def records():
-                nonlocal keep_gain, cancel_gain, sample_count
-                for quantity in (0.0, limit):
-                    payload = struct.pack(">d", quantity)
-                    yield "choices", payload, payload
-                with closing_iterator(self.samples()) as samples:
-                    for sample in samples:
-                        sample_id = sample_count
-                        sample_count += 1
-                        error = sample["forecast_error"]
-                        funded = [0.0] * len(funding)
-                        with _calibration_event_replays(
-                            self.events(
-                                int(sample["event_start"]), int(sample["event_end"])
-                            ),
-                            self.policy,
-                        ) as replay_events:
-                            for replacement in (None, limit):
-                                cumulative = 0.0
-                                with closing_iterator(
-                                    self._response(
-                                        sample,
-                                        state=state,
-                                        decision_ns=decision_ns,
-                                        new_order=new_order,
-                                        active_order=active_order,
-                                        commands=commands,
-                                        lifetime_ns=lifetime_ns,
-                                        replace_quantity=replacement,
-                                        events=replay_events(),
-                                    )
-                                ) as response:
-                                    for elapsed, quantity, price, is_new in response:
-                                        if is_new:
-                                            cumulative += quantity
-                                            if 0.0 <= cumulative <= limit:
-                                                payload = struct.pack(">d", cumulative)
-                                                yield "choices", payload, payload
-                                            for index, (stamp, _cash) in enumerate(
-                                                funding
-                                            ):
-                                                if elapsed < stamp:
-                                                    funded[index] = max(
-                                                        funded[index], cumulative
-                                                    )
-                                        else:
-                                            gain = quantity * (
-                                                sign * (forecast - price)
-                                                - price * fee_bps / 10000.0
-                                                + sign * mid * error
-                                            )
-                                            gain += (
-                                                quantity
-                                                * sign
-                                                * sum(
-                                                    cash
-                                                    for stamp, cash in funding
-                                                    if elapsed < stamp
-                                                )
-                                            )
-                                            if replacement is None:
-                                                keep_gain += gain
-                                            else:
-                                                cancel_gain += gain
-                                if replacement is not None:
-                                    yield (
-                                        "response",
-                                        struct.pack(">dQ", cumulative, sample_id),
-                                        struct.pack(">dd", cumulative, error),
-                                    )
-                        for index, quantity in enumerate(funded):
-                            yield (
-                                f"funding_{index}",
-                                struct.pack(">dQ", quantity, sample_id),
-                                struct.pack(">dd", quantity, 0.0),
-                            )
-
-            with closing_iterator(records()) as rows:
-                spill.add_identity_payload_rows(rows=rows)
-
-            def curve(namespace):
-                with closing_iterator(
-                    spill.identity_payload_values(namespace=namespace)
-                ) as payloads:
-                    rows = (struct.unpack(">dd", payload) for payload in payloads)
-                    for quantity, group in groupby(rows, key=lambda row: row[0]):
-                        count, error_sum = 0, 0.0
-                        for _quantity, error in group:
-                            count += 1
-                            error_sum += error
-                        yield quantity, count, error_sum
-
-            price = index_to_price(new_order.price_index, new_order.price_unit)
-            edge = sign * (forecast - price) - price * fee_bps / 10000.0
-
-            def responses(namespace, *, with_error):
-                def weight(count, error):
-                    return count * edge + sign * mid * error if with_error else count
-
-                total = 0.0 if with_error else 0
-                with closing_iterator(curve(namespace)) as groups:
-                    for _quantity, count, error in groups:
-                        # Preserve the original ordered cumsum, not compensated sum.
-                        total += weight(count, error)
-                weighted = 0.0
-                prefix = 0.0 if with_error else 0
-                with (
-                    closing_iterator(curve(namespace)) as groups,
-                    closing_iterator(
-                        spill.identity_payload_values(namespace="choices")
-                    ) as choices,
-                ):
-                    current = next(groups, None)
-                    for payload in choices:
-                        choice = struct.unpack(">d", payload)[0]
-                        while current is not None and current[0] <= choice:
-                            quantity, count, error = current
-                            value = weight(count, error)
-                            weighted += quantity * value
-                            prefix += value
-                            current = next(groups, None)
-                        yield weighted + choice * (total - prefix)
-
-            with handle_preserving_primary(ExitStack()) as reads:
-                choices = reads.enter_context(
-                    closing_iterator(spill.identity_payload_values(namespace="choices"))
+                self.policy.lease("storage.exact_keys", EXACT_KEY_SQLITE_CACHE_BYTES),
+                ExactPrimaryKeyIndex(
+                    primary_key=(),
+                ) as spill,
+            ):
+                sign = 1.0 if new_order.side == "buy" else -1.0
+                mid = _mid(state)
+                forecast = _positive(
+                    mid * (1.0 + prediction), "hft_prediction_price_invalid"
                 )
-                streams = [
-                    reads.enter_context(
-                        closing_iterator(responses("response", with_error=True))
-                    ),
-                    *(
-                        reads.enter_context(
-                            closing_iterator(
-                                responses(f"funding_{index}", with_error=False)
-                            )
+                limit = new_order.remaining
+                keep_gain = cancel_gain = 0.0
+                sample_count = 0
+
+                def records():
+                    nonlocal keep_gain, cancel_gain, sample_count
+                    for quantity in (0.0, limit):
+                        payload = struct.pack(">d", quantity)
+                        yield "choices", payload, payload
+                    with closing_iterator(self.samples()) as samples:
+                        for sample in samples:
+                            sample_id = sample_count
+                            sample_count += 1
+                            error = sample["forecast_error"]
+                            funded = [0.0] * len(funding)
+                            with self._event_replays(
+                                self.events(
+                                    int(sample["event_start"]), int(sample["event_end"])
+                                )
+                            ) as replay_events:
+                                for replacement in (None, limit):
+                                    cumulative = 0.0
+                                    with closing_iterator(
+                                        self._response(
+                                            sample,
+                                            state=state,
+                                            decision_ns=decision_ns,
+                                            new_order=new_order,
+                                            active_order=active_order,
+                                            commands=commands,
+                                            lifetime_ns=lifetime_ns,
+                                            replace_quantity=replacement,
+                                            events=replay_events(),
+                                        )
+                                    ) as response:
+                                        for (
+                                            elapsed,
+                                            quantity,
+                                            price,
+                                            is_new,
+                                        ) in response:
+                                            if is_new:
+                                                cumulative += quantity
+                                                if 0.0 <= cumulative <= limit:
+                                                    payload = struct.pack(
+                                                        ">d", cumulative
+                                                    )
+                                                    yield "choices", payload, payload
+                                                for index, (stamp, _cash) in enumerate(
+                                                    funding
+                                                ):
+                                                    if elapsed < stamp:
+                                                        funded[index] = max(
+                                                            funded[index], cumulative
+                                                        )
+                                            else:
+                                                gain = quantity * (
+                                                    sign * (forecast - price)
+                                                    - price * fee_bps / 10000.0
+                                                    + sign * mid * error
+                                                )
+                                                gain += (
+                                                    quantity
+                                                    * sign
+                                                    * sum(
+                                                        cash
+                                                        for stamp, cash in funding
+                                                        if elapsed < stamp
+                                                    )
+                                                )
+                                                if replacement is None:
+                                                    keep_gain += gain
+                                                else:
+                                                    cancel_gain += gain
+                                    if replacement is not None:
+                                        yield (
+                                            "response",
+                                            struct.pack(">dQ", cumulative, sample_id),
+                                            struct.pack(">dd", cumulative, error),
+                                        )
+                            for index, quantity in enumerate(funded):
+                                yield (
+                                    f"funding_{index}",
+                                    struct.pack(">dQ", quantity, sample_id),
+                                    struct.pack(">dd", quantity, 0.0),
+                                )
+
+                with closing_iterator(records()) as rows:
+                    spill.add_identity_payload_rows(rows=rows)
+
+                def curve(namespace):
+                    with closing_iterator(
+                        spill.identity_payload_values(namespace=namespace)
+                    ) as payloads:
+                        rows = (struct.unpack(">dd", payload) for payload in payloads)
+                        for quantity, group in groupby(rows, key=lambda row: row[0]):
+                            count, error_sum = 0, 0.0
+                            for _quantity, error in group:
+                                count += 1
+                                error_sum += error
+                            yield quantity, count, error_sum
+
+                price = index_to_price(new_order.price_index, new_order.price_unit)
+                edge = sign * (forecast - price) - price * fee_bps / 10000.0
+
+                def responses(namespace, *, with_error):
+                    def weight(count, error):
+                        return (
+                            count * edge + sign * mid * error if with_error else count
                         )
-                        for index in range(len(funding))
-                    ),
-                ]
-                best_gain = -float("inf")
-                best_quantity = 0.0
-                for payload, base, *funded in zip(choices, *streams, strict=True):
-                    gain = base
-                    for (_stamp, cash), value in zip(funding, funded, strict=True):
-                        gain += sign * cash * value
-                    gain = (gain + cancel_gain) / sample_count
-                    if gain > best_gain:
-                        best_gain = gain
-                        best_quantity = struct.unpack(">d", payload)[0]
-            keep_gain /= sample_count
-            keep = bool(active_order is not None or commands) and keep_gain >= best_gain
-            return (
-                keep,
-                0.0 if keep else float(best_quantity),
-                float(keep_gain) if keep else float(best_gain),
-            )
+
+                    total = 0.0 if with_error else 0
+                    with closing_iterator(curve(namespace)) as groups:
+                        for _quantity, count, error in groups:
+                            # Preserve the original ordered cumsum, not compensated sum.
+                            total += weight(count, error)
+                    weighted = 0.0
+                    prefix = 0.0 if with_error else 0
+                    with (
+                        closing_iterator(curve(namespace)) as groups,
+                        closing_iterator(
+                            spill.identity_payload_values(namespace="choices")
+                        ) as choices,
+                    ):
+                        current = next(groups, None)
+                        for payload in choices:
+                            choice = struct.unpack(">d", payload)[0]
+                            while current is not None and current[0] <= choice:
+                                quantity, count, error = current
+                                value = weight(count, error)
+                                weighted += quantity * value
+                                prefix += value
+                                current = next(groups, None)
+                            yield weighted + choice * (total - prefix)
+
+                with handle_preserving_primary(ExitStack()) as reads:
+                    choices = reads.enter_context(
+                        closing_iterator(
+                            spill.identity_payload_values(namespace="choices")
+                        )
+                    )
+                    streams = [
+                        reads.enter_context(
+                            closing_iterator(responses("response", with_error=True))
+                        ),
+                        *(
+                            reads.enter_context(
+                                closing_iterator(
+                                    responses(f"funding_{index}", with_error=False)
+                                )
+                            )
+                            for index in range(len(funding))
+                        ),
+                    ]
+                    best_gain = -float("inf")
+                    best_quantity = 0.0
+                    for payload, base, *funded in zip(choices, *streams, strict=True):
+                        gain = base
+                        for (_stamp, cash), value in zip(funding, funded, strict=True):
+                            gain += sign * cash * value
+                        gain = (gain + cancel_gain) / sample_count
+                        if gain > best_gain:
+                            best_gain = gain
+                            best_quantity = struct.unpack(">d", payload)[0]
+                keep_gain /= sample_count
+                keep = (
+                    bool(active_order is not None or commands)
+                    and keep_gain >= best_gain
+                )
+                return (
+                    keep,
+                    0.0 if keep else float(best_quantity),
+                    float(keep_gain) if keep else float(best_gain),
+                )
+
+        except BaseException as primary:
+            try:
+                self.close()
+            except BaseException as close_error:
+                primary.add_note(
+                    "Maker calibration close also failed: " + type(close_error).__name__
+                )
+            raise
 
 
 def replay_maker_calibration(

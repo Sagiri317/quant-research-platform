@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
@@ -11,11 +12,16 @@ import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts.json_codec import (
     MAX_QRP_JSON_BYTES,
     bounded_qrp_json_object_snapshot,
+    json_record_working_set_bytes,
     parse_qrp_json_object,
     render_qrp_json_object,
 )
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
+)
+from quant_research_platform.runtime.resources import (
+    MemoryLease,
+    current_runtime_resource_policy,
 )
 from quant_research_platform.storage.atomic import atomic_write_text
 from quant_research_platform.storage.datasets.schema import (
@@ -65,7 +71,7 @@ def read_bounded_qrp_json(
                 expected_identity=identity,
                 error="dataset_metadata_file_identity_changed",
             ):
-                raw = handle.read(max_bytes + 1)
+                raw = handle.read(identity.size + 1)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
     except ValueError as exc:
@@ -79,6 +85,7 @@ def read_bounded_qrp_json_directory(
     root: Path,
     *,
     max_members: int,
+    lease: MemoryLease,
 ) -> tuple[tuple[str, dict[str, Any]], ...]:
     """Read one bounded directory containing only QRP JSON object files."""
 
@@ -89,6 +96,8 @@ def read_bounded_qrp_json_directory(
     )
     if not filesystem_is_dir(candidate):
         raise ValueError("dataset_metadata_directory_invalid")
+
+    policy = current_runtime_resource_policy()
 
     def member_names() -> tuple[str, ...]:
         names: list[str] = []
@@ -103,6 +112,12 @@ def read_bounded_qrp_json_directory(
                         or Path(entry.name).name != entry.name
                     ):
                         raise ValueError("dataset_metadata_directory_member_invalid")
+                    additional = 3 * sys.getsizeof(entry.name) + 256
+                    policy.require_working_set(
+                        additional,
+                        error="trial_ledger_working_set_exceeds_memory_capacity",
+                    )
+                    lease.grow(additional)
                     names.append(entry.name)
             after = filesystem_stat(candidate, follow_symlinks=False)
         except (FileNotFoundError, NotADirectoryError) as exc:
@@ -116,10 +131,24 @@ def read_bounded_qrp_json_directory(
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_metadata_directory_invalid") from exc
     names = member_names()
-    result = tuple((name, read_bounded_qrp_json(candidate / name)[1]) for name in names)
+    result = []
+    for name in names:
+        identity = _qrp_json_file_identity(candidate / name)
+        # Keep decoded JSON and its typed/semantic projection alive in one scope.
+        additional = 2 * json_record_working_set_bytes(identity.size)
+        policy.require_working_set(
+            additional, error="trial_ledger_working_set_exceeds_memory_capacity"
+        )
+        lease.grow(additional)
+        result.append(
+            (
+                name,
+                read_bounded_qrp_json(candidate / name, expected_identity=identity)[1],
+            )
+        )
     if member_names() != names:
         raise ValueError("dataset_metadata_directory_identity_changed")
-    return result
+    return tuple(result)
 
 
 def _directory_identity(value: os.stat_result) -> tuple[int, int, int, int]:

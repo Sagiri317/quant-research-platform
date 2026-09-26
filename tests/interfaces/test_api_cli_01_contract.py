@@ -180,6 +180,19 @@ def test_real_cli_entrypoints_emit_safe_failure_without_traceback(
     assert "invalid_run_id" in output
 
 
+def test_cli_failure_redacts_quoted_credential_text(monkeypatch):
+    def fail(*args, **kwargs):
+        raise ValueError('{"Authorization": "Bearer SYNTHETIC_SECRET"}')
+
+    monkeypatch.setattr(
+        cli_commands.queries, "describe_research_dataset_requirements", fail
+    )
+    result = CliRunner().invoke(app, ["research-datasets", "requirements", "pv_all"])
+    assert result.exit_code == 2
+    assert "[credential]" in result.output
+    assert "SYNTHETIC_SECRET" not in result.output
+
+
 def test_cli_main_preserves_keyboard_interrupt(monkeypatch):
     primary = KeyboardInterrupt("cancelled")
 

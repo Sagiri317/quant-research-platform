@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from itertools import combinations
 from math import comb, e
 from typing import Literal
@@ -913,6 +914,30 @@ def _return_roundoff(values: np.ndarray, roundoff: object) -> np.ndarray:
     return np.broadcast_to(errors, values.shape)
 
 
+def _return_intervals_overlap(data: np.ndarray, errors: np.ndarray) -> np.ndarray:
+    # With finite centers and nonnegative errors, overflowing endpoints extend
+    # outward only. Their infinities preserve the exact interval intersection.
+    with np.errstate(over="ignore"):
+        lower = np.max(data - errors, axis=0)
+        upper = np.min(data + errors, axis=0)
+    overlap = np.asarray(lower <= upper)
+    for column in np.ndindex(overlap.shape):
+        selected = (slice(None), *column)
+        if lower[column] != upper[column] or not errors[selected].any():
+            continue
+        # Rounding is monotone, so only equal rounded extrema are ambiguous.
+        # Refine that column without retaining a matrix of exact endpoints.
+        values, bounds = data[selected], errors[selected]
+        overlap[column] = max(
+            Fraction(float(value)) - Fraction(float(error))
+            for value, error in zip(values, bounds, strict=True)
+        ) <= min(
+            Fraction(float(value)) + Fraction(float(error))
+            for value, error in zip(values, bounds, strict=True)
+        )
+    return overlap
+
+
 def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.ndarray:
     """Sample risk, with zero only when all supplied error intervals overlap.
 
@@ -923,19 +948,23 @@ def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.n
     errors = _return_roundoff(data, roundoff)
     if len(data) < 2:
         return np.full(data.shape[1:], np.nan)
-    unresolved = np.max(data - errors, axis=0) <= np.min(data + errors, axis=0)
+    unresolved = _return_intervals_overlap(data, errors)
     _, exponent = np.frexp(np.max(np.abs(data), axis=0))
     scaled = np.ldexp(data, -exponent)
-    deviation = np.ldexp(np.std(scaled, axis=0, ddof=1), exponent)
-    return np.where(unresolved, 0.0, deviation)
+    return np.ldexp(
+        np.std(scaled, axis=0, ddof=1),
+        exponent,
+        out=np.zeros(data.shape[1:]),
+        where=~unresolved,
+    )
 
 
-def _candidate_sharpes(values: np.ndarray, roundoff: object) -> np.ndarray | None:
-    means = np.mean(values, axis=0)
-    standard_deviations = return_standard_deviation(values, roundoff=roundoff)
-    if bool((standard_deviations == 0.0).any()):
+def _candidate_sharpes(values: np.ndarray, errors: np.ndarray) -> np.ndarray | None:
+    if bool(_return_intervals_overlap(values, errors).any()):
         return None
-    return means / standard_deviations
+    _, exponent = np.frexp(np.max(np.abs(values), axis=0))
+    scaled = np.ldexp(values, -exponent)
+    return np.mean(scaled, axis=0) / np.std(scaled, axis=0, ddof=1)
 
 
 def _undefined_pbo(

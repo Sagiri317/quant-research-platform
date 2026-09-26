@@ -747,7 +747,7 @@ def test_fingerprint_rejects_generalized_nested_values_before_hashing(
         )
 
 
-@pytest.mark.parametrize("data_type", (pa.float32(), pa.float64()))
+@pytest.mark.parametrize("data_type", (pa.float16(), pa.float32(), pa.float64()))
 def test_fingerprint_rejects_float_primary_keys_before_hashing(
     data_type: pa.DataType,
     monkeypatch: pytest.MonkeyPatch,

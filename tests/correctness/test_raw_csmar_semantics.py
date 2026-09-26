@@ -1074,16 +1074,20 @@ def test_dirty_index_info_csv_audit_counts_and_semantics(
     monkeypatch.setattr(
         raw_schemas.tempfile, "tempdir", native_filesystem_path(scratch)
     )
-    temporary_file = raw_schemas.tempfile.TemporaryFile
+    from quant_research_platform.storage import _scratch_ownership
+
+    temporary_file = _scratch_ownership.TemporaryFile
     handles = []
 
     def open_scratch(*args, **kwargs):
-        assert Path(kwargs["dir"]) == Path(native_filesystem_path(scratch))
+        assert Path(raw_schemas.tempfile.gettempdir()) == Path(
+            native_filesystem_path(scratch)
+        )
         handle = temporary_file(*args, **kwargs)
         handles.append(handle)
         return handle
 
-    monkeypatch.setattr(raw_schemas.tempfile, "TemporaryFile", open_scratch)
+    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", open_scratch)
     index_path = tmp_path / "index_info_dirty.csv"
     filesystem_write_text(
         index_path,
@@ -1796,6 +1800,66 @@ def test_index_membership_identity_uses_normalized_provider_types(kind):
 @pytest.mark.parametrize("finish", ["normal", "early", "invalid"])
 @pytest.mark.parametrize("quoted", [False, True])
 def test_csv_unicode_fast_heap_is_covered_by_live_leases(
+    tmp_path, size, suffix, finish, quoted
+):
+    import os
+    import subprocess
+    import sys
+    from textwrap import dedent
+
+    # tracemalloc is process-wide: earlier tests can make this parser's first
+    # scratch path trigger a multi-MiB resize of Python's global intern table.
+    root = Path(__file__).resolve().parents[2]
+    script = dedent(
+        """
+        import sys
+        from pathlib import Path
+        import pytest
+        from tests.correctness.test_raw_csmar_semantics import (
+            _assert_csv_unicode_heap_coverage,
+        )
+
+        with pytest.MonkeyPatch.context() as monkeypatch:
+            _assert_csv_unicode_heap_coverage(
+                Path(sys.argv[1]), monkeypatch, int(sys.argv[2]),
+                sys.argv[3], sys.argv[4], sys.argv[5] == "True",
+            )
+        """
+    )
+    child = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            script,
+            str(tmp_path),
+            str(size),
+            suffix,
+            finish,
+            str(quoted),
+        ],
+        env={
+            **os.environ,
+            "PYTHONPATH": os.pathsep.join((str(root / "src"), str(root))),
+            **{
+                key: "1"
+                for key in (
+                    "OMP_NUM_THREADS",
+                    "OPENBLAS_NUM_THREADS",
+                    "MKL_NUM_THREADS",
+                    "NUMEXPR_NUM_THREADS",
+                    "VECLIB_MAXIMUM_THREADS",
+                    "BLIS_NUM_THREADS",
+                )
+            },
+        },
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+    assert child.returncode == 0, child.stderr
+
+
+def _assert_csv_unicode_heap_coverage(
     tmp_path, monkeypatch, size, suffix, finish, quoted
 ):
     import tempfile
@@ -1803,6 +1867,7 @@ def test_csv_unicode_fast_heap_is_covered_by_live_leases(
 
     import psutil
 
+    from quant_research_platform.runtime.resources import MemoryLease
     from tests.helpers.runtime_resources import capture_test_policy
 
     scratch = tmp_path / "scratch"
@@ -1824,6 +1889,17 @@ def test_csv_unicode_fast_heap_is_covered_by_live_leases(
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
+        shrink = MemoryLease.shrink_to
+
+        def shrink_after_covered_peak(lease, actual_bytes):
+            if lease.owner != "source.csmar.csv.record":
+                return shrink(lease, actual_bytes)
+            assert tracemalloc.get_traced_memory()[1] <= policy.used_memory_bytes
+            shrink(lease, actual_bytes)
+            assert tracemalloc.get_traced_memory()[0] <= policy.used_memory_bytes
+            tracemalloc.reset_peak()
+
+        monkeypatch.setattr(MemoryLease, "shrink_to", shrink_after_covered_peak)
         records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
         tracemalloc.start()
         try:
@@ -2243,3 +2319,533 @@ def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_pa
     filesystem_write_text(conflict, payload, encoding="utf-8")
     with pytest.raises(ValueError, match="table_identity_conflict"):
         raw_schemas.inspect_raw_export_file(conflict)
+
+
+@pytest.mark.parametrize(
+    ("code", "column"),
+    [
+        ("invalid_index_info_date", "start_date"),
+        ("invalid_index_info_date", "base_date"),
+        ("invalid_stock_master_date", "listing_date"),
+        ("invalid_stock_master_date", "delisting_date"),
+        ("invalid_stock_master_date", "status_change_date"),
+        ("invalid_industry_version_date", "abandon_date"),
+        ("invalid_analyst_date", "declare_date"),
+        ("invalid_listing_status_date", "announcement_date"),
+        ("invalid_stock_info_change_date", "announcement_date"),
+    ],
+)
+def test_controlled_csmar_date_reason_survives_workflow_sanitizer(code, column):
+    from quant_research_platform.workflows.research import _semantic_failure_code
+
+    with pytest.raises(ValueError) as raised:
+        interim._parse_optional_csmar_date(
+            pd.Series(["invalid-date"]), column, error_code=code
+        )
+    assert _semantic_failure_code(raised.value) == f"{code}:{column}"
+    valid = interim._parse_optional_csmar_date(
+        pd.Series(["", " ", None, "2020-01-01"]), column, error_code=code
+    )
+    assert valid.isna().tolist() == [True, True, True, False]
+    assert str(valid.dtype) == "datetime64[ns]"
+
+
+def test_controlled_csmar_numeric_reasons_survive_workflow_sanitizer():
+    from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
+    from quant_research_platform.workflows.research import _semantic_failure_code
+
+    datasets = [
+        (
+            "analyst_forecast",
+            _analyst_rows()[0],
+            ("forecast_eps", "forecast_pe"),
+            "invalid_analyst_value",
+        )
+    ]
+    for data_id, columns in interim.FINANCIAL_COLUMNS_BY_DATA_ID.items():
+        numeric = [c for c in columns if c not in interim.FINANCIAL_BASE_COLUMNS]
+        inverse = {value: key for key, value in COLUMN_MAPPINGS[data_id].items()}
+        row = {
+            "Stkcd": "000001",
+            "ShortName": "synthetic",
+            "IfCorrect": 0,
+            "DeclareDate": None,
+            "Accper": "2020-12-31",
+            "Typrep": "A",
+            **{inverse[column]: 2.5 for column in numeric},
+        }
+        datasets.append((data_id, row, numeric, "invalid_financial_value"))
+    checked = 0
+    for data_id, row, columns, code in datasets:
+        inverse = {value: key for key, value in COLUMN_MAPPINGS[data_id].items()}
+        valid = interim.normalize_raw_frame(pd.DataFrame([row]), data_id)
+        for column in columns:
+            assert float(valid.loc[0, column]) == float(row[inverse[column]])
+            assert pd.api.types.is_float_dtype(valid[column].dtype)
+            with pytest.raises(ValueError) as raised:
+                interim.normalize_raw_frame(
+                    pd.DataFrame([{**row, inverse[column]: "invalid-number"}]), data_id
+                )
+            assert _semantic_failure_code(raised.value) == f"{code}:{column}"
+            checked += 1
+    assert checked == 16
+    for message in ("private value", "/private/input.csv", "private\nvalue", "a" * 97):
+        assert _semantic_failure_code(ValueError(message)) == "valueerror"
+
+
+def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
+    import json
+
+    from quant_research_platform.artifacts.research import read_research_run_record
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.workflows import research
+    from tests.helpers.a_share_raw import _write_csmar
+    from tests.helpers.research_configuration import research_configuration
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw, parents=True)
+    inverse = {value: key for key, value in COLUMN_MAPPINGS["index_info"].items()}
+    _write_csmar(
+        raw,
+        "index_info",
+        [
+            {
+                inverse["index_code"]: "000905",
+                inverse["base_date"]: "2020-01-01",
+                inverse["start_date"]: "invalid-date",
+            }
+        ],
+    )
+    profile = research_profile()
+    result = research.research_run(
+        profile=profile,
+        layout=layout,
+        research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
+    )
+    expected = "interim_build_failed:invalid_index_info_date:start_date"
+    target = next(
+        item for item in result["target_results"] if item["target_id"] == "index_info"
+    )
+    assert result["status"] == target["status"] == "FAILED"
+    assert target["reason"] == expected
+    record = read_research_run_record(layout.research_run_path(result["run_id"]))
+    saved = next(
+        item for item in record.target_results if item.target_id == "index_info"
+    )
+    assert record.status.value == saved.status.value == "FAILED"
+    assert saved.reason == expected
+    report = research.report_build(
+        profile=profile, layout=layout, run_id=result["run_id"]
+    )
+    assert report["source_run_status"] == "FAILED"
+    assert expected in json.dumps(report)
+
+
+@pytest.mark.parametrize(
+    "available,cap",
+    [(64 * 1024**2, 8 * 1024**2), (64 * 1024**2, 384 * 1024), (384 * 1024, None)],
+)
+def test_csv_scratch_remains_admitted_when_extra_fields_leave_the_frame(
+    tmp_path, monkeypatch, available, cap
+):
+    import os
+    import tempfile
+
+    from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
+    from quant_research_platform.sources.csmar.field_mappings import RAW_TABLE_CONTRACTS
+    from quant_research_platform.storage import _scratch_ownership
+
+    scratch = tmp_path / "scratch"
+    filesystem_mkdir(scratch)
+    monkeypatch.setattr(tempfile, "tempdir", native_filesystem_path(scratch))
+    monkeypatch.setattr(_scratch_ownership, "_memory_filesystem", lambda _path: True)
+    temporary_file = _scratch_ownership.TemporaryFile
+    handles = []
+
+    def tracked_file(*args, **kwargs):
+        handle = temporary_file(*args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", tracked_file)
+    columns = RAW_TABLE_CONTRACTS["financial_balance"].required_columns
+    values = {column: "1" for column in columns}
+    values.update(
+        Stkcd="000001",
+        ShortName="Synthetic",
+        IfCorrect="0",
+        DeclareDate="2020-04-01",
+        Accper="2019-12-31",
+        Typrep="A",
+    )
+    path = tmp_path / "extra.csv"
+    filesystem_write_text(
+        path,
+        ",".join((*columns, "OptionalProviderField"))
+        + "\n"
+        + ",".join(values[column] for column in columns)
+        + ',"'
+        + "x" * (896 * 1024)
+        + '\nx"\n',
+        encoding="utf-8",
+    )
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=available, explicit_cap_bytes=cap)
+    ) as policy:
+        chunks = raw_exports.iter_private_export_chunks_with_policy(
+            path, dataset="financial_balance", chunksize=1, resource_policy=policy
+        )
+        lease = policy.lease("test.csmar.producer", next(chunks))
+        try:
+            if cap == 8 * 1024**2:
+                owned = chunks.send(lease)
+                assert "OptionalProviderField" not in owned.value
+                assert owned.value.Stkcd.tolist() == ["000001"]
+                scratch_bytes = sum(
+                    os.fstat(handle.fileno()).st_size
+                    for handle in handles
+                    if not handle.closed
+                )
+                assert scratch_bytes > 896 * 1024
+                assert policy.used_memory_bytes >= (
+                    scratch_bytes + pandas_frame_payload_bytes(owned.value)
+                )
+                owned.release(owner="test.csmar.consumer")
+            else:
+                with pytest.raises(
+                    ValueError, match="^storage_scratch_exceeds_memory_capacity$"
+                ):
+                    chunks.send(lease)
+        finally:
+            chunks.close()
+            lease.close()
+        assert policy.used_memory_bytes == 0
+    assert handles and all(handle.closed for handle in handles)
+    assert list(filesystem_iterdir(scratch)) == []
+
+
+def test_index_info_continuation_scratch_survives_the_reconstructed_frame_handoff(
+    tmp_path, monkeypatch
+):
+    import os
+    import tempfile
+
+    from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
+    from quant_research_platform.storage import _scratch_ownership
+
+    scratch = tmp_path / "scratch"
+    filesystem_mkdir(scratch)
+    monkeypatch.setattr(tempfile, "tempdir", native_filesystem_path(scratch))
+    monkeypatch.setattr(_scratch_ownership, "_memory_filesystem", lambda _path: True)
+    temporary_file = _scratch_ownership.TemporaryFile
+    handles = []
+
+    def tracked_file(*args, **kwargs):
+        handle = temporary_file(*args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", tracked_file)
+    count = 393216
+    path = tmp_path / "continuation.csv"
+    filesystem_write_text(
+        path,
+        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
+        "000985,synthetic,2014-01-02,2013-12-31,1000,scope,1,2,3,4,5,formula\n"
+        + "#\n" * count
+        + "000300,next,2014-01-03,2013-12-31,1000,scope,1,2,3,4,5,end\n",
+        encoding="utf-8",
+    )
+    with runtime_resource_policy_scope(
+        capture_test_policy(
+            available_memory_bytes=64 * 1024**2, explicit_cap_bytes=32 * 1024**2
+        )
+    ) as policy:
+        chunks = raw_exports.iter_private_export_chunks_with_policy(
+            path, dataset="index_info", chunksize=1, resource_policy=policy
+        )
+        lease = policy.lease("test.csmar.producer", next(chunks))
+        try:
+            owned = chunks.send(lease)
+            assert owned.value.Idxinfo10.iloc[0] == "formula" + "\n#" * count
+            scratch_bytes = sum(
+                os.fstat(handle.fileno()).st_size
+                for handle in handles
+                if not handle.closed
+            )
+            assert scratch_bytes >= 5 * count
+            assert policy.used_memory_bytes >= (
+                scratch_bytes + pandas_frame_payload_bytes(owned.value)
+            )
+            owned.release(owner="test.csmar.consumer")
+        finally:
+            chunks.close()
+            lease.close()
+        assert policy.used_memory_bytes == 0
+    assert handles and all(handle.closed for handle in handles)
+    assert list(filesystem_iterdir(scratch)) == []
+
+
+def test_expired_slow_record_releases_scratch_before_fast_records(tmp_path):
+    import os
+
+    path = tmp_path / "slow_fast.csv"
+    filesystem_write_text(
+        path, '"' + "s" * (8192 - 5) + '\nx"\n' + "a,b\n" * 3, encoding="utf-8"
+    )
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=64 * 1024**2)
+    ) as policy:
+        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
+        try:
+            slow, _ = next(records)
+            owner = slow._owner
+            assert os.fstat(owner._spool.fileno()).st_size > 0
+            for _ in range(3):
+                fast, _ = next(records)
+                assert fast.materialize() == ["a", "b"]
+                assert owner._decoded_fields is not None
+                assert os.fstat(owner._spool.fileno()).st_size == 0
+            with pytest.raises(RuntimeError, match="csmar_csv_record_expired"):
+                slow.materialize()
+        finally:
+            records.close()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("cancel", [False, True])
+def test_csmar_releases_decoded_batch_before_normalization(
+    tmp_path, monkeypatch, cancel
+):
+    import weakref
+
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    class TrackedRow(list):
+        pass
+
+    class TrackedNumericText(str):
+        pass
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw, parents=True)
+    rows = []
+    for day, price in ((1, 10.0), (2, 11.0), (3, 12.0)):
+        row = dict.fromkeys(
+            raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns, 1.0
+        )
+        row.update(
+            Stkcd="000001",
+            Trddt=f"2019-08-{day:02}",
+            Markettype=32,
+            Filling=0,
+            Opnprc=price,
+            Hiprc=price,
+            Loprc=price,
+            Clsprc=price,
+            Adjprcwd=price,
+        )
+        rows.append(row)
+    _write_csmar(raw, "market_bars_1d", rows)
+    records = raw_exports._iter_csv_records
+    transform = interim._transform_interim_chunk
+    references, observations = [], []
+    primary = KeyboardInterrupt("decoded_batch_consumer_cancel")
+
+    def tracked_records(*args, **kwargs):
+        with closing_iterator(records(*args, **kwargs)) as source:
+            for header, row, source_bytes in source:
+                tracked = TrackedRow(row)
+                position = header.index("Opnprc")
+                tracked[position] = TrackedNumericText(tracked[position])
+                references.append(
+                    (weakref.ref(tracked), weakref.ref(tracked[position]))
+                )
+                try:
+                    yield header, tracked, source_bytes
+                finally:
+                    tracked = None
+
+    def observe_transform(frame, **kwargs):
+        assert len(references) == len(frame) == 3
+        # The suspended row iterator may still own its final row.
+        assert all(ref() is None for pair in references[:-1] for ref in pair)
+        observations.append(len(frame))
+        if cancel:
+            raise primary
+        return transform(frame, **kwargs)
+
+    with runtime_resource_policy_scope(explicit_cap_bytes=32 * 1024**2) as policy:
+        original = interim.materialize_interim_data(
+            layout=layout,
+            data_ids=("market_bars_1d",),
+            chunksize=3,
+            resource_policy=policy,
+        ).artifact_roots["market_bars_1d"]
+        expected = read_dataset(original, resource_policy=policy)
+        old_good = _file_bytes(original)
+        candidate = StorageLayout(tmp_path / "comparison").interim_data_root(
+            "csmar", "market_bars_1d"
+        )
+        monkeypatch.setattr(raw_exports, "_iter_csv_records", tracked_records)
+        monkeypatch.setattr(interim, "_transform_interim_chunk", observe_transform)
+        request = dict(
+            layout=layout.with_target_roots({"market_bars_1d": candidate}),
+            data_ids=("market_bars_1d",),
+            chunksize=3,
+            resource_policy=policy,
+        )
+        if cancel:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                interim.materialize_interim_data(**request)
+            assert caught.value is primary
+            assert not filesystem_exists(candidate)
+        else:
+            interim.materialize_interim_data(**request)
+            actual = read_dataset(candidate, resource_policy=policy)
+            pd.testing.assert_frame_equal(actual, expected)
+        assert observations == [3]
+        remaining = [
+            type(ref()).__name__
+            for pair in references
+            for ref in pair
+            if ref() is not None
+        ]
+        assert not remaining, remaining
+        assert _file_bytes(original) == old_good
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "case",
+    ["index_lookahead", "index_lookahead_unicode", "projected_field", "column_label"],
+)
+def test_csmar_reader_payload_survives_output_lease_close(tmp_path, monkeypatch, case):
+    import sys
+    import weakref
+
+    from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
+
+    class TrackedText(str):
+        pass
+
+    width = 900_000 if case == "index_lookahead_unicode" else 600_000
+    wide_text = "x" * (width - 1) + ("😀" if case == "index_lookahead_unicode" else "x")
+    path = tmp_path / "reader.csv"
+    if case == "projected_field":
+        dataset = "market_cap"
+        header = "Stkcd,Shrchgdt,Nshrttl,Nshra,OptionalProviderField"
+        text = (
+            header
+            + "\n000001,2019-08-01,100,50,"
+            + "x" * width
+            + "\n000001,2019-08-02,200,100,small\n"
+        )
+    else:
+        dataset = "index_info"
+        header = (
+            "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+            "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10"
+        )
+        if case == "column_label":
+            text = (
+                header
+                + ","
+                + "x" * width
+                + "\n000985,short,2014-01-02,2013-12-31,1000,scope,1,2,3,4,5,end,1\n"
+            )
+        else:
+            text = (
+                header
+                + "\n000985,short,2014-01-02,2013-12-31,1000,scope,1,2,3,4,5,end\n"
+                + "000300,"
+                + wide_text
+                + ",2014-01-03,2013-12-31,1000,scope,1,2,3,4,5,end\n"
+            )
+    filesystem_write_text(path, text, encoding="utf-8")
+    del text
+    references = []
+    parse = raw_schemas._BoundedCsvRecords._try_fast_fields
+
+    def tracked_fields(reader):
+        result = parse(reader)
+        if result is not None:
+            fields = result[0]
+            for position, value in enumerate(fields):
+                if len(value) == width:
+                    fields[position] = TrackedText(value)
+                    references.append(weakref.ref(fields[position]))
+        return result
+
+    monkeypatch.setattr(
+        raw_schemas._BoundedCsvRecords, "_try_fast_fields", tracked_fields
+    )
+    with runtime_resource_policy_scope(
+        capture_test_policy(
+            available_memory_bytes=64 * 1024**2, explicit_cap_bytes=32 * 1024**2
+        )
+    ) as policy:
+        chunks = raw_exports.iter_private_export_chunks_with_policy(
+            path, dataset=dataset, chunksize=1, resource_policy=policy
+        )
+        lease = policy.lease("test.csmar.producer", next(chunks))
+        try:
+            owned = chunks.send(lease)
+            assert len(references) == 1 and references[0]() is not None
+            retained = sys.getsizeof(references[0]())
+            assert retained >= width
+            if case == "column_label":
+                assert len(owned.value.columns[-1]) == width
+                assert lease.reserved_bytes >= (
+                    retained + pandas_frame_payload_bytes(owned.value)
+                )
+            elif case.startswith("index_lookahead"):
+                assert owned.value.Idxinfo01.tolist() == ["short"]
+            else:
+                assert "OptionalProviderField" not in owned.value
+                assert owned.value.Nshrttl.tolist() == [100.0]
+            assert (
+                sum(
+                    item.reserved_bytes
+                    for item in policy._leases
+                    if item.owner.startswith("source.csmar.")
+                )
+                >= retained
+            )
+            del owned
+            next_bound = chunks.send(None)
+            lease.close()
+            # The reader still holds its last record/lookahead after output closes.
+            assert references[0]() is not None
+            assert (
+                sum(
+                    item.reserved_bytes
+                    for item in policy._leases
+                    if item.owner.startswith("source.csmar.")
+                )
+                >= retained
+            )
+            lease = policy.lease("test.csmar.next", next_bound)
+            if case == "column_label":
+                with pytest.raises(StopIteration):
+                    chunks.send(lease)
+            else:
+                owned = chunks.send(lease)
+                if case.startswith("index_lookahead"):
+                    assert owned.value.Idxinfo01.iloc[0] == wide_text
+                else:
+                    assert owned.value.Nshrttl.tolist() == [200.0]
+                del owned
+        finally:
+            chunks.close()
+            lease.close()
+        assert all(reference() is None for reference in references)
+        assert policy.used_memory_bytes == 0

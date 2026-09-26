@@ -895,9 +895,13 @@ observed = 1
 结构/上下文前提失败时，该特征/行必须明确不可用；中性化失败不得通过 `.fillna(0)` 进入模型。
 现有三列 (feature, feature_missing, feature_observed) 的唯一编码：eligible且结构无效为
 (NULL,1,0)，设计有效但普通raw缺失为(0,1,0)，已观察有效为(z,0,1)，ineligible为(NULL,0,0)。
-训练、验证与OOS按该模型实际依赖的来源feature是否结构有效筛选；即使只选missing/observed
+训练、验证、OOS及预测消费者的必需PK域，共用该模型实际输入的唯一有效性规则；即使只选missing/observed
 标记，也必须检查来源feature，不能因为标记为有限数而绕过。raw排名模型不消费的canonical
-结构状态不改变其既有缺失中性规则。不新增行级原因表，原始输入和转换规格保留可复核原因。
+结构状态不改变其既有缺失中性规则；非rank模型还要求直接输入完整。不新增行级原因表，原始输入和转换规格保留可复核原因。
+
+统计和组合从已验证预测谱系绑定的持久化模型派生同一有效域，域内缺失的必需预测仍失败。
+`prediction_eligible` 只决定alpha及简单组合入选，域外alpha为NULL；持仓和benchmark会计全集不随之裁剪。
+既有持仓按原交易限制正常退出，unknown继续BLOCKED；增强组合的incomplete资产仍固定benchmark，内部优化零系数不发布为预测。
 
 单因子统计始终使用原始已观测经济值，绝不使用模型填充零。
 

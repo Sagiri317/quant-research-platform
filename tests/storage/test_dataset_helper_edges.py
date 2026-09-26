@@ -1156,6 +1156,10 @@ def test_exact_key_index_preserves_open_failure_when_close_also_fails(
     )
     child = subprocess.run(
         [sys.executable, "-c", script, str(tmp_path)],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -1315,7 +1319,7 @@ def test_nested_float_primary_key_zero_keeps_bit_identity(
         ) == (1, 1, 0)
 
 
-@pytest.mark.parametrize("data_type", (pa.float32(), pa.float64()))
+@pytest.mark.parametrize("data_type", (pa.float16(), pa.float32(), pa.float64()))
 def test_top_level_float_primary_key_fingerprint_rejects_unsupported_width(
     data_type: pa.DataType,
 ) -> None:
@@ -1713,6 +1717,10 @@ def test_exact_key_index_close_failure_does_not_replace_primary(
     )
     child = subprocess.run(
         [sys.executable, "-c", script, str(tmp_path)],
+        env={
+            **os.environ,
+            "PYTHONPATH": str(Path(__file__).resolve().parents[2] / "src"),
+        },
         capture_output=True,
         text=True,
         check=False,
@@ -2481,3 +2489,19 @@ def test_inventory_discovery_rejects_case_variant_parquet_suffix(
 
     with pytest.raises(ValueError, match="invalid_dataset_part_files"):
         _discovered_paths(data_root, spec={"partition_columns": []})
+
+
+@pytest.mark.parametrize("data_type", (pa.float16(), pa.float32(), pa.float64()))
+def test_top_level_float_zero_key_encodings_agree(data_type):
+    table = pa.table({"key": pa.array([-0.0, 0.0], type=data_type)})
+    with ExactPrimaryKeyIndex(primary_key=("key",)) as index:
+        assert index.add_table(table, namespace="writer") == 1
+        assert (
+            index.add_comparison_table(
+                table,
+                namespace="comparison",
+                value_columns=(),
+                payload_target_bytes=1024**2,
+            )
+            == 1
+        )

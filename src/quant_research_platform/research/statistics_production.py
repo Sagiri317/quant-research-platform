@@ -10,10 +10,12 @@ import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.contracts.experiments import legal_training_rows
-from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.features.transforms import (
+    model_input_validity_columns,
+)
 from quant_research_platform.research.protocols.a_share import (
     analysis_windows,
     label_catalog,
@@ -33,6 +35,7 @@ from quant_research_platform.runtime.dataframes import iter_complete_session_fra
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
+    current_runtime_resource_policy,
     pandas_frame_payload_bytes,
 )
 from quant_research_platform.storage.experiments import (
@@ -139,7 +142,10 @@ def build_a_share_statistics_tables(
                 *(
                     column
                     for item in model_entries.values()
-                    for column in item["model_metadata"]["input_columns"]
+                    for column in model_input_validity_columns(
+                        item["model_metadata"]["input_columns"],
+                        item["model_metadata"]["model_algorithm"],
+                    )
                 ),
             )
         )
@@ -209,18 +215,13 @@ def build_a_share_statistics_tables(
                             for family_id in family_ids:
                                 entry = model_entries[(quarter_id, family_id)]
                                 metadata = entry["model_metadata"]
-                                inputs = metadata["input_columns"]
-                                rank_inputs = (
-                                    _model_algorithm_facts(
-                                        metadata["model_algorithm"]
-                                    ).input_kind
-                                    == "rank_ensemble_inputs"
+                                inputs = model_input_validity_columns(
+                                    metadata["input_columns"],
+                                    metadata["model_algorithm"],
                                 )
-                                eligible = session["eligible"].eq(True)
-                                if not rank_inputs:
-                                    eligible &= (
-                                        session.loc[:, inputs].notna().all(axis=1)
-                                    )
+                                eligible = session["eligible"].eq(True) & session.loc[
+                                    :, list(inputs)
+                                ].notna().all(axis=1)
                                 keys = session.loc[
                                     eligible, ["timestamp", "asset_id"]
                                 ].copy()
@@ -345,7 +346,9 @@ def build_a_share_statistics_tables(
                 prediction_id,
             ),
         )
-        model_trials = _model_trials(persisted_model, layout)
+        model_trials = _model_trials(
+            persisted_model, layout, output_lease=accumulator_lease
+        )
         model_losses = pd.DataFrame.from_records(
             loss_records,
             columns=(
@@ -559,39 +562,52 @@ def _prediction_summary(
     return pd.DataFrame([row])
 
 
-def _model_trials(persisted_model: object, layout: StorageLayout) -> pd.DataFrame:
-    rows: list[dict[str, object]] = []
-    selections = {}
-    for reference in persisted_model.trial_ledgers:
-        plan, records = read_model_trial_ledger_reference(layout, reference)
-        if plan.stage == "selection":
-            identity = reference["semantic_identity"]
-            if identity in selections:
-                raise ValueError("statistics_trial_reference_mismatch")
-            selections[identity] = (plan, records)
+def _model_trials(
+    persisted_model: object, layout: StorageLayout, *, output_lease
+) -> pd.DataFrame:
+    groups = []
+    pending = {}
     for quarter_id, selection in persisted_model.quarterly_selections.items():
         if type(quarter_id) is not str or type(selection) is not dict:
             raise ValueError("statistics_model_selection_metadata_missing")
-        selected_family = selection.get("selected_family_id")
         for family in selection.get("families", ()):
             if type(family) is not dict or type(family.get("family_id")) is not str:
                 raise ValueError("statistics_model_family_metadata_invalid")
+            identity = family["trial_ledger_semantic_identity"]
+            if identity in pending:
+                raise ValueError("statistics_trial_reference_mismatch")
+            rows = []
+            groups.append(rows)
+            pending[identity] = (
+                quarter_id,
+                selection.get("selected_family_id"),
+                family,
+                rows,
+            )
+    for reference in persisted_model.trial_ledgers:
+        with read_model_trial_ledger_reference(layout, reference) as (plan, records):
+            if plan.stage != "selection":
+                continue
+            identity = reference["semantic_identity"]
+            if identity not in pending:
+                raise ValueError("statistics_trial_reference_mismatch")
+            quarter_id, selected_family, family, rows = pending.pop(identity)
             family_id = family["family_id"]
             selected_config = family.get("selected_config_id")
-            identity = family["trial_ledger_semantic_identity"]
-            if identity not in selections:
-                raise ValueError("statistics_trial_reference_mismatch")
-            plan, records = selections.pop(identity)
             if plan.candidate_family_id != family_id:
                 raise ValueError("statistics_trial_reference_mismatch")
             for record in records:
-                trial = {
-                    "model_id": record.candidate_id,
-                    **dict(record.metrics),
-                }
-                config_id = trial["model_id"]
-                value = trial["validation_rankic"]
+                config_id = record.candidate_id
+                value = record.metrics["validation_rankic"]
                 defined = type(value) in {int, float} and np.isfinite(value)
+                # Nine scalar columns, row dictionaries, and DataFrame construction.
+                row_bytes = 4096 + 4 * sum(
+                    len(value) for value in (quarter_id, family_id, config_id)
+                )
+                current_runtime_resource_policy().require_working_set(
+                    row_bytes, error="statistics_accumulator_bound_invalid"
+                )
+                output_lease.grow(row_bytes)
                 rows.append(
                     {
                         "quarter_id": quarter_id,
@@ -599,11 +615,11 @@ def _model_trials(persisted_model: object, layout: StorageLayout) -> pd.DataFram
                         "config_id": config_id,
                         "metric_id": "validation_rankic",
                         "value": float(value) if defined else np.nan,
-                        "observation_count": trial["validation_rows"],
+                        "observation_count": record.metrics["validation_rows"],
                         "status": "DEFINED" if defined else "UNDEFINED",
-                        "reason": (
-                            None if defined else trial["validation_rankic_reason"]
-                        ),
+                        "reason": None
+                        if defined
+                        else record.metrics["validation_rankic_reason"],
                         "selection_status": (
                             "CHAMPION"
                             if family_id == selected_family
@@ -614,11 +630,11 @@ def _model_trials(persisted_model: object, layout: StorageLayout) -> pd.DataFram
                         ),
                     }
                 )
-    if selections:
+    if pending:
         raise ValueError("statistics_trial_reference_mismatch")
-    if not rows:
+    if not any(groups):
         raise ValueError("statistics_model_trials_empty")
-    return pd.DataFrame(rows)
+    return pd.DataFrame(row for group in groups for row in group)
 
 
 def _common_model_rank_ic(frame, *, family_ids, label_column):

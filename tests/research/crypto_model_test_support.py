@@ -116,15 +116,15 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                             )
                         )
 
-                    _, records = read_trial_ledger_reference(
+                    with read_trial_ledger_reference(
                         layout, member.selection_trial_reference
-                    )
-                    assert records[0].metrics["n_train"] == count(
-                        (member.fold.train,), member.fold.train.end
-                    )
-                    assert records[0].metrics["validation_rows"] == count(
-                        (member.fold.validation,), member.fold.validation.end
-                    )
+                    ) as (_, records):
+                        assert records[0].metrics["n_train"] == count(
+                            (member.fold.train,), member.fold.train.end
+                        )
+                        assert records[0].metrics["validation_rows"] == count(
+                            (member.fold.validation,), member.fold.validation.end
+                        )
                     assert member.result.metadata[
                         "rows_after_input_label_dropna"
                     ] == count(
@@ -407,80 +407,88 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 read_model_trial_ledger_reference,
             )
 
-            plan, terminals = read_model_trial_ledger_reference(layout, references[0])
-            for kind, changes in (
-                ("lineage", {"input_lineage": ("e" * 64,)}),
-                ("family", {"candidate_family_id": "different_family"}),
+            with read_model_trial_ledger_reference(layout, references[0]) as (
+                plan,
+                terminals,
             ):
-                changed_plan = replace(
-                    plan, experiment_id=f"experiment_{uuid4().hex}", **changes
-                )
-                terminal = replace(
-                    terminals[0],
-                    event_id=f"event_{uuid4().hex}",
-                    run_id=f"run_{uuid4().hex}",
-                    experiment_id=changed_plan.experiment_id,
-                    protocol_hash=changed_plan.protocol_hash,
-                    candidate_family_id=changed_plan.candidate_family_id,
-                    artifact_lineage=changed_plan.input_lineage,
-                )
-                append_trial_record(
-                    layout.trial_ledger_root(
-                        terminal.run_id, changed_plan.experiment_id
-                    ),
-                    changed_plan,
-                    terminal,
-                )
-                reference = {
-                    "run_id": terminal.run_id,
-                    "experiment_id": changed_plan.experiment_id,
-                    "protocol_hash": changed_plan.protocol_hash,
-                    "semantic_identity": trial_ledger_semantic_identity(
-                        changed_plan, (terminal,)
-                    ),
-                }
-                # The replacement trial is valid by itself, but belongs elsewhere.
-                read_model_trial_ledger_reference(layout, reference)
-                copied = (
-                    layout.project_root / f"wrong-{kind}" / saved.instance_root.name
-                )
-                shutil.copytree(
-                    native_filesystem_path(saved.instance_root),
-                    native_filesystem_path(copied),
-                )
-                manifest_path = copied / "manifest.json"
-                manifest = json.loads(
-                    filesystem_read_text(manifest_path, encoding="utf-8")
-                )
-                manifest["operational_metadata"]["model_trial_ledgers"][0] = reference
-                relative = f"models/{saved.models[0]['fold_id']}/metadata.json"
-                metadata_path = copied / relative
-                metadata = json.loads(
-                    filesystem_read_text(metadata_path, encoding="utf-8")
-                )
-                metadata["models"][0]["trial_semantic_identity"] = reference[
-                    "semantic_identity"
-                ]
-                filesystem_write_text(
-                    metadata_path, json.dumps(metadata), encoding="utf-8"
-                )
-                raw = filesystem_read_bytes(metadata_path)
-                member = next(
-                    row for row in manifest["members"] if row["path"] == relative
-                )
-                member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
-                filesystem_write_text(
-                    manifest_path, json.dumps(manifest), encoding="utf-8"
-                )
-                with pytest.raises(
-                    ValueError, match="crypto_model_trial_binding_invalid"
+                for kind, changes in (
+                    ("lineage", {"input_lineage": ("e" * 64,)}),
+                    ("family", {"candidate_family_id": "different_family"}),
                 ):
-                    persisted.read_crypto_model_artifact(
-                        copied,
-                        expected_identity=saved.envelope["instance_identity"],
-                        trial_layout=layout,
+                    changed_plan = replace(
+                        plan, experiment_id=f"experiment_{uuid4().hex}", **changes
                     )
-                assert read_semantic_artifact_record(saved.instance_root) == original
+                    terminal = replace(
+                        terminals[0],
+                        event_id=f"event_{uuid4().hex}",
+                        run_id=f"run_{uuid4().hex}",
+                        experiment_id=changed_plan.experiment_id,
+                        protocol_hash=changed_plan.protocol_hash,
+                        candidate_family_id=changed_plan.candidate_family_id,
+                        artifact_lineage=changed_plan.input_lineage,
+                    )
+                    append_trial_record(
+                        layout.trial_ledger_root(
+                            terminal.run_id, changed_plan.experiment_id
+                        ),
+                        changed_plan,
+                        terminal,
+                    )
+                    reference = {
+                        "run_id": terminal.run_id,
+                        "experiment_id": changed_plan.experiment_id,
+                        "protocol_hash": changed_plan.protocol_hash,
+                        "semantic_identity": trial_ledger_semantic_identity(
+                            changed_plan, (terminal,)
+                        ),
+                    }
+                    # The replacement trial is valid by itself, but belongs elsewhere.
+                    with read_model_trial_ledger_reference(layout, reference):
+                        pass
+                    copied = (
+                        layout.project_root / f"wrong-{kind}" / saved.instance_root.name
+                    )
+                    shutil.copytree(
+                        native_filesystem_path(saved.instance_root),
+                        native_filesystem_path(copied),
+                    )
+                    manifest_path = copied / "manifest.json"
+                    manifest = json.loads(
+                        filesystem_read_text(manifest_path, encoding="utf-8")
+                    )
+                    manifest["operational_metadata"]["model_trial_ledgers"][0] = (
+                        reference
+                    )
+                    relative = f"models/{saved.models[0]['fold_id']}/metadata.json"
+                    metadata_path = copied / relative
+                    metadata = json.loads(
+                        filesystem_read_text(metadata_path, encoding="utf-8")
+                    )
+                    metadata["models"][0]["trial_semantic_identity"] = reference[
+                        "semantic_identity"
+                    ]
+                    filesystem_write_text(
+                        metadata_path, json.dumps(metadata), encoding="utf-8"
+                    )
+                    raw = filesystem_read_bytes(metadata_path)
+                    member = next(
+                        row for row in manifest["members"] if row["path"] == relative
+                    )
+                    member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+                    filesystem_write_text(
+                        manifest_path, json.dumps(manifest), encoding="utf-8"
+                    )
+                    with pytest.raises(
+                        ValueError, match="crypto_model_trial_binding_invalid"
+                    ):
+                        persisted.read_crypto_model_artifact(
+                            copied,
+                            expected_identity=saved.envelope["instance_identity"],
+                            trial_layout=layout,
+                        )
+                    assert (
+                        read_semantic_artifact_record(saved.instance_root) == original
+                    )
             entry = saved.models[0]
             columns = entry["model_metadata"]["input_columns"]
             probe = pd.DataFrame(np.zeros((2, len(columns))), columns=columns)
@@ -1057,27 +1065,30 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
     def fit_scaler(cls, matrix, **kwargs):
         if captured:
             selection, reference, refit = captured[-1]
-            selected_plan, selected_records = read_trial_ledger_reference(
-                layout, reference
-            )
-            refit_plan, refit_records = read_trial_ledger_reference(
-                layout, refit.reference()
-            )
-            assert (
-                selected_plan.stage == "selection"
-                and selected_records[0].status == "completed"
-            )
-            assert (
-                refit_plan.stage == "refit" and refit_records[0].status == "attempted"
-            )
-            assert (
-                refit_plan.selection_ledger_semantic_identity
-                == reference["semantic_identity"]
-            )
-            assert (
-                refit_records[0].common_coverage_id
-                != selected_records[0].common_coverage_id
-            )
+            with read_trial_ledger_reference(layout, reference) as (
+                selected_plan,
+                selected_records,
+            ):
+                with read_trial_ledger_reference(layout, refit.reference()) as (
+                    refit_plan,
+                    refit_records,
+                ):
+                    assert (
+                        selected_plan.stage == "selection"
+                        and selected_records[0].status == "completed"
+                    )
+                    assert (
+                        refit_plan.stage == "refit"
+                        and refit_records[0].status == "attempted"
+                    )
+                    assert (
+                        refit_plan.selection_ledger_semantic_identity
+                        == reference["semantic_identity"]
+                    )
+                    assert (
+                        refit_records[0].common_coverage_id
+                        != selected_records[0].common_coverage_id
+                    )
             observed_attempts.append(len(matrix))
             if failure is not None:
                 raise failure
@@ -1121,21 +1132,30 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
         assert len(saved.models) == 1 and len(captured) == 1
         entry = saved.models[0]
         selection, selection_ref, refit = captured[0]
-        selection_plan, selected = read_trial_ledger_reference(layout, selection_ref)
-        refit_plan, refitted = read_trial_ledger_reference(layout, refit.reference())
-        assert entry["trial_semantic_identity"] == selection_ref["semantic_identity"]
-        assert (
-            entry["refit_trial_semantic_identity"]
-            == refit.reference()["semantic_identity"]
-        )
-        assert entry["fit_coverage_id"] == refitted[0].common_coverage_id
-        assert (
-            refit_plan.selection_ledger_semantic_identity
-            == selection_ref["semantic_identity"]
-        )
-        assert refitted[0].status == "completed"
-        assert refitted[0].metrics["n_train"] == observed_attempts[0]
-        assert refitted[0].metrics["n_train"] > selected[0].metrics["n_train"]
+        with read_trial_ledger_reference(layout, selection_ref) as (
+            selection_plan,
+            selected,
+        ):
+            with read_trial_ledger_reference(layout, refit.reference()) as (
+                refit_plan,
+                refitted,
+            ):
+                assert (
+                    entry["trial_semantic_identity"]
+                    == selection_ref["semantic_identity"]
+                )
+                assert (
+                    entry["refit_trial_semantic_identity"]
+                    == refit.reference()["semantic_identity"]
+                )
+                assert entry["fit_coverage_id"] == refitted[0].common_coverage_id
+                assert (
+                    refit_plan.selection_ledger_semantic_identity
+                    == selection_ref["semantic_identity"]
+                )
+                assert refitted[0].status == "completed"
+                assert refitted[0].metrics["n_train"] == observed_attempts[0]
+                assert refitted[0].metrics["n_train"] > selected[0].metrics["n_train"]
         with persisted.read_crypto_model_member(
             saved, entry, resource_policy=policy
         ) as predictor:
@@ -1163,12 +1183,14 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             assert raised.value is error and len(captured) == 1
             selection, selection_ref, refit = captured[0]
             assert selection.reference() == selection_ref
-            _, selected = read_trial_ledger_reference(layout, selection_ref)
-            _, refitted = read_trial_ledger_reference(layout, refit.reference())
-            assert selected[0].status == "completed"
-            assert refitted[0].status == (
-                "failed" if isinstance(error, Exception) else "abandoned"
-            )
+            with (
+                read_trial_ledger_reference(layout, selection_ref) as (_, selected),
+                read_trial_ledger_reference(layout, refit.reference()) as (_, refitted),
+            ):
+                assert selected[0].status == "completed"
+                assert refitted[0].status == (
+                    "failed" if isinstance(error, Exception) else "abandoned"
+                )
             assert not filesystem_exists(
                 logical_root / "instances" / other.instance_identity
             )

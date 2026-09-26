@@ -836,10 +836,7 @@ class ExactPrimaryKeyIndex:
                     payload,
                     column[row_index],
                     field.type,
-                    normalize_float_zero=(
-                        pa.types.is_float32(field.type)
-                        or pa.types.is_float64(field.type)
-                    ),
+                    normalize_float_zero=pa.types.is_floating(field.type),
                 )
             yield namespace, payload.buffer, None
 
@@ -867,10 +864,7 @@ class ExactPrimaryKeyIndex:
                     key_payload,
                     column[row_index],
                     field.type,
-                    normalize_float_zero=(
-                        pa.types.is_float32(field.type)
-                        or pa.types.is_float64(field.type)
-                    ),
+                    normalize_float_zero=pa.types.is_floating(field.type),
                 )
             value_payload = _BoundedPayloadSink(key_payload.remaining_bytes, lease_row)
             for column, field in zip(value_arrays, value_fields, strict=True):

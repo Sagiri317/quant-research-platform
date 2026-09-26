@@ -30,7 +30,7 @@ from quant_research_platform.contracts.time import (
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
-    canonical_feature_validity_columns,
+    model_input_validity_columns,
 )
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
@@ -123,10 +123,9 @@ def build_prediction_result_from_frames(
         or dependency_status.get("package") != expected_package
     ):
         raise ValueError("invalid_model_metadata")
-    rank_inputs_allow_missing = facts.input_kind == "rank_ensemble_inputs"
     reject_filter_input_columns(input_columns)
     coordinates = ("quarter_id",) if spec.prediction_mode == "a_share_oos" else ()
-    validity_columns = canonical_feature_validity_columns(input_columns)
+    validity_columns = model_input_validity_columns(input_columns, model_algorithm)
     required = set((*spec.primary_key, *input_columns, *validity_columns, *coordinates))
     work_columns = tuple(
         dict.fromkeys(
@@ -153,7 +152,7 @@ def build_prediction_result_from_frames(
             prediction_model,
         ),
         build_state=build_state,
-        rank_inputs_allow_missing=rank_inputs_allow_missing,
+        validity_columns=validity_columns,
     )
     scoped_output_frames = _scoped_prediction_output_frames(
         output_frames,
@@ -284,7 +283,7 @@ def _iter_prediction_output_frames(
     input_columns: tuple[str, ...],
     predictor: Callable[[pd.DataFrame], np.ndarray],
     build_state: _PredictionBuildState,
-    rank_inputs_allow_missing: bool = False,
+    validity_columns: tuple[str, ...],
 ) -> Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]:
     usable_columns = tuple(
         dict.fromkeys(
@@ -306,7 +305,7 @@ def _iter_prediction_output_frames(
                 policy = current_runtime_resource_policy()
                 row_count = len(filtered)
                 index_bytes = int(filtered.index.memory_usage(deep=True))
-                mask_bytes = index_bytes + row_count * (len(input_columns) + 2)
+                mask_bytes = index_bytes + row_count * (len(validity_columns) + 2)
                 test_frame_bytes = _selected_frame_payload_bytes(
                     filtered,
                     usable_columns,
@@ -341,20 +340,8 @@ def _iter_prediction_output_frames(
                 output = None
                 owned_output: OwnedValue[pd.DataFrame] | None = None
                 try:
-                    validity_inputs = tuple(
-                        dict.fromkeys(
-                            (
-                                *canonical_feature_validity_columns(input_columns),
-                                *(
-                                    input_columns
-                                    if not rank_inputs_allow_missing
-                                    else ()
-                                ),
-                            )
-                        )
-                    )
                     usable_mask = (
-                        filtered.loc[:, list(validity_inputs)].notna().all(axis=1)
+                        filtered.loc[:, list(validity_columns)].notna().all(axis=1)
                     )
                     build_state.record_input_dropna_rows(int(usable_mask.sum()))
                     usable_mask &= filtered["timestamp"] >= pd.Timestamp(

@@ -20,7 +20,7 @@ from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
 )
 from quant_research_platform.research.features.transforms import (
-    canonical_feature_validity_columns,
+    model_input_validity_columns,
 )
 from quant_research_platform.research.models.persisted import (
     PersistedQuarterlyModelArtifact,
@@ -139,8 +139,8 @@ def build_prediction_result_from_persisted_model(
                                 (
                                     *dataset_spec.primary_key,
                                     *q_input_columns,
-                                    *canonical_feature_validity_columns(
-                                        q_input_columns
+                                    *model_input_validity_columns(
+                                        q_input_columns, metadata["model_algorithm"]
                                     ),
                                     *required_filter_columns(
                                         prediction_spec.sample_filter_mode

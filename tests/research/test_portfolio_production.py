@@ -4,6 +4,7 @@ from collections import deque
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -279,6 +280,8 @@ def _build_producer(
     resource_policy=None,
     candidate: PortfolioCandidateSpec | None = None,
     prediction_window: TimeWindow | None = None,
+    model_inputs: tuple[str, ...] = (),
+    model_algorithm: str = "equal_weight_rank_ensemble",
 ):
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
     if enhanced:
@@ -384,7 +387,19 @@ def _build_producer(
                 else selected.loc[:, list(columns)].copy()
             )
         expected = {
-            "dataset": ("asset_id", "timestamp", "eligible", "float_market_cap"),
+            "dataset": tuple(
+                dict.fromkeys(
+                    (
+                        "asset_id",
+                        "timestamp",
+                        "eligible",
+                        "float_market_cap",
+                        *production.model_input_validity_columns(
+                            model_inputs, model_algorithm
+                        ),
+                    )
+                )
+            ),
             "panel": (
                 production._ENHANCED_PANEL_COLUMNS
                 if enhanced
@@ -445,6 +460,31 @@ def _build_producer(
                 or TimeWindow("2022-12-01", "2023-01-10"),
                 prediction_window=prediction_window,
                 prediction_lookup=prediction_lookup or _PredictionLookup(),
+                persisted_model=SimpleNamespace(
+                    quarterly_selections={
+                        str(quarter): {"selected_family_id": "family"}
+                        for quarter in pd.period_range(
+                            "2000-01-01", "2030-12-31", freq="Q"
+                        )
+                    },
+                    prediction_models=lambda window, **_kwargs: tuple(
+                        {
+                            "quarter_id": str(quarter),
+                            "source_quarter": str(quarter),
+                            "family_id": "family"
+                            if candidate.prediction_selector == "champion"
+                            else candidate.prediction_selector,
+                            "model_metadata": {
+                                "input_columns": model_inputs,
+                                "model_algorithm": model_algorithm,
+                            },
+                        }
+                        for quarter in pd.period_range(
+                            window.start, window.end, freq="Q"
+                        )
+                    ),
+                ),
+                access_window="development",
                 assumptions=assumptions,
                 resource_policy=bound_policy,
                 fee_schedule_from_frame=fee_schedule_from_frame,
@@ -1185,9 +1225,11 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
             assert bounded.used_memory_bytes == 0
 
 
+@pytest.mark.parametrize("missing_prediction", [False, True])
 @pytest.mark.parametrize("removed_member", [False, True])
 def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
     removed_member: bool,
+    missing_prediction: bool,
 ) -> None:
     assets = pd.Index(
         ("a", "b", "old") if removed_member else ("a", "b"), dtype="string"
@@ -1209,7 +1251,10 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
         ),
         cash=10.0,
         nav=100.0,
-        expected_alpha=pd.Series(0.01, index=assets),
+        expected_alpha=pd.Series(
+            [np.nan if missing_prediction else 0.01, *([0.01] * (len(assets) - 1))],
+            index=assets,
+        ),
         exposures=exposures,
         specific_variance=pd.Series(0.01, index=assets),
         adv=pd.Series(1_000.0, index=assets),
@@ -1247,6 +1292,11 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
             cash_column="is_cash",
         )
         assert optimized.weights.loc["old"] == 0.0
+        if missing_prediction:
+            assert optimized.weights.loc["a"] == 0.5
+            assert pd.isna(
+                result.loc[result.asset_id.eq("a"), "expected_alpha"].iloc[0]
+            )
         assert optimized.weights.sum() == pytest.approx(1.0)
         assert optimized.target_turnover <= 0.20 + 1e-8
 
@@ -1860,3 +1910,59 @@ def test_risk_cross_uses_all_a_facts_and_persisted_styles():
     assert production._enhanced_risk_cross(
         panel=panel, risk_frames=[facts], style_columns=("beta_252d",)
     ).eligible.tolist() == [True, False]
+
+
+@pytest.mark.parametrize("can_exit", [True, False, None])
+def test_structurally_invalid_held_asset_exits_under_existing_execution_rules(
+    tmp_path, monkeypatch, can_exit
+):
+    frames, fee_frame, output_window = _inputs()
+    frames["dataset"]["feature_x"] = 1.0
+    frames["dataset"]["feature_missing_x"] = 0.0
+    second = pd.Timestamp(output_window.start) + pd.offsets.BDay(1)
+    invalid = frames["dataset"].asset_id.eq("b") & frames["dataset"].timestamp.ge(
+        second
+    )
+    frames["dataset"].loc[invalid, "feature_x"] = np.nan
+    frames["dataset"].loc[invalid, "feature_missing_x"] = 1.0
+    exit_rows = frames["execution"].asset_id.eq("b") & frames["execution"].timestamp.ge(
+        second
+    )
+    frames["execution"]["can_exit"] = frames["execution"]["can_exit"].astype("boolean")
+    frames["execution"].loc[exit_rows, "can_exit"] = can_exit
+    lookup = _PredictionLookup()
+    chunks, _calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=output_window,
+        prediction_lookup=lookup,
+        model_inputs=("feature_missing_x",),
+        model_algorithm="linear_regression",
+    )
+    if can_exit is None:
+        with pytest.raises(PortfolioTargetBlocked, match="unknown"):
+            list(chunks)
+        return
+    output = pd.concat(list(chunks), ignore_index=True)
+    held = output.loc[output.asset_id.eq("b")]
+    assert held.iloc[0].end_notional > 0.0
+    later = held.loc[held.decision_timestamp.ge(second)]
+    assert later.alpha_score.isna().all()
+    assert all(asset != "b" for date, asset in lookup.matched if date >= second)
+    if can_exit:
+        assert later.iloc[0].executed_delta_notional < 0.0
+        assert later.iloc[0].post_trade_notional == 0.0
+        assert later.iloc[0].target_notional == 0.0
+        assert later.iloc[0][list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum() > 0.0
+    else:
+        assert later.post_trade_notional.gt(0.0).all()
+        assert later.executed_delta_notional.eq(0.0).all()
+        assert later.target_notional.eq(0.0).all()
+    cash = output.loc[output.asset_id.eq("__cash__")]
+    assert cash.end_notional.ge(0.0).all()
+    for _date, session in output.groupby("decision_timestamp"):
+        assert session.executed_delta_notional.sum() + session[
+            list(PORTFOLIO_LEDGER_COST_COLUMNS)
+        ].to_numpy().sum() == pytest.approx(0.0, abs=1e-10)

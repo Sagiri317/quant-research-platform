@@ -728,12 +728,15 @@ def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
             minimum_cross_section=2,
         ),
     )
+    rng = np.random.default_rng(20260926)
+    beta = np.linspace(0.5, 1.5, len(assets))
+    residual_scale = np.linspace(0.001, 0.004, len(assets))
+    market = rng.normal(0.0005, 0.01, len(dates))
+    residuals = rng.normal(size=(len(dates), len(assets))) * residual_scale
     for position, timestamp in enumerate(dates):
         returns = pd.Series(
-            {
-                asset: 0.001 + ((index % 7) - 3) * 0.0002 + 0.0001 * (position % 5)
-                for index, asset in enumerate(assets)
-            },
+            beta * market[position] + residuals[position],
+            index=assets,
             dtype="float64",
         )
         panel = pd.DataFrame(
@@ -773,6 +776,8 @@ def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
         factor_risk.observe_return_session(cross)
     assert styles.beta.notna().all()
     assert styles.residual_volatility.notna().all()
+    assert styles.beta.std() > 0.1
+    assert styles.residual_volatility.gt(0.0).all()
     estimate = factor_risk.estimate()
     assert (
         np.linalg.eigvalsh(estimate.factor_covariance.to_numpy(dtype="float64")).min()
@@ -1594,6 +1599,7 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
             train_end=pd.Timestamp("2024-01-02"),
             label_column="label",
             input_columns=inputs,
+            model_algorithm="linear_regression",
         )
     )
     assert chunks[0].asset_id.tolist() == ["a", "b"]

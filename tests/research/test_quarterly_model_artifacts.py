@@ -460,12 +460,52 @@ def test_persisted_quarter_consumption_uses_active_columns_and_actual_model_ids(
         )
     artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
     from quant_research_platform.research.statistics_production import _model_trials
+    from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 
-    trials = _model_trials(artifact, StorageLayout(tmp_path))
-    assert len(artifact.trial_ledgers) == 8
-    assert len(trials) == 4
-    assert set(trials.config_id) == {"linear_x", "linear_y"}
-    assert trials.observation_count.tolist() == [2, 2, 2, 2]
+    active_readers = []
+    reader_peaks = []
+    original_lease = RuntimeResourcePolicy.lease
+
+    def observe_reader(self, owner, size):
+        lease = original_lease(self, owner, size)
+        if owner == "storage.trial.ledger":
+            active_readers.append(lease)
+            reader_peaks.append(sum(item.active for item in active_readers))
+        return lease
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", observe_reader)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.trial_output", 0) as trial_output,
+    ):
+        trials = _model_trials(
+            artifact, StorageLayout(tmp_path), output_lease=trial_output
+        )
+        assert len(artifact.trial_ledgers) == 8
+        assert len(trials) == 4
+        assert set(trials.config_id) == {"linear_x", "linear_y"}
+        assert trials.observation_count.tolist() == [2, 2, 2, 2]
+        reordered = replace(
+            artifact, trial_ledgers=tuple(reversed(artifact.trial_ledgers))
+        )
+        pd.testing.assert_frame_equal(
+            trials,
+            _model_trials(
+                reordered, StorageLayout(tmp_path), output_lease=trial_output
+            ),
+        )
+        for references in (
+            artifact.trial_ledgers[1:],
+            (*artifact.trial_ledgers, artifact.trial_ledgers[0]),
+        ):
+            changed = replace(artifact, trial_ledgers=references)
+            with pytest.raises(ValueError, match="statistics_trial_reference_mismatch"):
+                _model_trials(
+                    changed, StorageLayout(tmp_path), output_lease=trial_output
+                )
+    assert max(reader_peaks) == 1
+    assert all(not lease.active for lease in active_readers)
+    assert policy.used_memory_bytes == 0
     spec = _dataset_spec()
     frame = pd.DataFrame(
         {
@@ -1730,8 +1770,12 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             }
         },
     )
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.trial_references", 0) as trial_reference_lease,
+    ):
         winners, metadata, refs, indices = _select_model_family_winners(
+            trial_reference_lease=trial_reference_lease,
             training_counts={},
             validation_coverage=validation_coverage,
             validation_input_columns=("x",),
@@ -1819,145 +1863,160 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
         )
         assert saved["rows_after_input_label_dropna"] == refit_rows
         assert saved["resolved_hyperparameters"]["alpha"] == refit_alpha
-        plan, trials = read_trial_ledger_reference(layout, artifact.trial_ledgers[0])
-        assert plan.candidate_ids[index] == selected.model_id
-        assert (
-            next(
-                record for record in trials if record.candidate_id == selected.model_id
-            ).normalized_parameters["hyperparameters"]["alpha"]
-            == trial_alpha
-        )
-        assert all(record.metrics["n_train"] == train_rows for record in trials)
-        with read_quarterly_predictor(
-            artifact, "2019Q1", "ridge", resource_policy=policy
-        ) as predictor:
-            assert predictor.estimator.alpha == refit_alpha
-            probe = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
-            before = predictor.predict(probe).copy()
-        original_bytes = _file_bytes(root)
-        for mutation in (
-            "none_start",
-            "early_start",
-            "nat_end",
-            "cutoff",
-            "algorithm",
-            "inputs",
-            "label",
-            "filter",
-            "seed",
-            "refit_count",
-            "refit_strength",
-            "winner",
-            "backend",
-            "scaler",
+        with read_trial_ledger_reference(layout, artifact.trial_ledgers[0]) as (
+            plan,
+            trials,
         ):
-
-            def changed(staging, mutation=mutation):
-                for relative, content in original_bytes.items():
-                    if relative == Path("manifest.json"):
-                        continue
-                    destination = staging / relative
-                    filesystem_mkdir(destination.parent, parents=True, exist_ok=True)
-                    filesystem_write_bytes(destination, content)
-                metadata_path = staging / "models/2019Q1/metadata.json"
-                payload = json.loads(
-                    filesystem_read_text(metadata_path, encoding="utf-8")
-                )
-                entry = payload["models"][0]
-                altered = entry["model_metadata"]
-                if mutation == "none_start":
-                    altered["train_start"] = None
-                elif mutation == "early_start":
-                    altered["train_start"] = (
-                        pd.Timestamp(entry["training_window"]["start"])
-                        - pd.Timedelta(days=1)
-                    ).isoformat()
-                elif mutation == "nat_end":
-                    altered["train_end"] = "NaT"
-                elif mutation == "cutoff":
-                    altered["fit_cutoff"] = "NaT"
-                elif mutation == "algorithm":
-                    altered["model_algorithm"] = "lasso_regression"
-                elif mutation == "inputs":
-                    altered["input_factor_columns"] = altered["input_columns"] = [
-                        "other"
-                    ]
-                    altered["scaler"]["columns"] = ["other"]
-                    altered["feature_importance"] = {
-                        "other": altered["feature_importance"]["x"]
-                    }
-                elif mutation == "label":
-                    altered["label_column"] = "other_label"
-                elif mutation == "filter":
-                    altered["sample_filter_mode"] = "unfiltered"
-                    altered["filter_columns_used"] = []
-                    altered["filter_definition"] = filter_definition("unfiltered")
-                elif mutation == "seed":
-                    altered["random_seed"] += 1
-                elif mutation == "refit_count":
-                    for key in (
-                        "rows_input",
-                        "rows_after_filter_mode",
-                        "rows_after_input_label_dropna",
-                    ):
-                        altered[key] += 1
-                elif mutation == "refit_strength":
-                    altered["hyperparameters"]["alpha"] *= 2
-                    altered["resolved_hyperparameters"]["alpha"] *= 2
-                elif mutation == "winner":
-                    loser = next(
-                        candidate
-                        for candidate in plan.candidate_ids
-                        if candidate != selected.model_id
-                    )
-                    entry["model_id"] = loser
-                    payload["selection"]["selected_model_id"] = loser
-                    payload["selection"]["families"][0]["selected_config_id"] = loser
-                if mutation in {"backend", "scaler", "refit_strength"}:
-                    relative = "models/2019Q1/ridge.pkl"
-                    with persisted._read_model_member(
-                        root, artifact.member_records, relative, resource_policy=policy
-                    ) as owned:
-                        model = owned.value
-                        if mutation == "scaler":
-                            model.scaler = replace(
-                                model.scaler, mean_=(model.scaler.mean_[0] + 1.0,)
-                            )
-                        else:
-                            model.estimator.set_params(alpha=model.estimator.alpha * 2)
-                        persisted._write_model_member(
-                            staging / relative,
-                            model,
-                            state_bytes=owned.lease.reserved_bytes,
-                        )
-                        model = None
-                filesystem_write_text(
-                    metadata_path, json.dumps(payload), encoding="utf-8"
-                )
-
-            altered_root = write_semantic_artifact(
-                tmp_path / mutation,
-                envelope,
-                changed,
-                operational_metadata={
-                    "model_trial_ledgers": list(artifact.trial_ledgers)
-                },
+            ledger_baseline = policy.used_memory_bytes
+            assert plan.candidate_ids[index] == selected.model_id
+            assert (
+                next(
+                    record
+                    for record in trials
+                    if record.candidate_id == selected.model_id
+                ).normalized_parameters["hyperparameters"]["alpha"]
+                == trial_alpha
             )
-            with pytest.raises(
-                ValueError,
-                match=(
-                    "invalid_model_metadata|model_trial_|model_state_metadata_mismatch"
-                    "|model_artifact_training_range_invalid"
-                ),
+            assert all(record.metrics["n_train"] == train_rows for record in trials)
+            with read_quarterly_predictor(
+                artifact, "2019Q1", "ridge", resource_policy=policy
+            ) as predictor:
+                assert predictor.estimator.alpha == refit_alpha
+                probe = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
+                before = predictor.predict(probe).copy()
+            original_bytes = _file_bytes(root)
+            for mutation in (
+                "none_start",
+                "early_start",
+                "nat_end",
+                "cutoff",
+                "algorithm",
+                "inputs",
+                "label",
+                "filter",
+                "seed",
+                "refit_count",
+                "refit_strength",
+                "winner",
+                "backend",
+                "scaler",
             ):
-                corrupted = read_quarterly_model_artifact(
-                    altered_root, trial_layout=layout
+
+                def changed(staging, mutation=mutation):
+                    for relative, content in original_bytes.items():
+                        if relative == Path("manifest.json"):
+                            continue
+                        destination = staging / relative
+                        filesystem_mkdir(
+                            destination.parent, parents=True, exist_ok=True
+                        )
+                        filesystem_write_bytes(destination, content)
+                    metadata_path = staging / "models/2019Q1/metadata.json"
+                    payload = json.loads(
+                        filesystem_read_text(metadata_path, encoding="utf-8")
+                    )
+                    entry = payload["models"][0]
+                    altered = entry["model_metadata"]
+                    if mutation == "none_start":
+                        altered["train_start"] = None
+                    elif mutation == "early_start":
+                        altered["train_start"] = (
+                            pd.Timestamp(entry["training_window"]["start"])
+                            - pd.Timedelta(days=1)
+                        ).isoformat()
+                    elif mutation == "nat_end":
+                        altered["train_end"] = "NaT"
+                    elif mutation == "cutoff":
+                        altered["fit_cutoff"] = "NaT"
+                    elif mutation == "algorithm":
+                        altered["model_algorithm"] = "lasso_regression"
+                    elif mutation == "inputs":
+                        altered["input_factor_columns"] = altered["input_columns"] = [
+                            "other"
+                        ]
+                        altered["scaler"]["columns"] = ["other"]
+                        altered["feature_importance"] = {
+                            "other": altered["feature_importance"]["x"]
+                        }
+                    elif mutation == "label":
+                        altered["label_column"] = "other_label"
+                    elif mutation == "filter":
+                        altered["sample_filter_mode"] = "unfiltered"
+                        altered["filter_columns_used"] = []
+                        altered["filter_definition"] = filter_definition("unfiltered")
+                    elif mutation == "seed":
+                        altered["random_seed"] += 1
+                    elif mutation == "refit_count":
+                        for key in (
+                            "rows_input",
+                            "rows_after_filter_mode",
+                            "rows_after_input_label_dropna",
+                        ):
+                            altered[key] += 1
+                    elif mutation == "refit_strength":
+                        altered["hyperparameters"]["alpha"] *= 2
+                        altered["resolved_hyperparameters"]["alpha"] *= 2
+                    elif mutation == "winner":
+                        loser = next(
+                            candidate
+                            for candidate in plan.candidate_ids
+                            if candidate != selected.model_id
+                        )
+                        entry["model_id"] = loser
+                        payload["selection"]["selected_model_id"] = loser
+                        payload["selection"]["families"][0]["selected_config_id"] = (
+                            loser
+                        )
+                    if mutation in {"backend", "scaler", "refit_strength"}:
+                        relative = "models/2019Q1/ridge.pkl"
+                        with persisted._read_model_member(
+                            root,
+                            artifact.member_records,
+                            relative,
+                            resource_policy=policy,
+                        ) as owned:
+                            model = owned.value
+                            if mutation == "scaler":
+                                model.scaler = replace(
+                                    model.scaler, mean_=(model.scaler.mean_[0] + 1.0,)
+                                )
+                            else:
+                                model.estimator.set_params(
+                                    alpha=model.estimator.alpha * 2
+                                )
+                            persisted._write_model_member(
+                                staging / relative,
+                                model,
+                                state_bytes=owned.lease.reserved_bytes,
+                            )
+                            model = None
+                    filesystem_write_text(
+                        metadata_path, json.dumps(payload), encoding="utf-8"
+                    )
+
+                altered_root = write_semantic_artifact(
+                    tmp_path / mutation,
+                    envelope,
+                    changed,
+                    operational_metadata={
+                        "model_trial_ledgers": list(artifact.trial_ledgers)
+                    },
                 )
-                with read_quarterly_predictor(
-                    corrupted, "2019Q1", "ridge", resource_policy=policy
+                with pytest.raises(
+                    ValueError,
+                    match=(
+                        "invalid_model_metadata|model_trial_|model_state_metadata_mismatch"
+                        "|model_artifact_training_range_invalid"
+                    ),
                 ):
-                    pass
-            assert policy.used_memory_bytes == 0
+                    corrupted = read_quarterly_model_artifact(
+                        altered_root, trial_layout=layout
+                    )
+                    with read_quarterly_predictor(
+                        corrupted, "2019Q1", "ridge", resource_policy=policy
+                    ):
+                        pass
+                assert policy.used_memory_bytes == ledger_baseline
         assert _file_bytes(root) == original_bytes
         with persisted._read_model_member(
             root,
@@ -1989,10 +2048,11 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
                     ),
                     trial_layout=layout,
                 )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == trial_reference_lease.reserved_bytes
         frame.loc[frame.timestamp.ge("2019-01-01"), ["x", "label"]] *= 1000000.0
         later_winners, later_selection, later_refs, later_indices = (
             _select_model_family_winners(
+                trial_reference_lease=trial_reference_lease,
                 training_counts={},
                 validation_coverage=validation_coverage,
                 validation_input_columns=("x",),
@@ -2039,7 +2099,7 @@ def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted
             later = None
             if later_lease is not None:
                 later_lease.close()
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == trial_reference_lease.reserved_bytes
 
 
 def test_model_publication_rejects_self_consistent_wrong_trial_provenance(
@@ -3288,16 +3348,19 @@ def _small_common_coverage_case(tmp_path, *, fail_refit_scaler=False, monkeypatc
             assert recorder.plan.stage == "refit"
             from quant_research_platform.storage.experiments import read_trial_ledger
 
-            events = read_trial_ledger(recorder.root, recorder.plan)
-            assert events[-1].status == (
-                "abandoned" if fail_refit_scaler == "cancel" else "failed"
-            )
-            assert events[-1].metrics == {}
-            assert events[-1].undefined_reasons == {
-                "failure": "KeyboardInterrupt"
-                if fail_refit_scaler == "cancel"
-                else "RuntimeError"
-            }
+            with read_trial_ledger(recorder.root, recorder.plan) as (
+                _saved_plan,
+                events,
+            ):
+                assert events[-1].status == (
+                    "abandoned" if fail_refit_scaler == "cancel" else "failed"
+                )
+                assert events[-1].metrics == {}
+                assert events[-1].undefined_reasons == {
+                    "failure": "KeyboardInterrupt"
+                    if fail_refit_scaler == "cancel"
+                    else "RuntimeError"
+                }
             assert not tuple(filesystem_glob(tmp_path / "models", ".*staging*"))
             assert policy.used_memory_bytes == 0
             return
@@ -3317,14 +3380,21 @@ def _small_common_coverage_case(tmp_path, *, fail_refit_scaler=False, monkeypatc
         assert set(keys.asset_id) == {f"asset_{i}" for i in (2, 3, 4, 5, 7)}
         assert len(saved.trial_ledgers) == 8
         for reference in saved.trial_ledgers:
-            plan, records = read_model_trial_ledger_reference(layout, reference)
-            if plan.stage == "selection":
-                assert records[0].common_coverage_id == coverage["semantic_identity"]
-                assert records[0].metrics["validation_rows"] == 15
-            else:
-                assert dict(records[0].metrics) == {"n_train": 12}
-                assert plan.selection_metric is None
-                assert records[0].common_coverage_id != coverage["semantic_identity"]
+            with read_model_trial_ledger_reference(layout, reference) as (
+                plan,
+                records,
+            ):
+                if plan.stage == "selection":
+                    assert (
+                        records[0].common_coverage_id == coverage["semantic_identity"]
+                    )
+                    assert records[0].metrics["validation_rows"] == 15
+                else:
+                    assert dict(records[0].metrics) == {"n_train": 12}
+                    assert plan.selection_metric is None
+                    assert (
+                        records[0].common_coverage_id != coverage["semantic_identity"]
+                    )
         assert policy.used_memory_bytes == 0
         return saved, layout
 
@@ -3454,14 +3524,11 @@ def test_reader_binds_formal_model_basis_and_actual_coverage_count(
         ]
         selection["selected_family_id"] = "linear_x"
         selection["selected_model_id"] = "linear_x"
-    references = tuple(
-        ref
-        for ref in saved.trial_ledgers
-        if persisted.read_model_trial_ledger_reference(layout, ref)[
-            0
-        ].candidate_family_id
-        != "rank_flag"
-    )
+    references = []
+    for ref in saved.trial_ledgers:
+        with persisted.read_model_trial_ledger_reference(layout, ref) as (plan, _):
+            if plan.candidate_family_id != "rank_flag":
+                references.append(ref)
     with pytest.raises(ValueError, match="model_trial_family_coverage_mismatch"):
         persisted._validate_trial_references(
             tuple(
@@ -3478,14 +3545,17 @@ def test_reader_binds_formal_model_basis_and_actual_coverage_count(
         )
     read = persisted.read_model_trial_ledger_reference
 
+    from contextlib import contextmanager
+
+    @contextmanager
     def altered(layout, reference):
-        plan, records = read(layout, reference)
-        if plan.stage == "selection":
-            records = tuple(
-                replace(record, metrics={**record.metrics, "validation_rows": 16})
-                for record in records
-            )
-        return plan, records
+        with read(layout, reference) as (plan, records):
+            if plan.stage == "selection":
+                records = tuple(
+                    replace(record, metrics={**record.metrics, "validation_rows": 16})
+                    for record in records
+                )
+            yield plan, records
 
     monkeypatch.setattr(persisted, "read_model_trial_ledger_reference", altered)
     with pytest.raises(ValueError, match="model_trial_common_coverage_mismatch"):

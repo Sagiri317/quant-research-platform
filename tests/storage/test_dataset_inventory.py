@@ -1031,6 +1031,16 @@ def test_compare_uses_one_fingerprint_lease_per_side(
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     observed: list[int] = []
     original_exact = dataset_comparison._exact_comparison_counts
+    original_lease = RuntimeResourcePolicy.lease
+    fingerprint_leases = []
+
+    def observe_lease(self, owner, reserved_bytes):
+        lease = original_lease(self, owner, reserved_bytes)
+        if owner == "storage.dataset.fingerprint.result":
+            fingerprint_leases.append(lease)
+        return lease
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", observe_lease)
 
     def observe_exact(*args: object, **kwargs: object) -> dict[str, int]:
         assert "retained_payload_bytes" not in kwargs
@@ -1048,6 +1058,8 @@ def test_compare_uses_one_fingerprint_lease_per_side(
 
     assert comparison.status == "MATCH"
     assert observed and observed[0] > 0
+    assert len(fingerprint_leases) == 2
+    assert all(not lease.active for lease in fingerprint_leases)
     assert policy.used_memory_bytes == 0
 
 
@@ -1148,7 +1160,13 @@ def test_string_filter_compact_utf8_sizing_matches_arrow(
         values,
         resource_policy=policy,
     )
-    assert prepared.values.to_pylist() == sorted(set(values))
+    expected = pa.array(sorted(set(values)), type=field.type)
+    assert prepared.values.equals(expected)
+    assert prepared.retained_memory_bytes == expected.nbytes
+    assert (
+        sum(dataset_reading._utf8_payload_length(value) for value in set(values))
+        == expected.buffers()[2].size
+    )
 
 
 def test_writer_releases_previous_publication_before_requesting_next(

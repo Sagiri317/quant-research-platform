@@ -59,7 +59,10 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
     validate_market_payload,
 )
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
+from quant_research_platform.storage._scratch_ownership import (
+    ScratchReservation,
+    handle_preserving_primary,
+)
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -115,9 +118,7 @@ _CONNECTION_CLOSE_REASONS = frozenset(
 )
 _CONNECTION_INTERVAL_MAX_RECORD_BYTES = 64 * 1024
 _COVERAGE_SQLITE_PAGE_BYTES = 4096
-_COVERAGE_DISK_BATCH_ROWS = 256
 _COVERAGE_SQLITE_STARTUP_BYTES = 1024 * 1024
-_COVERAGE_SQLITE_ROW_BYTES = _CONNECTION_INTERVAL_MAX_RECORD_BYTES + 4096
 
 
 @dataclass
@@ -201,6 +202,9 @@ class ObservationCoverageIndex:
             reserve_bytes=2 * _COVERAGE_SQLITE_STARTUP_BYTES,
         )
         self._scratch = None
+        self._scratch_reservation = None
+        self._growth_credit_bytes = 0
+        self._growth_page_limit = 0
         self._database = None
         self._lease = None
         self._policy = resource_policy
@@ -209,6 +213,10 @@ class ObservationCoverageIndex:
             self._lease = resource_policy.lease(
                 "binance.replay.coverage_index", 3 * 1024 * 1024
             )
+            self._scratch_reservation = ScratchReservation(
+                Path(tempfile.gettempdir()), resource_policy=resource_policy
+            )
+            self._scratch_reservation.resize(2 * _COVERAGE_SQLITE_STARTUP_BYTES)
             self._scratch = tempfile.TemporaryDirectory(prefix="qrp-binance-coverage-")
             self._database = sqlite3.connect(
                 Path(self._scratch.name) / "coverage.sqlite3"
@@ -216,6 +224,7 @@ class ObservationCoverageIndex:
             startup_pages = (
                 _COVERAGE_SQLITE_STARTUP_BYTES + _COVERAGE_SQLITE_PAGE_BYTES - 1
             ) // _COVERAGE_SQLITE_PAGE_BYTES
+            self._database.execute(f"PRAGMA page_size={_COVERAGE_SQLITE_PAGE_BYTES}")
             self._database.execute(f"PRAGMA main.max_page_count={startup_pages}")
             self._database.execute(
                 "CREATE TABLE coverage ("
@@ -230,7 +239,18 @@ class ObservationCoverageIndex:
                 "CREATE INDEX coverage_window ON coverage "
                 "(market, data_kind, opened_ns)"
             )
+            self._database.execute(
+                "CREATE INDEX coverage_close ON coverage (market, data_kind, closed_ns)"
+            )
+            self._scratch_reservation.resize(
+                int(self._database.execute("PRAGMA main.page_count").fetchone()[0])
+                * _COVERAGE_SQLITE_PAGE_BYTES
+            )
             self._load(markets=markets, resource_policy=resource_policy)
+            self._scratch_reservation.resize(
+                int(self._database.execute("PRAGMA main.page_count").fetchone()[0])
+                * _COVERAGE_SQLITE_PAGE_BYTES
+            )
         except BaseException:
             self.close()
             raise
@@ -288,13 +308,7 @@ class ObservationCoverageIndex:
                                 "binance_replay_connection_intervals_invalid"
                             ) from exc
                         row = self._decode_interval(interval, markets=markets)
-                        if count % _COVERAGE_DISK_BATCH_ROWS == 0:
-                            self._admit_disk_growth(
-                                min(
-                                    _COVERAGE_DISK_BATCH_ROWS,
-                                    self._descriptor["record_count"] - count,
-                                )
-                            )
+                        self._admit_row(row)
                         try:
                             self._database.execute(
                                 "INSERT INTO coverage VALUES (?, ?, ?, ?, ?, ?, ?)",
@@ -347,24 +361,65 @@ class ObservationCoverageIndex:
             if first_failure is not None:
                 raise first_failure
 
-    def _admit_disk_growth(self, row_count: int) -> None:
-        assert self._scratch is not None
-        assert self._database is not None
-        growth_bytes = max(1, row_count) * _COVERAGE_SQLITE_ROW_BYTES
-        reserve_bytes = 2 * growth_bytes
-        require_free_disk_headroom(
-            Path(self._scratch.name),
-            reserve_bytes=reserve_bytes,
+    def _admit_row(self, row: tuple[object, ...]) -> None:
+        logical_bytes = sum(
+            9 + (len(value.encode("utf-8")) if isinstance(value, str) else 8)
+            for value in row
         )
+        overflow_payload = _COVERAGE_SQLITE_PAGE_BYTES - 4
+        payload_pages = (logical_bytes + overflow_payload - 1) // overflow_payload
+
+        def row_pages(page_limit: int) -> int:
+            # Four trees. SQLite balance_nonroot reuses at least one of at most
+            # five result pages; balance_deeper adds one root child. A balanced
+            # tree cannot be deeper than the admitted page count's bit length.
+            return 4 * (payload_pages + 4 * page_limit.bit_length() + 1)
+
+        row_growth = row_pages(self._growth_page_limit) * _COVERAGE_SQLITE_PAGE_BYTES
+        if row_growth <= self._growth_credit_bytes:
+            self._growth_credit_bytes -= row_growth
+            return
         current_pages = int(
             self._database.execute("PRAGMA main.page_count").fetchone()[0]
         )
-        growth_pages = (
-            reserve_bytes + _COVERAGE_SQLITE_PAGE_BYTES - 1
-        ) // _COVERAGE_SQLITE_PAGE_BYTES
-        self._database.execute(
-            f"PRAGMA main.max_page_count={current_pages + growth_pages}"
+        minimum_pages = 0
+        while (required := row_pages(current_pages + minimum_pages)) > minimum_pages:
+            minimum_pages = required
+        reserved_bytes = self._scratch_reservation.reserved_bytes
+        free_bytes = require_free_disk_headroom(
+            Path(self._scratch.name),
+            reserve_bytes=max(
+                0,
+                2 * (current_pages + minimum_pages) * _COVERAGE_SQLITE_PAGE_BYTES
+                - reserved_bytes,
+            ),
         )
+        capacity = free_bytes + reserved_bytes
+        memory_capacity = self._scratch_reservation.memory_capacity_bytes
+        if memory_capacity is not None:
+            capacity = min(capacity, memory_capacity)
+        growth_pages = max(
+            minimum_pages,
+            min(
+                max(
+                    _COVERAGE_SQLITE_STARTUP_BYTES // _COVERAGE_SQLITE_PAGE_BYTES,
+                    8 * minimum_pages,
+                ),
+                capacity // (2 * _COVERAGE_SQLITE_PAGE_BYTES) - current_pages,
+            ),
+        )
+        if row_pages(current_pages + growth_pages) > growth_pages:
+            growth_pages = minimum_pages
+        pages = current_pages + growth_pages
+        # The rollback journal may retain the original version of every page.
+        self._scratch_reservation.resize(
+            max(reserved_bytes, 2 * pages * _COVERAGE_SQLITE_PAGE_BYTES)
+        )
+        self._database.execute(f"PRAGMA main.max_page_count={pages}")
+        self._growth_page_limit = pages
+        self._growth_credit_bytes = (
+            growth_pages - row_pages(pages)
+        ) * _COVERAGE_SQLITE_PAGE_BYTES
 
     def bounds(
         self,
@@ -413,6 +468,8 @@ class ObservationCoverageIndex:
         failure: BaseException | None = None
         database = self._database
         scratch = self._scratch
+        connection_closed = True
+        removed = scratch is None
         self._database = None
         self._scratch = None
         self._descriptor = {}
@@ -430,6 +487,7 @@ class ObservationCoverageIndex:
             if database is not None:
                 database.close()
         except BaseException as close_error:
+            connection_closed = False
             if primary is not None:
                 primary.add_note(
                     "Binance connection coverage database close also failed: "
@@ -445,6 +503,7 @@ class ObservationCoverageIndex:
         try:
             if scratch is not None:
                 scratch.cleanup()
+                removed = True
         except BaseException as cleanup_error:
             note = (
                 "Binance connection coverage scratch cleanup also failed: "
@@ -456,8 +515,26 @@ class ObservationCoverageIndex:
                 failure = cleanup_error
             else:
                 failure.add_note(note)
+        reservation = self._scratch_reservation
+        self._scratch_reservation = None
+        if reservation is not None:
+            if connection_closed and removed:
+                reservation.resize(0)
+            try:
+                reservation.close()
+            except BaseException as close_error:
+                note = (
+                    "Binance coverage reservation close also failed: "
+                    + type(close_error).__name__
+                )
+                if primary is not None:
+                    primary.add_note(note)
+                elif failure is None:
+                    failure = close_error
+                else:
+                    failure.add_note(note)
         lease = self._lease
-        if lease is not None:
+        if lease is not None and connection_closed:
             try:
                 _close_lease_preserving_primary(
                     lease, owner="binance.replay.coverage_index"
@@ -532,19 +609,27 @@ class ObservationCoverage:
 
     def intervals(self):
         """Yield only unambiguous half-open coverage in chronological order."""
-        query = "WHERE market=? AND data_kind=? AND stream LIKE ?"
-        cursor = self.index._database.execute(
-            "SELECT opened_ns, observation_id, 1 FROM coverage "
-            + query
-            + " UNION ALL SELECT closed_ns, observation_id, -1 FROM coverage "
-            + query
-            + " ORDER BY 1, 3",
-            (*self.parameters, *self.parameters),
+        query = (
+            "WHERE market=? AND data_kind=? AND stream LIKE ? AND opened_ns<closed_ns"
         )
         active = set()
         previous = None
         retained = 0
-        with handle_preserving_primary(cursor):
+        with ExitStack() as readers:
+            cursors = [
+                readers.enter_context(
+                    handle_preserving_primary(
+                        self.index._database.execute(
+                            f"SELECT {column}, observation_id, {delta} FROM coverage "
+                            + query
+                            + f" ORDER BY {column}",
+                            self.parameters,
+                        )
+                    )
+                )
+                for column, delta in (("opened_ns", 1), ("closed_ns", -1))
+            ]
+            cursor = heapq.merge(*cursors, key=lambda row: (row[0], row[2]))
             try:
                 for timestamp, events in groupby(cursor, key=lambda row: row[0]):
                     if (

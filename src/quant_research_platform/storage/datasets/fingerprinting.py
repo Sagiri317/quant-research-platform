@@ -313,8 +313,7 @@ def _iter_fingerprint_hashes(
                 continue
             data_type = arrow_schema.field(column).type
             if pa.types.is_nested(data_type) or (
-                column in primary_key
-                and (pa.types.is_float32(data_type) or pa.types.is_float64(data_type))
+                column in primary_key and pa.types.is_floating(data_type)
             ):
                 raise ValueError("unsupported_dataset_fingerprint_value")
     if len(frame) == 0:

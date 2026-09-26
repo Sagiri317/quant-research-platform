@@ -4,6 +4,7 @@ from pathlib import Path
 
 import pytest
 
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage import manifests
 
 
@@ -69,6 +70,8 @@ def test_manifest_writers_render_the_snapshot_checked_for_safety(
         ({"row_sample": [{"a": 1}]}, "row_sample"),
         ({"api_key": "SYNTHETIC_SECRET"}, "credential"),
         ({"nested": {"Authorization": "Bearer SYNTHETIC_SECRET"}}, "credential"),
+        ({"message": '{"password": "SYNTHETIC_SECRET"}'}, "credential"),
+        ({"message": "{'auth': 'Basic SYNTHETIC_SECRET'}"}, "credential"),
     ],
 )
 def test_internal_manifest_rejects_private_or_row_level_metadata(
@@ -119,7 +122,13 @@ def test_json_directory_rechecks_members_with_constant_directory_identity(
         ValueError,
         match="dataset_metadata_(directory_identity_changed|member_limit_exceeded)",
     ):
-        manifests.read_bounded_qrp_json_directory(tmp_path, max_members=max_members)
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("test.json", 0) as lease,
+        ):
+            manifests.read_bounded_qrp_json_directory(
+                tmp_path, max_members=max_members, lease=lease
+            )
     assert reads == ["a.json"]
 
 
@@ -134,4 +143,10 @@ def test_json_directory_limit_precedes_content_reads(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(manifests, "read_bounded_qrp_json", forbidden)
     with pytest.raises(ValueError, match="dataset_metadata_member_limit_exceeded"):
-        manifests.read_bounded_qrp_json_directory(tmp_path, max_members=1)
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("test.json", 0) as lease,
+        ):
+            manifests.read_bounded_qrp_json_directory(
+                tmp_path, max_members=1, lease=lease
+            )

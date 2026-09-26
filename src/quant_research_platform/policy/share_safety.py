@@ -101,16 +101,14 @@ _PROVIDER_SOURCE_MARKER_RE = re.compile(
     r"raw[-_ ]?source[-_ ]?marker)\b"
 )
 _CREDENTIAL_RE = re.compile(
-    r"(?i)\b(?:token|secret|credential|password|api[_-]?key|private[_-]?key)\s*[:=]\s*"
-    r"(?:\"[^\r\n\"]+\"|'[^\r\n']+'|[^\s,;\}\]\)\"']+)"
+    r"(?i)['\"]?\b(?:\w*[_-])?(?:token|secret|credential|password|"
+    r"api[_-]?key|private[_-]?key|authorization|auth)['\"]?\s*[:=]\s*"
+    r"(?:\"(?:\\[\s\S]|[^\"\\])*\"?|'(?:\\[\s\S]|[^'\\])*'?|"
+    r"(?:(?:bearer|basic)\s+)?[^\s,;\}\]\)\"']+)?"
 )
 _CREDENTIAL_KEY_RE = re.compile(
     r"(?i)^(?:.*[_-])?(?:token|secret|credential|password|api[_-]?key|"
     r"authorization|auth|private[_-]?key)$"
-)
-_AUTHORIZATION_RE = re.compile(
-    r"(?i)\b(?:authorization|auth)\s*[:=]\s*"
-    r"['\"]?(?:bearer|basic)\s+[^\s,;\}\]\)\"']+['\"]?"
 )
 _TRACEBACK_RE = re.compile(r"(?is)Traceback \(most recent call last\):.*")
 _RAW_EXPORT_FILENAME_RE = re.compile(
@@ -160,17 +158,26 @@ def evidence_text_stream_unsafe_reason(
 
     decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
     pending = ""
+    previous_nonempty_line = ""
     seen_market_id = False
     seen_asset_id = False
 
     def scan_line(line: str) -> str | None:
-        nonlocal seen_asset_id, seen_market_id
-        reason = evidence_text_unsafe_reason(line)
+        nonlocal previous_nonempty_line, seen_asset_id, seen_market_id
+        text = previous_nonempty_line + "\n" + line if previous_nonempty_line else line
+        reason = evidence_text_unsafe_reason(text)
+        if line.strip():
+            previous_nonempty_line = line
         if reason is not None:
             return reason
-        has_market_id = re.search(r"\bmarket_id\s*=", line) is not None
-        has_asset_id = re.search(r"\basset_id\s*=", line) is not None
-        has_timestamp = re.search(r"\btimestamp\s*=", line) is not None
+        prefix_length = len(text) - len(line)
+        has_market_id, has_asset_id, has_timestamp = (
+            any(
+                match.end() > prefix_length
+                for match in re.finditer(rf"\b{field}\s*=", text, re.IGNORECASE)
+            )
+            for field in ("market_id", "asset_id", "timestamp")
+        )
         if (seen_market_id and has_asset_id) or (seen_asset_id and has_timestamp):
             return "row_sample"
         seen_market_id = seen_market_id or has_market_id
@@ -249,7 +256,7 @@ def unsafe_for_share_reason(
     value = str(text)
     if _TRACEBACK_RE.search(value):
         return "traceback"
-    if _CREDENTIAL_RE.search(value) or _AUTHORIZATION_RE.search(value):
+    if _CREDENTIAL_RE.search(value):
         return "credential"
     if _LOCAL_RUN_PATH_RE.search(value):
         return "local_run_path"
@@ -386,7 +393,6 @@ def sanitize_shared_text(text: object) -> str:
     result = str(text)
     result = _TRACEBACK_RE.sub("[traceback]", result)
     result = _CREDENTIAL_RE.sub("[credential]", result)
-    result = _AUTHORIZATION_RE.sub("[credential]", result)
     result = _LOCAL_RUN_PATH_RE.sub("[local-run-path]", result)
     result = _ABSOLUTE_REPO_LOCAL_ONLY_PATH_RE.sub("[local-only-path]", result)
     result = _WINDOWS_DRIVE_PATH_RE.sub("[local-path]", result)
@@ -453,7 +459,7 @@ def internal_artifact_metadata_unsafe_reason(
         return "absolute_path"
     if _RAW_EXPORT_FILENAME_RE.search(text):
         return "raw_export_filename"
-    if _CREDENTIAL_RE.search(text) or _AUTHORIZATION_RE.search(text):
+    if _CREDENTIAL_RE.search(text):
         return "credential"
     if _STOCK_CODE_RE.search(text):
         return None if typed_identifier else "stock_code_sample"

@@ -12,9 +12,6 @@ from quant_research_platform.artifacts.outputs.common_validation import (
     require_signal_metadata_list,
     validate_filter_metadata,
 )
-from quant_research_platform.artifacts.outputs.membership import (
-    validate_string_membership_column,
-)
 from quant_research_platform.contracts.evaluations import (
     CORRELATION_RAW_REASON_CODES,
     CORRELATION_SUMMARY_REASON_CODES,
@@ -31,6 +28,8 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
+    strict_membership_series,
+    strict_string_series,
 )
 
 EVALUATION_ARTIFACTS = [
@@ -431,19 +430,15 @@ def _validate_signal_label_membership(
     *,
     spec: EvaluationSpec,
 ) -> None:
-    signal_ids = {signal.signal_id for signal in spec.signals}
-    validate_string_membership_column(
-        frame,
-        "signal",
-        signal_ids,
-        "evaluation_artifact_signal_label_mismatch",
-    )
-    validate_string_membership_column(
-        frame,
-        "label",
-        spec.label_columns,
-        "evaluation_artifact_signal_label_mismatch",
-    )
+    error = "evaluation_artifact_signal_label_mismatch"
+    for column, allowed in (
+        ("signal", {signal.signal_id for signal in spec.signals}),
+        ("label", set(spec.label_columns)),
+    ):
+        if column not in frame.columns:
+            raise ValueError(error)
+        values = strict_string_series(frame[column], error=error, strip=False)
+        strict_membership_series(values, allowed=allowed, error=error)
 
 
 def _validate_reason_pair(

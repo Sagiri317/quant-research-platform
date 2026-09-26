@@ -88,6 +88,7 @@ def test_connection_coverage_cleanup_preserves_active_primary() -> None:
 
     index._coverage_readers = ExitStack()
     index._lease = None
+    index._scratch_reservation = None
     index._database = FailingDatabase()
     index._scratch = FailingScratch()
 
@@ -1624,7 +1625,7 @@ def test_raw_decode_is_admitted_before_json_allocation(tmp_path: Path) -> None:
     )
     manifest["files"][0]["max_record_bytes"] = 1_000_000
     filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
-    policy = capture_test_policy(available_memory_bytes=256 * 1024)
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
 
     with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
         record = next(run.iter_records())
@@ -2471,3 +2472,272 @@ def test_native_trade_identity_is_exact_across_official_resends(tmp_path, resend
                 (2.0, 1.0)
             ]
     assert policy.used_memory_bytes == 0
+
+
+def _write_coverage_history(root, count, width):
+    filesystem_mkdir(root, parents=True, exist_ok=True)
+    source = root / "connection_intervals.jsonl.gz"
+    with gzip.open(native_filesystem_path(source), "wt", encoding="utf-8") as handle:
+        for index in range(count):
+            opened = pd.Timestamp("2020-01-01", tz="UTC") + pd.Timedelta(
+                seconds=2 * index
+            )
+            handle.write(
+                json.dumps(
+                    {
+                        "connection_id": f"{index:0{width}x}",
+                        "market": FUTURES_MARKET_TYPE,
+                        "data_kind": "agg_trades",
+                        "stream": "btcusdt@aggTrade",
+                        "segment_id": None,
+                        "opened_at": opened.isoformat(),
+                        "closed_at": (opened + pd.Timedelta(seconds=1)).isoformat(),
+                        "opened_monotonic_ns": 2 * index * 10**9,
+                        "closed_monotonic_ns": (2 * index + 1) * 10**9,
+                        "close_reason": "stop",
+                    }
+                )
+                + "\n"
+            )
+    return {
+        "path": source.name,
+        "compressed_bytes": filesystem_stat(source).st_size,
+        "record_count": count,
+        "sha256": hashlib.sha256(filesystem_read_bytes(source)).hexdigest(),
+    }
+
+
+@pytest.mark.parametrize("count", [256, 2048])
+@pytest.mark.parametrize("width", [64, 4096])
+def test_coverage_accounts_actual_pages_and_streams_without_sorter(
+    tmp_path, count, width
+):
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+
+    descriptor = _write_coverage_history(tmp_path / "source", count, width)
+    policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        index = replay.ObservationCoverageIndex(
+            tmp_path / "source",
+            descriptor,
+            markets={FUTURES_MARKET_TYPE},
+            resource_policy=policy,
+            decode_interval=replay._decode_recorder_interval,
+        )
+        scratch = Path(index._scratch.name)
+        try:
+            database = index._database
+            pages = database.execute("PRAGMA main.page_count").fetchone()[0]
+            page_size = database.execute("PRAGMA page_size").fetchone()[0]
+            assert index._scratch_reservation.reserved_bytes == pages * page_size
+            expected = index._lease.reserved_bytes
+            if _memory_filesystem(scratch):
+                expected += pages * page_size
+            assert policy.used_memory_bytes == expected
+            reader = replay.ObservationCoverage(
+                index, FUTURES_MARKET_TYPE, "agg_trades", "BTCUSDT"
+            )
+            try:
+                for column in ("opened_ns", "closed_ns"):
+                    plan = database.execute(
+                        f"EXPLAIN QUERY PLAN SELECT {column}, observation_id "
+                        "FROM coverage "
+                        "WHERE market=? AND data_kind=? AND stream LIKE ? "
+                        "AND opened_ns<closed_ns "
+                        f"ORDER BY {column}",
+                        reader.parameters,
+                    ).fetchall()
+                    assert not any("TEMP B-TREE" in row[3] for row in plan)
+                intervals = reader.intervals()
+                first = pd.Timestamp("2020-01-01", tz="UTC").value
+                assert next(intervals) == (first, first + 10**9)
+                intervals.close()
+            finally:
+                reader.close()
+        finally:
+            index.close()
+        assert policy.used_memory_bytes == 0
+        assert not filesystem_exists(scratch)
+    assert (
+        hashlib.sha256(
+            filesystem_read_bytes(tmp_path / "source" / descriptor["path"])
+        ).hexdigest()
+        == descriptor["sha256"]
+    )
+
+
+def test_coverage_short_records_fit_three_mib_disk_headroom(tmp_path, monkeypatch):
+    descriptor = _write_coverage_history(tmp_path / "source", 256, 64)
+    reservations = []
+
+    def gate(_path, *, reserve_bytes):
+        reservations.append(reserve_bytes)
+        free_bytes = 3 * 1024**2 if len(reservations) == 1 else 1024 * 1024
+        if reserve_bytes > free_bytes:
+            raise OSError("insufficient_disk_space")
+        return free_bytes
+
+    monkeypatch.setattr(replay, "require_free_disk_headroom", gate)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        index = replay.ObservationCoverageIndex(
+            tmp_path / "source",
+            descriptor,
+            markets={FUTURES_MARKET_TYPE},
+            resource_policy=policy,
+            decode_interval=replay._decode_recorder_interval,
+        )
+        try:
+            assert (
+                index._database.execute("SELECT COUNT(*) FROM coverage").fetchone()[0]
+                == 256
+            )
+        finally:
+            index.close()
+        assert policy.used_memory_bytes == 0
+    assert reservations and max(reservations) <= 3 * 1024**2
+
+
+def test_coverage_tmpfs_rejects_growth_within_eight_mib_cap(tmp_path, monkeypatch):
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+
+    scratch_parent = Path(tempfile.gettempdir())
+    if not _memory_filesystem(scratch_parent):
+        pytest.skip("requires memory-backed scratch")
+    descriptor = _write_coverage_history(tmp_path / "source", 2048, 4096)
+    created = []
+    original = replay.tempfile.TemporaryDirectory
+
+    def capture(**kwargs):
+        directory = original(**kwargs)
+        created.append(Path(directory.name))
+        return directory
+
+    monkeypatch.setattr(replay.tempfile, "TemporaryDirectory", capture)
+    policy = capture_test_policy(
+        available_memory_bytes=512 * 1024**2, explicit_cap_bytes=8 * 1024**2
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(ValueError, match="storage_scratch_exceeds_memory_capacity"):
+            replay.ObservationCoverageIndex(
+                tmp_path / "source",
+                descriptor,
+                markets={FUTURES_MARKET_TYPE},
+                resource_policy=policy,
+                decode_interval=replay._decode_recorder_interval,
+            )
+        assert policy.used_memory_bytes == 0
+    assert created and all(not filesystem_exists(path) for path in created)
+
+
+def test_coverage_close_failure_does_not_release_scratch_accounting():
+    from contextlib import ExitStack
+
+    class FailingDatabase:
+        def close(self):
+            raise OSError("database_close")
+
+    class Scratch:
+        def cleanup(self):
+            pass
+
+    class Reservation:
+        reserved_bytes = 123
+
+        def resize(self, size):
+            self.reserved_bytes = size
+
+        def close(self):
+            if self.reserved_bytes:
+                raise RuntimeError("storage_scratch_not_released")
+
+    reservation = Reservation()
+    index = object.__new__(replay.ObservationCoverageIndex)
+    index._coverage_readers = ExitStack()
+    index._database = FailingDatabase()
+    index._scratch = Scratch()
+    index._scratch_reservation = reservation
+    index._lease = None
+    with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
+        try:
+            raise KeyboardInterrupt("body_primary")
+        finally:
+            index.close()
+    assert reservation.reserved_bytes == 123
+    assert raised.value.__notes__ == [
+        "Binance connection coverage database close also failed: OSError",
+        "Binance coverage reservation close also failed: RuntimeError",
+    ]
+
+
+@pytest.mark.parametrize(
+    "bounds,expected",
+    [
+        ([(0, 0)], []),
+        ([(0, 30)], [(0, 30)]),
+        ([(0, 30), (10, 10)], [(0, 30)]),
+        ([(0, 30), (0, 0), (30, 30)], [(0, 30)]),
+        ([(0, 10), (10, 20)], [(0, 10), (10, 20)]),
+        ([(0, 10), (10, 10), (10, 20)], [(0, 10), (10, 20)]),
+        ([(0, 20), (10, 30)], [(0, 10), (20, 30)]),
+        ([(0, 20), (10, 30), (15, 15)], [(0, 10), (20, 30)]),
+    ],
+)
+def test_coverage_empty_connections_keep_facts_without_sweep_contribution(
+    tmp_path, bounds, expected
+):
+    descriptor = _write_coverage_history(tmp_path, 1, 32)
+    source = tmp_path / descriptor["path"]
+    with gzip.open(native_filesystem_path(source), "rt", encoding="utf-8") as handle:
+        original = json.loads(next(handle))
+    start = pd.Timestamp("2020-01-01", tz="UTC")
+    with gzip.open(native_filesystem_path(source), "wt", encoding="utf-8") as handle:
+        for position, (opened, closed) in enumerate(bounds):
+            handle.write(
+                json.dumps(
+                    {
+                        **original,
+                        "connection_id": f"connection-{position}",
+                        "opened_at": (start + pd.Timedelta(seconds=opened)).isoformat(),
+                        "closed_at": (start + pd.Timedelta(seconds=closed)).isoformat(),
+                        "opened_monotonic_ns": opened * 10**9,
+                        "closed_monotonic_ns": closed * 10**9,
+                    }
+                )
+                + "\n"
+            )
+    raw_hash = hashlib.sha256(filesystem_read_bytes(source)).hexdigest()
+    descriptor.update(
+        record_count=len(bounds),
+        compressed_bytes=filesystem_stat(source).st_size,
+        sha256=raw_hash,
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        index = replay.ObservationCoverageIndex(
+            tmp_path,
+            descriptor,
+            markets={FUTURES_MARKET_TYPE},
+            resource_policy=policy,
+            decode_interval=replay._decode_recorder_interval,
+        )
+        scratch = Path(index._scratch.name)
+        reader = replay.ObservationCoverage(
+            index, FUTURES_MARKET_TYPE, "agg_trades", "BTCUSDT"
+        )
+        try:
+            assert list(reader.intervals()) == [
+                (start.value + opened * 10**9, start.value + closed * 10**9)
+                for opened, closed in expected
+            ]
+            for position, (opened, closed) in enumerate(bounds):
+                assert reader[f"connection-{position}"] == (
+                    start.value + opened * 10**9,
+                    start.value + closed * 10**9,
+                )
+        finally:
+            reader.close()
+            index.close()
+        assert policy.used_memory_bytes == 0
+    assert not filesystem_exists(scratch)
+    assert hashlib.sha256(filesystem_read_bytes(source)).hexdigest() == raw_hash

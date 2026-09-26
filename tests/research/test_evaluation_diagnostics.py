@@ -816,3 +816,78 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
             assert metrics.n_obs.tolist() == [expected_rows]
             assert metrics.ic.tolist() == pytest.approx([1.0])
             assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    ("signal_id", "reason"),
+    [
+        ('{"token":\n"SYNTHETIC_SECRET"}', "credential"),
+        ('{"token"\n \n:\n"SYNTHETIC_SECRET"}', "credential"),
+        ('{"_token":"SYNTHETIC_SECRET"}', "credential"),
+        ("MARKET_ID=synthetic\nordinary\nASSET_ID=synthetic", "row_sample"),
+        ("market_id\n=synthetic\nordinary\nasset_id=synthetic", "row_sample"),
+        ("asset_id\n=synthetic\nordinary\ntimestamp\n=synthetic", "row_sample"),
+    ],
+)
+def test_evaluation_writer_rejects_unsafe_signal_before_publication(
+    tmp_path: Path, signal_id: str, reason: str
+) -> None:
+    from dataclasses import replace
+
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.storage.layout import StorageLayout
+
+    spec = EvaluationSpec(
+        evaluation_id="unsafe_signal",
+        market_id=MarketId("crypto"),
+        research_dataset_id="hft_research",
+        signals=(replace(make_artifact_signal_spec(), signal_id=signal_id),),
+        label_columns=("label",),
+        evaluation_axis="single_asset_time_series",
+        n_groups=2,
+    )
+    output = OutputSpec(
+        output_id=spec.evaluation_id,
+        output_definition_id="evaluation_outputs",
+        run_id="test_run",
+        market_id=spec.market_id,
+        run_type="evaluation",
+        scope=OutputScope.LOCAL_ONLY,
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": [pd.Timestamp("2023-01-02")],
+            "asset_id": "asset",
+            "feature": 1.0,
+            "label": 2.0,
+            "eligible": True,
+        }
+    )
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(
+            ValueError, match=f"evaluation_summary_share_unsafe: {reason}"
+        ):
+            with evaluation_engine.build_evaluation_result_from_frames(
+                (frame,),
+                spec=spec,
+                signal_columns=(signal_id,),
+                label_columns=("label",),
+                n_groups=2,
+                asset_column="asset_id",
+                source_columns_by_kind={"feature": ("feature",)},
+                resource_policy=policy,
+            ) as result:
+                write_evaluation_outputs_from_chunks(
+                    result.output_chunks,
+                    summary_factory=result.summaries,
+                    spec=spec,
+                    output_spec=output,
+                    layout=StorageLayout(tmp_path),
+                    n_groups=2,
+                )
+        assert policy.used_memory_bytes == 0
+    assert not list(tmp_path.rglob("summary.md"))
+    assert not list(tmp_path.rglob("manifest.json"))

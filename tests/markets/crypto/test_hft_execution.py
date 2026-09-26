@@ -339,79 +339,65 @@ def test_taker_uses_latest_actual_state_at_effective_time() -> None:
     assert diagnostics["assumption"] == "historical_book_zero_market_impact"
 
 
-def test_pending_markout_close_failure_preserves_body_primary() -> None:
-    class FailingClose:
-        close_calls = 0
+def test_pending_markout_close_failure_preserves_body_primary(monkeypatch) -> None:
+    from quant_research_platform.storage import _scratch_ownership
 
-        def close(self) -> None:
-            self.close_calls += 1
+    original = _scratch_ownership.TemporaryFile
+    handles = []
+
+    class FailingClose:
+        def __init__(self, **kwargs):
+            self.handle = original(**kwargs)
+            handles.append(self.handle)
+
+        def __getattr__(self, name):
+            return getattr(self.handle, name)
+
+        def close(self):
+            self.handle.close()
             raise OSError("close_failure")
 
-    handle = FailingClose()
-    pending = object.__new__(_PendingMarkouts)
-    pending._file = handle
-    pending._next = None
-    pending.expire_all = lambda: None
-
-    with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
-        with pending:
-            raise KeyboardInterrupt("body_primary")
-
-    assert handle.close_calls == 1
+    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", FailingClose)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
+            with _PendingMarkouts(_Metrics(), None, policy) as pending:
+                pending.add({"fill_qty": 1.0})
+                raise KeyboardInterrupt("body_primary")
+        assert policy.used_memory_bytes == 0
+    assert handles and all(handle.closed for handle in handles)
     assert raised.value.__notes__ == [
         "execution pending markout handle close also failed: OSError"
     ]
 
 
-def test_pending_markout_rejects_disk_before_tempfile(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        execution,
-        "require_free_disk_headroom",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            OSError("pending_markout_disk_headroom")
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        execution.tempfile,
-        "TemporaryFile",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("temporary_file_created_before_disk_preflight")
-        ),
-    )
+def test_pending_markout_constructor_failure_releases_scratch_owner(monkeypatch):
+    from quant_research_platform.storage import _scratch_ownership
 
+    def fail(**_kwargs):
+        raise OSError("pending_markout_constructor")
+
+    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", fail)
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    with pytest.raises(OSError, match="pending_markout_disk_headroom"):
-        _PendingMarkouts(_Metrics(), None, policy)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(OSError, match="pending_markout_constructor"):
+            _PendingMarkouts(_Metrics(), None, policy)
+        assert policy.used_memory_bytes == 0
 
 
-def test_pending_markout_rechecks_disk_and_closes_after_failure(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls: list[int] = []
+def test_pending_markout_rechecks_disk_and_closes_after_failure(monkeypatch):
+    from quant_research_platform.storage import _scratch_ownership
 
-    def gate(_path, *, reserve_bytes: int) -> int:
+    calls = []
+
+    def gate(_path, *, reserve_bytes):
         calls.append(reserve_bytes)
         if len(calls) == 2:
             raise OSError("pending_markout_disk_headroom")
         return reserve_bytes
 
-    monkeypatch.setattr(
-        execution,
-        "require_free_disk_headroom",
-        gate,
-        raising=False,
-    )
-    monkeypatch.setattr(
-        execution,
-        "_PENDING_MARKOUT_DISK_CHECK_BYTES",
-        1,
-        raising=False,
-    )
+    monkeypatch.setattr(_scratch_ownership, "require_free_disk_headroom", gate)
     policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    pending = _PendingMarkouts(_Metrics(), None, policy)
     fill = {
         "fill_qty": 1.0,
         "fill_price": 100.0,
@@ -419,14 +405,18 @@ def test_pending_markout_rechecks_disk_and_closes_after_failure(
         "segment_id": "s1",
         "markout_target_time_ns": 1,
     }
-
     with runtime_resource_policy_scope(policy):
         with pytest.raises(OSError, match="pending_markout_disk_headroom"):
-            with pending:
+            with _PendingMarkouts(_Metrics(), None, policy) as pending:
                 pending.add(fill)
-
+                size = pending._file.seek(0, 2)
+                try:
+                    pending.add(fill)
+                finally:
+                    assert pending._file.seek(0, 2) == size
+        assert policy.used_memory_bytes == 0
     assert len(calls) == 2
-    assert pending._file.closed is True
+    assert pending._file.closed
 
 
 def test_pending_markout_encode_and_retained_decode_are_admitted(
@@ -436,6 +426,11 @@ def test_pending_markout_encode_and_retained_decode_are_admitted(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=16 * 1024**2,
     )
+    from pathlib import Path
+    from tempfile import gettempdir
+
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+
     observed: list[tuple[str, int]] = []
     dumps = execution.json.dumps
     parse_json = execution.parse_qrp_json_object
@@ -461,9 +456,18 @@ def test_pending_markout_encode_and_retained_decode_are_admitted(
     with runtime_resource_policy_scope(policy):
         with _PendingMarkouts(_Metrics(), None, policy) as pending:
             pending.add(fill)
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == (
+                pending._reservation.reserved_bytes
+                if _memory_filesystem(Path(gettempdir()))
+                else 0
+            )
             assert pending._peek() == fill
             assert policy.used_memory_bytes > 0
+            pending.expire_all()
+            assert policy.used_memory_bytes == 0
+            assert pending._file.seek(0, 2) == 0
+            pending.add(fill)
+            assert pending._peek() == fill
             pending.expire_all()
             assert policy.used_memory_bytes == 0
 
@@ -1159,3 +1163,126 @@ def test_complete_observation_window_preserves_continuous_economic_batches(kind)
                 )
         produced.append(batches)
     assert produced[0] == produced[1]
+
+
+def test_pending_markout_truncate_failure_closes_file_and_preserves_primary(
+    monkeypatch,
+):
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    primary = KeyboardInterrupt("truncate_primary")
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(KeyboardInterrupt) as caught:
+            with _PendingMarkouts(_Metrics(), None, policy) as pending:
+                handle = pending._file
+
+                class FailingTruncate:
+                    def __getattr__(self, name):
+                        return getattr(handle, name)
+
+                    def truncate(self):
+                        assert pending._reservation.reserved_bytes > 0
+                        raise primary
+
+                monkeypatch.setattr(pending, "_file", FailingTruncate())
+                pending.add({"fill_qty": 1.0, "fill_price": 100.0, "side": "buy"})
+                pending.expire_all()
+        assert caught.value is primary
+        assert handle.closed
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("kind", ["maker", "taker"])
+@pytest.mark.parametrize("matured", [False, True])
+def test_execution_markout_scratch_is_bounded_and_history_is_released(
+    monkeypatch, kind, matured
+):
+    import os
+    from pathlib import Path
+    from tempfile import gettempdir
+
+    from quant_research_platform.storage._scratch_ownership import _memory_filesystem
+
+    cap = 768 * 1024
+    count = 2048
+    peak_bytes = 0
+    handles = []
+    original_add = _PendingMarkouts.add
+
+    def observe(pending, fill):
+        nonlocal peak_bytes
+        original_add(pending, fill)
+        size = os.fstat(pending._file.fileno()).st_size
+        peak_bytes = max(peak_bytes, size)
+        assert pending._reservation.reserved_bytes == size
+        if not handles:
+            handles.append(pending._file)
+
+    monkeypatch.setattr(_PendingMarkouts, "add", observe)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2, explicit_cap_bytes=cap
+    )
+    with runtime_resource_policy_scope(policy):
+        common = dict(
+            observed_coverage={"s1": (0, 1_000_000_000_000)},
+            resource_policy=policy,
+            capital=PortfolioCapital(
+                "fixture", 1_000_000.0, "USDT", "linear_perpetual"
+            ),
+            asset_id="btc_usdt",
+            funding_events=(),
+            funding_forecasts=KNOWN_NO_FUNDING,
+        )
+        books = (_state(stamp) for stamp in range(0, 4 * count + 4, 2))
+        horizon = 1 if matured else 100_000
+
+        def simulate():
+            if kind == "taker":
+                return _simulate_taker(
+                    books,
+                    (
+                        {
+                            "timestamp_ms": 4 * i,
+                            "prediction": 0.02 if i % 2 == 0 else -0.02,
+                        }
+                        for i in range(count)
+                    ),
+                    prediction_column="prediction",
+                    prediction_horizon_ms=500,
+                    config=replace(_taker_config(), markout_horizon_ms=horizon),
+                    **common,
+                )
+            return _simulate_maker(
+                books,
+                (
+                    _trade(
+                        4 * i + 1,
+                        price="99.5" if i % 2 == 0 else "100.5",
+                        quantity="3",
+                        maker_buyer=i % 2 == 0,
+                    )
+                    for i in range(count)
+                ),
+                (_quote(4 * i, book_segment_id="s1") for i in range(count)),
+                config=replace(_maker_config(), markout_horizon_ms=horizon),
+                trade_coverage={"trade-connection-1": (0, 1_000_000_000_000)},
+                **common,
+            )
+
+        if not matured and _memory_filesystem(Path(gettempdir())):
+            with pytest.raises(
+                (MemoryError, ValueError),
+                match="storage_scratch_exceeds_memory_capacity|runtime_memory_budget_exceeded",
+            ):
+                simulate()
+            assert 0 < peak_bytes < cap
+        else:
+            result = simulate()
+            assert result["fill_events"] == count
+            assert result["gross_pnl"] == pytest.approx(
+                count * (0.5 if kind == "maker" else -0.5)
+            )
+            assert result["markout_undefined_fill_events"] == (0 if matured else count)
+        if matured:
+            assert 0 < peak_bytes < 1024
+        assert policy.used_memory_bytes == 0
+    assert handles and all(handle.closed for handle in handles)

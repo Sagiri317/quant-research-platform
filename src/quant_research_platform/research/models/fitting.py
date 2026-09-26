@@ -26,7 +26,6 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.models import (
     ModelSpec,
-    _model_algorithm_facts,
     _thaw_model_hyperparameters,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
@@ -34,6 +33,7 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     canonical_feature_validity_columns,
+    model_input_validity_columns,
 )
 from quant_research_platform.research.filtering import (
     _filter_mode_scope,
@@ -557,7 +557,9 @@ def _collect_training_frame_owned(
     tuple[pd.DataFrame, dict[str, object], dict[str, object]]
     | OwnedValue[tuple[pd.DataFrame, dict[str, object], dict[str, object]]]
 ):
-    validity_columns = canonical_feature_validity_columns(spec.input_columns)
+    validity_columns = model_input_validity_columns(
+        spec.input_columns, spec.model_algorithm
+    )
     required = set((*spec.input_columns, *validity_columns))
     required.add(spec.label_column)
     required.add("timestamp")
@@ -654,14 +656,7 @@ def _collect_training_frame_owned(
                     filtered,
                     fitting_cutoff=fitting_cutoff,
                     availability_column=availability_column,
-                    feature_columns=(
-                        validity_columns
-                        if _model_algorithm_facts(spec.model_algorithm).input_kind
-                        == "rank_ensemble_inputs"
-                        else tuple(
-                            dict.fromkeys((*spec.input_columns, *validity_columns))
-                        )
-                    ),
+                    feature_columns=validity_columns,
                     target_column=spec.label_column,
                 ).loc[:, selected_columns]
                 usable_payload_bytes = pandas_frame_payload_bytes(usable)
@@ -1184,6 +1179,7 @@ def iter_legal_training_chunks(
     train_end: pd.Timestamp,
     label_column: str,
     input_columns: tuple[str, ...],
+    model_algorithm: str,
 ) -> Iterable[pd.DataFrame]:
     for chunk in chunks:
         policy = current_runtime_resource_policy()
@@ -1216,13 +1212,8 @@ def iter_legal_training_chunks(
                 chunk,
                 fitting_cutoff=train_end,
                 availability_column=availability_column,
-                feature_columns=tuple(
-                    dict.fromkeys(
-                        (
-                            *input_columns,
-                            *canonical_feature_validity_columns(input_columns),
-                        )
-                    )
+                feature_columns=model_input_validity_columns(
+                    input_columns, model_algorithm
                 ),
                 target_column=label_column,
             )

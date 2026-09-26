@@ -250,7 +250,7 @@ def test_price_volume_rejects_removed_names_before_calculation():
 
 @pytest.mark.parametrize("size", [20, 60])
 @pytest.mark.parametrize("scale", [1.0, 1e-10, 1e10])
-def test_price_volume_skew_preserves_native_single_window_rounding(size, scale):
+def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
     values = np.random.default_rng(20260910).normal(size=320) * scale
     values[200] = np.nan
     dates = pd.bdate_range("2020-01-01", periods=len(values))
@@ -263,15 +263,48 @@ def test_price_volume_skew_preserves_native_single_window_rounding(size, scale):
         factor_columns=(f"skewness_{size}d",),
         output_window=TimeWindow(dates[size - 1].date(), dates[-1].date()),
     )
-    expected = pd.Series(
-        [
-            pd.Series(values[start : start + size]).skew(skipna=False)
-            for start in range(len(values) - size + 1)
-        ],
-        name=f"skewness_{size}d",
-    )
-    pd.testing.assert_series_equal(
-        actual[f"skewness_{size}d"], expected, check_exact=True
+    from decimal import Decimal, localcontext
+
+    expected = []
+    error_bounds = []
+    for start in range(len(values) - size + 1):
+        window = values[start : start + size]
+        if np.isnan(window).any():
+            expected.append(np.nan)
+            error_bounds.append(0.0)
+            continue
+        with localcontext() as context:
+            context.prec = 80
+            data = [Decimal.from_float(float(value)) for value in window]
+            n = Decimal(size)
+            mean = sum(data) / n
+            centered = [value - mean for value in data]
+            m2 = sum(value**2 for value in centered) / n
+            m3 = sum(value**3 for value in centered) / n
+            correction = (n * (n - 1)).sqrt() / (n - 2)
+            expected.append(float(correction * m3 / (m2 * m2.sqrt())))
+            # Absolute third moments bound cancellation; gamma accounts for
+            # centering, powers, reductions, and the final normalized ratio.
+            absolute_m3 = sum(abs(value) ** 3 for value in centered) / n
+            unit = np.finfo("float64").eps
+            gamma = 32 * size * unit / (1 - 32 * size * unit)
+            error_bounds.append(
+                gamma * float(correction * absolute_m3 / (m2 * m2.sqrt()))
+            )
+        single = calculate_price_volume_factors(
+            panel.iloc[start : start + size],
+            factor_columns=(f"skewness_{size}d",),
+        )
+        assert (
+            single.iloc[-1][f"skewness_{size}d"]
+            == actual.iloc[start][f"skewness_{size}d"]
+        )
+    observed = actual[f"skewness_{size}d"].to_numpy()
+    expected = np.asarray(expected)
+    assert np.array_equal(np.isnan(observed), np.isnan(expected))
+    valid = np.isfinite(expected)
+    assert np.all(
+        np.abs(observed[valid] - expected[valid]) <= np.asarray(error_bounds)[valid]
     )
     pd.testing.assert_frame_equal(panel, original, check_exact=True)
 

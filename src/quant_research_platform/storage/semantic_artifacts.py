@@ -100,14 +100,20 @@ def compare_semantic_artifacts(
         for old_ref, candidate_ref in zip(old_trials, candidate_trials, strict=True):
             if trial_layout is None:
                 raise ValueError("trial_layout_required")
-            old_plan, old_records = read_trial_ledger_reference(trial_layout, old_ref)
-            candidate_plan, candidate_records = read_trial_ledger_reference(
-                trial_layout, candidate_ref
-            )
-            if trial_ledger_semantic_payload(
-                old_plan, old_records
-            ) != trial_ledger_semantic_payload(candidate_plan, candidate_records):
-                return SemanticArtifactComparison("CONTENT_MISMATCH")
+            with (
+                read_trial_ledger_reference(trial_layout, old_ref) as (
+                    old_plan,
+                    old_records,
+                ),
+                read_trial_ledger_reference(trial_layout, candidate_ref) as (
+                    candidate_plan,
+                    candidate_records,
+                ),
+            ):
+                if trial_ledger_semantic_payload(
+                    old_plan, old_records
+                ) != trial_ledger_semantic_payload(candidate_plan, candidate_records):
+                    return SemanticArtifactComparison("CONTENT_MISMATCH")
         for member, candidate_member in zip(
             old_members, candidate_members, strict=True
         ):

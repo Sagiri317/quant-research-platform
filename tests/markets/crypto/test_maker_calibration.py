@@ -732,3 +732,142 @@ def test_future_coverage_end_cannot_change_earlier_maker_decision(
     assert any(
         row.name == "maker_buy_requested_quantity" and row.number > 0 for row in long
     )
+
+
+def test_native_windows_reuse_one_spool_and_recompute_economic_queries(monkeypatch):
+    from contextlib import contextmanager
+
+    from quant_research_platform.markets.implementations.crypto import execution
+
+    state = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
+    paths = [
+        ([state], [_trade(stamp, price="99.5", quantity="1.5", maker_buyer=True)])
+        for stamp in (10, 20)
+    ]
+    sample_source, event_source = calibration_inputs(paths, [-0.002, 0.003])
+    windows = []
+    spools = []
+    native_file = execution.reserved_temporary_file
+
+    def events(start, stop):
+        windows.append((start, stop))
+        yield from event_source(start, stop)
+
+    @contextmanager
+    def observed_file(**kwargs):
+        with native_file(**kwargs) as owned:
+            spools.append(owned[0])
+            yield owned
+
+    monkeypatch.setattr(execution, "reserved_temporary_file", observed_file)
+    order = _maker_new_order(
+        0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
+    )
+    queries = [
+        dict(
+            state=state,
+            decision_ns=0,
+            new_order=replace(order),
+            active_order=replace(order, remaining=0.5) if index == 2 else None,
+            commands=((15000000, "buy", None),) if index == 3 else (),
+            lifetime_ns=20000000 if index == 3 else 500000000,
+            prediction=(0.01, -0.005, 0.02, -0.02)[index],
+            fee_bps=float(index),
+            funding=[] if index == 0 else [(15000000, 0.02)],
+        )
+        for index in range(4)
+    ]
+    with runtime_resource_policy_scope() as policy:
+        shared = MakerCalibration(sample_source, events, resource_policy=policy)
+        try:
+            answers = [shared.select(**query) for query in queries]
+            assert len(windows) == len(paths) * len(queries)
+            assert len(spools) == 1 and not spools[0].closed
+            assert spools[0].seek(0, 2) == 0 and policy.used_memory_bytes == 0
+        finally:
+            shared.close()
+        assert spools[0].closed and policy.used_memory_bytes == 0
+        for answer, query in zip(answers, queries, strict=True):
+            fresh = MakerCalibration(sample_source, events, resource_policy=policy)
+            try:
+                assert fresh.select(**query) == answer
+            finally:
+                fresh.close()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("failure_at", ["source", "response", "truncate"])
+def test_native_window_failure_closes_spool_preserving_primary(monkeypatch, failure_at):
+    from contextlib import contextmanager
+
+    from quant_research_platform.markets.implementations.crypto import execution
+
+    state = _state(0)
+    sample_source, event_source = calibration_inputs(
+        [([state], [_trade(10, price="99.5", quantity="2", maker_buyer=True)])],
+        [0.0],
+    )
+    primary = KeyboardInterrupt("native_window_interrupted")
+    closed = []
+    spools = []
+    native_file = execution.reserved_temporary_file
+
+    def events(start, stop):
+        try:
+            yield from event_source(start, stop)
+            if failure_at == "source":
+                raise primary
+        finally:
+            closed.append(True)
+
+    @contextmanager
+    def failing_close(**kwargs):
+        with native_file(**kwargs) as owned:
+            spools.append(owned[0])
+            if failure_at == "truncate":
+
+                class TruncateFailure:
+                    def __getattr__(self, name):
+                        return getattr(owned[0], name)
+
+                    def truncate(self):
+                        raise primary
+
+                yield TruncateFailure(), owned[1]
+            else:
+                yield owned
+        raise RuntimeError("synthetic_close_failed_after_release")
+
+    monkeypatch.setattr(execution, "reserved_temporary_file", failing_close)
+    with runtime_resource_policy_scope() as policy:
+        model = MakerCalibration(sample_source, events, resource_policy=policy)
+        if failure_at == "response":
+
+            def interrupted(*args, **kwargs):
+                raise primary
+
+            monkeypatch.setattr(model, "_response", interrupted)
+        with pytest.raises(KeyboardInterrupt) as caught:
+            model.select(
+                state=state,
+                decision_ns=0,
+                new_order=_maker_new_order(
+                    0,
+                    "buy",
+                    1.0,
+                    state,
+                    _quote(0, book_segment_id="s1"),
+                    _maker_config(),
+                ),
+                active_order=None,
+                commands=(),
+                lifetime_ns=500000000,
+                prediction=0.0,
+                fee_bps=0.0,
+                funding=[],
+            )
+        assert caught.value is primary and closed == [True]
+        assert any("RuntimeError" in note for note in primary.__notes__)
+        assert len(spools) == 1 and spools[0].closed
+        assert policy.used_memory_bytes == 0
+        model.close()

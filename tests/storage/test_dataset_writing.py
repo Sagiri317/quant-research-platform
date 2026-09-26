@@ -21,6 +21,7 @@ from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import (
+    compare_datasets,
     fingerprint_dataset,
     inspect_dataset,
     read_dataset,
@@ -974,3 +975,25 @@ def test_single_short_string_key_row_uses_measured_conversion_size() -> None:
 
     assert len(chunks) == 1
     pd.testing.assert_frame_equal(chunks[0], batch.to_pandas(use_threads=False))
+
+
+@pytest.mark.parametrize("dtype", ("float16", "float32", "float64"))
+def test_float_primary_key_zero_identity_publication(tmp_path, dtype):
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["asset_id"] = np.array([-0.0, 0.0], dtype=dtype)
+    frame["timestamp"] = pd.Timestamp("2020-01-01")
+    root = make_dataset_artifact_root(tmp_path, "float_key")
+    spec = make_processed_dataset_spec("float_key")
+    with pytest.raises(ValueError, match="duplicate_dataset_primary_key"):
+        write_dataset(root, frame, spec=spec)
+    assert not filesystem_exists(root)
+    assert not list(filesystem_glob(root.parent, ".a-*"))
+    frame["asset_id"] = np.array([1.0, 2.0], dtype=dtype)
+    write_dataset(root, frame, spec=spec)
+    restored = read_dataset(root)
+    assert restored["asset_id"].dtype == frame["asset_id"].dtype
+    assert sorted(restored["asset_id"]) == [1.0, 2.0]
+    with pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"):
+        fingerprint_dataset(root)
+    comparison = compare_datasets(root, root)
+    assert comparison.status == "INSPECTION_FAILED"

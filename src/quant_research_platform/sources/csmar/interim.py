@@ -754,7 +754,7 @@ def normalize_raw_frame(
         ):
             result[column] = strict_finite_numeric_series(
                 result[column],
-                error=f"invalid_financial_value: {column}",
+                error=f"invalid_financial_value:{column}",
                 allow_null=True,
             )
         result["timestamp"] = result["report_period"]
@@ -1024,7 +1024,7 @@ def normalize_raw_frame(
         for column in ("forecast_eps", "forecast_pe"):
             result[column] = strict_finite_numeric_series(
                 result[column],
-                error=f"invalid_analyst_value: {column}",
+                error=f"invalid_analyst_value:{column}",
                 allow_null=True,
             )
         result["timestamp"] = result["declare_date"]
@@ -1154,7 +1154,7 @@ def _parse_optional_csmar_date(
     blank = text.map(lambda value: isinstance(value, str) and not value.strip())
     return strict_timestamp_series(
         text.mask(blank),
-        error=f"{error_code}: {column}",
+        error=f"{error_code}:{column}",
         allow_null=True,
     )
 
