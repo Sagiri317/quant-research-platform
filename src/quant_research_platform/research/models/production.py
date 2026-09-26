@@ -32,7 +32,6 @@ from quant_research_platform.contracts.time import TimeWindow, time_value_isofor
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import (
     _research_dataset_access_window,
-    iter_research_dataset_chunks,
 )
 from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
@@ -88,6 +87,32 @@ class QuarterlyModelResult:
     trial_ledgers: tuple[dict[str, str], ...] = ()
 
 
+def _model_input_chunks(dataset_session, *, dataset_spec, columns, time_window):
+    columns = resolve_columns_from_schema(
+        tuple(dataset_session.arrow_schema.names),
+        spec=dataset_session.spec,
+        columns=columns,
+    )
+    projection = replace(
+        dataset_session,
+        logical_columns=columns,
+        physical_columns=columns,
+        owns_inventory=False,
+        owns_lease=False,
+    )
+    window = _research_dataset_access_window(dataset_spec.market_id, time_window)
+    with projection.filtered_view(window) as view:
+        with closing_iterator(
+            iter_dataset_chunks(
+                view,
+                target_chunk_bytes=max(
+                    1, dataset_session.resource_policy.planning_headroom_bytes
+                ),
+            )
+        ) as source:
+            yield from source
+
+
 def build_model_selection_result(
     *,
     layout: StorageLayout,
@@ -125,29 +150,6 @@ def build_model_selection_result(
     if type(root_seed) is not int or root_seed < 0:
         raise ValueError("model_root_seed_missing")
 
-    def read_chunks(read_columns: tuple[str, ...], window: TimeWindow):
-        columns = resolve_columns_from_schema(
-            tuple(dataset_session.arrow_schema.names),
-            spec=dataset_session.spec,
-            columns=read_columns,
-        )
-        projection = replace(
-            dataset_session,
-            logical_columns=columns,
-            physical_columns=columns,
-            owns_inventory=False,
-            owns_lease=False,
-        )
-        window = _research_dataset_access_window(dataset_spec.market_id, window)
-        with projection.filtered_view(window) as view:
-            with closing_iterator(
-                iter_dataset_chunks(
-                    view,
-                    target_chunk_bytes=max(1, resource_policy.planning_headroom_bytes),
-                )
-            ) as source:
-                yield from source
-
     def chunks(
         read_columns: tuple[str, ...],
         *,
@@ -156,9 +158,11 @@ def build_model_selection_result(
         end: object,
     ) -> Iterable[pd.DataFrame]:
         yield from iter_validated_research_input_chunks(
-            read_chunks(
-                read_columns,
-                TimeWindow(
+            _model_input_chunks(
+                dataset_session,
+                dataset_spec=dataset_spec,
+                columns=read_columns,
+                time_window=TimeWindow(
                     formal_dataset_window["start"] if start is None else start,
                     end,
                 ),
@@ -177,9 +181,13 @@ def build_model_selection_result(
         time_window=time_window,
         chunks=chunks,
         sessions=_dataset_sessions(
-            read_chunks(
-                ("timestamp",),
-                TimeWindow(formal_dataset_window["start"], development_window["end"]),
+            _model_input_chunks(
+                dataset_session,
+                dataset_spec=dataset_spec,
+                columns=("timestamp",),
+                time_window=TimeWindow(
+                    formal_dataset_window["start"], development_window["end"]
+                ),
             )
         ),
         chronology=chronology,
@@ -870,9 +878,29 @@ class CryptoFoldModelResult:
     fit_coverage_id: str
 
 
+def _crypto_model_chronology(protocol_manifest, time_window):
+    from quant_research_platform.research.protocols.crypto_hft import (
+        research_chronology,
+    )
+
+    folds, holdout = research_chronology(protocol_manifest["research_plan"])
+    return (
+        tuple(
+            fold
+            for fold in folds
+            if pd.Timestamp(fold.development_test.end)
+            >= pd.Timestamp(time_window.start)
+            and pd.Timestamp(fold.development_test.start)
+            <= pd.Timestamp(time_window.end)
+        ),
+        holdout,
+    )
+
+
 def build_crypto_fold_models(
     *,
     layout,
+    dataset_session,
     dataset_catalog,
     model_catalog,
     dataset_id,
@@ -894,20 +922,14 @@ def build_crypto_fold_models(
     from quant_research_platform.research.protocols.crypto_hft import (
         HFT_EXECUTION_CONTEXT_COLUMNS,
         build_hft_prediction_catalog,
-        research_chronology,
     )
 
-    folds, holdout = research_chronology(protocol_manifest["research_plan"])
-
+    folds, holdout = _crypto_model_chronology(protocol_manifest, time_window)
+    if not folds:
+        return
     dataset = dataset_catalog.get(dataset_id)
-    identity = layout.target_root(
-        dataset_id, layout.research_dataset_root(dataset.market_id, dataset_id)
-    ).name
+    identity = dataset_session.root.name
     for fold in folds:
-        if pd.Timestamp(fold.development_test.end) < pd.Timestamp(
-            time_window.start
-        ) or pd.Timestamp(fold.development_test.start) > pd.Timestamp(time_window.end):
-            continue
         prediction_catalog = build_hft_prediction_catalog(
             configuration=protocol_manifest["research_configuration"],
             train_end=fold.train.end.isoformat(),
@@ -949,10 +971,9 @@ def build_crypto_fold_models(
             metrics = training_metadata = None
 
             def chunks(window, spec=spec, prediction=prediction):
-                source = iter_research_dataset_chunks(
-                    layout,
-                    market_id=dataset.market_id,
-                    dataset_id=dataset_id,
+                source = _model_input_chunks(
+                    dataset_session,
+                    dataset_spec=dataset,
                     time_window=window,
                     columns=(
                         *model_training_read_columns(
@@ -966,7 +987,9 @@ def build_crypto_fold_models(
                 )
                 yield from training_scope_chunks(
                     iter_validated_research_input_chunks(
-                        source, dataset_spec=dataset, input_columns=spec.input_columns
+                        source,
+                        dataset_spec=dataset,
+                        input_columns=spec.input_columns,
                     ),
                     asset_ids=prediction.training_asset_ids,
                 )
@@ -1041,7 +1064,8 @@ def build_crypto_fold_models(
                 validation = iter_validation_prediction_chunks(
                     lambda fold=fold: chunks(fold.validation),
                     prediction_spec=replace(
-                        prediction, evaluation_asset_ids=prediction.training_asset_ids
+                        prediction,
+                        evaluation_asset_ids=prediction.training_asset_ids,
                     ),
                     candidate_spec=spec,
                     model_result=trained,

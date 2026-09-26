@@ -243,6 +243,9 @@ def test_crypto_valid_selected_windows_reach_training(tmp_path, selected_folds):
                 envelope=envelope,
                 model_results=model_results,
                 trial_layout=None,
+                verify_source=lambda: pytest.fail(
+                    "training_failure_reached_verification"
+                ),
             )
         assert len(calls) == 1
         assert policy.used_memory_bytes == 0

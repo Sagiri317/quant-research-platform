@@ -105,6 +105,7 @@ from quant_research_platform.research.models.persisted import (
     write_crypto_model_artifact,
     write_quarterly_model_artifact,
 )
+from quant_research_platform.research.models.production import _crypto_model_chronology
 from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.runtime.execution_metrics import record_run_observations
 from quant_research_platform.runtime.resources import (
@@ -1568,69 +1569,41 @@ def _build_semantic_target(
     target_protocol = envelope.payload()["semantic_metadata"]["target_contract"][
         "protocol"
     ]
-    if protocol.protocol_id == "crypto_hft" and binding.kind in {
-        ProducerKind.MODEL,
-        ProducerKind.PREDICTION,
-    }:
-        if binding.kind is ProducerKind.MODEL:
-            ids = protocol.model_ids_for_target(spec.target_id)
-            model_results = partial(
-                binding.producer,
+    if protocol.protocol_id == "crypto_hft" and binding.kind is ProducerKind.PREDICTION:
+        model_target = f"{protocol.scenario_id}_models"
+        persisted = read_crypto_model_artifact(
+            target_layout.target_root(model_target, Path("__missing_model__")),
+            expected_identity=planned["upstream_identities"][model_target],
+            trial_layout=target_layout,
+        )
+
+        def write(staging):
+            results = binding.producer(
                 layout=target_layout,
                 dataset_catalog=profile.research_datasets,
-                model_catalog=profile.models,
-                dataset_id=protocol.scenario_id,
-                model_ids=ids,
-                tie_break_order=ids,
+                persisted_model=persisted,
                 time_window=time_window,
                 resource_policy=policy,
-                protocol_manifest=target_protocol,
-                run_id=run_id,
-                research_protocol_identity=canonical_json_hash(target_protocol),
-                model_target_id=spec.target_id,
-                backend_versions=software_identity.payload["dependency_versions"],
+                access_window=protocol.access_window,
             )
-            write_crypto_model_artifact(
-                logical_root,
-                envelope=envelope,
-                model_results=model_results,
-                trial_layout=target_layout,
-            )
-        else:
-            model_target = f"{protocol.scenario_id}_models"
-            persisted = read_crypto_model_artifact(
-                target_layout.target_root(model_target, Path("__missing_model__")),
-                expected_identity=planned["upstream_identities"][model_target],
-                trial_layout=target_layout,
-            )
+            with closing_iterator(iter(results)) as active:
+                for result in active:
+                    with result:
+                        write_prediction_outputs(
+                            output_chunks=result.output_chunks,
+                            spec=result.spec,
+                            output_spec=_output_spec_for_target(
+                                result.spec.prediction_id,
+                                "crypto",
+                                "prediction",
+                            ),
+                            layout=StorageLayout(staging),
+                            model_metadata=result.model_metadata,
+                            prediction_metadata_factory=result.prediction_metadata_factory,
+                            resource_policy=policy,
+                        )
 
-            def write(staging):
-                results = binding.producer(
-                    layout=target_layout,
-                    dataset_catalog=profile.research_datasets,
-                    persisted_model=persisted,
-                    time_window=time_window,
-                    resource_policy=policy,
-                    access_window=protocol.access_window,
-                )
-                with closing_iterator(iter(results)) as active:
-                    for result in active:
-                        with result:
-                            write_prediction_outputs(
-                                output_chunks=result.output_chunks,
-                                spec=result.spec,
-                                output_spec=_output_spec_for_target(
-                                    result.spec.prediction_id,
-                                    "crypto",
-                                    "prediction",
-                                ),
-                                layout=StorageLayout(staging),
-                                model_metadata=result.model_metadata,
-                                prediction_metadata_factory=result.prediction_metadata_factory,
-                                resource_policy=policy,
-                            )
-
-            write_semantic_artifact(logical_root, envelope, write)
+        write_semantic_artifact(logical_root, envelope, write)
     elif binding.kind is ProducerKind.EVALUATION:
         evaluation_spec = profile.evaluations.get(spec.target_id)
         evaluation_result = binding.producer(
@@ -1680,11 +1653,25 @@ def _build_semantic_target(
                 dataset_spec.market_id, dataset_spec.data_id
             ),
         )
-        with open_dataset_session(
-            dataset_root,
-            columns=None,
-            time_window=_research_dataset_access_window(dataset_spec.market_id, None),
-            resource_policy=policy,
+        read_window = _research_dataset_access_window(dataset_spec.market_id, None)
+        empty_scope = False
+        if protocol.protocol_id == "crypto_hft":
+            folds, _holdout = _crypto_model_chronology(target_protocol, time_window)
+            empty_scope = not folds
+            if folds:
+                read_window = TimeWindow(
+                    min(fold.train.start for fold in folds),
+                    max(fold.validation.end for fold in folds),
+                )
+        with (
+            nullcontext()
+            if empty_scope
+            else open_dataset_session(
+                dataset_root,
+                columns=None,
+                time_window=read_window,
+                resource_policy=policy,
+            )
         ) as dataset_session:
             model_result = partial(
                 binding.producer,
@@ -1703,14 +1690,25 @@ def _build_semantic_target(
                 model_target_id=spec.target_id,
                 backend_versions=software_identity.payload["dependency_versions"],
             )
-            write_quarterly_model_artifact(
-                logical_root,
-                model_id=spec.target_id,
-                envelope=envelope,
-                quarterly_results=model_result,
-                trial_layout=target_layout,
-                verify_source=dataset_session.verify,
-            )
+            if protocol.protocol_id == "crypto_hft":
+                write_crypto_model_artifact(
+                    logical_root,
+                    envelope=envelope,
+                    model_results=model_result,
+                    trial_layout=target_layout,
+                    verify_source=(
+                        (lambda: None) if empty_scope else dataset_session.verify
+                    ),
+                )
+            else:
+                write_quarterly_model_artifact(
+                    logical_root,
+                    model_id=spec.target_id,
+                    envelope=envelope,
+                    quarterly_results=model_result,
+                    trial_layout=target_layout,
+                    verify_source=dataset_session.verify,
+                )
     elif binding.kind is ProducerKind.PREDICTION:
         model_dependencies = tuple(
             dependency

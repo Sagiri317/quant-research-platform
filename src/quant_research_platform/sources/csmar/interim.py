@@ -710,8 +710,8 @@ def normalize_raw_frame(
         ).dt.normalize()
         result["weight"] = (
             strict_finite_numeric_series(
-                result["weight_pct"], error="invalid_index_weight"
-            )
+                result["weight_pct"], error="invalid_index_weight", allow_null=True
+            ).astype("float64")
             / 100.0
         )
         if bool((result["weight"] < 0.0).any()):
@@ -924,8 +924,8 @@ def normalize_raw_frame(
         ).dt.normalize()
         result["period_return"] = (
             strict_finite_numeric_series(
-                result["return_1d_pct"], error="invalid_index_return"
-            )
+                result["return_1d_pct"], error="invalid_index_return", allow_null=True
+            ).astype("float64")
             / 100.0
         )
         result["timestamp"] = result["trade_date"]

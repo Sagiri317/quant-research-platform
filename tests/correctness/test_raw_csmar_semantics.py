@@ -2551,14 +2551,14 @@ def test_index_info_continuation_scratch_survives_the_reconstructed_frame_handof
     monkeypatch.setattr(_scratch_ownership, "TemporaryFile", tracked_file)
     count = 393216
     path = tmp_path / "continuation.csv"
-    filesystem_write_text(
+    # Keep the logical record's source bytes identical across platforms.
+    filesystem_write_bytes(
         path,
-        "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
-        "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
-        "000985,synthetic,2014-01-02,2013-12-31,1000,scope,1,2,3,4,5,formula\n"
-        + "#\n" * count
-        + "000300,next,2014-01-03,2013-12-31,1000,scope,1,2,3,4,5,end\n",
-        encoding="utf-8",
+        b"Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
+        b"Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
+        b"000985,synthetic,2014-01-02,2013-12-31,1000,scope,1,2,3,4,5,formula\n"
+        + b"#\n" * count
+        + b"000300,next,2014-01-03,2013-12-31,1000,scope,1,2,3,4,5,end\n",
     )
     with runtime_resource_policy_scope(
         capture_test_policy(
@@ -2594,9 +2594,8 @@ def test_expired_slow_record_releases_scratch_before_fast_records(tmp_path):
     import os
 
     path = tmp_path / "slow_fast.csv"
-    filesystem_write_text(
-        path, '"' + "s" * (8192 - 5) + '\nx"\n' + "a,b\n" * 3, encoding="utf-8"
-    )
+    # End the slow record at the buffer boundary so the next records take the fast path.
+    filesystem_write_bytes(path, b'"' + b"s" * (8192 - 5) + b'\nx"\n' + b"a,b\n" * 3)
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
     ) as policy:
@@ -2849,3 +2848,116 @@ def test_csmar_reader_payload_survives_output_lease_close(tmp_path, monkeypatch,
             lease.close()
         assert all(reference() is None for reference in references)
         assert policy.used_memory_bytes == 0
+
+
+def _nullable_index_numeric_rows(data_id):
+    if data_id == "index_weights":
+        return [
+            {
+                "Indexcd": "000905",
+                "Enddt": "2019-01-02",
+                "Stkcd": f"{position + 1:06}",
+                "Constdnme": f"synthetic-{position}",
+                "Weight": value,
+            }
+            for position, value in enumerate((None, 25.0, 25.0, 50.0))
+        ]
+    return [
+        {
+            "Indexcd": "H00905",
+            "Idxtrd01": f"2019-01-{position + 2:02}",
+            "Idxtrd02": 100.0,
+            "Idxtrd03": 101.0,
+            "Idxtrd04": 99.0,
+            "Idxtrd05": 100.0,
+            "Idxtrd06": 1.0,
+            "Idxtrd07": 1.0,
+            "Idxtrd08": value,
+            "Idxtrd09": "synthetic-index",
+        }
+        for position, value in enumerate((None, -2.5, 0.0, 2.5))
+    ]
+
+
+@pytest.mark.parametrize("chunksize", (1, 4))
+@pytest.mark.parametrize(
+    "data_id,column,expected",
+    (
+        ("index_weights", "weight", (float("nan"), 0.25, 0.25, 0.5)),
+        ("index_market", "period_return", (float("nan"), -0.025, 0.0, 0.025)),
+    ),
+)
+def test_index_source_null_numeric_values_persist_without_claiming_complete_weights(
+    tmp_path, chunksize, data_id, column, expected
+):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.markets.implementations.a_share.benchmark import (
+        iter_benchmark_weight_snapshots,
+    )
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw, parents=True)
+    _write_csmar(raw, data_id, _nullable_index_numeric_rows(data_id))
+    original = _file_bytes(raw)
+    with runtime_resource_policy_scope() as policy:
+        result = interim.materialize_interim_data(
+            layout=layout,
+            data_ids=(data_id,),
+            chunksize=chunksize,
+            resource_policy=policy,
+        )
+        root = result.artifact_roots[data_id]
+        saved = read_dataset(root, resource_policy=policy).sort_values(
+            "constituent_asset_id" if data_id == "index_weights" else "timestamp"
+        )
+        pd.testing.assert_series_equal(
+            saved[column].reset_index(drop=True),
+            pd.Series(expected, name=column, dtype="float64"),
+            check_exact=True,
+        )
+        nulls = 0
+        for path in filesystem_glob(root, "**/*.parquet"):
+            table = pq.ParquetFile(native_filesystem_path(path)).read(columns=[column])
+            assert table.schema.field(column).type == pa.float64()
+            nulls += table[column].null_count
+        assert nulls == 1
+        if data_id == "index_weights":
+            info = pd.DataFrame(
+                {
+                    "source_asset_id": ["000905", "000852"],
+                    "index_name": ["中证小盘500指数", "中证1000指数"],
+                }
+            )
+            # The known weights sum to one, but the missing member is still unknown.
+            assert saved.weight.sum() == 1.0
+            with pytest.raises(ValueError, match="a_share_benchmark_weight_invalid"):
+                list(iter_benchmark_weight_snapshots(info, [saved]))
+        assert policy.used_memory_bytes == 0
+    assert _file_bytes(raw) == original
+
+
+@pytest.mark.parametrize(
+    "data_id,raw_column,bad_value,reason",
+    [
+        (data_id, raw_column, value, reason)
+        for data_id, raw_column, reason in (
+            ("index_weights", "Weight", "invalid_index_weight"),
+            ("index_market", "Idxtrd08", "invalid_index_return"),
+        )
+        for value in ("invalid-number", float("inf"), -float("inf"))
+    ]
+    + [("index_weights", "Weight", -1.0, "invalid_index_weight")],
+)
+def test_nullable_index_source_numeric_values_still_reject_invalid_facts(
+    data_id, raw_column, bad_value, reason
+):
+    rows = _nullable_index_numeric_rows(data_id)
+    rows[0][raw_column] = bad_value
+    with pytest.raises(ValueError, match=reason):
+        interim.normalize_raw_frame(pd.DataFrame(rows), data_id)

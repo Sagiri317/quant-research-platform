@@ -17,6 +17,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
+    open_dataset_session,
     read_dataset,
 )
 from quant_research_platform.storage.experiments import read_trial_ledger_reference
@@ -69,23 +70,35 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
             yield selected
 
         def results(run_id):
-            return production.build_crypto_fold_models(
-                layout=layout.with_target_roots({dataset_id: dataset_root}),
-                dataset_catalog=profile.research_datasets,
-                model_catalog=profile.models,
-                dataset_id=dataset_id,
-                model_ids=ids,
-                tie_break_order=ids,
+            requested = TimeWindow(
+                "1970-01-01T00:00:06.500000", "1970-01-01T00:00:08.500000"
+            )
+            folds, _holdout = production._crypto_model_chronology(protocol, requested)
+            with open_dataset_session(
+                dataset_root,
+                columns=None,
                 time_window=TimeWindow(
-                    "1970-01-01T00:00:06.500000", "1970-01-01T00:00:08.500000"
+                    min(fold.train.start for fold in folds),
+                    max(fold.validation.end for fold in folds),
                 ),
                 resource_policy=policy,
-                protocol_manifest=protocol,
-                run_id=run_id,
-                research_protocol_identity=canonical_json_hash(protocol),
-                model_target_id=f"{dataset_id}_models",
-                backend_versions={"fixture": "1"},
-            )
+            ) as dataset_session:
+                yield from production.build_crypto_fold_models(
+                    dataset_session=dataset_session,
+                    layout=layout.with_target_roots({dataset_id: dataset_root}),
+                    dataset_catalog=profile.research_datasets,
+                    model_catalog=profile.models,
+                    dataset_id=dataset_id,
+                    model_ids=ids,
+                    tie_break_order=ids,
+                    time_window=requested,
+                    resource_policy=policy,
+                    protocol_manifest=protocol,
+                    run_id=run_id,
+                    research_protocol_identity=canonical_json_hash(protocol),
+                    model_target_id=f"{dataset_id}_models",
+                    backend_versions={"fixture": "1"},
+                )
 
         def fit(run_id):
             observed = {}
@@ -147,7 +160,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
             return observed
 
         with monkeypatch.context() as patch:
-            patch.setattr(production, "iter_research_dataset_chunks", chunks)
+            patch.setattr(production, "_model_input_chunks", chunks)
             before = fit("run_crypto_boundaries_before")
             # Mutate only excluded times in the original borrowed source frame.
             excluded = (
@@ -188,7 +201,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
 
             with monkeypatch.context() as empty_patch:
                 empty_patch.setattr(
-                    production, "iter_research_dataset_chunks", no_legal_validation
+                    production, "_model_input_chunks", no_legal_validation
                 )
                 empty_patch.setattr(
                     production.fitting,
@@ -616,6 +629,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
                         ),
                         model_results=observed_results,
                         trial_layout=layout,
+                        verify_source=lambda: pytest.fail(
+                            "invalid_model_reached_source_verification"
+                        ),
                     )
                 if failure == "disk":
                     assert not opened and not closed
@@ -782,6 +798,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
                         envelope=envelope,
                         model_results=lambda **_kwargs: members(),
                         trial_layout=layout,
+                        verify_source=lambda: pytest.fail(
+                            "invalid_model_reached_source_verification"
+                        ),
                     )
                 if failure == "primary":
                     assert raised.value is primary
@@ -895,6 +914,7 @@ def check_crypto_wide_fold_artifact(
 
         def results(*, on_validation):
             return production.build_crypto_fold_models(
+                dataset_session=dataset_session,
                 layout=layout.with_target_roots(
                     {original["scenario_id"]: dataset_root}
                 ),
@@ -915,13 +935,31 @@ def check_crypto_wide_fold_artifact(
                 on_validation=on_validation,
             )
 
-        with monkeypatch.context() as patch:
-            patch.setattr(production, "iter_research_dataset_chunks", chunks)
+        folds, _holdout = production._crypto_model_chronology(
+            protocol,
+            TimeWindow(
+                envelope.research_window["start"], envelope.research_window["end"]
+            ),
+        )
+        with (
+            monkeypatch.context() as patch,
+            open_dataset_session(
+                dataset_root,
+                columns=None,
+                time_window=TimeWindow(
+                    min(fold.train.start for fold in folds),
+                    max(fold.validation.end for fold in folds),
+                ),
+                resource_policy=policy,
+            ) as dataset_session,
+        ):
+            patch.setattr(production, "_model_input_chunks", chunks)
             root = persisted.write_crypto_model_artifact(
                 layout.project_root / "wide-models",
                 envelope=envelope,
                 model_results=results,
                 trial_layout=layout,
+                verify_source=dataset_session.verify,
             )
         loaded = persisted.read_crypto_model_artifact(
             root, expected_identity=envelope.instance_identity, trial_layout=layout
@@ -1006,9 +1044,11 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
     )
     dataset_id = configuration["scenario_id"]
     dataset_identity = "a" * 64
-    layout = StorageLayout(tmp_path).with_target_roots(
-        {dataset_id: tmp_path / dataset_identity}
+    layout = StorageLayout(tmp_path)
+    dataset_root = layout.instance_root(
+        layout.research_dataset_root("crypto", dataset_id), dataset_identity
     )
+    layout = layout.with_target_roots({dataset_id: dataset_root})
     envelope = _target_envelope_for_spec(
         profile=profile,
         protocol=bound,
@@ -1042,27 +1082,68 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
         }
     )
 
-    def chunks(_layout, *, time_window, columns, **_kwargs):
-        yield frame.loc[
-            frame.timestamp.between(
-                pd.Timestamp(time_window.start), pd.Timestamp(time_window.end)
-            ),
-            list(columns),
-        ].copy()
+    from contextlib import contextmanager
+    from dataclasses import replace
 
-    monkeypatch.setattr(production, "iter_research_dataset_chunks", chunks)
+    from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
+    from quant_research_platform.storage.datasets import write_dataset
+
+    dataset = profile.research_datasets.get(dataset_id)
+    dataset = replace(
+        dataset,
+        context_columns=tuple(
+            column for column in dataset.context_columns if column in frame
+        ),
+        column_roles={column: dataset.column_roles[column] for column in frame},
+    )
+    profile = replace(profile, research_datasets=ResearchDatasetCatalog((dataset,)))
+    write_dataset(dataset_root, frame, spec=dataset)
+    opened_sessions = []
+    folds, _holdout = production._crypto_model_chronology(protocol, window)
+    read_window = TimeWindow(
+        min(fold.train.start for fold in folds),
+        max(fold.validation.end for fold in folds),
+    )
+
+    @contextmanager
+    def tracked_session():
+        with open_dataset_session(
+            dataset_root, columns=None, time_window=read_window, resource_policy=policy
+        ) as session:
+            opened_sessions.append(session)
+            yield session
+
     original_begin = production.TrialRecorder.begin_refit
     original_fit = fitting.ModelMatrixScaler.fit
     captured = []
     failure = None
+    mutate_source = None
     observed_attempts = []
+    mutation_points = []
 
     def begin_refit(recorder, *args, **kwargs):
         refit, attempt = original_begin(recorder, *args, **kwargs)
         captured.append((recorder, recorder.reference(), refit))
         return refit, attempt
 
+    def change_source():
+        nonlocal mutate_source
+        mutation_points.append(mutate_source)
+        mutate_source = None
+        session = opened_sessions[-1]
+        assert session._lease.active and session.inventory._lease.active
+        part = session.read_paths[0]
+        payload = filesystem_read_bytes(part)
+        filesystem_write_bytes(part, payload[:-1] + bytes((payload[-1] ^ 1,)))
+
     def fit_scaler(cls, matrix, **kwargs):
+        session = opened_sessions[-1]
+        assert session._lease.active and session.inventory._lease.active
+        assert policy.used_memory_bytes >= (
+            session._lease.reserved_bytes + session.inventory._lease.reserved_bytes
+        )
+        if mutate_source == "selection" or (mutate_source == "refit" and captured):
+            change_source()
         if captured:
             selection, reference, refit = captured[-1]
             with read_trial_ledger_reference(layout, reference) as (
@@ -1094,36 +1175,130 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                 raise failure
         return original_fit(matrix, **kwargs)
 
+    original_write_member = persisted._write_model_member
+    original_validate = persisted._validate_crypto_model_payload
+
+    def write_member(*args, **kwargs):
+        result = original_write_member(*args, **kwargs)
+        if mutate_source == "member_write":
+            change_source()
+        return result
+
+    def validate_payload(*args, **kwargs):
+        result = original_validate(*args, **kwargs)
+        if mutate_source == "staged_validation":
+            change_source()
+        return result
+
+    monkeypatch.setattr(persisted, "_write_model_member", write_member)
+    monkeypatch.setattr(persisted, "_validate_crypto_model_payload", validate_payload)
     monkeypatch.setattr(production.TrialRecorder, "begin_refit", begin_refit)
     monkeypatch.setattr(fitting.ModelMatrixScaler, "fit", classmethod(fit_scaler))
     logical_root = tmp_path / "models"
     with runtime_resource_policy_scope() as policy:
 
+        def results(
+            run_id, *, dataset_session, model_window=window, on_validation=None
+        ):
+            return production.build_crypto_fold_models(
+                layout=layout,
+                dataset_session=dataset_session,
+                dataset_catalog=profile.research_datasets,
+                model_catalog=profile.models,
+                dataset_id=dataset_id,
+                model_ids=(model["model_id"],),
+                tie_break_order=(model["model_id"],),
+                time_window=model_window,
+                resource_policy=policy,
+                protocol_manifest=protocol,
+                run_id=run_id,
+                research_protocol_identity=canonical_json_hash(protocol),
+                model_target_id=target_id,
+                backend_versions={"fixture": "1"},
+                on_validation=on_validation,
+            )
+
         def publish(target_envelope, run_id):
-            def results(*, on_validation):
-                return production.build_crypto_fold_models(
-                    layout=layout,
-                    dataset_catalog=profile.research_datasets,
-                    model_catalog=profile.models,
-                    dataset_id=dataset_id,
-                    model_ids=(model["model_id"],),
-                    tie_break_order=(model["model_id"],),
-                    time_window=window,
-                    resource_policy=policy,
-                    protocol_manifest=protocol,
-                    run_id=run_id,
-                    research_protocol_identity=canonical_json_hash(protocol),
-                    model_target_id=target_id,
-                    backend_versions={"fixture": "1"},
-                    on_validation=on_validation,
+            with tracked_session() as dataset_session:
+                return persisted.write_crypto_model_artifact(
+                    logical_root,
+                    envelope=target_envelope,
+                    model_results=lambda **kwargs: results(
+                        run_id, dataset_session=dataset_session, **kwargs
+                    ),
+                    trial_layout=layout,
+                    verify_source=dataset_session.verify,
                 )
 
-            return persisted.write_crypto_model_artifact(
-                logical_root,
-                envelope=target_envelope,
-                model_results=results,
-                trial_layout=layout,
+        assert (
+            list(
+                results(
+                    "run_crypto_no_fold",
+                    dataset_session=None,
+                    model_window=TimeWindow(
+                        "1969-12-31T00:00:00", "1969-12-31T00:00:01"
+                    ),
+                )
             )
+            == []
+        )
+        assert opened_sessions == []
+        from quant_research_platform.workflows import research
+
+        empty_window = TimeWindow("1969-12-31T00:00:00", "1969-12-31T00:00:01")
+        empty_research_window = {
+            "start": empty_window.start.isoformat(),
+            "end": empty_window.end.isoformat(),
+            "access": "development",
+        }
+        software = production_software_identity()
+        empty_envelope = _target_envelope_for_spec(
+            profile=profile,
+            protocol=bound,
+            target_spec=target,
+            data_spec=None,
+            research_window=empty_research_window,
+            upstream_identities={dataset_id: dataset_identity},
+            software_identity=software,
+            raw_content_identity=None,
+        )
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                research,
+                "open_dataset_session",
+                lambda *_args, **_kwargs: pytest.fail("empty_fold_opened_source"),
+            )
+            empty_result = research._build_semantic_target(
+                profile=profile,
+                protocol=bound,
+                layout=layout,
+                spec=target,
+                planned={
+                    "requested_identity": empty_envelope.instance_identity,
+                    "upstream_identities": {dataset_id: dataset_identity},
+                },
+                target_layout=layout,
+                policy=policy,
+                time_window=empty_window,
+                research_window=empty_research_window,
+                software_identity=software,
+                raw_root=tmp_path / "raw",
+                run_id="run_crypto_empty_artifact",
+            )
+        assert empty_result.instance_identity == empty_envelope.instance_identity
+        empty_root = layout.instance_root(
+            layout.semantic_artifact_root("crypto", target_id),
+            empty_envelope.instance_identity,
+        )
+        assert (
+            persisted.read_crypto_model_artifact(
+                empty_root,
+                expected_identity=empty_envelope.instance_identity,
+                trial_layout=layout,
+            ).models
+            == ()
+        )
+        assert policy.used_memory_bytes == 0
 
         root = publish(envelope, "run_crypto_refit_success")
         saved = persisted.read_crypto_model_artifact(
@@ -1165,6 +1340,18 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             assert np.isfinite(predictions).all()
         assert policy.used_memory_bytes == 0
         original = file_hashes(root)
+        assert len(opened_sessions) == 1
+        captured.clear()
+        with (
+            tracked_session() as dataset_session,
+            closing_iterator(
+                results("run_crypto_early_close", dataset_session=dataset_session)
+            ) as source,
+        ):
+            owned = next(source)
+            owned.release(owner="test.crypto.early_close")
+        assert len(opened_sessions) == 2
+        assert policy.used_memory_bytes == 0
         for index, error in enumerate(
             (RuntimeError("refit_failure"), KeyboardInterrupt("refit_cancel"))
         ):
@@ -1196,4 +1383,58 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             )
             assert original == file_hashes(root)
             assert policy.used_memory_bytes == 0
-        assert len(observed_attempts) == 3
+        assert len(observed_attempts) == 4
+        part = next(
+            parent / name
+            for parent, _directories, files in filesystem_walk(dataset_root)
+            for name in files
+            if name.endswith(".parquet")
+        )
+        original_part = filesystem_read_bytes(part)
+        payload = envelope.payload()
+        for index, phase in enumerate(
+            ("selection", "refit", "member_write", "staged_validation"), start=3
+        ):
+            captured.clear()
+            failure = None
+            mutate_source = phase
+            changed_source_envelope = build_business_manifest_envelope(
+                **{
+                    key: (str(index) * 64 if key == "software_identity" else value)
+                    for key, value in payload.items()
+                    if key not in {"instance_identity", "status"}
+                }
+            )
+            try:
+                with pytest.raises(ValueError, match="dataset_file_identity_changed"):
+                    publish(
+                        changed_source_envelope, "run_crypto_source_changed_" + phase
+                    )
+                assert mutation_points[-1] == phase
+                assert len(filesystem_read_bytes(part)) == len(original_part)
+            finally:
+                filesystem_write_bytes(part, original_part)
+            if phase != "selection":
+                assert len(captured) == 1
+                selection, selection_ref, refit = captured[0]
+                with (
+                    read_trial_ledger_reference(layout, selection_ref) as (_, selected),
+                    read_trial_ledger_reference(layout, refit.reference()) as (
+                        _,
+                        refitted,
+                    ),
+                ):
+                    assert selected[0].status == refitted[0].status == "completed"
+            assert original == file_hashes(root)
+            assert not filesystem_exists(
+                logical_root / "instances" / changed_source_envelope.instance_identity
+            )
+            assert policy.used_memory_bytes == 0
+        assert mutation_points == [
+            "selection",
+            "refit",
+            "member_write",
+            "staged_validation",
+        ]
+        assert len(opened_sessions) == 8
+        assert all(not session._lease.active for session in opened_sessions)

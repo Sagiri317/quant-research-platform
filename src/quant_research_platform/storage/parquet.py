@@ -173,19 +173,17 @@ def iter_dataset_part_batches(
                     arrow_extensions_enabled=True,
                 )
                 current_dictionary_paths = dictionary_paths
+            native_schema = parquet_file.schema_arrow
             decode_dictionary = any(
-                parquet_file.schema_arrow.field(column).type
-                != metadata.schema.field(column).type
+                native_schema.field(column).type != metadata.schema.field(column).type
                 for column in selected_columns
             )
             compact_nested = any(
-                parquet_file.schema_arrow.field(column).type
-                != metadata.schema.field(column).type
-                and not pa.types.is_dictionary(
-                    parquet_file.schema_arrow.field(column).type
-                )
+                native_schema.field(column).type != metadata.schema.field(column).type
+                and not pa.types.is_dictionary(native_schema.field(column).type)
                 for column in selected_columns
             )
+            del native_schema
             initial_operation_headroom = current_capacity()
             initial_physical_headroom = (
                 None

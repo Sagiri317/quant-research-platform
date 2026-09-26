@@ -37,6 +37,7 @@ from quant_research_platform.contracts.time import TimeWindow, time_value_isofor
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.models.fitting import validate_model_state
 from quant_research_platform.research.models.production import (
+    _crypto_model_chronology,
     _refit_model_spec,
     _selection_model_specs,
 )
@@ -1136,7 +1137,9 @@ class PersistedCryptoModelArtifact:
         }
 
 
-def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_layout):
+def write_crypto_model_artifact(
+    logical_root, *, envelope, model_results, trial_layout, verify_source
+):
     with (
         runtime_resource_policy_scope() as policy,
         policy.lease("research.model.artifact.trial_references", 0) as reference_lease,
@@ -1271,18 +1274,22 @@ def write_crypto_model_artifact(logical_root, *, envelope, model_results, trial_
                 },
             )
 
-        return write_semantic_artifact(
-            logical_root,
-            envelope,
-            write,
-            operational_metadata=operational,
-            staged_validator=lambda root, members: _validate_crypto_model_payload(
+        def verify_models(root, members):
+            _validate_crypto_model_payload(
                 root,
                 envelope.payload(),
                 members,
                 operational["model_trial_ledgers"],
                 trial_layout,
-            ),
+            )
+            verify_source()
+
+        return write_semantic_artifact(
+            logical_root,
+            envelope,
+            write,
+            operational_metadata=operational,
+            staged_validator=verify_models,
         )
 
 
@@ -1320,21 +1327,13 @@ def read_crypto_model_artifact(
 
 
 def _crypto_model_scope(envelope):
-    from quant_research_platform.research.protocols.crypto_hft import (
-        research_chronology,
-    )
-
     protocol = envelope["semantic_metadata"]["target_contract"]["protocol"]
-    chronology, _holdout = research_chronology(protocol["research_plan"])
-    window = TimeWindow(
-        envelope["research_window"]["start"], envelope["research_window"]["end"]
+    folds, _holdout = _crypto_model_chronology(
+        protocol,
+        TimeWindow(
+            envelope["research_window"]["start"], envelope["research_window"]["end"]
+        ),
     )
-    folds = [
-        fold
-        for fold in chronology
-        if fold.development_test.end >= window.start
-        and fold.development_test.start <= window.end
-    ]
     model_ids = tuple(
         model["model_id"] for model in protocol["research_configuration"]["models"]
     )
