@@ -14,9 +14,7 @@ from quant_research_platform.contracts.validation import (
     clear_exception_frames,
     strict_finite_float,
 )
-from quant_research_platform.markets.implementations.a_share.ids import (
-    FORMAL_BENCHMARKS,
-)
+from quant_research_platform.markets.implementations.a_share import ids as a_share_ids
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios.accounting import (
     capacity_quantiles,
@@ -907,7 +905,7 @@ def build_portfolio_statistics_tables(
             codes = protocol_manifest["benchmark_total_return_indices"]
             price_codes = {
                 name: code
-                for code, (name, _label) in FORMAL_BENCHMARKS.items()
+                for code, (name, _label) in a_share_ids.FORMAL_BENCHMARKS.items()
                 if name in codes
             }
             if codes:
