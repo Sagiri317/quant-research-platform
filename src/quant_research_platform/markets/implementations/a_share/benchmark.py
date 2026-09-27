@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from types import MappingProxyType
-
 import numpy as np
 import pandas as pd
 
@@ -12,13 +10,10 @@ from quant_research_platform.contracts.validation import (
     strict_string_series,
     strict_timestamp_series,
 )
-
-FORMAL_BENCHMARKS = MappingProxyType(
-    {
-        "000905": ("csi500", "中证小盘500指数"),
-        "000852": ("csi1000", "中证1000指数"),
-    }
+from quant_research_platform.markets.implementations.a_share.ids import (
+    FORMAL_BENCHMARKS,
 )
+
 APPROVED_BENCHMARK_IDS = frozenset(
     benchmark_id for benchmark_id, _name in FORMAL_BENCHMARKS.values()
 )
@@ -108,8 +103,16 @@ def _normalize_benchmark_weight_snapshots(
     key = ["benchmark_id", "asset_id", "timestamp"]
     if bool(weights.duplicated(key, keep=False).any()):
         raise ValueError("a_share_benchmark_weight_key_duplicate")
-    totals = weights.groupby(["benchmark_id", "timestamp"])["weight"].transform("sum")
-    if not bool(np.isclose(totals.to_numpy(), 1.0, atol=1e-6, rtol=0.0).all()):
+    grouped = weights.groupby(["benchmark_id", "timestamp"])["weight"]
+    totals = grouped.transform("sum")
+    counts = grouped.transform("size")
+    # CSMAR N10,4 percent weights have a 1e-6 fractional quantum per observation.
+    tolerance = counts * 1e-6 + (counts + 2) * np.finfo(float).eps * np.maximum(
+        1.0, totals.abs()
+    )
+    if not bool(np.isfinite(totals).all()) or not bool(
+        np.isclose(totals.to_numpy(), 1.0, atol=tolerance, rtol=0.0).all()
+    ):
         raise ValueError("a_share_benchmark_weight_sum_invalid")
     weights["weight"] = weights["weight"].div(totals)
     return (

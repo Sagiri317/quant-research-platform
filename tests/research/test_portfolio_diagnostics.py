@@ -896,3 +896,330 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
                 and rows.reason.eq("no_rebalance_requests").all()
             )
         assert policy.used_memory_bytes == 0
+
+
+def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sources(
+    tmp_path,
+):
+    from fractions import Fraction
+
+    import numpy as np
+
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.artifacts.statistics import (
+        read_statistics_artifact,
+        write_statistics_artifact,
+    )
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.contracts.data import InterimDataSpec
+    from quant_research_platform.contracts.portfolios import (
+        CONTINUOUS_EXECUTION_COLUMNS,
+        PORTFOLIO_LEDGER_COST_COLUMNS,
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.research.portfolios.diagnostics import (
+        build_portfolio_statistics_tables,
+    )
+    from quant_research_platform.runtime.resources import (
+        current_runtime_resource_policy,
+        runtime_resource_policy_scope,
+    )
+    from quant_research_platform.storage.datasets import write_dataset
+    from quant_research_platform.storage.identity import (
+        content_hash_for_files,
+        filesystem_glob,
+        filesystem_is_file,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.portfolio_ledger import write_test_sessions
+    from tests.helpers.research_configuration import research_configuration
+    from tests.workflows.test_portfolio_workflow_integration import (
+        _frames,
+        _interim_specs,
+        _processed_specs,
+    )
+
+    dates = pd.bdate_range("2019-01-02", periods=3)
+    frames = _frames(dates)
+    originals = {name: frame.copy(deep=True) for name, frame in frames.items()}
+    protocol = bind_research_configuration(
+        research_profile(), research_configuration(name="pv25")
+    ).protocol("pv_all")
+    candidates = protocol.portfolio_candidates()
+    manifest = protocol.manifest()
+    window = {
+        "start": str(dates[0].date()),
+        "end": str(dates[-1].date()),
+        "access": "development",
+    }
+
+    def envelope(logical_id, *, metadata=None):
+        return build_business_manifest_envelope(
+            logical_artifact_id=logical_id,
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity="c" * 64,
+            research_window=window,
+            upstream_identities={},
+            semantic_metadata=metadata or {},
+        )
+
+    def tree_hash(root):
+        return content_hash_for_files(
+            (
+                (path.relative_to(root).as_posix(), path)
+                for path in filesystem_glob(root, "**/*")
+                if filesystem_is_file(path)
+            ),
+            error="fixture_input_changed",
+        )
+
+    layout = StorageLayout(tmp_path)
+    roots = {}
+    for spec in (*_interim_specs().list(), *_processed_specs().list()):
+        if spec.data_id == "index_market":
+            continue
+        root = (
+            layout.interim_data_root(spec.source_id, spec.data_id)
+            if isinstance(spec, InterimDataSpec)
+            else layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        )
+        write_dataset(root, frames[spec.data_id], spec=spec)
+        roots[spec.data_id] = root
+    ledger_rows = []
+    for asset, value in (("a", 1000.0), ("__cash__", 0.0)):
+        row = {name: np.nan for name in CONTINUOUS_EXECUTION_COLUMNS}
+        row.update(
+            decision_timestamp=dates[0],
+            execution_date=dates[1],
+            asset_id=asset,
+            pre_trade_notional=value,
+            target_notional=value,
+            executed_delta_notional=0.0,
+            post_trade_notional=value,
+            holding_return=0.04 if value else 0.0,
+            end_notional=value * 1.04,
+            decision_delta_weight=0.0,
+            decision_reason="simple_rule" if not value else np.nan,
+            adv20=10000.0,
+        )
+        row.update({name: 0.0 for name in PORTFOLIO_LEDGER_COST_COLUMNS})
+        ledger_rows.append(row)
+    ledger_frame = pd.DataFrame(ledger_rows, columns=CONTINUOUS_EXECUTION_COLUMNS)
+    ledger_frame.attrs["end_timestamp"] = dates[2]
+    ledgers = {}
+    for candidate in candidates:
+        contract = envelope(
+            candidate.candidate_id,
+            metadata={
+                "portfolio_capital": {
+                    "candidate_id": candidate.candidate_id,
+                    "initial_capital": 1000.0,
+                    "valuation_currency": "CNY",
+                    "valuation_method": "adjusted_notional",
+                }
+            },
+        )
+        root = write_test_sessions(
+            tmp_path / "ledgers" / candidate.candidate_id,
+            envelope=contract,
+            ledger_chunks=iter((ledger_frame,)),
+        )
+        ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(
+            root, expected_identity=contract.instance_identity
+        )
+
+    market = pd.DataFrame(
+        [
+            {
+                "source_asset_id": code,
+                "timestamp": date,
+                "trade_date": date,
+                "index_name": code,
+                "open": opening,
+                "close": closing,
+                "period_return": np.nan,
+            }
+            for code, opens, closes in (
+                ("000905", (50.0, 100.0, 102.0), (55.0, 110.0, 100.0)),
+                ("H00905", (np.nan,) * 3, (110.0, 220.0, 210.0)),
+                ("000852", (50.0, 100.0, 102.0), (55.0, 110.0, 100.0)),
+                ("H00852", (110.0, 120.0, 126.0), (110.0, 220.0, 210.0)),
+            )
+            for date, opening, closing in zip(dates, opens, closes, strict=True)
+        ]
+    )
+    cases = [("derived_and_native", (), None)]
+    for code, field in (("000905", "open"), ("000905", "close"), ("H00905", "close")):
+        for label, value in (
+            ("missing", np.nan),
+            ("negative", -1.0),
+            ("infinite", np.inf),
+        ):
+            cases.append(
+                (
+                    f"{code}_{field}_{label}",
+                    ((code, field, value),),
+                    {
+                        "missing": "BLOCKED",
+                        "negative": "ERROR",
+                        "infinite": "WRITE_ERROR",
+                    }[label],
+                )
+            )
+    cases.extend(
+        (
+            (
+                "negative_ratio",
+                (("000905", "open", -100.0), ("000905", "close", -110.0)),
+                "ERROR",
+            ),
+            ("zero_denominator", (("000905", "close", 0.0),), "ERROR"),
+            ("native_negative", (("H00905", "open", -1.0),), "ERROR"),
+            ("native_infinite", (("H00905", "open", np.inf),), "WRITE_ERROR"),
+            ("native_ignores_unused_close", (("000852", "close", 0.0),), None),
+            ("unconsumed_invalid", (), None),
+            ("missing_price_date", (), "BLOCKED"),
+            ("missing_tr_date", (), "BLOCKED"),
+        )
+    )
+    input_hashes = {name: tree_hash(root) for name, root in roots.items()}
+    good_root = good_hash = None
+    for case, mutations, expected_status in cases:
+        source = market.copy(deep=True)
+        for code, field, value in mutations:
+            source.loc[
+                source.source_asset_id.eq(code) & source.timestamp.eq(dates[1]), field
+            ] = value
+        if case == "unconsumed_invalid":
+            unused = source.timestamp.eq(dates[0])
+            source.loc[unused & source.source_asset_id.eq("000905"), "open"] = -1.0
+            source.loc[unused & source.source_asset_id.eq("000905"), "close"] = 0.0
+            source.loc[unused & source.source_asset_id.eq("H00852"), "open"] = -1.0
+        if case in {"missing_price_date", "missing_tr_date"}:
+            code = "000905" if case == "missing_price_date" else "H00905"
+            source = source.loc[
+                ~(source.source_asset_id.eq(code) & source.timestamp.eq(dates[1]))
+            ].copy()
+        original = source.copy(deep=True)
+        index_root = StorageLayout(tmp_path / "index" / case).interim_data_root(
+            "csmar", "index_market"
+        )
+        if expected_status == "WRITE_ERROR":
+            with pytest.raises(ValueError, match="^dataset_infinite_value$"):
+                write_dataset(
+                    index_root,
+                    source,
+                    spec=_interim_specs().get("index_market"),
+                )
+            assert not index_root.exists()
+            assert current_runtime_resource_policy() is None
+            pd.testing.assert_frame_equal(source, original, check_exact=True)
+            assert tree_hash(good_root) == good_hash
+            continue
+        write_dataset(
+            index_root,
+            source,
+            spec=_interim_specs().get("index_market"),
+        )
+        before = tree_hash(index_root)
+        with runtime_resource_policy_scope() as policy:
+            kwargs = dict(
+                ledgers=ledgers,
+                candidates=candidates,
+                protocol_manifest=manifest,
+                time_window=TimeWindow(dates[0], dates[-1]),
+                resource_policy=policy,
+                unified_trading_sessions=lambda calendar: pd.DatetimeIndex(
+                    calendar.calendar_date
+                ),
+                layout=layout.with_target_roots({**roots, "index_market": index_root}),
+            )
+            if expected_status == "ERROR":
+                with pytest.raises(ValueError, match="^benchmark_return_open_invalid$"):
+                    build_portfolio_statistics_tables(**kwargs)
+            else:
+                owned = build_portfolio_statistics_tables(**kwargs)
+                contract = envelope(
+                    "pv_all_portfolio_statistics", metadata={"fixture_case": case}
+                )
+                try:
+                    root = write_statistics_artifact(
+                        tmp_path / "statistics",
+                        envelope=contract,
+                        tables=owned.value,
+                        table_group="portfolio",
+                    )
+                finally:
+                    owned.release(owner="research.portfolio.statistics.output")
+                artifact = read_statistics_artifact(
+                    root, expected_identity=contract.instance_identity
+                )
+                with artifact.table("portfolio_daily.parquet") as daily:
+                    for candidate in candidates:
+                        if candidate.benchmark_id is None:
+                            continue
+                        row = daily.loc[
+                            daily.candidate_id.eq(candidate.candidate_id)
+                        ].iloc[0]
+                        if (
+                            candidate.benchmark_id == "csi500"
+                            and expected_status == "BLOCKED"
+                        ):
+                            assert row.benchmark_status == "BLOCKED"
+                            assert (
+                                row.benchmark_reason
+                                == "benchmark_total_return_open_missing"
+                            )
+                            assert pd.isna(row.benchmark_return) and pd.isna(
+                                row.active_return
+                            )
+                        else:
+                            expected = (
+                                Fraction(71, 1000)
+                                if candidate.benchmark_id == "csi500"
+                                else Fraction(1, 20)
+                            )
+                            assert row.benchmark_status == "DEFINED"
+                            assert row.benchmark_return == pytest.approx(
+                                float(expected), abs=1e-14
+                            )
+                            assert row.active_return == pytest.approx(
+                                float(Fraction(1, 25) - expected), abs=1e-14
+                            )
+                            assert row.relative_wealth == pytest.approx(
+                                float(Fraction(26, 25) / (1 + expected)), abs=1e-14
+                            )
+                with artifact.table("portfolio_performance.parquet") as summary:
+                    for candidate in candidates:
+                        if candidate.benchmark_id != "csi500":
+                            continue
+                        value = summary.loc[
+                            summary.candidate_id.eq(candidate.candidate_id)
+                            & summary.metric_id.eq("annualized_active_return")
+                        ].iloc[0]
+                        if expected_status == "BLOCKED":
+                            assert value.status == "BLOCKED" and pd.isna(value.value)
+                        else:
+                            assert value.status == "DEFINED"
+                            assert value.value == pytest.approx(
+                                float(Fraction(-31, 1000) * 252), abs=1e-12
+                            )
+                if case == "derived_and_native":
+                    good_root, good_hash = root, tree_hash(root)
+            assert policy.used_memory_bytes == 0
+        assert policy.state == "CLOSED"
+        assert tree_hash(index_root) == before
+        pd.testing.assert_frame_equal(source, original, check_exact=True)
+        assert tree_hash(good_root) == good_hash
+    assert {name: tree_hash(root) for name, root in roots.items()} == input_hashes
+    for name, frame in frames.items():
+        pd.testing.assert_frame_equal(frame, originals[name], check_exact=True)

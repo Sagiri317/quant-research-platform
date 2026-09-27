@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from decimal import ROUND_HALF_EVEN, Decimal
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -14,6 +16,7 @@ from quant_research_platform.markets.implementations.a_share.processed import (
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog,
 )
+from quant_research_platform.sources.csmar.interim import normalize_raw_frame
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -192,6 +195,10 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
     (
         ("duplicate", "key_duplicate"),
         ("negative", "weight_invalid"),
+        ("zero", "weight_invalid"),
+        ("null", "weight_invalid"),
+        ("missing", "weight_sum_invalid"),
+        ("overflow", "weight_sum_invalid"),
         ("sum", "weight_sum_invalid"),
         ("identity", "index_identity_invalid"),
     ),
@@ -205,6 +212,15 @@ def test_benchmark_normalization_rejects_fact_mutations(
         weights = pd.concat([weights, weights.iloc[[0]]], ignore_index=True)
     elif mutation == "negative":
         weights.loc[0, "weight"] = -0.1
+    elif mutation == "zero":
+        weights.loc[0, "weight"] = 0.0
+    elif mutation == "null":
+        weights.loc[0, "weight"] = np.nan
+    elif mutation == "missing":
+        weights = weights.drop(index=1)
+    elif mutation == "overflow":
+        weights.loc[[0, 1], "weight"] = 1e308
+        assert np.isfinite(weights["weight"]).all()
     elif mutation == "sum":
         weights.loc[1, "weight"] = 0.7
     else:
@@ -264,7 +280,7 @@ def test_rounded_benchmark_weights_publish_as_unit_portfolio(tmp_path, raw_weigh
     pd.testing.assert_frame_equal(raw, original, check_exact=True)
 
 
-@pytest.mark.parametrize("raw_weight", (0.3333326, 0.333334))
+@pytest.mark.parametrize("raw_weight", (0.333332, 0.333335))
 def test_benchmark_normalization_does_not_hide_invalid_total(raw_weight):
     info, _ = _benchmark_facts()
     weights = pd.DataFrame(
@@ -311,3 +327,104 @@ def test_benchmark_normalization_preserves_unequal_relative_weights():
         np.testing.assert_array_max_ulp(
             np.array([weights.sum()]), np.array([1.0]), maxulp=1
         )
+
+
+@pytest.mark.parametrize(
+    ("percentages", "accepted"),
+    (
+        (("10.0000", "90.0002"), True),
+        (("10.0000", "90.0003"), False),
+        (("10.0000", "20.0000", "30.0000", "39.9996"), True),
+        (("10.0000", "20.0000", "30.0000", "39.9995"), False),
+    ),
+)
+def test_source_percentage_quantization_boundary_uses_actual_group_size(
+    percentages, accepted
+):
+    info, _ = _benchmark_facts()
+    raw = pd.DataFrame(
+        [
+            {
+                "Indexcd": code,
+                "Enddt": "2020-01-02",
+                "Stkcd": f"{position + 1:06d}",
+                "Constdnme": "synthetic",
+                "Weight": weight,
+            }
+            for code in ("000905", "000852")
+            for position, weight in enumerate(percentages)
+        ]
+    )
+    original = raw.copy(deep=True)
+    interim = normalize_raw_frame(raw, "index_weights")
+    if not accepted:
+        with pytest.raises(ValueError, match="^a_share_benchmark_weight_sum_invalid$"):
+            tuple(iter_benchmark_weight_snapshots(info, (interim,)))
+    else:
+        normalized = pd.concat(
+            iter_benchmark_weight_snapshots(info, (interim,)), ignore_index=True
+        )
+        total_percent = sum(map(Decimal, percentages))
+        expected = np.array(
+            [float(Decimal(weight) / total_percent) for weight in percentages]
+        )
+        for _, group in normalized.groupby("benchmark_id"):
+            np.testing.assert_array_max_ulp(
+                group["weight"].to_numpy(), expected, maxulp=2
+            )
+            np.testing.assert_array_max_ulp(
+                np.array([group["weight"].sum()]), np.array([1.0]), maxulp=2
+            )
+    pd.testing.assert_frame_equal(raw, original, check_exact=True)
+
+
+@pytest.mark.parametrize("direction", (-1, 1))
+def test_complete_500_and_1000_source_rounding_preserves_relative_weights(direction):
+    info, _ = _benchmark_facts()
+    rows = []
+    expected = {}
+    for code, benchmark, count in (
+        ("000905", "csi500", 500),
+        ("000852", "csi1000", 1000),
+    ):
+        base = Decimal(1) / count
+        offset = direction * Decimal("0.0000004")
+        exact = [base + offset] * (count - 1) + [base - (count - 1) * offset]
+        assert sum(exact) == Decimal(1)
+        percentages = [
+            (weight * 100).quantize(Decimal("0.0001"), rounding=ROUND_HALF_EVEN)
+            for weight in exact
+        ]
+        total_percent = sum(percentages)
+        assert abs(total_percent / 100 - 1) > Decimal("0.000001")
+        expected[benchmark] = np.array(
+            [float(weight / total_percent) for weight in percentages]
+        )
+        rows.extend(
+            {
+                "Indexcd": code,
+                "Enddt": "2020-01-02",
+                "Stkcd": f"{position + 1:06d}",
+                "Constdnme": "synthetic",
+                "Weight": str(weight),
+            }
+            for position, weight in enumerate(percentages)
+        )
+    raw = pd.DataFrame(rows)
+    original = raw.copy(deep=True)
+    interim = normalize_raw_frame(raw, "index_weights")
+    normalized = pd.concat(
+        iter_benchmark_weight_snapshots(info, (interim,)), ignore_index=True
+    )
+    assert normalized.groupby("benchmark_id").size().to_dict() == {
+        "csi500": 500,
+        "csi1000": 1000,
+    }
+    for benchmark, group in normalized.groupby("benchmark_id"):
+        np.testing.assert_array_max_ulp(
+            group["weight"].to_numpy(), expected[benchmark], maxulp=2
+        )
+        np.testing.assert_array_max_ulp(
+            np.array([group["weight"].sum()]), np.array([1.0]), maxulp=2
+        )
+    pd.testing.assert_frame_equal(raw, original, check_exact=True)

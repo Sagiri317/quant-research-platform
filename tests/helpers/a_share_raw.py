@@ -11,7 +11,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.markets.implementations.a_share.benchmark import (
+from quant_research_platform.markets.implementations.a_share.ids import (
     FORMAL_BENCHMARKS,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope

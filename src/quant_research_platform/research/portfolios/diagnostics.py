@@ -14,6 +14,9 @@ from quant_research_platform.contracts.validation import (
     clear_exception_frames,
     strict_finite_float,
 )
+from quant_research_platform.markets.implementations.a_share.ids import (
+    FORMAL_BENCHMARKS,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios.accounting import (
     capacity_quantiles,
@@ -888,7 +891,8 @@ def build_portfolio_statistics_tables(
     )
     days = (pd.Timestamp(history.end) - pd.Timestamp(history.start)).days + 1
     pieces = []
-    benchmark = calendar = frame = piece = inputs = None
+    benchmark = calendar = frame = piece = inputs = prices = required = missing = None
+    endpoint_dates = None
     with resource_policy.lease(
         "research.portfolio.statistics.inputs", max(65536, days * 4096)
     ):
@@ -901,11 +905,25 @@ def build_portfolio_statistics_tables(
                 resource_policy=resource_policy,
             )
             codes = protocol_manifest["benchmark_total_return_indices"]
+            price_codes = {
+                name: code
+                for code, (name, _label) in FORMAL_BENCHMARKS.items()
+                if name in codes
+            }
             if codes:
+                endpoint_dates = (
+                    holding_intervals(
+                        pd.DatetimeIndex(unified_trading_sessions(calendar)),
+                        time_window,
+                    )
+                    .loc[:, ["entry_at", "end_at"]]
+                    .to_numpy()
+                    .ravel()
+                )
                 with closing_iterator(
                     read_dataset(
                         layout.target_root("index_market", None),
-                        columns=("source_asset_id", "timestamp", "open"),
+                        columns=("source_asset_id", "timestamp", "open", "close"),
                         time_window=time_window,
                         mode=DatasetReadMode.CHUNKED,
                         resource_policy=resource_policy,
@@ -913,15 +931,51 @@ def build_portfolio_statistics_tables(
                 ) as chunks:
                     for frame in chunks:
                         piece = frame.loc[
-                            frame.source_asset_id.isin(codes.values())
+                            frame.source_asset_id.isin(
+                                (*codes.values(), *price_codes.values())
+                            )
                         ].copy()
                         if not piece.empty:
                             pieces.append(piece)
+                        frame = piece = None
             benchmark = (
                 pd.concat(pieces, ignore_index=True)
                 if pieces
-                else pd.DataFrame(columns=("source_asset_id", "timestamp", "open"))
+                else pd.DataFrame(
+                    columns=("source_asset_id", "timestamp", "open", "close")
+                )
             )
+            pieces.clear()
+            for name, price_code in price_codes.items():
+                missing = (
+                    benchmark.source_asset_id.eq(codes[name])
+                    & benchmark.open.isna()
+                    & benchmark.timestamp.isin(endpoint_dates)
+                )
+                if not missing.any():
+                    continue
+                prices = benchmark.loc[
+                    benchmark.source_asset_id.eq(price_code),
+                    ["timestamp", "open", "close"],
+                ].set_index("timestamp")
+                required = (
+                    benchmark.loc[missing, ["timestamp", "close"]]
+                    .set_index("timestamp")
+                    .rename(columns={"close": "total_close"})
+                    .join(prices)
+                )
+                if ((~np.isfinite(required) | required.le(0)) & required.notna()).any(
+                    axis=None
+                ):
+                    raise ValueError("benchmark_return_open_invalid")
+                # CSI pairs share the intraday numerator and fixed daily divisors.
+                benchmark.loc[missing, "open"] = (
+                    required.open * required.total_close / required.close
+                ).to_numpy()
+            benchmark = benchmark.loc[
+                benchmark.source_asset_id.isin(codes.values()),
+                ["source_asset_id", "timestamp", "open"],
+            ].copy()
             benchmark["benchmark_id"] = benchmark.source_asset_id.map(
                 {code: name for name, code in codes.items()}
             )
@@ -968,7 +1022,10 @@ def build_portfolio_statistics_tables(
             raise
         finally:
             pieces.clear()
-            benchmark = calendar = frame = piece = inputs = None
+            benchmark = calendar = frame = piece = inputs = prices = required = (
+                missing
+            ) = None
+            endpoint_dates = None
 
 
 def _portfolio_statistics_tables(
