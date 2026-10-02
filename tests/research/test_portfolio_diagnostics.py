@@ -6,6 +6,84 @@ import pytest
 from quant_research_platform.contracts.targets import unmeasured_operation_evidence
 
 
+def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.research.portfolios.diagnostics import (
+        iter_holding_factor_inputs,
+    )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.datasets import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.research_configuration import research_configuration
+    from tests.workflows.test_portfolio_workflow_integration import (
+        _frames,
+        _processed_specs,
+    )
+
+    config = research_configuration(name="pv_expanded")
+    profile = bind_research_configuration(research_profile(), config)
+    protocol = profile.protocol(config["scenario_id"])
+    candidates = protocol.portfolio_candidates()
+    assert candidates and all(
+        candidate.benchmark_id is None for candidate in candidates
+    )
+    candidate = candidates[0]
+    statistics_target = next(
+        target
+        for target in protocol.target_specs("research run")
+        if target.target_id == "pv_expanded_portfolio_statistics"
+    )
+    assert set(candidate.risk_context_target_ids) <= set(statistics_target.dependencies)
+    dates = pd.bdate_range("2020-01-02", periods=3)
+    panel = _frames(dates)["market_panel_1d"]
+    layout = StorageLayout(tmp_path)
+    roots = {}
+    specs = (
+        _processed_specs().get("market_panel_1d"),
+        *(
+            profile.processed.get(target)
+            for target in candidate.risk_context_target_ids
+        ),
+    )
+    for spec in specs:
+        frame = (
+            panel
+            if spec.data_id == "market_panel_1d"
+            else panel[["market_id", "asset_id", "timestamp"]].assign(
+                **dict.fromkeys(
+                    set(spec.required_columns) - {"market_id", "asset_id", "timestamp"},
+                    1.0,
+                )
+            )
+        )
+        root = layout.processed_data_root("a_share", spec.kind, spec.data_id)
+        write_dataset(root, frame, spec=spec)
+        roots[spec.data_id] = root
+    with runtime_resource_policy_scope() as policy:
+        source = iter_holding_factor_inputs(
+            layout=layout.with_target_roots(roots),
+            calendar=pd.DataFrame({"calendar_date": dates}),
+            time_window=TimeWindow(dates[0], dates[-1]),
+            resource_policy=policy,
+            unified_trading_sessions=lambda frame: pd.DatetimeIndex(
+                frame.calendar_date
+            ),
+            style_columns=candidate.risk_style_columns,
+            risk_context_target_ids=candidate.risk_context_target_ids,
+            benchmark_required=False,
+        )
+        with closing_iterator(source):
+            first = next(source)
+            assert first.entry_at == dates[1] and first.end_at == dates[2]
+            assert first.reason == "holding_factor_fit_unidentified"
+        assert policy.used_memory_bytes == 0
+
+
 def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     tmp_path, monkeypatch
 ):

@@ -22,13 +22,7 @@ def derive_seed(root_seed: int, component_id: str, *parts: object) -> int:
         ensure_ascii=False,
         sort_keys=True,
         separators=(",", ":"),
-        default=_json_default,
+        default=repr,
     ).encode("utf-8")
     digest = hashlib.blake2s(payload, digest_size=8).digest()
     return int.from_bytes(digest, "big") % UINT32_MODULUS
-
-
-def _json_default(value: object) -> str:
-    if isinstance(value, (str, int, float, bool)) or value is None:
-        return str(value)
-    return repr(value)

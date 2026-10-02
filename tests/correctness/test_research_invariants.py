@@ -236,6 +236,62 @@ def test_supervised_models_persist_a_training_only_scaler() -> None:
         result.release(owner="test.scaler")
 
 
+@pytest.mark.parametrize(
+    "algorithm",
+    ("linear_regression", "equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"),
+)
+def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.models import validate_model_metadata_core
+
+    spec = ModelSpec(
+        model_id="fixed",
+        model_algorithm=algorithm,
+        input_factor_columns=("x",),
+        label_column="y",
+    )
+    with pytest.raises(ValueError, match="^model_hyperparameters_not_supported$"):
+        replace(spec, hyperparameters={"fit_intercept": False})
+    preflight_model_specs((spec,))
+    timestamp = pd.Timestamp("2020-01-02")
+    frame = pd.DataFrame(
+        {
+            "timestamp": timestamp,
+            "asset_id": ["a", "b", "c", "d"],
+            "eligible": True,
+            "x": [1.0, 2.0, 3.0, 4.0],
+            "y": [5.0, 7.0, 9.0, 11.0],
+            "label_available_at": timestamp,
+        }
+    )
+    with runtime_resource_policy_scope() as policy:
+        result = _fit_model_result_owned_from_frames(
+            (frame,),
+            spec,
+            estimator=build_estimator_from_model_spec(spec),
+            fitting_cutoff=timestamp,
+        )
+        try:
+            metadata = validate_model_metadata_core(result.value.metadata)
+            assert (
+                metadata["hyperparameters"]
+                == metadata["resolved_hyperparameters"]
+                == {}
+            )
+            if algorithm == "linear_regression":
+                np.testing.assert_allclose(
+                    result.value.prediction_model.predict(frame[["x"]]), frame.y
+                )
+            metadata["hyperparameters"] = {"fit_intercept": False}
+            metadata["resolved_hyperparameters"] = {"fit_intercept": False}
+            with pytest.raises(ValueError, match="^invalid_model_metadata$"):
+                validate_model_metadata_core(metadata)
+        finally:
+            result.release(owner="test.fixed_parameters")
+        assert policy.used_memory_bytes == 0
+
+
 def test_model_fitting_excludes_labels_unavailable_at_fitting_cutoff() -> None:
     spec = ModelSpec(
         model_id="cutoff",

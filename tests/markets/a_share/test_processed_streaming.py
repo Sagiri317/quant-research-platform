@@ -40,6 +40,146 @@ from tests.markets.a_share.test_target_dag_chain import (
 )
 
 
+def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tmp_path):
+    from quant_research_platform.sources.reference import interim
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    dates = pd.bdate_range("2020-01-06", periods=5)
+    source = _synthetic_interim_frames(dates)
+    source["industry_classification_versions"]["implement_date"] = pd.Timestamp(
+        "2012-10-26"
+    )
+    source["industry_classification_sets"] = pd.DataFrame(
+        {
+            "industry_standard_id": ["CSRC2012"] * 6,
+            "industry_code": ["A", "A01", "B", "B01", "C", "C01"],
+            "industry_name": [
+                "old",
+                "old leaf",
+                "barrier",
+                "blocked leaf",
+                "new",
+                "new leaf",
+            ],
+            "parent_industry_code": ["", "A", "", "B", "", "C"],
+            "industry_level": ["1", "2", "1", "2", "1", "2"],
+            "industry_id": [str(index) for index in range(6)],
+            "timestamp": pd.Timestamp("2012-10-26"),
+        }
+    )
+    source["industry_classification"] = (
+        source["industry_classification"]
+        .iloc[:1]
+        .assign(
+            timestamp=pd.Timestamp("2020-01-07"),
+            implement_date=pd.Timestamp("2020-01-07"),
+            industry_level1_code="B01",
+            industry_level1_name="blocked leaf",
+        )
+    )
+    source["stock_info_changes"] = (
+        source["stock_info_changes"]
+        .iloc[:1]
+        .assign(
+            timestamp=pd.Timestamp("2020-01-07"),
+            effective_date=pd.Timestamp("2020-01-07"),
+            announcement_date=pd.NaT,
+            value_after="blocked leaf",
+        )
+    )
+    observations = tuple(
+        (
+            snapshot_id,
+            "CSRC2012",
+            observed,
+            published,
+            [
+                {
+                    "code": "000001",
+                    "name": "synthetic issuer",
+                    "category": category,
+                    "major": "",
+                    "industry": "01",
+                    "source_locator": "page:1",
+                }
+            ],
+        )
+        for snapshot_id, observed, published, category in (
+            ("initial", "2019-12-31", "2020-01-03", "A"),
+            ("late-old", "2020-01-06", "2020-01-08", "B"),
+            ("recovery", "2020-01-08", "2020-01-09", "C"),
+            ("future", "2020-01-09", "2020-01-12", "B"),
+        )
+    )
+    raw_root = tmp_path / "raw"
+    write_industry_reference_fixture(raw_root, observations=observations)
+    profile = research_profile()
+    layout = StorageLayout(tmp_path)
+    spec = profile.processed.get("market_panel_1d")
+    with runtime_resource_policy_scope(explicit_cap_bytes=32 * 1024**2) as policy:
+        interim.materialize_interim_data(
+            layout=layout,
+            raw_root=raw_root / "reference",
+            data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
+            start_date="2020-01-06",
+            end_date="2020-01-10",
+            resource_policy=policy,
+        )
+        snapshots = read_dataset(
+            layout.interim_data_root(
+                "reference", interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+            ),
+            resource_policy=policy,
+        )
+        assert snapshots["snapshot_id"].tolist() == ["initial", "late-old", "recovery"]
+        for data_id in spec.source_input_data_ids:
+            if data_id == interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
+                continue
+            source_spec = profile.interim.get(data_id)
+            write_dataset(
+                layout.interim_data_root(source_spec.source_id, data_id),
+                source[data_id],
+                spec=source_spec,
+                resource_policy=policy,
+                borrowed_input=True,
+            )
+        root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(dates[0], dates[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+            resource_policy=policy,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                resource_policy=policy,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        result = read_dataset(root, resource_policy=policy)
+        asset = result.loc[result["asset_id"].eq("000001")]
+        assert asset["timestamp"].tolist() == list(dates)
+        assert asset["industry_level1_code"].fillna("unknown").tolist() == [
+            "A",
+            "unknown",
+            "unknown",
+            "unknown",
+            "C",
+        ]
+        assert asset["is_nonfinancial_industry"].fillna(False).tolist() == [
+            True,
+            False,
+            False,
+            False,
+            True,
+        ]
+        assert policy.used_memory_bytes == 0
+
+
 @pytest.mark.parametrize("boundary", ["soft", "captured", "explicit"])
 def test_financial_event_builder_is_admitted_before_expansion(monkeypatch, boundary):
     source = _synthetic_financial_frames()
@@ -93,6 +233,77 @@ def test_financial_event_builder_is_admitted_before_expansion(monkeypatch, bound
                     next(frames)
                 assert calls == []
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("asset_count", (32, 64))
+def test_price_volume_budget_charges_outputs_only_to_core_rows(tmp_path, asset_count):
+    dates = pd.bdate_range("2020-01-02", periods=270)
+    source = _synthetic_interim_frames(dates)
+    profile = research_profile()
+    panel_spec = profile.processed.get("market_panel_1d")
+    panel = producer._compute_processed_frame(
+        panel_spec, source=source, dependencies={}, trading_sessions=tuple(dates)
+    )
+    asset = panel.loc[panel["asset_id"].eq("000001")]
+    panel = (
+        pd.concat(
+            [
+                asset.assign(asset_id=f"{900000 + index:06d}")
+                for index in range(asset_count)
+            ],
+            ignore_index=True,
+        )
+        .sort_values(["timestamp", "market_id", "asset_id"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    layout = StorageLayout(tmp_path)
+    spec = profile.processed.get("price_volume_facts")
+    expected = producer._compute_processed_frame(
+        spec,
+        source={},
+        dependencies={panel_spec.data_id: panel},
+        trading_sessions=tuple(dates),
+    )
+    definitions = tuple(
+        definition
+        for definition in producer.a_share.factor_catalog().list()
+        if definition.output_column in spec.required_columns
+    )
+    assert len(definitions) == 50
+    lookback = producer.factor_engine.factor_lookback_bars(definitions)
+    cap = 32 * 1024**2
+    # Even without source payloads the old one-session estimate exceeded the cap.
+    assert (lookback + 1) * asset_count * len(definitions) * 128 > cap
+    write_dataset(
+        layout.processed_data_root(
+            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
+        ),
+        panel,
+        spec=panel_spec,
+        resource_policy=None,
+        borrowed_input=True,
+    )
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy:
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(dates[0], dates[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+            resource_policy=policy,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                resource_policy=policy,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        assert policy.used_memory_bytes == 0
+    actual = read_dataset(root, resource_policy=None)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
 
 
 def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):

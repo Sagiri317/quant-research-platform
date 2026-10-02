@@ -263,6 +263,7 @@ def test_seed_changes_by_quarter_component_and_refit_kind(
     trial_q1 = derive_seed(42, "a_share_model_trial", "ridge", "config", "2019Q1", 0)
     trial_q2 = derive_seed(42, "a_share_model_trial", "ridge", "config", "2019Q2", 0)
     refit_q1 = derive_seed(42, "a_share_model_refit", "ridge", "config", "2019Q1")
+    assert (trial_q1, trial_q2, refit_q1) == (2404282703, 28539577, 2825241916)
     assert trial_q1 == derive_seed(
         42, "a_share_model_trial", "ridge", "config", "2019Q1", 0
     )

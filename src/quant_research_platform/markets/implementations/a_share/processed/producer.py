@@ -80,7 +80,10 @@ _OPTIONAL_SOURCE_IDS = frozenset(
         "special_treatment_changes",
     }
 )
-_FULL_HISTORY_SOURCE_IDS = _OPTIONAL_SOURCE_IDS | {"index_info"}
+_FULL_HISTORY_SOURCE_IDS = _OPTIONAL_SOURCE_IDS | {
+    "index_info",
+    "a_share_industry_snapshots",
+}
 
 
 @contextmanager
@@ -330,13 +333,16 @@ def _processed_frames(spec, *, source, source_sessions, dependencies, policy, re
         if events is not None
         else (max(2048, len(definitions) * 128) if definitions else 4096)
     )
+    price_volume = bool(definitions) and all(
+        definition.family == "price_volume" for definition in definitions
+    )
     asset_count = max(1, len(asset_types))
     block_sessions = max(
         1,
         min(
             len(sessions),
             (policy.planning_headroom_bytes - 1024**2) // (3 * asset_count * per_row)
-            - lookback
+            - (0 if price_volume else lookback)
             - lookahead,
         ),
     )
@@ -372,6 +378,17 @@ def _processed_frames(spec, *, source, source_sessions, dependencies, policy, re
                     ]
                 )
                 bound = 1024**2 + input_bytes * 4 + rows * per_row
+                if price_volume:
+                    # History copies/sorts share the input workspace reserve; all
+                    # factor outputs retain only core rows. Rolling matrices and
+                    # exact sums belong to one asset and one factor at a time.
+                    bound = (
+                        1024**2
+                        + input_bytes * 4
+                        + asset_count * len(core) * per_row
+                        + (lookback + len(core)) * 2048
+                        + len(core) * lookback * 8 * 8
+                    )
                 lease = yield bound
                 output = _compute_processed_frame(
                     spec,

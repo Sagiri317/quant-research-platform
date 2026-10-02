@@ -109,6 +109,30 @@ def test_model_input_and_evaluation_selection_are_independent():
     ) == (model.model_id,)
 
 
+@pytest.mark.parametrize("market,name", (("a_share", "core6"), ("crypto", "baseline")))
+@pytest.mark.parametrize(
+    "algorithm",
+    ("linear_regression", "equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"),
+)
+def test_fixed_algorithm_configuration_rejects_unconsumed_parameters(
+    market, name, algorithm
+):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration(market, name)
+    model = config["models"][0]
+    model["model_algorithm"] = algorithm
+    model["hyperparameters"] = {"fit_intercept": False}
+    profile = research_profile(config["profile_id"])
+    with pytest.raises(ValueError, match="^model_hyperparameters_not_supported$"):
+        bind_research_configuration(profile, config)
+    if market == "a_share":
+        model["hyperparameters"] = {}
+        model["parameter_candidates"] = [{}, {"fit_intercept": False}]
+        with pytest.raises(ValueError, match="^model_hyperparameters_not_supported$"):
+            bind_research_configuration(profile, config)
+
+
 def test_crypto_selection_keeps_execution_assets_and_can_evaluate_only():
     profile = research_profile("crypto_binance_hft")
     config = configuration(profile.profile_id, crypto_ids.HFT_RESEARCH_DATASET_ID)
@@ -204,7 +228,10 @@ def test_portfolio_parameters_flow_through_existing_candidate_contracts():
     candidate = bound.protocol("pv_expanded").portfolio_candidates()[0]
     assert candidate.top_quantile == 0.1
     assert candidate.prediction_selector == "champion"
-    assert candidate.risk_context_target_ids == ("price_volume_facts",)
+    assert candidate.risk_context_target_ids == (
+        "price_volume_facts",
+        "market_model_factors",
+    )
     assert candidate.risk_style_columns
     ledger = next(
         target

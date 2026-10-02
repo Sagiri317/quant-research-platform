@@ -38,9 +38,13 @@ def write_json_evidence(path: Path, payload: dict[str, Any]) -> Path:
         + 1
     )
     with runtime_resource_policy_scope() as policy:
-        with policy.lease(
-            "evidence.json.write", json_record_working_set_bytes(encoded)
-        ):
+        required = json_record_working_set_bytes(encoded)
+        cap = policy.explicit_memory_cap_bytes
+        if cap is None or policy.used_memory_bytes + required <= cap:
+            policy.require_working_set(
+                required, error="evidence_json_working_set_exceeds_capacity"
+            )
+        with policy.lease("evidence.json.write", required):
             return atomic_write_json(path, payload)
 
 
@@ -58,7 +62,13 @@ def read_json_evidence(
             if lease is None
             else nullcontext(lease)
         ) as owned:
-            owned.grow(json_record_working_set_bytes(identity.size))
+            required = json_record_working_set_bytes(identity.size)
+            cap = policy.explicit_memory_cap_bytes
+            if cap is None or policy.used_memory_bytes + required <= cap:
+                policy.require_working_set(
+                    required, error="evidence_json_working_set_exceeds_capacity"
+                )
+            owned.grow(required)
             raw, payload = read_bounded_qrp_json(
                 path, expected_identity=identity, max_bytes=identity.size
             )

@@ -658,10 +658,15 @@ def test_batched_volatility_matches_scalar_reference_across_units_and_windows():
             )
 
 
-def test_long_rolling_means_match_exact_scalar_windows():
+@pytest.mark.parametrize("extreme", (False, True))
+def test_rolling_means_match_exact_scalar_windows(extreme):
     from statistics import mean
 
-    values = np.resize(np.array([1e200, -1e200, 1e-200, 3.0, 0.0, 1e200, -1e200]), 400)
+    values = (
+        np.full(400, 1e308)
+        if extreme
+        else np.resize([1e200, -1e200, 1e-200, 3.0, 0.0, 1e200, -1e200], 400)
+    )
     values[270] = np.nan
     dates = pd.bdate_range("2020-01-01", periods=len(values))
     panel = pd.DataFrame(
@@ -675,15 +680,32 @@ def test_long_rolling_means_match_exact_scalar_windows():
             "float_market_cap": 1.0,
         }
     )
-    result = calculate_price_volume_factors(
-        panel, factor_columns=("avg_amount_126d", "turnover_250d")
+    cases = (
+        ("avg_amount_20d", 20, 0),
+        ("avg_amount_126d", 126, 0),
+        ("log_avg_amount_20d", 20, 0),
+        ("turnover_20d", 20, 0),
+        ("turnover_60d", 60, 0),
+        ("turnover_250d", 250, 0),
+        ("amount_shock_20d", 20, 1),
+        ("volume_shock_20d", 20, 1),
     )
-    for name, size in (("avg_amount_126d", 126), ("turnover_250d", 250)):
+    result = calculate_price_volume_factors(
+        panel, factor_columns=tuple(name for name, _, _ in cases)
+    )
+    for name, size, shift in cases:
         expected = np.full(len(values), np.nan)
-        for stop in range(size, len(values) + 1):
-            window = values[stop - size : stop]
-            if np.isfinite(window).all():
-                expected[stop - 1] = mean(window)
+        for stop in range(size + shift, len(values) + 1):
+            window = values[stop - size - shift : stop - shift]
+            if np.isfinite(window).all() and np.isfinite(values[stop - 1]):
+                average = mean(window)
+                expected[stop - 1] = (
+                    (values[stop - 1] / average - 1.0 if average != 0 else np.nan)
+                    if shift
+                    else (np.log(average) if average > 0 else np.nan)
+                    if name == "log_avg_amount_20d"
+                    else average
+                )
         np.testing.assert_array_equal(result[name], expected)
         bounded = calculate_price_volume_factors(
             panel.iloc[20:],

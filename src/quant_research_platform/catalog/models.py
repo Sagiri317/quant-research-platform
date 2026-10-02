@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from dataclasses import replace
 
 from quant_research_platform.catalog._immutable import ImmutableCatalog
 from quant_research_platform.contracts.models import ModelSpec
@@ -52,6 +53,8 @@ class ModelCatalog(ImmutableCatalog[ModelSpec]):
                 )
             ):
                 raise ValueError("research_parameter_candidates_invalid")
+            for parameters in item.get("parameter_candidates", ()):
+                replace(models[-1], hyperparameters=parameters)
         return cls(models)
 
     def get(self, model_id: str) -> ModelSpec:

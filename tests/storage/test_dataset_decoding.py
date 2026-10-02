@@ -1709,8 +1709,10 @@ def test_materialized_nullable_and_string_fill_is_vectorized_at_scale(
     pd.testing.assert_frame_equal(observed, expected)
 
 
-def test_materialized_second_pass_failure_closes_both_streams(
+@pytest.mark.parametrize("failure_stage", ["fill", "frame", "bound"])
+def test_materialized_failure_releases_output_and_closes_both_streams(
     monkeypatch: pytest.MonkeyPatch,
+    failure_stage: str,
 ) -> None:
     expected = pd.DataFrame({"value": pd.Series([1, 2], dtype="int64")})
     opened = 0
@@ -1733,15 +1735,34 @@ def test_materialized_second_pass_failure_closes_both_streams(
         retained_memory_bytes=1024,
     )
     monkeypatch.setattr(dataset_reading, "iter_dataset_chunks", chunks)
+    references = []
+    primary = RuntimeError("second_pass_failed")
+    allocate = dataset_reading._allocate_materialized_buffers
+
+    def observed_allocate(*args, **kwargs):
+        buffers = allocate(*args, **kwargs)
+        references.extend(weakref.ref(buffer.values) for buffer in buffers.values())
+        return buffers
+
+    def fail(*_args, **_kwargs):
+        if failure_stage == "bound" and not references:
+            return pandas_frame_payload_bytes(*_args, **_kwargs)
+        raise primary
+
+    monkeypatch.setattr(
+        dataset_reading, "_allocate_materialized_buffers", observed_allocate
+    )
     monkeypatch.setattr(
         dataset_reading,
-        "_fill_materialized_column",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            RuntimeError("second_pass_failed")
-        ),
+        {
+            "fill": "_fill_materialized_column",
+            "frame": "_materialized_frame",
+            "bound": "pandas_frame_payload_bytes",
+        }[failure_stage],
+        fail,
     )
 
-    with pytest.raises(RuntimeError, match="second_pass_failed"):
+    with pytest.raises(RuntimeError, match="second_pass_failed") as caught:
         dataset_reading.materialize_dataset_session(
             context,
             target_chunk_bytes=1024,
@@ -1750,6 +1771,10 @@ def test_materialized_second_pass_failure_closes_both_streams(
 
     assert opened == 2
     assert closed == 2
+    assert caught.value is primary
+    gc.collect()
+    assert references and all(reference() is None for reference in references)
+    assert context.resource_policy.used_memory_bytes == 0
 
 
 def test_materialized_passes_existing_headroom_to_each_conversion_pass(

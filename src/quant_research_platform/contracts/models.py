@@ -221,6 +221,12 @@ class ModelSpec:
         _validate_non_empty_string(self.model_id, "model_id_required")
         _validate_non_empty_string(self.model_algorithm, "model_algorithm_required")
         _model_algorithm_facts(self.model_algorithm)
+        if hyperparameters and self.model_algorithm in {
+            "linear_regression",
+            "equal_weight_rank_ensemble",
+            "ic_weighted_rank_ensemble",
+        }:
+            raise ValueError("model_hyperparameters_not_supported")
         validate_sample_filter_mode(self.sample_filter_mode, owner="model")
         _validate_column_tuple(
             self.input_factor_columns,

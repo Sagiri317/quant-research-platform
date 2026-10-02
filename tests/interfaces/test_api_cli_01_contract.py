@@ -619,3 +619,61 @@ def test_research_cli_rejects_invalid_configuration_profile_without_traceback(
     assert result.exit_code == 2
     assert "research_configuration_profile_invalid" in result.output
     assert "Traceback" not in result.output
+
+
+@pytest.mark.parametrize("is_crypto", [False, True])
+def test_notebook_metrics_preserve_each_published_scope(is_crypto):
+    import pandas as pd
+
+    notebook = json.loads(
+        (
+            Path(__file__).resolve().parents[2]
+            / "notebooks/research-interview-demo.ipynb"
+        ).read_text(encoding="utf-8")
+    )
+    cell = next(item for item in notebook["cells"] if item["id"] == "research-cell-07")
+    row = {
+        "candidate_id": "synthetic",
+        "metric_id": "oos_mean_daily_return",
+        "value": 0.01,
+        "status": "DEFINED",
+        "reason": "",
+        "observation_count": 2,
+    }
+    scopes = [
+        ("continuous", "continuous"),
+        ("independent_segments", "a" * 64),
+        ("independent_segments", "b" * 64),
+    ]
+    rows = (
+        [
+            {**row, "execution_mode": mode, "episode_id": episode}
+            for mode, episode in scopes
+        ]
+        if is_crypto
+        else [row]
+    )
+    sections = {"readiness/blockers": {"issues": []}}
+    sections.update(
+        {"daily statistics": {"results": rows, "policy": {"annualization_days": 365}}}
+        if is_crypto
+        else {"cost": {"results": rows}, "risk": {"results": []}}
+    )
+    displayed = []
+    namespace = {
+        "report": {"sections": sections},
+        "is_crypto": is_crypto,
+        "pd": pd,
+        "display": displayed.append,
+        "Markdown": str,
+    }
+    exec("".join(cell["source"]), namespace)
+    visible = namespace["metrics"].loc[:, namespace["columns"]]
+    pd.testing.assert_frame_equal(visible, pd.DataFrame(rows).loc[:, visible.columns])
+    assert len(visible.drop_duplicates()) == len(rows)
+    if is_crypto:
+        assert (
+            list(zip(visible.execution_mode, visible.episode_id, strict=True)) == scopes
+        )
+        html = next(item for item in displayed if isinstance(item, str))
+        assert all(episode in html for _, episode in scopes)

@@ -28,6 +28,7 @@ from quant_research_platform.contracts.time import (
     time_window_date_bounds,
     time_window_timestamp_interval,
 )
+from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     MemoryLease,
@@ -482,6 +483,8 @@ def _materialize_dataset_session(
             raise ValueError("dataset_materialized_output_bound_invalid")
         output_lease.shrink_to(output_bytes)
     except BaseException as primary:
+        buffers = output = None
+        clear_exception_frames(primary)
         try:
             output_lease.close()
         except BaseException as cleanup_error:

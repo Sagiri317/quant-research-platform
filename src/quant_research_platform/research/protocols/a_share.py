@@ -648,10 +648,8 @@ class AShareProtocol:
                         risk_context_target_ids=(
                             market_ids.PRICE_VOLUME_DATA_ID,
                             "market_model_factors",
-                            "fundamental_factors",
-                        )
-                        if enhanced
-                        else (market_ids.PRICE_VOLUME_DATA_ID,),
+                            *(("fundamental_factors",) if enhanced else ()),
+                        ),
                         research_dataset_id=self.scenario_id,
                         market_panel_target_id=market_ids.MARKET_PANEL_ID,
                         execution_mask_target_id="execution_mask",

@@ -60,8 +60,9 @@ owner，提交前重核完整源身份；缺少已声明文件、身份变化或
 
 `a_share_industry_snapshots` 是正式 PANEL 的显式 DAG 输入，source_id 为 reference。
 Interim 的 observation_date 保留观察期，publication_date 保留页面公开日，timestamp
-为日期型公开日之后的次日下界；角色窗口据 timestamp 裁剪，PANEL 在真实交易日轴上实施
-可用日规则。分类词典、历史资产身份、未知屏障与混合标准消费仍由现有 A 股 owner 统一裁定，
+为日期型公开日之后的次日下界；按角色窗口末端裁剪，保留窗口起点前的历史状态。
+PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资产身份、未知屏障与混合标准
+消费仍由现有 A 股 owner 统一裁定，
 见 [历史行业](a-share.md#543-历史行业)。元数据或候选完整不等于覆盖区间已获研究资格。
 
 ## 持久化与就绪

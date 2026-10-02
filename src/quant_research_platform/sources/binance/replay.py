@@ -2241,12 +2241,16 @@ def native_trade_identities(resource_policy):
     with (
         ExactPrimaryKeyIndex(primary_key=("market", "symbol", "trade_id")) as index,
         resource_policy.lease(
-            "binance.native_trade_identities", index.retained_memory_bytes + 64 * 1024
+            "binance.native_trade_identities", index.retained_memory_bytes + 128 * 1024
         ),
     ):
         latest = {}
+        pending = ()
+        pending_bytes = 0
+        pointer_bytes = sys.getsizeof((None,)) - sys.getsizeof(())
 
         def observe(market_type, symbol, payload):
+            nonlocal pending, pending_bytes
             namespace = market_type + ":" + symbol
             trade_id = payload["a"]
             key = str(trade_id).encode("ascii")
@@ -2257,17 +2261,49 @@ def native_trade_identities(resource_policy):
                 separators=(",", ":"),
             ).encode()
             if previous is not None and trade_id <= previous:
-                if (
-                    index.identity_payload_value(namespace=namespace, payload=key)
-                    == value
-                ):
+                stored = next(
+                    (
+                        value
+                        for ns, identity, value in reversed(pending)
+                        if ns == namespace and identity == key
+                    ),
+                    None,
+                )
+                if stored is None:
+                    stored = index.identity_payload_value(
+                        namespace=namespace, payload=key
+                    )
+                if stored == value:
                     return False, previous
                 raise ValueError("binance_native_sequence_non_monotonic")
-            index.add_identity_payload_rows(rows=((namespace, key, value),))
+            row = (namespace, key, value)
+            row_bytes = sys.getsizeof(row) + sum(map(sys.getsizeof, row))
+            if (
+                pending
+                and pending_bytes
+                + row_bytes
+                + 2 * sys.getsizeof(pending)
+                + pointer_bytes
+                > 64 * 1024
+            ):
+                index.add_identity_payload_rows(rows=pending)
+                pending, pending_bytes = (), 0
+            if row_bytes + 2 * sys.getsizeof(()) + pointer_bytes > 64 * 1024:
+                index.add_identity_payload_rows(rows=(row,))
+            else:
+                # ponytail: tuple copying is bounded by 64 KiB; a larger batch would
+                # need a mutable container with its own growth admission.
+                pending += (row,)
+                pending_bytes += row_bytes
             latest[namespace] = trade_id
             return True, previous
 
-        yield observe
+        try:
+            yield observe
+        finally:
+            # The index is operation-local; unspilled rows have no recovery reader.
+            pending, pending_bytes = (), 0
+            latest.clear()
 
 
 def iter_agg_trades(

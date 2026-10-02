@@ -222,7 +222,9 @@ def read_dataset_manifest_evidence(
 def write_manifest(
     path: Path, payload: dict[str, Any], *, _admit: Callable[[int], None] | None = None
 ) -> Path:
-    snapshot = _bounded_qrp_json_snapshot(payload, _admit=_admit)
+    snapshot = bounded_qrp_json_object_snapshot(
+        payload, max_bytes=MAX_QRP_JSON_BYTES - 1, _admit=_admit
+    )
     _require_schema_id(snapshot)
     text = render_qrp_json_object(snapshot) + "\n"
     return atomic_write_text(path, text, encoding="utf-8")
@@ -256,13 +258,3 @@ def _require_schema_id(payload: object) -> None:
     schema_id = payload.get("schema_id")
     if not isinstance(schema_id, str) or not schema_id or "/" in schema_id:
         raise ValueError("manifest_json_identity_invalid")
-
-
-def _bounded_qrp_json_snapshot(
-    payload: dict[str, Any], *, _admit: Callable[[int], None] | None = None
-) -> dict[str, Any]:
-    return bounded_qrp_json_object_snapshot(
-        payload,
-        max_bytes=MAX_QRP_JSON_BYTES - 1,
-        _admit=_admit,
-    )

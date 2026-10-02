@@ -168,6 +168,31 @@ def _calculate_values(
         valid &= np.min(matrix, axis=1) != np.max(matrix, axis=1)
     if shift:
         valid &= np.isfinite(source[first:stop])
+    if shift or factor in {
+        "log_avg_amount_20d",
+        "avg_amount_20d",
+        "avg_amount_126d",
+        "turnover_250d",
+        "turnover_20d",
+        "turnover_60d",
+    }:
+        result = _rolling_mean(source[first - size + 1 - shift : stop - shift], size)[
+            valid
+        ]
+        if shift:
+            result = (
+                np.divide(
+                    source[first:stop][valid],
+                    result,
+                    out=np.full(len(result), np.nan),
+                    where=result != 0,
+                )
+                - 1.0
+            )
+        elif factor == "log_avg_amount_20d":
+            result = _log(result)
+        output[first - start :][valid] = result
+        return output
     current = matrix[valid]
     extra = {name: data[valid] for name, data in extra.items()}
     if factor.startswith("volatility_") or factor in {
@@ -233,34 +258,8 @@ def _calculate_values(
         result = np.min(current / np.maximum.accumulate(current, axis=1) - 1.0, axis=1)
     elif factor == "amplitude_20d":
         result = np.mean((current - extra["low"]) / extra["close"], axis=1)
-    elif factor in {
-        "log_avg_amount_20d",
-        "avg_amount_20d",
-        "avg_amount_126d",
-        "turnover_250d",
-        "turnover_20d",
-        "turnover_60d",
-    }:
-        result = (
-            _rolling_mean(source[first - size + 1 : stop], size)[valid]
-            if factor in {"avg_amount_126d", "turnover_250d"}
-            else np.mean(current, axis=1)
-        )
-        if factor == "log_avg_amount_20d":
-            result = _log(result)
     elif factor.startswith("amihud_"):
         result = np.mean(np.abs(current) / extra["amount"], axis=1)
-    elif shift:
-        mean = np.mean(current, axis=1)
-        result = (
-            np.divide(
-                source[first:stop][valid],
-                mean,
-                out=np.full(len(current), np.nan),
-                where=mean != 0,
-            )
-            - 1.0
-        )
     elif factor.endswith("_corr_20d"):
         result = np.fromiter(
             (

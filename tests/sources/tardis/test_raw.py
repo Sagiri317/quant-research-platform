@@ -403,3 +403,90 @@ def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
             tracker.observe(0, 9, "2026-07-01T00:00:09Z", trade)
 
     assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("count", (256, 1024))
+def test_native_trade_batches_keep_spilled_and_pending_exact_identities(
+    monkeypatch, count
+):
+    from quant_research_platform.sources.binance import replay
+
+    batches = []
+    indexes = []
+    original = replay.ExactPrimaryKeyIndex
+
+    class ObservedIndex(original):
+        def __enter__(self):
+            result = super().__enter__()
+            indexes.append((self, self.database_path.parent))
+            return result
+
+        def add_identity_payload_rows(self, *, rows):
+            batches.append(len(rows))
+            return super().add_identity_payload_rows(rows=rows)
+
+    monkeypatch.setattr(replay, "ExactPrimaryKeyIndex", ObservedIndex)
+    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
+        with replay.native_trade_identities(policy) as observe:
+            for trade_id in range(count):
+                assert observe("future", "SYNTHETIC", {"a": trade_id, "q": "1"}) == (
+                    True,
+                    None if trade_id == 0 else trade_id - 1,
+                )
+            assert batches and max(batches) > 1 and len(batches) < count // 10
+            for trade_id in (0, count - 1):
+                assert observe(
+                    "future", "SYNTHETIC", {"a": trade_id, "q": "1", "E": 99}
+                ) == (
+                    False,
+                    count - 1,
+                )
+                with pytest.raises(
+                    ValueError, match="binance_native_sequence_non_monotonic"
+                ):
+                    observe("future", "SYNTHETIC", {"a": trade_id, "q": "2"})
+            # One large identity bypasses the bounded pending tuple and remains exact.
+            large = {"a": count, "q": "1", "source_note": "x" * (70 * 1024)}
+            assert observe("future", "SYNTHETIC", large) == (True, count - 1)
+            assert batches[-1] == 1
+            assert observe("future", "SYNTHETIC", large) == (False, count)
+            assert observe("future", "SYNTHETIC", {"a": count + 1}) == (True, count)
+            batch_count = len(batches)
+        assert len(batches) == batch_count
+        assert policy.used_memory_bytes == 0
+    assert all(
+        index._connection is None and not path.exists() for index, path in indexes
+    )
+
+
+def test_native_trade_batch_failure_closes_index_and_preserves_primary(monkeypatch):
+    from quant_research_platform.sources.binance import replay
+
+    primary = KeyboardInterrupt("synthetic_native_batch_failure")
+    indexes = []
+    original = replay.ExactPrimaryKeyIndex
+
+    class FailingIndex(original):
+        def __enter__(self):
+            result = super().__enter__()
+            indexes.append((self, self.database_path.parent))
+            return result
+
+        def add_identity_payload_rows(self, *, rows):
+            def interrupted():
+                yield rows[0]
+                raise primary
+
+            return super().add_identity_payload_rows(rows=interrupted())
+
+    monkeypatch.setattr(replay, "ExactPrimaryKeyIndex", FailingIndex)
+    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            with replay.native_trade_identities(policy) as observe:
+                for trade_id in range(1024):
+                    observe("future", "SYNTHETIC", {"a": trade_id})
+        assert caught.value is primary
+        assert policy.used_memory_bytes == 0
+    assert all(
+        index._connection is None and not path.exists() for index, path in indexes
+    )

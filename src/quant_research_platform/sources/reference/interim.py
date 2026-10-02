@@ -182,12 +182,8 @@ def materialize_interim_data(
                 raise ValueError("reference_raw_identity_changed")
         if data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
             frame = _industry_frame(metadata, members, policy, retained)
-            mask = pd.Series(True, index=frame.index)
-            if start_date is not None:
-                mask &= frame["timestamp"].ge(pd.Timestamp(start_date))
             if end_date is not None:
-                mask &= frame["timestamp"].le(pd.Timestamp(end_date))
-            frame = frame.loc[mask].copy()
+                frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
             spec = _industry_snapshots_spec()
         else:
             source = load_a_share_fee_source(reference_root=root)
