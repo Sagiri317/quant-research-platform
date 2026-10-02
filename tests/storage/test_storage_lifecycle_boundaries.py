@@ -1942,7 +1942,7 @@ def test_content_hash_rechecks_earlier_members_before_return(tmp_path, monkeypat
 
 @pytest.mark.parametrize("member_count", (1, 64))
 @pytest.mark.parametrize("unicode_paths", (False, True))
-def test_content_hash_member_metadata_covers_live_objects_and_legacy_digest(
+def test_content_hash_member_metadata_covers_live_objects_and_original_digest(
     tmp_path, monkeypatch, member_count, unicode_paths
 ):
     import gc
