@@ -200,13 +200,19 @@ def _episode_rows(root, envelope, members, identities, manifest_identity=None):
                     def consume(batches):
                         nonlocal terminal_observed
                         for batch in batches:
-                            for value in batch.valuations:
-                                if value.phase == "end":
-                                    terminal_observed = (
-                                        value.timestamp_ns
-                                        if terminal_observed is None
-                                        else max(terminal_observed, value.timestamp_ns)
-                                    )
+                            try:
+                                for value in batch.valuations:
+                                    if value.phase == "end":
+                                        terminal_observed = (
+                                            value.timestamp_ns
+                                            if terminal_observed is None
+                                            else max(
+                                                terminal_observed, value.timestamp_ns
+                                            )
+                                        )
+
+                            finally:
+                                batch = value = None
 
                     expected_child = _episode_envelope(envelope, start, stop)
                     if row["ledger_identity"] != expected_child.instance_identity:
@@ -394,6 +400,7 @@ def produce_crypto_report(
     execution_targets,
 ):
     protocol = record.payload()["protocol"]
+    final_test = record.research_window["access"] == "holdout"
     issues, references, captured = [], {}, {}
     for result in record.target_results:
         if result.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}:
@@ -498,31 +505,18 @@ def produce_crypto_report(
                 trial_layout=layout,
             )
             report_lease.grow(
-                report_payload_working_set({"fold_models": list(artifact.models)})
+                report_payload_working_set(
+                    {
+                        "fold_models": list(artifact.models),
+                        "final_models": list(artifact.final_models),
+                    }
+                )
             )
             models = {
                 "status": "DEFINED",
                 "identity": reference.instance_identity,
-                "fold_models": [
-                    {
-                        key: entry[key]
-                        for key in (
-                            "fold_id",
-                            "model_id",
-                            "training_window",
-                            "validation_window",
-                            "prediction_window",
-                            "training_asset_ids",
-                            "validation_asset_ids",
-                            "evaluation_asset_ids",
-                            "model_metadata",
-                            "trial_semantic_identity",
-                            "refit_trial_semantic_identity",
-                            "fit_coverage_id",
-                        )
-                    }
-                    for entry in artifact.models
-                ],
+                "fold_models": list(artifact.models),
+                "final_models": list(artifact.final_models),
                 "validation_prediction_role": (
                     "train_model_predictions_of_mature_validation_rows"
                 ),
@@ -532,7 +526,11 @@ def produce_crypto_report(
             models = _unavailable(issues, model_target)
 
     prediction_target = f"{record.scenario_id}_predictions"
-    predictions = _unavailable(issues, prediction_target)
+    predictions = (
+        _unavailable(issues, prediction_target)
+        if final_test
+        else {"status": "UNDEFINED", "reason": "not_requested"}
+    )
     if prediction_target in references:
         reference = references[prediction_target]
         try:
@@ -658,7 +656,7 @@ def produce_crypto_report(
 
     portfolios = []
     statistics = []
-    for execution_target in execution_targets:
+    for execution_target in execution_targets if final_test else ():
         candidate = execution_target.candidate
         target = execution_target.target_id
         key = {
@@ -802,21 +800,24 @@ def summarize_crypto_execution(artifact):
     result = None
     with closing_iterator(artifact.iter_chunks()) as chunks:
         for batch in chunks:
-            for diagnostic in batch.diagnostics:
-                if diagnostic.name != "execution_summary":
-                    continue
-                if (
-                    result is not None
-                    or type(diagnostic.text) is not str
-                    or len(diagnostic.text) > 65536
-                ):
-                    raise ValueError("crypto_execution_summary_invalid")
-                result = parse_qrp_json_object(diagnostic.text.encode("utf-8"))
-                if PORTFOLIO_ECONOMIC_SUMMARY_FIELDS.intersection(result) or any(
-                    type(value) not in {int, float, str, bool, type(None)}
-                    for value in result.values()
-                ):
-                    raise ValueError("crypto_execution_duplicate_economic_fields")
+            try:
+                for diagnostic in batch.diagnostics:
+                    if diagnostic.name != "execution_summary":
+                        continue
+                    if (
+                        result is not None
+                        or type(diagnostic.text) is not str
+                        or len(diagnostic.text) > 65536
+                    ):
+                        raise ValueError("crypto_execution_summary_invalid")
+                    result = parse_qrp_json_object(diagnostic.text.encode("utf-8"))
+                    if PORTFOLIO_ECONOMIC_SUMMARY_FIELDS.intersection(result) or any(
+                        type(value) not in {int, float, str, bool, type(None)}
+                        for value in result.values()
+                    ):
+                        raise ValueError("crypto_execution_duplicate_economic_fields")
+            finally:
+                batch = diagnostic = None
     if result is None:
         raise ValueError("crypto_execution_summary_missing")
     return result
@@ -845,55 +846,64 @@ def summarize_crypto_ledger_windows(
     chunks = artifact.iter_chunks()
     with closing_iterator(chunks):
         for batch in chunks:
-            fees -= sum(
-                row.amount for row in batch.cashflows if row.kind.endswith("_cost")
-            )
-            funding += sum(
-                row.amount for row in batch.cashflows if row.kind == "funding"
-            )
-            turnover += sum(abs(row.notional) for row in batch.trades)
-            fills += len(batch.trades)
-            ends = [row for row in batch.valuations if row.phase == "end"]
-            nav = sum(row.value for row in ends)
-            for diagnostic in batch.diagnostics:
-                if diagnostic.name not in {"oos_window_start", "oos_window_end"}:
-                    continue
-                if (
-                    marker_index >= len(expected)
-                    or (
-                        diagnostic.name,
-                        diagnostic.number,
-                        ends[0].timestamp_ns,
-                    )
-                    != expected[marker_index]
-                ):
-                    raise ValueError("crypto_ledger_window_marker_invalid")
-                current = (nav, fees, funding, turnover, fills)
-                if previous is None:
-                    if current != (artifact.capital.initial_capital, 0.0, 0.0, 0.0, 0):
-                        raise ValueError("crypto_ledger_before_window_economics")
-                else:
-                    net, cost, cash, traded, count = (
-                        value - before
-                        for value, before in zip(current, previous, strict=True)
-                    )
-                    intervals.append(
-                        {
-                            "kind": "oos" if marker_index % 2 else "gap",
-                            "start_ns": expected[marker_index - 1][2],
-                            "end_ns": expected[marker_index][2],
-                            "start_nav": previous[0],
-                            "end_nav": nav,
-                            "net_pnl": net,
-                            "gross_pnl": net + cost - cash,
-                            "fees": cost,
-                            "funding": cash,
-                            "turnover": traded,
-                            "fill_events": count,
-                        }
-                    )
-                previous = current
-                marker_index += 1
+            try:
+                fees -= sum(
+                    row.amount for row in batch.cashflows if row.kind.endswith("_cost")
+                )
+                funding += sum(
+                    row.amount for row in batch.cashflows if row.kind == "funding"
+                )
+                turnover += sum(abs(row.notional) for row in batch.trades)
+                fills += len(batch.trades)
+                ends = [row for row in batch.valuations if row.phase == "end"]
+                nav = sum(row.value for row in ends)
+                for diagnostic in batch.diagnostics:
+                    if diagnostic.name not in {"oos_window_start", "oos_window_end"}:
+                        continue
+                    if (
+                        marker_index >= len(expected)
+                        or (
+                            diagnostic.name,
+                            diagnostic.number,
+                            ends[0].timestamp_ns,
+                        )
+                        != expected[marker_index]
+                    ):
+                        raise ValueError("crypto_ledger_window_marker_invalid")
+                    current = (nav, fees, funding, turnover, fills)
+                    if previous is None:
+                        if current != (
+                            artifact.capital.initial_capital,
+                            0.0,
+                            0.0,
+                            0.0,
+                            0,
+                        ):
+                            raise ValueError("crypto_ledger_before_window_economics")
+                    else:
+                        net, cost, cash, traded, count = (
+                            value - before
+                            for value, before in zip(current, previous, strict=True)
+                        )
+                        intervals.append(
+                            {
+                                "kind": "oos" if marker_index % 2 else "gap",
+                                "start_ns": expected[marker_index - 1][2],
+                                "end_ns": expected[marker_index][2],
+                                "start_nav": previous[0],
+                                "end_nav": nav,
+                                "net_pnl": net,
+                                "gross_pnl": net + cost - cash,
+                                "fees": cost,
+                                "funding": cash,
+                                "turnover": traded,
+                                "fill_events": count,
+                            }
+                        )
+                    previous = current
+                    marker_index += 1
+            finally:
+                batch = ends = diagnostic = None
     if marker_index != len(expected):
         raise ValueError("crypto_ledger_window_marker_missing")
     if previous != (nav, fees, funding, turnover, fills):

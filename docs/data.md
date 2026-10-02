@@ -51,6 +51,19 @@ Tardis 历史下载与导入按连续切片范围运行，保留 Binance 官方�
 独立历史费率 CSV 是当前 QRP 研究已接受的参考输入；其精确原始内容保持，
 独立外部来源核验状态与实现是否可消费分别说明，不制造第二份规范副本。
 
+公开行业快照属于 `reference` 来源，由现有 reference interim owner 读取
+`data/raw/reference/a_share_industry_snapshots/metadata.json`。元数据声明机构对应的官方页面、
+标准、观察日、公开日、快照身份、候选 JSON/原始附件/发布页面逻辑文件名及全部来源文件 SHA256；
+候选逐行保留资产源代码、公司原名、分类原字段和原件页码或表/行定位。文件使用共同的有界读取和精确身份
+owner，提交前重核完整源身份；缺少已声明文件、身份变化或结构不合法不能以空列表替代，
+失败保留已验证旧产物。公开源与 CSMAR 原件分别保留，不伪造供应商字段或修改原始附件。
+
+`a_share_industry_snapshots` 是正式 PANEL 的显式 DAG 输入，source_id 为 reference。
+Interim 的 observation_date 保留观察期，publication_date 保留页面公开日，timestamp
+为日期型公开日之后的次日下界；角色窗口据 timestamp 裁剪，PANEL 在真实交易日轴上实施
+可用日规则。分类词典、历史资产身份、未知屏障与混合标准消费仍由现有 A 股 owner 统一裁定，
+见 [历史行业](a-share.md#543-历史行业)。元数据或候选完整不等于覆盖区间已获研究资格。
+
 ## 持久化与就绪
 
 数据层分为 raw、interim、processed、research、artifacts、runs，由 storage 布局派生路径。
@@ -84,6 +97,13 @@ Git 只保存代码、合同、结构定义、文档、合成测试和安全模�
 
 
 Tardis native continuity 保留原字节，包括 depth 重复/过期更新。
+显式多归档集合逐原件绑定精确身份，按实际覆盖跨度及请求窗口路由。
+原件的本地 source_sequence/event/segment/observation 可重新起算；
+统一 source owner 为持久化 observation/segment 标识加入原件身份，并保留每段真实 gap。
+按窗口选取的 funding 原件分别验证实际 coverage，不以跨月包络推断未知结算。
+A 股开发标签 producer 只访问开发可见末端；截至最终开发 cutoff 仍未成熟的尾标签保持不可用，
+不能为保存和重评分提前读取独立 test 事实。历史初始状态仍沿既有生命周期/asof owner 读取。
+
 下载校验只推进 depth update-id 高水位，旧更新不倒退高水位、不制造新的连续性；
 既有 Binance book engine 负责丢弃不适用的更新。
 断连关闭观察区间，后续更新使用新的观察身份；前向 sequence gap 仍形成 gap。

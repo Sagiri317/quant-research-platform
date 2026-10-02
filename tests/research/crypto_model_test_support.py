@@ -40,9 +40,9 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
     protocol = deepcopy(
         saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
     )
-    # A genuine undeclared gap containing two observed grid points.
+    # A real gap between training and validation contains excluded grid points.
     protocol["research_plan"]["folds"][1]["validation"]["start"] = (
-        "1970-01-01T00:00:04.300000"
+        "1970-01-01T00:00:06.700000"
     )
     ids = tuple(spec.model_id for spec in profile.models.list())
     windows = []
@@ -64,7 +64,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                 for label in {spec.label_column for spec in profile.models.list()}:
                     if label in selected:
                         late = selected[f"{label}_available_at"] > pd.Timestamp(
-                            "1970-01-01T00:00:06"
+                            "1970-01-01T00:00:08.500000"
                         )
                         selected.loc[late, label] = 100.0
             yield selected
@@ -98,6 +98,8 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                     research_protocol_identity=canonical_json_hash(protocol),
                     model_target_id=f"{dataset_id}_models",
                     backend_versions={"fixture": "1"},
+                    on_validation=lambda *args: None,
+                    on_selection=lambda *args: None,
                 )
 
         def fit(run_id):
@@ -167,9 +169,9 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                 (frame.timestamp < pd.Timestamp("1970-01-01T00:00:01"))
                 | frame.timestamp.between(
                     pd.Timestamp("1970-01-01T00:00:04.100000"),
-                    pd.Timestamp("1970-01-01T00:00:04.200000"),
+                    pd.Timestamp("1970-01-01T00:00:06.600000"),
                 )
-                | (frame.timestamp > pd.Timestamp("1970-01-01T00:00:06"))
+                | (frame.timestamp > pd.Timestamp("1970-01-01T00:00:08.500000"))
             )
             labels = list({spec.label_column for spec in profile.models.list()})
             frame.loc[excluded, labels] = 100.0
@@ -185,8 +187,8 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                     pd.Timestamp("1970-01-01T00:00:04"),
                 ),
                 (
-                    pd.Timestamp("1970-01-01T00:00:04.300000"),
-                    pd.Timestamp("1970-01-01T00:00:06"),
+                    pd.Timestamp("1970-01-01T00:00:06.700000"),
+                    pd.Timestamp("1970-01-01T00:00:08.500000"),
                 ),
             }
             assert policy.used_memory_bytes == 0
@@ -194,7 +196,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
             def no_legal_validation(*args, **kwargs):
                 for selected in chunks(*args, **kwargs):
                     if pd.Timestamp(kwargs["time_window"].start) == pd.Timestamp(
-                        "1970-01-01T00:00:04.300000"
+                        "1970-01-01T00:00:06.700000"
                     ):
                         selected.loc[:, labels] = np.nan
                     yield selected
@@ -269,7 +271,9 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
 
     old = read_semantic_artifact_record(prediction_root)
     payload = old[0]
-    entry = next(item for item in saved.models if "leave_btc_out" in item["model_id"])
+    entry = next(
+        item for item in saved.final_models if "leave_btc_out" in item["model_id"]
+    )
     spec = PredictionSpec(
         prediction_id=f"{entry['model_id']}_prediction",
         model_id=entry["model_id"],
@@ -277,8 +281,8 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
             "scenario_id"
         ],
         train_end=None,
-        test_start="1970-01-01T00:00:04",
-        test_end="1970-01-01T00:00:08.500000",
+        test_start="1970-01-01T00:00:08.600000",
+        test_end="1970-01-01T00:00:09",
         prediction_mode="crypto_oos",
         training_asset_ids=tuple(entry["training_asset_ids"]),
         evaluation_asset_ids=tuple(entry["evaluation_asset_ids"]),
@@ -287,12 +291,14 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
     prior = {p.name for p in filesystem_iterdir(prediction_root.parent)}
     with runtime_resource_policy_scope() as policy:
         for index, (stamp, asset) in enumerate(
-            (("05.500000", "btc_usdt"), ("04.500000", "eth_usdt"))
+            (("08.500000", "btc_usdt"), ("08.700000", "eth_usdt"))
         ):
             envelope = build_business_manifest_envelope(
                 **{
                     key: (
-                        dict(payload[key], start=f"1970-01-01T00:00:04.00{index + 1}")
+                        dict(
+                            payload[key], start=f"1970-01-01T00:00:08.60000{index + 1}"
+                        )
                         if key == "research_window"
                         else payload[key]
                     )
@@ -329,7 +335,9 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
                     layout=StorageLayout(staging),
                     output_chunks=(frame,),
                     model_metadata=saved.prediction_lineage(
-                        entry["model_id"], TimeWindow(spec.test_start, spec.test_end)
+                        entry["model_id"],
+                        TimeWindow(spec.test_start, spec.test_end),
+                        access_window="holdout",
                     ),
                     prediction_metadata_factory=lambda: pytest.fail(
                         "invalid row must reject before metadata publication"
@@ -387,7 +395,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
             HFT_FACTOR_COLUMNS,
         )
 
-        for entry in saved.models:
+        for entry in saved.final_models:
             spec = profile.models.get(entry["model_id"])
             if spec.model_algorithm != "ridge_regression":
                 continue
@@ -502,7 +510,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
                     assert (
                         read_semantic_artifact_record(saved.instance_root) == original
                     )
-            entry = saved.models[0]
+            entry = saved.final_models[0]
             columns = entry["model_metadata"]["input_columns"]
             probe = pd.DataFrame(np.zeros((2, len(columns))), columns=columns)
             wrong = DummyRegressor(strategy="constant", constant=0.125).fit(
@@ -513,7 +521,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 native_filesystem_path(saved.instance_root),
                 native_filesystem_path(copied),
             )
-            relative = f"models/{entry['fold_id']}/{entry['model_id']}.pkl"
+            relative = f"models/final/{entry['model_id']}.pkl"
             raw = pickle.dumps(wrong, protocol=pickle.HIGHEST_PROTOCOL)
             filesystem_write_bytes(copied / relative, raw)
             manifest_path = copied / "manifest.json"
@@ -528,7 +536,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
             )
             with pytest.raises(ValueError, match="model_state_metadata_mismatch"):
                 with persisted.read_crypto_model_member(
-                    changed, changed.models[0], resource_policy=policy
+                    changed, changed.final_models[0], resource_policy=policy
                 ):
                     pytest.fail("wrong predictor reached the consumer")
             del probe, wrong, raw, manifest, changed, member
@@ -555,7 +563,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
             opened = []
             closed = []
 
-            def observed_results(*, on_validation, primary=primary):
+            def observed_results(*, on_validation, on_selection, primary=primary):
                 on_validation(validation_fold, validation_spec, validation.iloc[:1])
                 raise primary
 
@@ -682,14 +690,47 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 }
             )
 
-            def members(failure=failure):
+            def members(*, on_validation, on_selection, failure=failure):
+                by_identity = {ref["semantic_identity"]: ref for ref in references}
+                folds = {fold.fold_id: fold for fold in protocol.research_plan.folds}
                 for number, entry in enumerate(saved.models):
                     if failure == "missing_fold" and entry["fold_id"] == "fold_2":
-                        break
+                        continue
+                    fold = folds[entry["fold_id"]]
+                    spec = profile.models.get(entry["model_id"])
+                    with closing_iterator(
+                        saved.validation_chunks(
+                            fold_id=entry["fold_id"], model_id=entry["model_id"]
+                        )
+                    ) as chunks:
+                        for frame in chunks:
+                            on_validation(fold, spec, frame)
+                    reference = by_identity[
+                        saved.models[1 - number]["trial_semantic_identity"]
+                        if failure == "trial_binding" and number < 2
+                        else entry["trial_semantic_identity"]
+                    ]
+                    if failure == "trial_reference" and number == 1:
+                        reference = by_identity[
+                            saved.models[0]["trial_semantic_identity"]
+                        ]
+                    on_selection(
+                        fold,
+                        spec,
+                        deepcopy(entry["model_metadata"]),
+                        ("outside_scope",)
+                        if failure == "training_assets" and number == 0
+                        else tuple(entry["training_asset_ids"]),
+                        ("outside_scope",)
+                        if failure == "evaluation_assets" and number == 0
+                        else tuple(entry["evaluation_asset_ids"]),
+                        reference,
+                    )
+                for number, entry in enumerate(saved.final_models):
                     with _read_model_member(
                         saved.instance_root,
                         saved.member_records,
-                        f"models/{entry['fold_id']}/{entry['model_id']}.pkl",
+                        f"models/final/{entry['model_id']}.pkl",
                         resource_policy=policy,
                         workspace_factor=4,
                     ) as owned:
@@ -704,39 +745,23 @@ def check_crypto_model_staging(*, layout, profile, saved):
                                 else metadata["max_train_rows"] + 1
                             )
                         if failure == "refit_window" and number == 0:
-                            metadata["train_end"] = entry["prediction_window"]["end"]
+                            metadata["train_end"] = (
+                                protocol.research_plan.test.end.isoformat()
+                            )
+                        selection = next(
+                            item
+                            for item in saved.models
+                            if item["fold_id"] == entry["fold_id"]
+                            and item["model_id"] == entry["model_id"]
+                        )
                         member = production.CryptoFoldModelResult(
-                            next(
-                                f
-                                for f in protocol.research_plan.folds
-                                if f.fold_id == entry["fold_id"]
-                            ),
+                            folds[entry["fold_id"]],
                             profile.models.get(entry["model_id"]),
                             fitting.ModelFitResult(metadata, payload),
-                            ("outside_scope",)
-                            if failure == "training_assets" and number == 0
-                            else tuple(entry["training_asset_ids"]),
-                            ("outside_scope",)
-                            if failure == "evaluation_assets" and number == 0
-                            else tuple(entry["evaluation_asset_ids"]),
-                            references[1]
-                            if failure == "trial_reference" and number == 0
-                            else next(
-                                ref
-                                for ref in references
-                                if ref["semantic_identity"]
-                                == (
-                                    saved.models[1 - number]["trial_semantic_identity"]
-                                    if failure == "trial_binding" and number < 2
-                                    else entry["trial_semantic_identity"]
-                                )
-                            ),
-                            next(
-                                ref
-                                for ref in references
-                                if ref["semantic_identity"]
-                                == entry["refit_trial_semantic_identity"]
-                            ),
+                            tuple(entry["training_asset_ids"]),
+                            tuple(entry["evaluation_asset_ids"]),
+                            by_identity[selection["trial_semantic_identity"]],
+                            by_identity[entry["refit_trial_semantic_identity"]],
                             entry["fit_coverage_id"],
                         )
                         owned.value = member
@@ -753,7 +778,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 "missing_fold": "crypto_model_fold_coverage_invalid",
                 "training_assets": "crypto_model_fold_binding_invalid",
                 "evaluation_assets": "crypto_model_fold_binding_invalid",
-                "refit_window": "crypto_model_refit_window_invalid",
+                "refit_window": "crypto_model_fit_window_invalid",
                 "trial_reference": "crypto_model_trial_references_invalid",
                 "trial_binding": "crypto_model_trial_binding_invalid",
                 "disk": "insufficient_free_disk",
@@ -796,7 +821,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
                     write_crypto_model_artifact(
                         logical_root,
                         envelope=envelope,
-                        model_results=lambda **_kwargs: members(),
+                        model_results=members,
                         trial_layout=layout,
                         verify_source=lambda: pytest.fail(
                             "invalid_model_reached_source_verification"
@@ -819,11 +844,12 @@ def check_crypto_wide_fold_artifact(
     *, layout, dataset_root, profile, saved, monkeypatch
 ):
     """Persist 22 synthetic folds through real model fitting and trial ledgers."""
-    from quant_research_platform.contracts.business_manifest import (
-        build_business_manifest_envelope,
-    )
     from quant_research_platform.profiles.research import bind_research_configuration
     from quant_research_platform.research.models import persisted
+    from quant_research_platform.workflows.research import (
+        _target_envelope_for_spec,
+        production_software_identity,
+    )
 
     original = saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
     full_protocol = profile.protocol(original["scenario_id"])
@@ -833,7 +859,7 @@ def check_crypto_wide_fold_artifact(
     for index in range(22):
         fold = deepcopy(template)
         fold["fold_id"] = f"wide_{index}"
-        for name in ("train", "validation", "development_test"):
+        for name in ("train", "validation"):
             fold[name] = {
                 key: (
                     pd.Timestamp(value) + pd.Timedelta(seconds=100 * index)
@@ -841,8 +867,8 @@ def check_crypto_wide_fold_artifact(
                 for key, value in fold[name].items()
             }
         plan["folds"].append(fold)
-    last = pd.Timestamp(plan["folds"][-1]["development_test"]["end"])
-    plan["final_holdout"] = {
+    last = pd.Timestamp(plan["folds"][-1]["validation"]["end"])
+    plan["test"] = {
         "start": (last + pd.Timedelta(seconds=10)).isoformat(),
         "end": (last + pd.Timedelta(seconds=11)).isoformat(),
     }
@@ -850,34 +876,33 @@ def check_crypto_wide_fold_artifact(
     configuration["research_plan"] = plan
     configuration["windows"] = {
         "development": {
-            "start": plan["folds"][0]["development_test"]["start"],
-            "end": plan["folds"][-1]["development_test"]["end"],
+            "start": plan["folds"][0]["validation"]["start"],
+            "end": plan["folds"][-1]["validation"]["end"],
         },
-        "holdout": dict(plan["final_holdout"]),
+        "holdout": dict(plan["test"]),
     }
     profile = bind_research_configuration(profile, configuration)
-    protocol = profile.protocol(original["scenario_id"]).target_manifest(
-        saved.envelope["logical_artifact_id"], "MODEL"
+    bound = profile.protocol(original["scenario_id"])
+    target = next(
+        item
+        for item in bound.target_specs("research run")
+        if item.target_id == saved.envelope["logical_artifact_id"]
     )
-    fields = {
-        key: saved.envelope[key]
-        for key in (
-            "logical_artifact_id",
-            "schema_identity",
-            "software_identity",
-            "upstream_identities",
-        )
-    }
-    envelope = build_business_manifest_envelope(
-        **fields,
-        protocol_or_spec_identity=canonical_json_hash(protocol),
+    envelope = _target_envelope_for_spec(
+        profile=profile,
+        protocol=bound,
+        target_spec=target,
+        data_spec=None,
         research_window={
-            "start": plan["folds"][0]["development_test"]["start"],
-            "end": plan["folds"][-1]["development_test"]["end"],
+            "start": plan["folds"][0]["validation"]["start"],
+            "end": plan["folds"][-1]["validation"]["end"],
             "access": "development",
         },
-        semantic_metadata={"target_contract": {"protocol": protocol}},
+        upstream_identities=saved.envelope["upstream_identities"],
+        software_identity=production_software_identity(),
+        raw_content_identity=None,
     )
+    protocol = envelope.payload()["semantic_metadata"]["target_contract"]["protocol"]
     from quant_research_platform.research.models.supervised import preflight_model_specs
 
     preflight_model_specs(profile.models.list())
@@ -912,7 +937,7 @@ def check_crypto_wide_fold_artifact(
                 list(columns),
             ].copy()
 
-        def results(*, on_validation):
+        def results(*, on_validation, on_selection):
             return production.build_crypto_fold_models(
                 dataset_session=dataset_session,
                 layout=layout.with_target_roots(
@@ -933,6 +958,7 @@ def check_crypto_wide_fold_artifact(
                 model_target_id=envelope.logical_artifact_id,
                 backend_versions={"fixture": "1"},
                 on_validation=on_validation,
+                on_selection=on_selection,
             )
 
         folds, _holdout = production._crypto_model_chronology(
@@ -965,8 +991,9 @@ def check_crypto_wide_fold_artifact(
             root, expected_identity=envelope.instance_identity, trial_layout=layout
         )
         assert len(loaded.models) == 22 * 9
-        assert len(loaded.member_records) == 1 + 22 * (1 + 2 * 9)
-        for entry in loaded.models:
+        assert len(loaded.final_models) == 9
+        assert len(loaded.member_records) == 1 + 22 * (1 + 9) + 9
+        for entry in loaded.final_models:
             with persisted.read_crypto_model_member(
                 loaded, entry, resource_policy=policy
             ) as model:
@@ -1006,7 +1033,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
 
     plan = hft_research_plan()
     plan["folds"] = plan["folds"][:1]
-    window = TimeWindow(**plan["folds"][0]["development_test"])
+    window = TimeWindow(**plan["folds"][0]["validation"])
     configuration = research_configuration(
         "crypto",
         "baseline",
@@ -1162,9 +1189,8 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                         refit_plan.stage == "refit"
                         and refit_records[0].status == "attempted"
                     )
-                    assert (
-                        refit_plan.selection_ledger_semantic_identity
-                        == reference["semantic_identity"]
+                    assert refit_plan.selection_ledger_semantic_identities == (
+                        reference["semantic_identity"],
                     )
                     assert (
                         refit_records[0].common_coverage_id
@@ -1198,7 +1224,12 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
     with runtime_resource_policy_scope() as policy:
 
         def results(
-            run_id, *, dataset_session, model_window=window, on_validation=None
+            run_id,
+            *,
+            dataset_session,
+            model_window=window,
+            on_validation=lambda *args: None,
+            on_selection=lambda *args: None,
         ):
             return production.build_crypto_fold_models(
                 layout=layout,
@@ -1216,6 +1247,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                 model_target_id=target_id,
                 backend_versions={"fixture": "1"},
                 on_validation=on_validation,
+                on_selection=on_selection,
             )
 
         def publish(target_envelope, run_id):
@@ -1304,8 +1336,10 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
         saved = persisted.read_crypto_model_artifact(
             root, expected_identity=envelope.instance_identity, trial_layout=layout
         )
-        assert len(saved.models) == 1 and len(captured) == 1
-        entry = saved.models[0]
+        assert len(saved.models) == len(saved.final_models) == 1
+        assert len(captured) == 1
+        selected_entry = saved.models[0]
+        entry = saved.final_models[0]
         selection, selection_ref, refit = captured[0]
         with read_trial_ledger_reference(layout, selection_ref) as (
             selection_plan,
@@ -1316,7 +1350,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                 refitted,
             ):
                 assert (
-                    entry["trial_semantic_identity"]
+                    selected_entry["trial_semantic_identity"]
                     == selection_ref["semantic_identity"]
                 )
                 assert (
@@ -1324,9 +1358,8 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                     == refit.reference()["semantic_identity"]
                 )
                 assert entry["fit_coverage_id"] == refitted[0].common_coverage_id
-                assert (
-                    refit_plan.selection_ledger_semantic_identity
-                    == selection_ref["semantic_identity"]
+                assert refit_plan.selection_ledger_semantic_identities == (
+                    selection_ref["semantic_identity"],
                 )
                 assert refitted[0].status == "completed"
                 assert refitted[0].metrics["n_train"] == observed_attempts[0]
@@ -1437,4 +1470,55 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             "staged_validation",
         ]
         assert len(opened_sessions) == 8
+        assert all(not session._lease.active for session in opened_sessions)
+
+        metadata_failure = RuntimeError("crypto_metadata_boundary_primary")
+        copied_metadata_ids = []
+        original_manifest_write = persisted.write_internal_artifact_manifest
+
+        def fail_metadata_write(path, payload, **kwargs):
+            if path.name == "metadata.json":
+                copied_metadata_ids.extend(
+                    id(entry["model_metadata"]) for entry in payload["models"]
+                )
+                assert any(
+                    lease.owner == "research.model.artifact.metadata"
+                    and lease.reserved_bytes > 0
+                    for lease in policy._leases
+                )
+                raise metadata_failure
+            return original_manifest_write(path, payload, **kwargs)
+
+        payload = envelope.payload()
+        metadata_envelope = build_business_manifest_envelope(
+            **{
+                key: ("f" * 64 if key == "software_identity" else value)
+                for key, value in payload.items()
+                if key not in {"instance_identity", "status"}
+            }
+        )
+        captured.clear()
+        with monkeypatch.context() as patch:
+            patch.setattr(
+                persisted, "write_internal_artifact_manifest", fail_metadata_write
+            )
+            with pytest.raises(RuntimeError) as raised:
+                publish(metadata_envelope, "run_crypto_metadata_failure")
+        assert raised.value is metadata_failure
+        assert copied_metadata_ids
+        current = metadata_failure.__traceback__
+        while current is not None:
+            local_values = current.tb_frame.f_locals
+            if current.tb_frame.f_code.co_name == "fail_metadata_write":
+                assert not local_values
+            assert all(
+                id(value) not in copied_metadata_ids for value in local_values.values()
+            )
+            current = current.tb_next
+        assert policy.used_memory_bytes == 0
+        assert original == file_hashes(root)
+        assert not filesystem_exists(
+            logical_root / "instances" / metadata_envelope.instance_identity
+        )
+        assert len(opened_sessions) == 9
         assert all(not session._lease.active for session in opened_sessions)

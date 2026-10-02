@@ -50,27 +50,19 @@ def _statistics_plan(quantity_scale=1.0):
                 "train": {"start": "2023-12-01T00:00:00", "end": "2023-12-10T00:00:00"},
                 "validation": {
                     "start": "2023-12-11T00:00:00",
-                    "end": "2023-12-31T00:00:00",
-                },
-                "development_test": {
-                    "start": "2024-01-01T00:00:00",
-                    "end": "2024-01-02T00:00:00",
+                    "end": "2023-12-20T00:00:00",
                 },
             },
             {
                 "fold_id": "second",
-                "train": {"start": "2023-12-02T00:00:00", "end": "2024-01-01T00:00:00"},
+                "train": {"start": "2023-12-02T00:00:00", "end": "2023-12-20T00:00:00"},
                 "validation": {
-                    "start": "2024-01-01T00:00:00.100000",
-                    "end": "2024-01-02T12:00:00",
-                },
-                "development_test": {
-                    "start": "2024-01-03T00:00:00",
-                    "end": "2024-01-06T00:00:00",
+                    "start": "2023-12-21T00:00:00",
+                    "end": "2023-12-31T00:00:00",
                 },
             },
         ],
-        "final_holdout": {"start": "2024-01-07T00:00:00", "end": "2024-01-08T00:00:00"},
+        "test": {"start": "2024-01-01T00:00:00", "end": "2024-01-06T00:00:00"},
         "initial_capital": 1000.0,
         "valuation_currency": "USDT",
         "exposure_limits": {
@@ -109,15 +101,15 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
         "crypto",
         "baseline",
         development=(
-            plan["folds"][0]["development_test"]["start"],
-            plan["folds"][-1]["development_test"]["end"],
+            plan["folds"][0]["validation"]["start"],
+            plan["folds"][-1]["validation"]["end"],
         ),
         plan=plan,
     )
     profile = bind_research_configuration(
         research_profile(CRYPTO_PROFILE_ID), configuration
     )
-    bound = profile.protocol(configuration["scenario_id"])
+    bound = profile.protocol(configuration["scenario_id"], access_window="holdout")
     layout = StorageLayout(tmp_path)
     start = pd.Timestamp("2024-01-01T00:00:00").value
     day = pd.Timedelta(days=1).value
@@ -125,7 +117,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
     research_window = {
         "start": "2024-01-01T00:00:00",
         "end": "2024-01-06T00:00:00",
-        "access": "development",
+        "access": "holdout",
     }
     roots, identities = {}, {}
     with runtime_resource_policy_scope() as policy:
@@ -144,7 +136,9 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                 semantic_metadata={"portfolio_capital": asdict(capital)},
             )
 
-            def produce(emit, capital=capital, candidate=candidate):
+            def produce(
+                emit, capital=capital, candidate=candidate, *, split_windows=False
+            ):
                 economic = PortfolioEconomics(capital, candidate.asset_id, emit)
 
                 def mark(offset, price, name=None, number=None):
@@ -170,11 +164,17 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                     mark_price=100.0 / quantity_scale,
                     fee=0.0,
                 )
-                mark(day, 200.0, "oos_window_end", 0.0)
+                mark(day, 200.0, "utc_day_boundary", float((start + day) // day))
+                if split_windows:
+                    mark(day, 200.0, "oos_window_end", 0.0)
                 economic.funding(
                     FundingEvent(start + day + day // 2, -0.5, 200.0 / quantity_scale)
                 )
-                mark(2 * day, 500.0, "oos_window_start", 1.0)
+                mark(
+                    2 * day, 500.0, "utc_day_boundary", float((start + 2 * day) // day)
+                )
+                if split_windows:
+                    mark(2 * day, 500.0, "oos_window_start", 1.0)
                 mark(
                     3 * day,
                     500.0,
@@ -193,7 +193,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                     mark_price=350.0 / quantity_scale,
                     fee=0.0,
                 )
-                mark(5 * day, 350.0, "oos_window_end", 1.0)
+                mark(5 * day, 350.0, "oos_window_end", 1.0 if split_windows else 0.0)
                 _record_execution_result(
                     economic,
                     {
@@ -213,6 +213,46 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                 produce=produce,
             )
             identities[descriptor.target_id] = envelope.instance_identity
+            from quant_research_platform.artifacts.crypto_hft import (
+                summarize_crypto_ledger_windows,
+            )
+            from quant_research_platform.artifacts.portfolio_ledger import (
+                read_portfolio_ledger_artifact,
+            )
+
+            separated_windows = (
+                (start, start + day),
+                (start + 2 * day, start + 5 * day),
+            )
+            separated_envelope = build_business_manifest_envelope(
+                logical_artifact_id=f"{descriptor.target_id}_separated",
+                schema_identity=envelope.schema_identity,
+                protocol_or_spec_identity=envelope.protocol_or_spec_identity,
+                software_identity=envelope.software_identity,
+                research_window=research_window,
+                upstream_identities={},
+                semantic_metadata={
+                    "portfolio_capital": asdict(capital),
+                    "oos_windows_ns": [list(bounds) for bounds in separated_windows],
+                },
+            )
+            separated_root = write_portfolio_ledger_artifact(
+                layout.semantic_artifact_root(
+                    "crypto", separated_envelope.logical_artifact_id
+                ),
+                envelope=separated_envelope,
+                produce=lambda emit: produce(emit, split_windows=True),
+            )
+            ledger = read_portfolio_ledger_artifact(
+                separated_root,
+                expected_identity=separated_envelope.instance_identity,
+            )
+            separated = summarize_crypto_ledger_windows(
+                ledger,
+                windows_ns=separated_windows,
+            )
+            gap = next(row for row in separated if row["kind"] == "gap")
+            assert gap["funding"] == 100.0 and gap["net_pnl"] == 400.0
         for descriptor in bound.execution_targets():
             target = descriptor.statistics_target_id
             selected_identities = {
@@ -268,8 +308,8 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                     assert metrics.loc[
                         "continuous_max_drawdown", "value"
                     ] == pytest.approx(-0.1)
-                    assert metrics.loc["gap_net_pnl", "value"] == 400.0
-                    assert metrics.loc["oos_net_pnl", "value"] == -50.0
+                    assert metrics.loc["gap_net_pnl", "value"] == 0.0
+                    assert metrics.loc["oos_net_pnl", "value"] == 350.0
                     assert (
                         metrics.loc["oos_inventory_max_abs", "value"]
                         == 2.0 * quantity_scale
@@ -282,11 +322,11 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                         == 0.0
                     )
                     rows = daily.loc[daily.candidate_id.eq(candidate.candidate_id)]
-                    assert len(rows) == 4 and rows.benchmark_return.eq(0).all()
+                    assert len(rows) == 5 and rows.benchmark_return.eq(0).all()
                     assert rows.iloc[-1].start_nav == 1500.0
                     assert rows.iloc[-1].net_return == -0.1
                     if missing_boundary:
-                        assert rows.status.eq("DEFINED").sum() == 2
+                        assert rows.status.eq("DEFINED").sum() == 3
                         assert metrics.loc["sharpe", "status"] == "UNDEFINED"
                         assert (
                             metrics.loc["annualized_volatility", "status"]
@@ -297,18 +337,21 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                             == "planned_utc_day_valuation_undefined"
                         )
                     else:
-                        assert rows.net_return.to_numpy() == pytest.approx(
-                            [0.1, 0.0, 0.0, -0.1]
+                        expected = np.array([0.1, 400.0 / 1100.0, 0.0, 0.0, -0.1])
+                        assert rows.net_return.to_numpy() == pytest.approx(expected)
+                        daily_volatility = np.std(expected, ddof=1)
+                        assert metrics.loc["sharpe", "value"] == pytest.approx(
+                            expected.mean() / daily_volatility * np.sqrt(365)
                         )
-                        assert metrics.loc["sharpe", "value"] == pytest.approx(0.0)
                         assert metrics.loc[
                             "annualized_volatility", "value"
-                        ] == pytest.approx(np.sqrt(0.02 / 3 * 365))
-                    gap = intervals.loc[
+                        ] == pytest.approx(daily_volatility * np.sqrt(365))
+                    observed = intervals.loc[
                         intervals.candidate_id.eq(candidate.candidate_id)
-                        & intervals.kind.eq("gap")
-                    ].iloc[0]
-                    assert gap.funding == 100.0 and gap.net_pnl == 400.0
+                    ]
+                    assert observed.kind.tolist() == ["oos"]
+                    assert observed.funding.iloc[0] == 100.0
+                    assert observed.net_pnl.iloc[0] == 350.0
         assert policy.used_memory_bytes == 0
 
 
@@ -398,17 +441,13 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
 
     plan = _statistics_plan()
     plan["execution"]["backtest_modes"] = ["continuous", "independent_segments"]
-    plan["folds"][-1]["development_test"]["end"] = "2025-01-01T00:00:00"
-    plan["final_holdout"] = {
-        "start": "2025-01-02T00:00:00",
-        "end": "2025-01-03T00:00:00",
-    }
+    plan["test"]["end"] = "2025-01-01T00:00:00"
     configuration = research_configuration(
         "crypto",
         "baseline",
         development=(
-            plan["folds"][0]["development_test"]["start"],
-            plan["folds"][-1]["development_test"]["end"],
+            plan["folds"][0]["validation"]["start"],
+            plan["folds"][-1]["validation"]["end"],
         ),
         plan=plan,
     )
@@ -416,15 +455,15 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
     profile = bind_research_configuration(
         research_profile(CRYPTO_PROFILE_ID), configuration
     )
-    bound = profile.protocol(configuration["scenario_id"])
+    bound = profile.protocol(configuration["scenario_id"], access_window="holdout")
     continuous, descriptor = bound.execution_targets()
     candidate = descriptor.candidate
     layout = StorageLayout(tmp_path)
-    window = TimeWindow(**configuration["windows"]["development"])
+    window = TimeWindow(**configuration["windows"]["holdout"])
     research_window = {
         "start": window.start.isoformat(),
         "end": window.end.isoformat(),
-        "access": "development",
+        "access": "holdout",
     }
     specs = {spec.target_id: spec for spec in bound.target_specs("research run")}
     execution_envelope = _target_envelope_for_spec(
@@ -620,6 +659,10 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
             target_results=references,
             status=RunStatus.BLOCKED,
             operation_evidence=unmeasured_operation_evidence("fixture_record"),
+            holdout_evidence={
+                "qualification": "HOLDOUT_FIRST_EVIDENCE",
+                "prior_runs": [],
+            },
         )
         write_research_run_record(layout.research_run_path(run.run_id), run)
         curve = portfolio_curve(

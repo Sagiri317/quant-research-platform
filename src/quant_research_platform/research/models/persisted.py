@@ -5,20 +5,17 @@ from __future__ import annotations
 import os
 import pickle
 import re
-import stat
 import sys
-from collections.abc import Callable, Iterable
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
+from functools import partial
 from pathlib import Path
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts.business_manifest import (
-    BusinessManifestEnvelope,
-)
+from quant_research_platform.contracts.experiments import label_maturity_mask
 from quant_research_platform.contracts.json_codec import (
     bounded_rendered_qrp_json_object_size,
     canonical_json_hash,
@@ -34,6 +31,7 @@ from quant_research_platform.contracts.models import (
 )
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
+from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.models.fitting import validate_model_state
 from quant_research_platform.research.models.production import (
@@ -44,13 +42,17 @@ from quant_research_platform.research.models.production import (
 from quant_research_platform.research.models.trial_selection import (
     ModelSampleCoverage,
     crypto_validation_coverage_scope,
+    evaluate_model_trial_metrics_from_chunks,
     model_validation_coverage_scope,
     select_best_validation_trial,
 )
 from quant_research_platform.research.protocols.a_share import quarter_id_for_fold
+from quant_research_platform.research.randomness import ROOT_SEED, derive_seed
+from quant_research_platform.runtime.execution_metrics import record_run_observations
 from quant_research_platform.runtime.resources import (
     OwnedValue,
-    RuntimeResourcePolicy,
+    current_runtime_resource_policy,
+    pandas_frame_payload_bytes,
     require_free_disk_headroom,
     runtime_resource_policy_scope,
 )
@@ -67,7 +69,6 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
     verified_file_handle,
 )
-from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     read_bounded_qrp_json,
     write_internal_artifact_manifest,
@@ -79,12 +80,12 @@ from quant_research_platform.storage.parquet import (
     parquet_table_writer,
 )
 from quant_research_platform.storage.semantic_artifacts import (
+    _member_record,
     read_semantic_artifact_record,
     verify_semantic_artifact_member,
     write_semantic_artifact,
 )
 
-_QUARTER_ID_RE = re.compile(r"^[0-9]{4}Q[1-4]$")
 _CRYPTO_VALIDATION_SCHEMA = pa.schema(
     (
         ("timestamp", pa.timestamp("ns")),
@@ -99,70 +100,112 @@ _CRYPTO_VALIDATION_SCHEMA = pa.schema(
 )
 
 
+_A_SHARE_VALIDATION_SCHEMA = pa.schema(
+    (
+        ("timestamp", pa.timestamp("ns")),
+        ("asset_id", pa.string()),
+        ("label", pa.float64()),
+        ("prediction_score", pa.float64()),
+        ("label_available_at", pa.timestamp("ns")),
+        ("score_eligible", pa.bool_()),
+    )
+)
+
+
 @dataclass(frozen=True)
 class PersistedQuarterlyModelArtifact:
     model_id: str
-    quarterly_models: tuple[dict[str, object], ...]
-    quarterly_selections: dict[str, dict[str, object]]
+    candidate_models: tuple[dict, ...]
+    selections: dict[str, dict[str, dict]]
+    final_models: tuple[dict, ...]
     instance_root: Path
-    envelope: dict[str, object]
-    member_records: tuple[dict[str, object], ...]
-    trial_ledgers: tuple[dict[str, str], ...]
+    envelope: dict
+    member_records: tuple
+    trial_ledgers: tuple
     member_identities: dict
 
-    def prediction_models(
-        self, window: TimeWindow, *, access_window: str = "development"
-    ) -> tuple[dict[str, object], ...]:
-        """Bind observation quarters to the immutable source model quarter."""
+    def selection(self, group, quarter_id, *, access_window):
+        if group not in {"global", "quarterly"}:
+            raise ValueError("a_share_selection_group_invalid")
+        decision = (
+            "final" if access_window == "holdout" or group == "global" else quarter_id
+        )
+        if decision == "final" and decision not in self.selections[group]:
+            raise ValueError("model_selection_requires_complete_development")
+        return self.selections[group][decision]
+
+    def prediction_models(self, window, *, selection_group, access_window):
         if access_window not in {"development", "holdout"}:
             raise ValueError("unknown_a_share_access_window")
-        source_quarter = max(self.quarterly_selections)
-        models = []
+        protocol = self.envelope["semantic_metadata"]["target_contract"]["protocol"]
+        boundary = TimeWindow(
+            **protocol[
+                "holdout_window" if access_window == "holdout" else "development_window"
+            ]
+        )
+        if pd.Timestamp(window.start) < pd.Timestamp(boundary.start) or pd.Timestamp(
+            window.end
+        ) > pd.Timestamp(boundary.end):
+            raise PermissionError("a_share_prediction_window_invalid")
+        result = []
         for period in pd.period_range(window.start, window.end, freq="Q"):
-            observed = str(period)
-            source = source_quarter if access_window == "holdout" else observed
-            entries = tuple(
-                item for item in self.quarterly_models if item["quarter_id"] == source
+            quarter_id = str(period)
+            selection = self.selection(
+                selection_group, quarter_id, access_window=access_window
             )
-            if not entries:
-                raise ValueError("persisted_model_prediction_window_uncovered")
-            start = max(pd.Timestamp(window.start), period.start_time)
-            end = min(pd.Timestamp(window.end), period.end_time.normalize())
-            if access_window == "holdout" and any(
-                pd.Timestamp(item["model_metadata"]["fit_cutoff"]) >= start
-                for item in entries
-            ):
-                raise ValueError("holdout_model_cutoff_invalid")
-            for item in entries:
-                models.append(
+            for family in selection["families"]:
+                if access_window == "development":
+                    entry = next(
+                        item
+                        for item in self.candidate_models
+                        if item["quarter_id"] == quarter_id
+                        and item["family_id"] == family["family_id"]
+                        and item["model_id"] == family["selected_config_id"]
+                    )
+                    prediction_window = entry["validation_window"]
+                else:
+                    entry = next(
+                        item
+                        for item in self.final_models
+                        if item["selection_group"] == selection_group
+                        and item["family_id"] == family["family_id"]
+                    )
+                    prediction_window = _window_payload(
+                        TimeWindow(
+                            max(pd.Timestamp(window.start), period.start_time),
+                            min(pd.Timestamp(window.end), period.end_time.normalize()),
+                        )
+                    )
+                result.append(
                     {
-                        **item,
-                        "quarter_id": observed,
-                        "source_quarter": source,
-                        "prediction_window": item["prediction_window"]
+                        **entry,
+                        "selection_group": selection_group,
+                        "quarter_id": quarter_id,
+                        "decision_id": selection["decision_id"],
+                        "prediction_source": "validation"
                         if access_window == "development"
-                        else {
-                            "start": start.date().isoformat(),
-                            "end": end.date().isoformat(),
-                        },
+                        else "final",
+                        "prediction_window": prediction_window,
                     }
                 )
-        return tuple(models)
+        return tuple(result)
 
-    def prediction_lineage(
-        self, window: TimeWindow, *, access_window: str = "development"
-    ) -> dict[str, object]:
-        models = self.prediction_models(window, access_window=access_window)
+    def prediction_lineage(self, window, *, selection_group, access_window):
+        models = self.prediction_models(
+            window, selection_group=selection_group, access_window=access_window
+        )
         return {
             "model_artifact_id": self.model_id,
             "model_artifact_identity": self.envelope["instance_identity"],
             "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
+            "selection_group": selection_group,
             "quarterly_models": [
                 {
                     key: item[key]
                     for key in (
                         "quarter_id",
-                        "source_quarter",
+                        "decision_id",
+                        "prediction_source",
                         "family_id",
                         "model_id",
                         "prediction_window",
@@ -171,694 +214,1220 @@ class PersistedQuarterlyModelArtifact:
                 for item in models
             ],
             "champion_by_quarter": {
-                item["quarter_id"]: self.quarterly_selections[item["source_quarter"]][
-                    "selected_family_id"
-                ]
+                item["quarter_id"]: self.selection(
+                    selection_group, item["quarter_id"], access_window=access_window
+                )["selected_family_id"]
                 for item in models
             },
         }
 
-
-def write_quarterly_model_artifact(
-    logical_root: Path,
-    *,
-    model_id: str,
-    envelope: BusinessManifestEnvelope,
-    quarterly_results: Callable[..., Iterable[OwnedValue]],
-    trial_layout: StorageLayout | None = None,
-    verify_source: Callable[[], None] | None = None,
-) -> Path:
-    validate_run_id(model_id)
-    if model_id != envelope.logical_artifact_id or quarterly_results is None:
-        raise ValueError("model_artifact_identity_invalid")
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("research.model.artifact.trial_references", 0) as reference_lease,
-    ):
-        operational = {"model_trial_ledgers": []}
-        quarterly_payload: list[dict[str, object]] = []
-
-        def write(staging: Path) -> None:
-            selections: dict[str, dict[str, object]] = {}
-            models_root = staging / "models"
-            filesystem_mkdir(models_root)
-
-            def write_coverage(quarter, frames):
-                relative = (
-                    f"models/{quarter_id_for_fold(quarter)}/validation-coverage.parquet"
-                )
-                path = staging / relative
-                filesystem_mkdir(path.parent, parents=True, exist_ok=True)
-                with (
-                    handle_preserving_primary(
-                        open_filesystem_file(path, "xb")
-                    ) as handle,
-                    parquet_table_writer(
-                        handle, parent=path.parent, compression="zstd"
-                    ) as write_keys,
-                    closing_iterator(frames) as source,
-                ):
-                    for frame in source:
-                        with _parquet_frame_reservation(frame, borrowed_input=True):
-                            table = pa.Table.from_pandas(frame, preserve_index=False)
-                            try:
-                                write_keys(table)
-                            finally:
-                                table = None
-                return relative
-
-            iterator = iter(quarterly_results(on_validation_coverage=write_coverage))
-            try:
-                for owned_quarterly in iterator:
-                    owned_quarterly.lease.transfer("research.model.artifact")
-                    quarterly = owned_quarterly.value
-                    quarter = None
-                    quarterly_result = None
-                    try:
-                        quarter = quarterly.quarter
-                        quarterly_result = quarterly.model_result
-                        if quarterly_result.prediction_model is None:
-                            raise ValueError("quarterly_prediction_model_missing")
-                        metadata = dict(quarterly_result.metadata)
-                        for reference in quarterly.trial_ledgers:
-                            additional = json_record_working_set_bytes(
-                                bounded_rendered_qrp_json_object_size(
-                                    reference, lazy_arrays={}, max_bytes=sys.maxsize
-                                )
-                            )
-                            policy.require_working_set(
-                                additional,
-                                error="trial_ledger_working_set_exceeds_memory_capacity",
-                            )
-                            reference_lease.grow(additional)
-                            operational["model_trial_ledgers"].append(dict(reference))
-                        quarter_id = quarter_id_for_fold(quarter)
-                        family_id = quarterly.family_id
-                        validate_run_id(family_id)
-                        selection = dict(quarterly.selection_metadata)
-                        validate_a_share_model_selection_metadata(selection)
-                        if (
-                            quarter_id in selections
-                            and selections[quarter_id] != selection
-                        ):
-                            raise ValueError("model_artifact_selection_conflict")
-                        selections[quarter_id] = selection
-                        quarter_root = models_root / quarter_id
-                        filesystem_mkdir(quarter_root, exist_ok=True)
-
-                        cutoff = time_value_isoformat(
-                            quarter.validation.end, date_only=True
-                        )
-                        if (
-                            "fit_cutoff" in metadata
-                            and metadata["fit_cutoff"] != cutoff
-                        ):
-                            raise ValueError("model_fit_cutoff_mismatch")
-                        metadata["fit_cutoff"] = cutoff
-                        model_algorithm = metadata["model_algorithm"]
-                        if model_algorithm in {
-                            "equal_weight_rank_ensemble",
-                            "ic_weighted_rank_ensemble",
-                        }:
-                            rank_columns = tuple(
-                                getattr(
-                                    quarterly_result.prediction_model,
-                                    "columns",
-                                    (),
-                                )
-                            )
-                            rank_parameters = {"columns": list(rank_columns)}
-                            if model_algorithm == "equal_weight_rank_ensemble":
-                                rank_parameters["directions"] = list(
-                                    getattr(
-                                        quarterly_result.prediction_model,
-                                        "directions",
-                                        (),
-                                    )
-                                )
-                            else:
-                                rank_parameters["weights"] = list(
-                                    getattr(
-                                        quarterly_result.prediction_model,
-                                        "weights",
-                                        (),
-                                    )
-                                )
-                            if (
-                                "rank_parameters" in metadata
-                                and metadata["rank_parameters"] != rank_parameters
-                            ):
-                                raise ValueError("model_state_metadata_mismatch")
-                            metadata["rank_parameters"] = rank_parameters
-                        quarterly_payload.append(
-                            {
-                                "quarter_id": quarter_id,
-                                "model_id": quarterly.model_id,
-                                "family_id": family_id,
-                                "training_window": _window_payload(quarter.train),
-                                "validation_window": _window_payload(
-                                    quarter.validation
-                                ),
-                                "prediction_window": _window_payload(
-                                    quarter.development_test
-                                ),
-                                "model_metadata": validate_model_metadata_core(
-                                    metadata,
-                                    quarterly=True,
-                                ),
-                            }
-                        )
-                        validate_model_state(
-                            quarterly_result.prediction_model,
-                            quarterly_payload[-1]["model_metadata"],
-                        )
-                        _write_model_member(
-                            quarter_root / f"{family_id}.pkl",
-                            quarterly_result.prediction_model,
-                            state_bytes=owned_quarterly.lease.reserved_bytes,
-                        )
-                    finally:
-                        ownership = owned_quarterly
-                        primary = sys.exception()
-                        quarterly = None
-                        quarterly_result = None
-                        owned_quarterly = None
-                        if ownership.lease.active:
-                            try:
-                                ownership.release(owner="research.model.artifact")
-                            except BaseException as cleanup_error:
-                                if primary is not None:
-                                    primary.add_note(
-                                        "quarterly model ownership release "
-                                        "also failed: "
-                                        f"{type(cleanup_error).__name__}"
-                                    )
-                                else:
-                                    raise
-                        ownership = None
-            finally:
-                close = getattr(iterator, "close", None)
-                if callable(close):
-                    primary = sys.exc_info()[1]
-                    try:
-                        close()
-                    except BaseException as cleanup_error:
-                        if primary is not None:
-                            primary.add_note(
-                                "quarterly model generator cleanup also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                        else:
-                            raise
-            if not quarterly_payload:
-                raise ValueError("model_artifact_quarterly_required")
-            validated_payload = list(
-                _validated_quarterly_payload(quarterly_payload, selections)
-            )
-            _validate_trial_references(
-                validated_payload,
-                selections,
-                operational["model_trial_ledgers"],
-                trial_layout,
-                envelope.payload(),
-                root=staging,
-                member_identities=None,
-            )
-            for quarter_id, selection in selections.items():
-                write_internal_artifact_manifest(
-                    staging / "models" / quarter_id / "metadata.json",
-                    {
-                        "schema_id": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-                        "quarter_id": quarter_id,
-                        "selection": selection,
-                        "models": [
-                            item
-                            for item in validated_payload
-                            if item["quarter_id"] == quarter_id
-                        ],
-                    },
-                )
-            write_internal_artifact_manifest(
-                staging / "model.json",
-                {
-                    "schema_id": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-                    "model_id": model_id,
-                    "quarters": list(selections),
-                },
-            )
-
-        def verify_models(root, members):
-            for entry in quarterly_payload:
-                relative = f"models/{entry['quarter_id']}/{entry['family_id']}.pkl"
-                with _read_model_member(root, members, relative) as owned:
-                    validate_model_state(owned.value, entry["model_metadata"])
-            if verify_source is not None:
-                verify_source()
-
-        return write_semantic_artifact(
-            logical_root,
-            envelope,
-            write,
-            operational_metadata=operational,
-            staged_validator=verify_models,
+    def validation_chunks(self, entry):
+        return _a_share_validation_chunks(
+            self.instance_root,
+            entry,
+            member_identities=self.member_identities,
+            development_end=self.envelope["semantic_metadata"]["target_contract"][
+                "protocol"
+            ]["development_window"]["end"],
         )
 
 
-def read_quarterly_model_artifact(
-    instance_root: Path,
+def _model_metadata_bytes(value):
+    return json_record_working_set_bytes(
+        bounded_rendered_qrp_json_object_size(
+            value, lazy_arrays={}, max_bytes=sys.maxsize
+        )
+    )
+
+
+def _retain_model_metadata(
+    value, *, lease, error="model_metadata_exceeds_memory_capacity"
+):
+    size = _model_metadata_bytes(value)
+    current_runtime_resource_policy().require_working_set(size, error=error)
+    lease.grow(size)
+    return size
+
+
+def _admit_model_metadata(size, *, lease):
+    policy = current_runtime_resource_policy()
+    cap = policy.explicit_memory_cap_bytes
+    if cap is None or policy.used_memory_bytes + size <= cap:
+        policy.require_working_set(size, error="model_metadata_exceeds_memory_capacity")
+    lease.grow(size)
+
+
+def _write_model_metadata(path, payload, *, lease):
+    retained = lease.reserved_bytes
+    try:
+        write_internal_artifact_manifest(
+            path, payload, _admit=partial(_admit_model_metadata, lease=lease)
+        )
+    except BaseException as error:
+        clear_exception_frames(error)
+        raise
+    finally:
+        payload = None
+        lease.shrink_to(retained)
+
+
+def _persisted_model_metadata(result, *, retain, fit_cutoff=None, fit_coverage_id=None):
+    algorithm = result.metadata["model_algorithm"]
+    rank_parameters = None
+    if algorithm in {"equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"}:
+        predictor = result.prediction_model
+        parameter = (
+            "directions" if algorithm == "equal_weight_rank_ensemble" else "weights"
+        )
+        rank_parameters = {
+            "columns": predictor.columns,
+            parameter: getattr(predictor, parameter),
+        }
+    cutoff = (
+        None if fit_cutoff is None else time_value_isoformat(fit_cutoff, date_only=True)
+    )
+    retain(
+        {
+            "metadata": result.metadata,
+            "rank_parameters": rank_parameters,
+            "fit_cutoff": cutoff,
+            "fit_coverage_id": fit_coverage_id,
+        }
+    )
+    metadata = dict(result.metadata)
+    if rank_parameters is not None:
+        metadata["rank_parameters"] = {
+            key: list(value) for key, value in rank_parameters.items()
+        }
+    if fit_cutoff is not None:
+        metadata["fit_cutoff"] = cutoff
+        metadata["fit_coverage_id"] = fit_coverage_id
+    metadata = validate_model_metadata_core(metadata, quarterly=fit_cutoff is not None)
+    validate_model_state(result.prediction_model, metadata)
+    return metadata
+
+
+def write_quarterly_model_artifact(
+    logical_root,
     *,
-    expected_identity: str | None = None,
-    trial_layout: StorageLayout | None = None,
+    model_id,
+    envelope,
+    model_results,
+    trial_layout,
+    verify_source,
+):
+    validate_run_id(model_id)
+    if model_id != envelope.logical_artifact_id:
+        raise ValueError("model_artifact_identity_invalid")
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("research.model.artifact.metadata", 0) as metadata_lease,
+    ):
+        operational = {
+            "model_trial_ledgers": [],
+            "model_phase_observations": {"environments": [], "phases": []},
+        }
+
+        admit = partial(_admit_model_metadata, lease=metadata_lease)
+        retain = partial(_retain_model_metadata, lease=metadata_lease)
+        write_metadata = partial(_write_model_metadata, lease=metadata_lease)
+        operational_bytes = 0
+
+        def record_observation(value):
+            nonlocal operational_bytes
+            operational_bytes += retain(value)
+            value = dict(value)
+            observation = dict(value["observations"])
+            environment = dict(observation["environment"])
+            created_at = environment.pop("created_at_utc")
+            costs = operational["model_phase_observations"]
+            if environment not in costs["environments"]:
+                costs["environments"].append(environment)
+            observation["environment"] = {
+                "context": costs["environments"].index(environment),
+                "created_at_utc": created_at,
+            }
+            value["observations"] = observation
+            costs["phases"].append(value)
+
+        def write(staging):
+            nonlocal operational_bytes
+            candidate_models = []
+            final_models = []
+            selections = {"global": {}, "quarterly": {}}
+            candidate_files = {}
+            validation_owner = ExitStack()
+            validation_writer = None
+            current_path = None
+
+            def write_validation(fold, family, spec, frame):
+                nonlocal validation_writer, current_path
+                path = f"models/{quarter_id_for_fold(fold)}/{spec.model_id}.parquet"
+                if validation_writer is None:
+                    current_path = path
+                    target = staging / path
+                    filesystem_mkdir(target.parent, parents=True, exist_ok=True)
+                    handle = validation_owner.enter_context(
+                        handle_preserving_primary(open_filesystem_file(target, "xb"))
+                    )
+                    validation_writer = validation_owner.enter_context(
+                        parquet_table_writer(
+                            handle,
+                            parent=target.parent,
+                            compression="zstd",
+                            schema=_A_SHARE_VALIDATION_SCHEMA,
+                        )
+                    )
+                if path != current_path:
+                    raise ValueError("model_validation_candidate_interleaving")
+                with _parquet_frame_reservation(frame, borrowed_input=True):
+                    table = None
+                    try:
+                        table = pa.Table.from_pandas(
+                            frame.rename(columns={spec.label_column: "label"}),
+                            schema=_A_SHARE_VALIDATION_SCHEMA,
+                            preserve_index=False,
+                        )
+                        validation_writer(table)
+                    finally:
+                        table = None
+
+            def write_candidate(fold, family, spec, result):
+                nonlocal validation_writer, current_path
+                if validation_writer is None:
+                    raise ValueError("model_validation_predictions_missing")
+                validation_owner.close()
+                validation_writer = None
+                identity = dataset_file_identity(staging / current_path)
+                record = _member_record(
+                    current_path, staging / current_path, identity=identity
+                )
+                candidate_files[current_path] = identity
+                entry = {
+                    "quarter_id": quarter_id_for_fold(fold),
+                    "family_id": family,
+                    "model_id": spec.model_id,
+                    "training_window": _window_payload(fold.train),
+                    "validation_window": _window_payload(fold.validation),
+                    "model_metadata": None,
+                    "validation_prediction": record,
+                }
+                retain(entry)
+                entry["model_metadata"] = _persisted_model_metadata(
+                    result, retain=retain
+                )
+                candidate_models.append(entry)
+                current_path = None
+
+            def write_trial(fold, family, reference):
+                nonlocal operational_bytes
+                for entry in candidate_models:
+                    if (
+                        entry["quarter_id"] == quarter_id_for_fold(fold)
+                        and entry["family_id"] == family
+                    ):
+                        entry["trial_semantic_identity"] = reference[
+                            "semantic_identity"
+                        ]
+                operational_bytes += retain(reference)
+                operational["model_trial_ledgers"].append(dict(reference))
+
+            def select_models(group, decision_id, cutoff, scoring_window):
+                retained = metadata_lease.reserved_bytes
+                observation = {}
+                with record_run_observations(policy, observation):
+                    value = _select_a_share_models(
+                        staging,
+                        candidate_models,
+                        envelope.semantic_metadata["target_contract"],
+                        group=group,
+                        decision_id=decision_id,
+                        cutoff=cutoff,
+                        scoring_window=scoring_window,
+                        member_identities=candidate_files,
+                        dataset_identity=envelope.upstream_identities[
+                            envelope.semantic_metadata["target_contract"]["protocol"][
+                                "scenario_id"
+                            ]
+                        ],
+                        _retain=retain,
+                    )
+                metadata_lease.shrink_to(retained + _model_metadata_bytes(value))
+                record_observation(
+                    {
+                        "phase": "group_scoring",
+                        "selection_group": group,
+                        "family_id": None,
+                        "quarter_id": decision_id,
+                        "fit_count": 0,
+                        "observations": observation,
+                    }
+                )
+                selections[group][decision_id] = value
+                return value
+
+            try:
+                with (
+                    handle_preserving_primary(validation_owner),
+                    closing_iterator(
+                        iter(
+                            model_results(
+                                on_validation=write_validation,
+                                on_candidate=write_candidate,
+                                on_trial=write_trial,
+                                select_models=select_models,
+                                on_observation=record_observation,
+                            )
+                        )
+                    ) as source,
+                ):
+                    for owned in source:
+                        owned.lease.transfer("research.model.final.persist")
+                        member = owned.value
+                        try:
+                            path = (
+                                f"models/final/{member.selection_group}/"
+                                f"{member.family_id}.pkl"
+                            )
+                            filesystem_mkdir(
+                                (staging / path).parent, parents=True, exist_ok=True
+                            )
+                            metadata = _persisted_model_metadata(
+                                member.model_result,
+                                retain=retain,
+                                fit_cutoff=member.fit_cutoff,
+                                fit_coverage_id=member.fit_coverage_id,
+                            )
+                            _write_model_member(
+                                staging / path,
+                                member.model_result.prediction_model,
+                                state_bytes=owned.lease.reserved_bytes,
+                            )
+                            entry = {
+                                "selection_group": member.selection_group,
+                                "family_id": member.family_id,
+                                "model_id": member.spec.model_id,
+                                "fit_windows": [
+                                    _window_payload(part) for part in member.fit_windows
+                                ],
+                                "fit_cutoff": time_value_isoformat(
+                                    member.fit_cutoff, date_only=True
+                                ),
+                                "model_metadata": None,
+                                "refit_trial_semantic_identity": (
+                                    member.refit_trial_reference["semantic_identity"]
+                                ),
+                            }
+                            retain(entry)
+                            entry["model_metadata"] = metadata
+                            final_models.append(entry)
+                            operational_bytes += retain(member.refit_trial_reference)
+                            operational["model_trial_ledgers"].append(
+                                dict(member.refit_trial_reference)
+                            )
+                        finally:
+                            member = None
+                            if owned.lease.active:
+                                primary = sys.exception()
+                                try:
+                                    owned.release(owner="research.model.final.persist")
+                                except BaseException as cleanup:
+                                    if primary is None:
+                                        raise
+                                    primary.add_note(
+                                        "model release also failed: "
+                                        + type(cleanup).__name__
+                                    )
+                            owned = None
+                quarters = tuple(
+                    dict.fromkeys(entry["quarter_id"] for entry in candidate_models)
+                )
+                for quarter in quarters:
+                    write_metadata(
+                        staging / "models" / quarter / "metadata.json",
+                        {
+                            "schema_id": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
+                            "quarter_id": quarter,
+                            "candidate_models": [
+                                entry
+                                for entry in candidate_models
+                                if entry["quarter_id"] == quarter
+                            ],
+                        },
+                    )
+                for group, decisions in selections.items():
+                    for decision_id, decision in decisions.items():
+                        target = staging / "selections" / group / f"{decision_id}.json"
+                        filesystem_mkdir(target.parent, parents=True, exist_ok=True)
+                        write_metadata(
+                            target,
+                            {
+                                "schema_id": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
+                                "selection": decision,
+                            },
+                        )
+                final_groups = tuple(
+                    dict.fromkeys(entry["selection_group"] for entry in final_models)
+                )
+                for group in final_groups:
+                    write_metadata(
+                        staging / "models" / "final" / group / "metadata.json",
+                        {
+                            "schema_id": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
+                            "selection_group": group,
+                            "final_models": [
+                                entry
+                                for entry in final_models
+                                if entry["selection_group"] == group
+                            ],
+                        },
+                    )
+                write_metadata(
+                    staging / "model.json",
+                    {
+                        "schema_id": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
+                        "model_id": model_id,
+                        "validation_quarters": list(quarters),
+                        "selection_decisions": {
+                            group: list(decisions)
+                            for group, decisions in selections.items()
+                        },
+                        "final_groups": list(final_groups),
+                    },
+                )
+            except BaseException as error:
+                clear_exception_frames(error)
+                raise
+            finally:
+                candidate_models.clear()
+                final_models.clear()
+                selections.clear()
+                candidate_files.clear()
+                entry = metadata = member = owned = decision = decisions = None
+                del entry, metadata, member, owned, decision, decisions
+                metadata_lease.shrink_to(operational_bytes)
+
+        def verify_models(root, members):
+            retained = metadata_lease.reserved_bytes
+            try:
+                admit(
+                    sum(
+                        2 * json_record_working_set_bytes(member["size"])
+                        for member in members
+                        if str(member["path"]).endswith(".json")
+                    )
+                )
+                _validate_a_share_model_payload(
+                    root,
+                    envelope.payload(_admit=admit),
+                    members,
+                    operational["model_trial_ledgers"],
+                    trial_layout,
+                )
+                verify_source()
+            except BaseException as error:
+                clear_exception_frames(error)
+                raise
+            finally:
+                metadata_lease.shrink_to(retained)
+
+        try:
+            return write_semantic_artifact(
+                logical_root,
+                envelope,
+                write,
+                operational_metadata=operational,
+                staged_validator=verify_models,
+            )
+        except BaseException as error:
+            clear_exception_frames(error)
+            raise
+        finally:
+            operational.clear()
+
+
+def _a_share_validation_chunks(root, entry, *, member_identities, development_end):
+    record = entry["validation_prediction"]
+    path = record["path"]
+    identity = member_identities[path]
+    with _opened_parquet(root / path, expected_identity=identity) as (
+        parquet,
+        _identity,
+        _handle,
+    ):
+        if parquet.schema_arrow.remove_metadata() != _A_SHARE_VALIDATION_SCHEMA:
+            raise ValueError("a_share_validation_schema_invalid")
+    previous = {}
+    start, end = (
+        pd.Timestamp(entry["validation_window"][key]) for key in ("start", "end")
+    )
+    source = iter_declared_parquet_member_batches(
+        root / path, target_chunk_bytes=256 * 1024, expected_identity=identity
+    )
+    with closing_iterator(source):
+        for frame in source:
+            labeled = frame["label"].notna()
+            if (
+                frame.empty
+                or frame[
+                    ["timestamp", "asset_id", "prediction_score", "score_eligible"]
+                ]
+                .isna()
+                .any()
+                .any()
+                or not np.isfinite(frame["prediction_score"].to_numpy()).all()
+                or not np.isfinite(frame.loc[labeled, "label"].to_numpy()).all()
+                or not labeled.equals(frame["label_available_at"].notna())
+                or not frame.timestamp.between(start, end).all()
+                or not (
+                    frame.loc[labeled, "label_available_at"]
+                    > frame.loc[labeled, "timestamp"]
+                ).all()
+                or not (
+                    frame.loc[labeled, "label_available_at"]
+                    <= pd.Timestamp(development_end)
+                ).all()
+            ):
+                raise ValueError("a_share_validation_values_invalid")
+            for timestamp, asset in frame[["timestamp", "asset_id"]].itertuples(
+                index=False, name=None
+            ):
+                if (
+                    type(asset) is not str
+                    or not asset
+                    or (asset in previous and timestamp <= previous[asset])
+                ):
+                    raise ValueError("a_share_validation_keys_invalid")
+                previous[asset] = timestamp
+            yield frame
+
+
+def _select_a_share_models(
+    root,
+    candidate_models,
+    contract,
+    *,
+    group,
+    decision_id,
+    cutoff,
+    scoring_window,
+    member_identities,
+    dataset_identity,
+    _retain=None,
+):
+    if _retain is not None:
+        # Borrowed entries bound the new indexes, metric rows and result containers.
+        _retain({"selection_entries": candidate_models})
+    protocol = contract["protocol"]
+    family_ids = tuple(value["model_id"] for value in contract["model_specs"])
+    eligible = [
+        entry
+        for entry in candidate_models
+        if pd.Timestamp(entry["validation_window"]["end"]) <= pd.Timestamp(cutoff)
+        and pd.Timestamp(entry["validation_window"]["end"])
+        >= pd.Timestamp(scoring_window.start)
+        and pd.Timestamp(entry["validation_window"]["start"])
+        <= pd.Timestamp(scoring_window.end)
+    ]
+    if not eligible:
+        raise ValueError("a_share_selection_predictions_missing")
+    quarters = tuple(sorted({entry["quarter_id"] for entry in eligible}))
+    source_predictions = sorted(
+        (entry["validation_prediction"] for entry in eligible),
+        key=lambda item: item["path"],
+    )
+    parents = sorted({entry["trial_semantic_identity"] for entry in eligible})
+    scope = {
+        "dataset_identity": dataset_identity,
+        "prediction_members": source_predictions,
+        "cutoff": time_value_isoformat(pd.Timestamp(cutoff), date_only=True),
+        "scoring_window": _window_payload(scoring_window),
+        "label": contract["model_specs"][0]["label_column"],
+        "eligibility": "shared_candidate_prediction_keys",
+    }
+    coverage = ModelSampleCoverage(scope)
+    family_rows = []
+    selected_rows = []
+    first_candidate = True
+    for family_id in family_ids:
+        candidate_ids = tuple(
+            entry["model_id"]
+            for entry in eligible
+            if entry["quarter_id"] == quarters[0] and entry["family_id"] == family_id
+        )
+        if not candidate_ids or any(
+            tuple(
+                entry["model_id"]
+                for entry in eligible
+                if entry["quarter_id"] == quarter and entry["family_id"] == family_id
+            )
+            != candidate_ids
+            for quarter in quarters
+        ):
+            raise ValueError("a_share_selection_candidate_coverage_missing")
+        rows = []
+        for candidate_id in candidate_ids:
+            entries = tuple(
+                entry
+                for entry in eligible
+                if entry["family_id"] == family_id and entry["model_id"] == candidate_id
+            )
+
+            def chunks(entries=entries, populate=first_candidate):
+                for entry in entries:
+                    with closing_iterator(
+                        _a_share_validation_chunks(
+                            root,
+                            entry,
+                            member_identities=member_identities,
+                            development_end=protocol["development_window"]["end"],
+                        )
+                    ) as frames:
+                        for frame in frames:
+                            policy = current_runtime_resource_policy()
+                            with policy.lease(
+                                "research.model.selection.maturity",
+                                max(1, 3 * pandas_frame_payload_bytes(frame)),
+                            ):
+                                mask = label_maturity_mask(
+                                    frame,
+                                    fitting_cutoff=cutoff,
+                                    availability_column="label_available_at",
+                                    target_column="label",
+                                )
+                                mask &= frame["score_eligible"]
+                                mask &= frame.timestamp.between(
+                                    pd.Timestamp(scoring_window.start),
+                                    pd.Timestamp(scoring_window.end),
+                                )
+                                mature = frame.loc[mask]
+                                if populate:
+                                    coverage.add(mature)
+                                yield mature
+
+            metrics = evaluate_model_trial_metrics_from_chunks(
+                chunks(),
+                model_id=candidate_id,
+                label_column="label",
+                prediction_column="prediction_score",
+                expected_coverage=coverage,
+            )
+            first_candidate = False
+            rows.append(
+                {
+                    key: None
+                    if isinstance(value, float) and np.isnan(value)
+                    else value.item()
+                    if isinstance(value, np.generic)
+                    else value
+                    for key, value in metrics.items()
+                }
+            )
+        selected_id = select_best_validation_trial(
+            pd.DataFrame.from_records(rows),
+            trial_id_column="model_id",
+            selection_metric="validation_rankic",
+            maximize=True,
+            validation_metric_columns=("validation_rankic",),
+            test_metric_columns=(),
+            tie_break_order=candidate_ids,
+        )
+        selected = next(row for row in rows if row["model_id"] == selected_id)
+        selected_rows.append({**selected, "model_id": family_id})
+        family_rows.append(
+            {
+                "family_id": family_id,
+                "config_tie_break_order": list(candidate_ids),
+                "selected_config_id": selected_id,
+                "trial_metrics": rows,
+            }
+        )
+    champion = select_best_validation_trial(
+        pd.DataFrame.from_records(selected_rows),
+        trial_id_column="model_id",
+        selection_metric="validation_rankic",
+        maximize=True,
+        validation_metric_columns=("validation_rankic",),
+        test_metric_columns=(),
+        tie_break_order=family_ids,
+    )
+    result = {
+        "status": "selected",
+        "selection_group": group,
+        "decision_id": decision_id,
+        "cutoff": time_value_isoformat(pd.Timestamp(cutoff), date_only=True),
+        "selection_metric": "validation_rankic",
+        "selection_direction": "maximize",
+        "validation_start": time_value_isoformat(scoring_window.start, date_only=True),
+        "validation_end": time_value_isoformat(scoring_window.end, date_only=True),
+        "candidate_family_ids": list(family_ids),
+        "tie_break_order": list(family_ids),
+        "selected_family_id": champion,
+        "selected_model_id": next(
+            family["selected_config_id"]
+            for family in family_rows
+            if family["family_id"] == champion
+        ),
+        "families": family_rows,
+        "common_validation_coverage": {
+            "semantic_identity": coverage.semantic_identity,
+            "row_count": coverage.row_count,
+        },
+        "selection_ledger_semantic_identities": parents,
+        "prediction_members": source_predictions,
+        "label_dataset_identity": dataset_identity,
+    }
+    validate_a_share_model_selection_metadata(result)
+    return result
+
+
+def read_quarterly_model_artifact(
+    instance_root,
+    *,
+    expected_identity=None,
+    trial_layout=None,
     expected_member_identities=None,
-) -> PersistedQuarterlyModelArtifact:
+):
+    instance_root = Path(instance_root)
     member_identities = {}
     operational = {}
-    envelope, member_records = read_semantic_artifact_record(
+    envelope, members = read_semantic_artifact_record(
         instance_root,
         expected_identity=expected_identity,
         member_identities=member_identities,
         expected_member_identities=expected_member_identities,
         operational_metadata=operational,
     )
-    manifest_member = next(
-        (item for item in member_records if item["path"] == "model.json"),
-        None,
+    return _validate_a_share_model_payload(
+        instance_root,
+        envelope,
+        members,
+        operational.get("model_trial_ledgers"),
+        trial_layout,
+        member_identities=member_identities,
     )
-    if manifest_member is None:
-        raise ValueError("model_artifact_manifest_invalid")
+
+
+def _validate_a_share_model_payload(
+    root,
+    envelope,
+    members,
+    references,
+    trial_layout,
+    *,
+    member_identities=None,
+):
+    if trial_layout is None:
+        raise ValueError("model_trial_layout_required")
+    if member_identities is None:
+        member_identities = {
+            member["path"]: verify_semantic_artifact_member(
+                root, relative_path=member["path"], expected=member
+            )
+            for member in members
+        }
+    member_records = {member["path"]: member for member in members}
     payload = read_bounded_qrp_json(
-        Path(instance_root) / "model.json",
-        expected_identity=member_identities["model.json"],
+        root / "model.json", expected_identity=member_identities["model.json"]
     )[1]
     if (
-        set(payload) != {"schema_id", "model_id", "quarters"}
+        set(payload)
+        != {
+            "schema_id",
+            "model_id",
+            "validation_quarters",
+            "selection_decisions",
+            "final_groups",
+        }
         or payload["schema_id"] != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
+        or payload["model_id"] != envelope["logical_artifact_id"]
+        or type(payload["validation_quarters"]) is not list
+        or type(payload["selection_decisions"]) is not dict
+        or set(payload["selection_decisions"]) != {"global", "quarterly"}
+        or type(payload["final_groups"]) is not list
+        or type(references) is not list
     ):
         raise ValueError("model_artifact_manifest_invalid")
-    model_id = payload["model_id"]
-    if type(model_id) is not str:
-        raise ValueError("model_artifact_model_id_invalid")
-    try:
-        validate_run_id(model_id)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("model_artifact_model_id_invalid") from exc
-    if model_id != envelope["logical_artifact_id"]:
-        raise ValueError("model_artifact_identity_invalid")
-    quarters = payload["quarters"]
-    if (
-        type(quarters) is not list
-        or not quarters
-        or any(
-            type(item) is not str or _QUARTER_ID_RE.fullmatch(item) is None
-            for item in quarters
-        )
-        or len(quarters) != len(set(quarters))
-    ):
-        raise ValueError("model_artifact_quarterly_invalid")
-    quarterly_payload = []
-    selections = {}
-    for quarter_id in quarters:
-        relative = f"models/{quarter_id}/metadata.json"
-        member = next(
-            (item for item in member_records if item["path"] == relative), None
-        )
-        if member is None:
-            raise ValueError("model_artifact_quarterly_invalid")
-        quarter = read_bounded_qrp_json(
-            instance_root / relative, expected_identity=member_identities[relative]
-        )[1]
-        if (
-            set(quarter) != {"schema_id", "quarter_id", "selection", "models"}
-            or quarter["schema_id"] != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
-            or quarter["quarter_id"] != quarter_id
-            or any(item["quarter_id"] != quarter_id for item in quarter["models"])
-        ):
-            raise ValueError("model_artifact_quarterly_invalid")
-        quarterly_payload.extend(quarter["models"])
-        selections[quarter_id] = quarter["selection"]
-    quarterly_entries = _validated_quarterly_payload(quarterly_payload, selections)
-    required_members = {"model.json"}
-    for quarter_id in selections:
-        required_members.update(
-            (
-                f"models/{quarter_id}/metadata.json",
-                f"models/{quarter_id}/validation-coverage.parquet",
-            )
-        )
-    required_members.update(
-        f"models/{entry['quarter_id']}/{entry['family_id']}.pkl"
-        for entry in quarterly_entries
-    )
-    if {member["path"] for member in member_records} != required_members:
-        raise ValueError("model_artifact_members_invalid")
-    references = operational.get("model_trial_ledgers", [])
-    _validate_trial_references(
-        quarterly_entries,
-        selections,
-        references,
-        trial_layout,
-        envelope,
-        root=Path(instance_root),
-        member_identities=member_identities,
-    )
-    for entry in quarterly_entries:
-        predictor_path = (
-            Path(instance_root)
-            / "models"
-            / entry["quarter_id"]
-            / f"{entry['family_id']}.pkl"
-        )
-        try:
-            predictor_stat = filesystem_stat(predictor_path, follow_symlinks=False)
-        except (FileNotFoundError, NotADirectoryError) as exc:
-            raise ValueError("model_artifact_quarterly_invalid") from exc
-        if not stat.S_ISREG(predictor_stat.st_mode):
-            raise ValueError("model_artifact_quarterly_invalid")
-    return PersistedQuarterlyModelArtifact(
-        model_id=model_id,
-        quarterly_models=quarterly_entries,
-        quarterly_selections=selections,
-        instance_root=Path(instance_root),
-        envelope=envelope,
-        member_records=member_records,
-        trial_ledgers=tuple(references),
-        member_identities=member_identities,
-    )
-
-
-def _validate_validation_coverage(root, quarter_id, metadata, scope, member_identities):
-    relative = f"models/{quarter_id}/validation-coverage.parquet"
-    if metadata["path"] != relative:
-        raise ValueError("model_validation_coverage_path_invalid")
-    path = root / relative
-    identity = (
-        dataset_file_identity(path)
-        if member_identities is None
-        else member_identities[relative]
-    )
-    with _opened_parquet(path, expected_identity=identity) as (
-        parquet,
-        _identity,
-        _handle,
-    ):
-        schema = parquet.schema_arrow.remove_metadata()
-        if (
-            schema.names != ["timestamp", "asset_id"]
-            or not pa.types.is_timestamp(schema.field("timestamp").type)
-            or not (
-                pa.types.is_string(schema.field("asset_id").type)
-                or pa.types.is_large_string(schema.field("asset_id").type)
-            )
-        ):
-            raise ValueError("model_validation_coverage_schema_invalid")
-    coverage = ModelSampleCoverage(scope)
-    chunks = iter_declared_parquet_member_batches(
-        path, target_chunk_bytes=256 * 1024, expected_identity=identity
-    )
-    with closing_iterator(chunks):
-        for frame in chunks:
-            if (
-                not frame["timestamp"]
-                .between(
-                    pd.Timestamp(scope["validation_start"]),
-                    pd.Timestamp(scope["validation_end"]),
-                )
-                .all()
-            ):
-                raise ValueError("model_validation_coverage_window_invalid")
-            coverage.add(frame)
-    if (
-        coverage.row_count != metadata["row_count"]
-        or coverage.semantic_identity != metadata["semantic_identity"]
-    ):
-        raise ValueError("model_validation_coverage_mismatch")
-
-
-def _validate_trial_references(
-    quarterly_entries,
-    selections,
-    references,
-    layout: StorageLayout | None,
-    envelope: dict[str, object],
-    *,
-    root,
-    member_identities,
-) -> None:
-    if layout is None:
-        raise ValueError("model_trial_layout_required")
-    expected = [
-        (entry, family)
-        for entry in quarterly_entries
-        for family in selections[entry["quarter_id"]]["families"]
-        if family["family_id"] == entry["family_id"]
-    ]
-    if 2 * len(expected) != len(references):
-        raise ValueError("model_trial_references_missing")
     contract = envelope["semantic_metadata"]["target_contract"]
-    protocol_identity = canonical_json_hash(contract["protocol"])
-    registered_specs = {
-        value["model_id"]: ModelSpec(
+    protocol = contract["protocol"]
+    dataset_identity = envelope["upstream_identities"][protocol["scenario_id"]]
+    specs = {
+        item["model_id"]: ModelSpec(
             **{
-                **value,
-                "input_factor_columns": tuple(value["input_factor_columns"]),
-                "input_feature_columns": tuple(value["input_feature_columns"]),
+                **item,
+                "input_factor_columns": tuple(item["input_factor_columns"]),
+                "input_feature_columns": tuple(item["input_feature_columns"]),
             }
         )
-        for value in contract["model_specs"]
+        for item in contract["model_specs"]
     }
-    for selection in selections.values():
-        if tuple(selection["candidate_family_ids"]) != tuple(registered_specs):
-            raise ValueError("model_trial_family_coverage_mismatch")
-    with ExitStack() as ledger_scope:
-        family_metrics = {}
-        by_stage = {}
-        for reference in references:
-            plan, records = ledger_scope.enter_context(
-                read_model_trial_ledger_reference(layout, reference)
+    configurations = {
+        item["model_id"]: item for item in protocol["research_configuration"]["models"]
+    }
+    if tuple(specs) != tuple(configurations):
+        raise ValueError("model_trial_family_coverage_mismatch")
+    family_ids = tuple(specs)
+    quarters = tuple(
+        str(period)
+        for period in pd.period_range(
+            protocol["model_chronology"]["warmup_window"]["start"],
+            envelope["research_window"]["end"],
+            freq="Q",
+        )
+    )
+    expected_keys = []
+    candidate_orders = {}
+    for family_id, configuration in configurations.items():
+        parameters = configuration.get(
+            "parameter_candidates", [configuration["hyperparameters"]]
+        )
+        candidate_orders[family_id] = tuple(
+            family_id if len(parameters) == 1 else f"{family_id}__config_{index}"
+            for index in range(len(parameters))
+        )
+    for quarter in quarters:
+        for family_id in family_ids:
+            expected_keys.extend(
+                (quarter, family_id, candidate_id)
+                for candidate_id in candidate_orders[family_id]
             )
-            key = (
-                quarter_id_for_fold(plan.folds[0]),
-                plan.candidate_family_id,
-                plan.stage,
-            )
-            if key in by_stage:
-                raise ValueError("model_trial_reference_semantics_invalid")
-            by_stage[key] = (plan, records, reference)
-        checked_coverage = set()
-        for entry, family in expected:
-            key = (entry["quarter_id"], family["family_id"])
-            if (*key, "selection") not in by_stage or (*key, "refit") not in by_stage:
-                raise ValueError("model_trial_references_missing")
-            plan, records, reference = by_stage[(*key, "selection")]
-            refit_plan, refit_records, _refit_reference = by_stage[(*key, "refit")]
-            coverage = selections[entry["quarter_id"]]["common_validation_coverage"]
-            if entry["quarter_id"] not in checked_coverage:
-                specs = tuple(registered_specs.values())
-                _validate_validation_coverage(
-                    root,
-                    entry["quarter_id"],
-                    coverage,
-                    model_validation_coverage_scope(
-                        plan.data_snapshot_id, plan.folds[0], specs
-                    ),
-                    member_identities,
-                )
-                checked_coverage.add(entry["quarter_id"])
-            if any(
-                record.common_coverage_id != coverage["semantic_identity"]
-                or (
-                    record.status == "completed"
-                    and record.metrics["validation_rows"] != coverage["row_count"]
-                )
-                for record in records
+    if payload["validation_quarters"] != list(quarters):
+        raise ValueError("model_candidate_matrix_incomplete")
+    required = {"model.json"}
+
+    def read_member(path):
+        if path not in member_identities:
+            raise ValueError("model_artifact_members_invalid")
+        required.add(path)
+        return read_bounded_qrp_json(
+            root / path, expected_identity=member_identities[path]
+        )[1]
+
+    candidates = []
+    for quarter in quarters:
+        shard = read_member(f"models/{quarter}/metadata.json")
+        if set(shard) != {"schema_id", "quarter_id", "candidate_models"} or (
+            shard["schema_id"] != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
+            or shard["quarter_id"] != quarter
+            or type(shard["candidate_models"]) is not list
+        ):
+            raise ValueError("model_candidate_shard_invalid")
+        candidates.extend(shard["candidate_models"])
+    selections = {"global": {}, "quarterly": {}}
+    for group, decisions in payload["selection_decisions"].items():
+        if (
+            type(decisions) is not list
+            or any(type(value) is not str for value in decisions)
+            or len(set(decisions)) != len(decisions)
+            or any(value != "final" and value not in quarters for value in decisions)
+        ):
+            raise ValueError("model_selection_decisions_invalid")
+        for decision_id in decisions:
+            shard = read_member(f"selections/{group}/{decision_id}.json")
+            if set(shard) != {"schema_id", "selection"} or (
+                shard["schema_id"] != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
             ):
-                raise ValueError("model_trial_common_coverage_mismatch")
-            dataset_identity = envelope["upstream_identities"].get(
-                plan.research_dataset_id
+                raise ValueError("model_selection_shard_invalid")
+            selections[group][decision_id] = shard["selection"]
+    expected_groups = (
+        ["global", "quarterly"]
+        if pd.Timestamp(envelope["research_window"]["end"])
+        >= pd.Timestamp(protocol["development_window"]["end"])
+        else []
+    )
+    if payload["final_groups"] != expected_groups:
+        raise ValueError("model_final_matrix_incomplete")
+    final_models = []
+    for group in expected_groups:
+        shard = read_member(f"models/final/{group}/metadata.json")
+        if set(shard) != {"schema_id", "selection_group", "final_models"} or (
+            shard["schema_id"] != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
+            or shard["selection_group"] != group
+            or type(shard["final_models"]) is not list
+        ):
+            raise ValueError("model_final_shard_invalid")
+        final_models.extend(shard["final_models"])
+    if tuple(
+        (entry.get("quarter_id"), entry.get("family_id"), entry.get("model_id"))
+        for entry in candidates
+    ) != tuple(expected_keys):
+        raise ValueError("model_candidate_matrix_incomplete")
+    by_identity = {
+        reference["semantic_identity"]: reference for reference in references
+    }
+    if len(by_identity) != len(references):
+        raise ValueError("model_trial_references_duplicate")
+    used_references = set()
+    folds = {}
+    for quarter in quarters:
+        for family_id in family_ids:
+            entries = [
+                entry
+                for entry in candidates
+                if entry["quarter_id"] == quarter and entry["family_id"] == family_id
+            ]
+            identities = {entry["trial_semantic_identity"] for entry in entries}
+            if len(identities) != 1:
+                raise ValueError("model_trial_reference_semantics_invalid")
+            identity = next(iter(identities))
+            if identity not in by_identity or identity in used_references:
+                raise ValueError("model_trial_references_missing")
+            used_references.add(identity)
+            with read_model_trial_ledger_reference(
+                trial_layout, by_identity[identity]
+            ) as (plan, records):
+                if (
+                    plan.stage != "selection"
+                    or plan.market_id != "a_share"
+                    or plan.research_dataset_id != protocol["scenario_id"]
+                    or plan.data_snapshot_id != dataset_identity
+                    or plan.input_lineage != (dataset_identity,)
+                    or plan.target_id != envelope["logical_artifact_id"]
+                    or plan.research_protocol_identity != canonical_json_hash(protocol)
+                    or plan.candidate_family_id != family_id
+                    or len(plan.folds) != 1
+                    or plan.candidate_ids != candidate_orders[family_id]
+                    or plan.tie_break_order != plan.candidate_ids
+                    or plan.trial_budget != len(plan.candidate_ids)
+                    or plan.selection_metric != "validation_rankic"
+                    or plan.selection_direction != "maximize"
+                    or _window_payload(plan.test) != protocol["holdout_window"]
+                    or tuple(record.candidate_id for record in records)
+                    != plan.candidate_ids
+                    or any(record.status != "completed" for record in records)
+                ):
+                    raise ValueError("model_trial_artifact_binding_invalid")
+                fold = plan.folds[0]
+                if (
+                    quarter_id_for_fold(fold) != quarter
+                    or str(pd.Period(fold.validation.start, freq="Q")) != quarter
+                    or str(pd.Period(fold.validation.end, freq="Q")) != quarter
+                    or pd.Timestamp(fold.train.start).year
+                    != pd.Timestamp(protocol["formal_dataset_window"]["start"]).year
+                    or (quarter in folds and folds[quarter] != fold)
+                ):
+                    raise ValueError("model_trial_fold_binding_invalid")
+                folds[quarter] = fold
+                configuration = configurations[family_id]
+                parameters = configuration.get(
+                    "parameter_candidates", [configuration["hyperparameters"]]
+                )
+                for entry, record in zip(entries, records, strict=True):
+                    if set(entry) != {
+                        "quarter_id",
+                        "family_id",
+                        "model_id",
+                        "training_window",
+                        "validation_window",
+                        "model_metadata",
+                        "validation_prediction",
+                        "trial_semantic_identity",
+                    }:
+                        raise ValueError("model_candidate_metadata_invalid")
+                    metadata = validate_model_metadata_core(entry["model_metadata"])
+                    expected_spec = _selection_model_specs(
+                        specs[family_id],
+                        parameters,
+                        n_train=record.metrics["n_train"],
+                        root_seed=protocol["root_seed"],
+                        quarter_id=quarter,
+                    )[plan.candidate_ids.index(record.candidate_id)]
+                    expected_parameters = model_spec_payload(expected_spec)
+                    if (
+                        record.payload()["normalized_parameters"] != expected_parameters
+                        or plan.protocol_payload()["candidate_parameters"][
+                            record.candidate_id
+                        ]
+                        != expected_parameters
+                        or record.metrics["n_train"]
+                        != metadata["rows_after_input_label_dropna"]
+                        or entry["training_window"] != _window_payload(fold.train)
+                        or entry["validation_window"]
+                        != _window_payload(fold.validation)
+                        or pd.Timestamp(metadata["train_start"])
+                        < pd.Timestamp(fold.train.start)
+                        or pd.Timestamp(metadata["train_end"])
+                        > pd.Timestamp(fold.train.end)
+                    ):
+                        raise ValueError("model_trial_parameters_misaligned")
+                    _validate_a_share_model_parameters(metadata, expected_parameters)
+                    member = entry["validation_prediction"]
+                    path = f"models/{quarter}/{entry['model_id']}.parquet"
+                    if member.get("path") != path or member != member_records.get(path):
+                        raise ValueError("model_validation_member_invalid")
+                    required.add(path)
+                    expected_coverage = ModelSampleCoverage(
+                        model_validation_coverage_scope(
+                            dataset_identity, fold, tuple(specs.values())
+                        )
+                    )
+
+                    def scoring_frames(
+                        entry=entry, fold=fold, coverage=expected_coverage
+                    ):
+                        with closing_iterator(
+                            _a_share_validation_chunks(
+                                root,
+                                entry,
+                                member_identities=member_identities,
+                                development_end=protocol["development_window"]["end"],
+                            )
+                        ) as frames:
+                            for frame in frames:
+                                with current_runtime_resource_policy().lease(
+                                    "research.model.validation_reader",
+                                    max(1, 3 * pandas_frame_payload_bytes(frame)),
+                                ):
+                                    mature = frame.loc[
+                                        label_maturity_mask(
+                                            frame,
+                                            fitting_cutoff=fold.validation.end,
+                                            availability_column="label_available_at",
+                                            target_column="label",
+                                        )
+                                        & frame["score_eligible"]
+                                    ]
+                                    coverage.add(mature)
+                                    yield mature
+
+                    metrics = evaluate_model_trial_metrics_from_chunks(
+                        scoring_frames(),
+                        model_id=entry["model_id"],
+                        label_column="label",
+                        prediction_column="prediction_score",
+                        expected_coverage=expected_coverage,
+                    )
+                    terminal = {
+                        key: None
+                        if isinstance(value, float) and np.isnan(value)
+                        else value.item()
+                        if isinstance(value, np.generic)
+                        else value
+                        for key, value in metrics.items()
+                        if key != "model_id"
+                    }
+                    terminal["n_train"] = metadata["rows_after_input_label_dropna"]
+                    if (
+                        dict(record.metrics) != terminal
+                        or record.common_coverage_id
+                        != expected_coverage.semantic_identity
+                    ):
+                        raise ValueError("model_validation_trial_mismatch")
+    cutoff = pd.Timestamp(protocol["development_window"]["end"])
+    complete = pd.Timestamp(envelope["research_window"]["end"]) >= cutoff
+    expected_decisions = []
+    for quarter, fold in folds.items():
+        if pd.Timestamp(fold.validation.start) >= pd.Timestamp(
+            protocol["development_window"]["start"]
+        ):
+            expected_decisions.append(
+                (
+                    "quarterly",
+                    quarter,
+                    pd.Timestamp(fold.train.end),
+                    TimeWindow(
+                        pd.Timestamp(fold.validation.start).to_period("Q").start_time
+                        - pd.DateOffset(
+                            months=protocol["model_chronology"][
+                                "scoring_lookback_months"
+                            ]
+                        ),
+                        fold.train.end,
+                    ),
+                )
             )
+    if complete:
+        expected_decisions.extend(
+            (
+                (
+                    "global",
+                    "final",
+                    cutoff,
+                    TimeWindow(
+                        pd.Timestamp(protocol["development_window"]["start"]), cutoff
+                    ),
+                ),
+                (
+                    "quarterly",
+                    "final",
+                    cutoff,
+                    TimeWindow(
+                        cutoff
+                        + pd.Timedelta(days=1)
+                        - pd.DateOffset(
+                            months=protocol["model_chronology"][
+                                "scoring_lookback_months"
+                            ]
+                        ),
+                        cutoff,
+                    ),
+                ),
+            )
+        )
+    if any(type(value) is not dict for value in selections.values()) or {
+        (group, key) for group, values in selections.items() for key in values
+    } != {(group, key) for group, key, _cutoff, _window in expected_decisions}:
+        raise ValueError("model_selection_decisions_incomplete")
+    for group, key, decision_cutoff, window in expected_decisions:
+        expected = _select_a_share_models(
+            root,
+            candidates,
+            contract,
+            group=group,
+            decision_id=key,
+            cutoff=decision_cutoff,
+            scoring_window=window,
+            member_identities=member_identities,
+            dataset_identity=dataset_identity,
+        )
+        if selections[group][key] != expected:
+            raise ValueError("model_selection_decision_mismatch")
+    expected_final = (
+        tuple(
+            (group, family)
+            for group in ("global", "quarterly")
+            for family in family_ids
+        )
+        if complete
+        else ()
+    )
+    if (
+        tuple(
+            (entry.get("selection_group"), entry.get("family_id"))
+            for entry in final_models
+        )
+        != expected_final
+    ):
+        raise ValueError("model_final_matrix_incomplete")
+    fit_windows = (
+        TimeWindow(pd.Timestamp(protocol["formal_dataset_window"]["start"]), cutoff),
+    )
+    for entry in final_models:
+        if set(entry) != {
+            "selection_group",
+            "family_id",
+            "model_id",
+            "fit_windows",
+            "fit_cutoff",
+            "model_metadata",
+            "refit_trial_semantic_identity",
+        }:
+            raise ValueError("model_final_metadata_invalid")
+        group, family_id = entry["selection_group"], entry["family_id"]
+        decision = selections[group]["final"]
+        family = next(
+            item for item in decision["families"] if item["family_id"] == family_id
+        )
+        metadata = validate_model_metadata_core(entry["model_metadata"], quarterly=True)
+        parameters = configurations[family_id].get(
+            "parameter_candidates", [configurations[family_id]["hyperparameters"]]
+        )[candidate_orders[family_id].index(family["selected_config_id"])]
+        expected_spec = _refit_model_spec(
+            replace(specs[family_id], model_id=family["selected_config_id"]),
+            candidate_parameters=parameters,
+            n_train=metadata["rows_after_input_label_dropna"],
+            quarter_id="final",
+            root_seed=protocol["root_seed"],
+        )
+        normalized = model_spec_payload(expected_spec)
+        identity = entry["refit_trial_semantic_identity"]
+        if identity not in by_identity or identity in used_references:
+            raise ValueError("model_trial_references_missing")
+        used_references.add(identity)
+        with read_model_trial_ledger_reference(trial_layout, by_identity[identity]) as (
+            plan,
+            records,
+        ):
             if (
-                plan.target_id != envelope["logical_artifact_id"]
-                or dataset_identity is None
+                plan.stage != "refit"
+                or plan.selection_group != group
+                or plan.selection_ledger_semantic_identities
+                != tuple(decision["selection_ledger_semantic_identities"])
+                or plan.market_id != "a_share"
+                or plan.research_dataset_id != protocol["scenario_id"]
                 or plan.data_snapshot_id != dataset_identity
                 or plan.input_lineage != (dataset_identity,)
-                or plan.research_protocol_identity != protocol_identity
-                or plan.candidate_family_id not in registered_specs
-                or len(plan.folds) != 1
-                or _window_payload(plan.folds[0].train) != entry["training_window"]
-                or _window_payload(plan.folds[0].validation)
-                != entry["validation_window"]
-                or _window_payload(plan.folds[0].development_test)
-                != entry["prediction_window"]
-            ):
-                raise ValueError("model_trial_artifact_binding_invalid")
-            if (
-                reference["semantic_identity"]
-                != family["trial_ledger_semantic_identity"]
-                or plan.candidate_family_id != family["family_id"]
-                or quarter_id_for_fold(plan.folds[0]) != entry["quarter_id"]
-                or len(records) != len(plan.candidate_ids)
-                or any(record.status != "completed" for record in records)
-                or set(record.candidate_id for record in records)
-                != set(plan.candidate_ids)
-                or tuple(family["config_tie_break_order"]) != plan.tie_break_order
-            ):
-                raise ValueError("model_trial_reference_semantics_invalid")
-            frame = pd.DataFrame(
-                [
-                    {"model_id": record.candidate_id, **dict(record.metrics)}
-                    for record in records
-                ]
-            )
-            selected = select_best_validation_trial(
-                frame,
-                trial_id_column="model_id",
-                selection_metric=plan.selection_metric,
-                maximize=plan.selection_direction == "maximize",
-                validation_metric_columns=(plan.selection_metric,),
-                test_metric_columns=(),
-                tie_break_order=plan.tie_break_order,
-            )
-            if selected != family["selected_config_id"]:
-                raise ValueError("model_trial_selection_mismatch")
-            winning = next(
-                record for record in records if record.candidate_id == selected
-            )
-            parameters = winning.payload()["normalized_parameters"]
-            if not plan.candidate_parameters or not parameters:
-                raise ValueError("model_trial_parameters_missing")
-            metadata = entry["model_metadata"]
-            if (
-                parameters["model_id"] != selected
-                or winning.random_seed != parameters["random_seed"]
-            ):
-                raise ValueError("model_trial_parameters_misaligned")
-            for key in (
-                "model_algorithm",
-                "input_factor_columns",
-                "input_feature_columns",
-                "label_column",
-                "sample_filter_mode",
-                "max_train_rows",
-                "training_weighting",
-            ):
-                if metadata[key] != parameters[key]:
-                    raise ValueError("model_trial_parameters_misaligned")
-            selected_spec = ModelSpec(
-                **{
-                    **parameters,
-                    "input_factor_columns": tuple(parameters["input_factor_columns"]),
-                    "input_feature_columns": tuple(parameters["input_feature_columns"]),
-                }
-            )
-            configuration = next(
-                item
-                for item in contract["protocol"]["research_configuration"]["models"]
-                if item["model_id"] == plan.candidate_family_id
-            )
-            candidates = configuration.get(
-                "parameter_candidates", [configuration["hyperparameters"]]
-            )
-            if len(candidates) != len(plan.candidate_ids):
-                raise ValueError("model_trial_parameters_misaligned")
-            for record in records:
-                if record.status != "completed":
-                    continue
-                expected_specs = _selection_model_specs(
-                    registered_specs[plan.candidate_family_id],
-                    candidates,
-                    n_train=record.metrics["n_train"],
-                    root_seed=plan.random_seed,
-                    quarter_id=entry["quarter_id"],
-                )
-                expected_spec = expected_specs[
-                    plan.candidate_ids.index(record.candidate_id)
-                ]
-                if record.payload()["normalized_parameters"] != model_spec_payload(
-                    expected_spec
-                ):
-                    raise ValueError("model_trial_parameters_misaligned")
-            refit = _refit_model_spec(
-                selected_spec,
-                candidate_parameters=candidates[plan.candidate_ids.index(selected)],
-                n_train=metadata["rows_after_input_label_dropna"],
-                quarter_id=entry["quarter_id"],
-                root_seed=plan.random_seed,
-            )
-            if (
-                metadata["random_seed"] != refit.random_seed
-                or metadata["hyperparameters"]
-                != model_spec_payload(refit)["hyperparameters"]
-            ):
-                raise ValueError("model_trial_refit_misaligned")
-            if (
-                refit_plan.selection_ledger_semantic_identity
-                != reference["semantic_identity"]
-                or refit_plan.target_id != plan.target_id
-                or refit_plan.data_snapshot_id != plan.data_snapshot_id
-                or refit_plan.input_lineage != plan.input_lineage
-                or refit_plan.research_protocol_identity
-                != plan.research_protocol_identity
-                or refit_plan.folds != plan.folds
-                or refit_plan.final_holdout != plan.final_holdout
-                or refit_plan.candidate_ids != (refit.model_id,)
-                or refit_plan.random_seed != refit.random_seed
-                or refit_plan.protocol_payload()["candidate_parameters"][refit.model_id]
-                != model_spec_payload(refit)
-                or len(refit_records) != 1
-            ):
-                raise ValueError("model_trial_refit_misaligned")
-            refit_record = refit_records[0]
-            if (
-                refit_record.status != "completed"
-                or refit_record.common_coverage_id != metadata["fit_coverage_id"]
-                or refit_record.random_seed != refit.random_seed
-                or refit_record.payload()["normalized_parameters"]
-                != model_spec_payload(refit)
-                or dict(refit_record.metrics)
+                or plan.target_id != envelope["logical_artifact_id"]
+                or plan.candidate_family_id != family_id
+                or plan.research_protocol_identity != canonical_json_hash(protocol)
+                or plan.fit_windows != fit_windows
+                or pd.Timestamp(plan.fit_cutoff) != cutoff
+                or plan.candidate_ids != (expected_spec.model_id,)
+                or plan.random_seed != expected_spec.random_seed
+                or plan.protocol_payload()["candidate_parameters"]
+                != {expected_spec.model_id: normalized}
+                or _window_payload(plan.test) != protocol["holdout_window"]
+                or len(records) != 1
+                or records[0].status != "completed"
+                or records[0].payload()["normalized_parameters"] != normalized
+                or records[0].common_coverage_id != metadata["fit_coverage_id"]
+                or dict(records[0].metrics)
                 != {"n_train": metadata["rows_after_input_label_dropna"]}
+                or entry["model_id"] != expected_spec.model_id
+                or entry["fit_windows"]
+                != [_window_payload(part) for part in fit_windows]
+                or entry["fit_cutoff"] != cutoff.date().isoformat()
+                or metadata["fit_cutoff"] != entry["fit_cutoff"]
+                or pd.Timestamp(metadata["train_start"])
+                < pd.Timestamp(fit_windows[0].start)
+                or pd.Timestamp(metadata["train_end"]) > cutoff
             ):
                 raise ValueError("model_trial_refit_misaligned")
-            family_metrics.setdefault(entry["quarter_id"], []).append(
-                {"model_id": family["family_id"], **dict(winning.metrics)}
-            )
-        for quarter_id, selection in selections.items():
-            metrics = pd.DataFrame(family_metrics[quarter_id])
-            if metrics["validation_rows"].nunique() != 1:
-                raise ValueError("model_trial_common_coverage_mismatch")
-            champion = select_best_validation_trial(
-                metrics,
-                trial_id_column="model_id",
-                selection_metric="validation_rankic",
-                maximize=True,
-                validation_metric_columns=("validation_rankic",),
-                test_metric_columns=(),
-                tie_break_order=tuple(selection["tie_break_order"]),
-            )
-            if champion != selection["selected_family_id"]:
-                raise ValueError("model_trial_selection_mismatch")
+        _validate_a_share_model_parameters(metadata, normalized)
+        relative = f"models/final/{group}/{family_id}.pkl"
+        required.add(relative)
+        with _read_model_member(
+            root,
+            members,
+            relative,
+            expected_identity=member_identities[relative],
+        ) as owned:
+            validate_model_state(owned.value, metadata)
+    if used_references != set(by_identity) or required != set(member_records):
+        raise ValueError("model_artifact_members_invalid")
+    return PersistedQuarterlyModelArtifact(
+        payload["model_id"],
+        tuple(candidates),
+        selections,
+        tuple(final_models),
+        root,
+        envelope,
+        tuple(members),
+        tuple(references),
+        member_identities,
+    )
+
+
+def _validate_a_share_model_parameters(metadata, parameters):
+    for key in (
+        "model_algorithm",
+        "random_seed",
+        "label_column",
+        "input_factor_columns",
+        "input_feature_columns",
+        "sample_filter_mode",
+        "hyperparameters",
+        "max_train_rows",
+        "training_weighting",
+    ):
+        if metadata[key] != parameters[key]:
+            raise ValueError("model_trial_parameters_misaligned")
 
 
 @contextmanager
 def read_quarterly_predictor(
-    artifact: PersistedQuarterlyModelArtifact,
-    quarter_id: str,
-    family_id: str,
+    artifact,
+    selection_group,
+    family_id,
     *,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    resource_policy=None,
 ):
-    """Load exactly one persisted quarter while its lease remains live."""
-
     entry = next(
-        (
-            item
-            for item in artifact.quarterly_models
-            if item["quarter_id"] == quarter_id and item["family_id"] == family_id
-        ),
-        None,
+        item
+        for item in artifact.final_models
+        if item["selection_group"] == selection_group and item["family_id"] == family_id
     )
-    if entry is None:
-        raise ValueError("model_artifact_quarter_invalid")
-    relative = f"models/{quarter_id}/{family_id}.pkl"
+    relative = f"models/final/{selection_group}/{family_id}.pkl"
     with _read_model_member(
         artifact.instance_root,
         artifact.member_records,
@@ -943,112 +1512,6 @@ def _read_model_member(
             _close_lease_preserving_primary(lease, owner="research.model.predictor")
 
 
-def _validated_quarterly_payload(
-    value: object, selections: object
-) -> tuple[dict[str, object], ...]:
-    if type(value) is not list or type(selections) is not dict or not value:
-        raise ValueError("model_artifact_quarterly_invalid")
-    result = []
-    quarter_families: dict[str, list[str]] = {}
-    windows: dict[str, tuple[dict[str, str], ...]] = {}
-    for item in value:
-        if type(item) is not dict or set(item) != {
-            "quarter_id",
-            "family_id",
-            "model_id",
-            "training_window",
-            "validation_window",
-            "prediction_window",
-            "model_metadata",
-        }:
-            raise ValueError("model_artifact_quarterly_invalid")
-        quarter_id, family_id, model_id = (
-            item["quarter_id"],
-            item["family_id"],
-            item["model_id"],
-        )
-        if (
-            type(quarter_id) is not str
-            or _QUARTER_ID_RE.fullmatch(quarter_id) is None
-            or quarter_id not in selections
-        ):
-            raise ValueError("model_artifact_quarterly_invalid")
-        validate_run_id(family_id)
-        validate_run_id(model_id)
-        selection = selections[quarter_id]
-        validate_a_share_model_selection_metadata(selection)
-        for window_name in (
-            "training_window",
-            "validation_window",
-            "prediction_window",
-        ):
-            window = item[window_name]
-            if type(window) is not dict or set(window) != {"start", "end"}:
-                raise ValueError("model_artifact_quarterly_invalid")
-            TimeWindow(**window)
-        current_windows = tuple(
-            item[name]
-            for name in ("training_window", "validation_window", "prediction_window")
-        )
-        if quarter_id not in quarter_families:
-            if quarter_families:
-                previous = next(reversed(quarter_families))
-                if quarter_id != _next_quarter_id(previous) or pd.Timestamp(
-                    item["prediction_window"]["start"]
-                ) <= pd.Timestamp(windows[previous][2]["end"]):
-                    raise ValueError("model_artifact_quarterly_invalid")
-            quarter_families[quarter_id] = []
-            windows[quarter_id] = current_windows
-        elif (
-            quarter_id != next(reversed(quarter_families))
-            or current_windows != windows[quarter_id]
-        ):
-            raise ValueError("model_artifact_quarterly_invalid")
-        if family_id in quarter_families[quarter_id]:
-            raise ValueError("model_artifact_duplicate_family")
-        quarter_families[quarter_id].append(family_id)
-        if pd.Timestamp(item["training_window"]["end"]) >= pd.Timestamp(
-            item["validation_window"]["start"]
-        ) or pd.Timestamp(item["validation_window"]["end"]) >= pd.Timestamp(
-            item["prediction_window"]["start"]
-        ):
-            raise ValueError("model_artifact_quarterly_invalid")
-        if any(
-            str(pd.Period(item["prediction_window"][bound], freq="Q")) != quarter_id
-            for bound in ("start", "end")
-        ):
-            raise ValueError("model_artifact_quarter_window_mismatch")
-        family = next(
-            (
-                member
-                for member in selection["families"]
-                if member["family_id"] == family_id
-            ),
-            None,
-        )
-        if family is None or family["selected_config_id"] != model_id:
-            raise ValueError("model_artifact_family_selection_mismatch")
-        nested = validate_model_metadata_core(item["model_metadata"], quarterly=True)
-        if pd.Timestamp(nested["train_start"]) < pd.Timestamp(
-            item["training_window"]["start"]
-        ):
-            raise ValueError("model_artifact_training_range_invalid")
-        if (
-            pd.Timestamp(nested["fit_cutoff"])
-            != pd.Timestamp(item["validation_window"]["end"])
-            or selection["validation_start"] != item["validation_window"]["start"]
-            or selection["validation_end"] != item["validation_window"]["end"]
-        ):
-            raise ValueError("model_artifact_quarterly_invalid")
-        result.append({**item, "model_metadata": nested})
-    if set(quarter_families) != set(selections) or any(
-        families != selections[quarter]["candidate_family_ids"]
-        for quarter, families in quarter_families.items()
-    ):
-        raise ValueError("model_artifact_family_coverage_invalid")
-    return tuple(result)
-
-
 def _window_payload(window: TimeWindow) -> dict[str, str]:
     if not isinstance(window, TimeWindow):
         raise TypeError("model_artifact_window_invalid")
@@ -1060,20 +1523,13 @@ def _window_payload(window: TimeWindow) -> dict[str, str]:
     }
 
 
-def _next_quarter_id(value: str) -> str:
-    year = int(value[:4])
-    quarter = int(value[-1])
-    if quarter == 4:
-        return f"{year + 1:04d}Q1"
-    return f"{year:04d}Q{quarter + 1}"
-
-
 @dataclass(frozen=True)
 class PersistedCryptoModelArtifact:
     instance_root: Path
     envelope: dict
     member_records: tuple
     models: tuple[dict, ...]
+    final_models: tuple[dict, ...]
     member_identities: dict
 
     def validation_chunks(self, *, fold_id, model_id):
@@ -1088,27 +1544,23 @@ class PersistedCryptoModelArtifact:
             member_identities=self.member_identities,
         )
 
-    def prediction_models(self, window, *, access_window="development"):
-        if access_window == "development":
-            return tuple(
-                entry
-                for entry in self.models
-                if pd.Timestamp(entry["prediction_window"]["start"])
-                <= pd.Timestamp(window.end)
-                and pd.Timestamp(entry["prediction_window"]["end"])
-                >= pd.Timestamp(window.start)
-            )
+    def prediction_models(self, window, *, access_window):
+        from quant_research_platform.research.protocols.crypto_hft import (
+            execution_windows,
+        )
+
         plan = self.envelope["semantic_metadata"]["target_contract"]["protocol"][
             "research_plan"
         ]
-        source_fold = plan["folds"][-1]["fold_id"]
+        execution_windows(plan, window, access_window=access_window)
+        if not self.final_models:
+            raise ValueError("crypto_final_models_missing")
         return tuple(
             {**entry, "prediction_window": _intraday_window(window)}
-            for entry in self.models
-            if entry["fold_id"] == source_fold
+            for entry in self.final_models
         )
 
-    def prediction_lineage(self, model_id, window, *, access_window="development"):
+    def prediction_lineage(self, model_id, window, *, access_window):
         entries = [
             entry
             for entry in self.prediction_models(window, access_window=access_window)
@@ -1128,6 +1580,8 @@ class PersistedCryptoModelArtifact:
                     for key in (
                         "fold_id",
                         "prediction_window",
+                        "fit_windows",
+                        "fit_cutoff",
                         "training_asset_ids",
                         "evaluation_asset_ids",
                     )
@@ -1142,14 +1596,29 @@ def write_crypto_model_artifact(
 ):
     with (
         runtime_resource_policy_scope() as policy,
-        policy.lease("research.model.artifact.trial_references", 0) as reference_lease,
+        policy.lease("research.model.artifact.metadata", 0) as metadata_lease,
     ):
         operational = {"model_trial_ledgers": []}
+        reference_bytes = 0
+
+        admit = partial(_admit_model_metadata, lease=metadata_lease)
+        retain = partial(_retain_model_metadata, lease=metadata_lease)
+        write_metadata = partial(_write_model_metadata, lease=metadata_lease)
 
         def write(staging):
             folders = {}
+            final_models = []
             validation_owner = ExitStack()
             validation_writer = None
+
+            def add_reference(reference):
+                nonlocal reference_bytes
+                reference_bytes += _retain_model_metadata(
+                    reference,
+                    lease=metadata_lease,
+                    error="trial_ledger_working_set_exceeds_memory_capacity",
+                )
+                operational["model_trial_ledgers"].append(dict(reference))
 
             def write_validation(fold, spec, frame):
                 nonlocal validation_writer
@@ -1182,115 +1651,171 @@ def write_crypto_model_artifact(
                     finally:
                         table = None
 
-            with (
-                handle_preserving_primary(validation_owner),
-                closing_iterator(
-                    iter(model_results(on_validation=write_validation))
-                ) as source,
+            def write_selection(
+                fold, spec, metadata, training_assets, evaluation_assets, reference
             ):
-                for owned in source:
-                    owned.lease.transfer("research.model.crypto.persist")
-                    member = owned.value
-                    try:
-                        validation_owner.close()
-                        validation_writer = None
-                        fold = member.fold
-                        fold_root = staging / "models" / fold.fold_id
-                        filesystem_mkdir(fold_root, parents=True, exist_ok=True)
-                        _write_model_member(
-                            fold_root / f"{member.spec.model_id}.pkl",
-                            member.result.prediction_model,
-                            state_bytes=owned.lease.reserved_bytes,
+                nonlocal validation_writer
+                validation_owner.close()
+                validation_writer = None
+                entry = {
+                    "fold_id": fold.fold_id,
+                    "model_id": spec.model_id,
+                    "training_window": _intraday_window(fold.train),
+                    "validation_window": _intraday_window(fold.validation),
+                    "training_asset_ids": training_assets,
+                    "validation_asset_ids": training_assets,
+                    "evaluation_asset_ids": evaluation_assets,
+                    "model_metadata": metadata,
+                    "trial_semantic_identity": reference["semantic_identity"],
+                    "validation_prediction_path": (
+                        f"models/{fold.fold_id}/validation/{spec.model_id}.parquet"
+                    ),
+                }
+                retain(entry)
+                entry.update(
+                    {
+                        "training_asset_ids": list(training_assets),
+                        "validation_asset_ids": list(training_assets),
+                        "evaluation_asset_ids": list(evaluation_assets),
+                        "model_metadata": validate_model_metadata_core(metadata),
+                    }
+                )
+                folders.setdefault(fold.fold_id, []).append(entry)
+                add_reference(reference)
+
+            try:
+                with (
+                    handle_preserving_primary(validation_owner),
+                    closing_iterator(
+                        iter(
+                            model_results(
+                                on_validation=write_validation,
+                                on_selection=write_selection,
+                            )
                         )
-                        refit_reference = member.refit_trial_reference
-                        entry = {
-                            "fold_id": fold.fold_id,
-                            "model_id": member.spec.model_id,
-                            "training_window": _intraday_window(fold.train),
-                            "validation_window": _intraday_window(fold.validation),
-                            "prediction_window": _intraday_window(
-                                fold.development_test
-                            ),
-                            "training_asset_ids": list(member.training_assets),
-                            "validation_asset_ids": list(member.training_assets),
-                            "evaluation_asset_ids": list(member.evaluation_assets),
-                            "model_metadata": validate_model_metadata_core(
-                                member.result.metadata
-                            ),
-                            "trial_semantic_identity": member.selection_trial_reference[
-                                "semantic_identity"
-                            ],
-                            "refit_trial_semantic_identity": refit_reference[
-                                "semantic_identity"
-                            ],
-                            "fit_coverage_id": member.fit_coverage_id,
-                            "validation_prediction_path": (
-                                f"models/{fold.fold_id}/validation/{member.spec.model_id}.parquet"
-                            ),
-                        }
-                        folders.setdefault(fold.fold_id, []).append(entry)
-                        for reference in (
-                            member.selection_trial_reference,
-                            member.refit_trial_reference,
-                        ):
-                            additional = json_record_working_set_bytes(
-                                bounded_rendered_qrp_json_object_size(
-                                    reference, lazy_arrays={}, max_bytes=sys.maxsize
-                                )
+                    ) as source,
+                ):
+                    for owned in source:
+                        owned.lease.transfer("research.model.crypto.persist")
+                        member = owned.value
+                        try:
+                            fold = member.fold
+                            final_root = staging / "models" / "final"
+                            filesystem_mkdir(final_root, parents=True, exist_ok=True)
+                            _write_model_member(
+                                final_root / f"{member.spec.model_id}.pkl",
+                                member.result.prediction_model,
+                                state_bytes=owned.lease.reserved_bytes,
                             )
-                            policy.require_working_set(
-                                additional,
-                                error="trial_ledger_working_set_exceeds_memory_capacity",
+                            entry = {
+                                "fold_id": fold.fold_id,
+                                "model_id": member.spec.model_id,
+                                "fit_windows": [
+                                    _intraday_window(part)
+                                    for part in (fold.train, fold.validation)
+                                ],
+                                "fit_cutoff": time_value_isoformat(
+                                    fold.validation.end, preserve_datetime=True
+                                ),
+                                "training_asset_ids": member.training_assets,
+                                "evaluation_asset_ids": member.evaluation_assets,
+                                "model_metadata": member.result.metadata,
+                                "refit_trial_semantic_identity": (
+                                    member.refit_trial_reference["semantic_identity"]
+                                ),
+                                "fit_coverage_id": member.fit_coverage_id,
+                            }
+                            retain(entry)
+                            entry.update(
+                                {
+                                    "training_asset_ids": list(member.training_assets),
+                                    "evaluation_asset_ids": list(
+                                        member.evaluation_assets
+                                    ),
+                                    "model_metadata": validate_model_metadata_core(
+                                        member.result.metadata
+                                    ),
+                                }
                             )
-                            reference_lease.grow(additional)
-                            operational["model_trial_ledgers"].append(dict(reference))
-                    finally:
-                        member = None
-                        if owned.lease.active:
-                            primary = sys.exception()
-                            try:
-                                owned.release(owner="research.model.crypto.persist")
-                            except BaseException as cleanup:
-                                if primary is None:
-                                    raise
-                                primary.add_note(
-                                    "model member release also failed: "
-                                    f"{type(cleanup).__name__}"
-                                )
-                        owned = None
-            for fold_id, entries in folders.items():
-                write_internal_artifact_manifest(
-                    staging / "models" / fold_id / "metadata.json",
+                            final_models.append(entry)
+                            add_reference(member.refit_trial_reference)
+                        finally:
+                            member = None
+                            if owned.lease.active:
+                                primary = sys.exception()
+                                try:
+                                    owned.release(owner="research.model.crypto.persist")
+                                except BaseException as cleanup:
+                                    if primary is None:
+                                        raise
+                                    primary.add_note(
+                                        "model member release also failed: "
+                                        f"{type(cleanup).__name__}"
+                                    )
+                            owned = None
+                for fold_id, entries in folders.items():
+                    write_metadata(
+                        staging / "models" / fold_id / "metadata.json",
+                        {
+                            "schema_id": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
+                            "models": entries,
+                        },
+                    )
+                write_metadata(
+                    staging / "model.json",
                     {
                         "schema_id": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
-                        "models": entries,
+                        "folds": list(folders),
+                        "final_models": final_models,
                     },
                 )
-            write_internal_artifact_manifest(
-                staging / "model.json",
-                {
-                    "schema_id": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
-                    "folds": list(folders),
-                },
-            )
+            except BaseException as error:
+                clear_exception_frames(error)
+                raise
+            finally:
+                folders.clear()
+                final_models.clear()
+                entry = entries = member = owned = None
+                del entry, entries, member, owned
+                metadata_lease.shrink_to(reference_bytes)
 
         def verify_models(root, members):
-            _validate_crypto_model_payload(
-                root,
-                envelope.payload(),
-                members,
-                operational["model_trial_ledgers"],
-                trial_layout,
-            )
-            verify_source()
+            retained = metadata_lease.reserved_bytes
+            try:
+                admit(
+                    sum(
+                        2 * json_record_working_set_bytes(member["size"])
+                        for member in members
+                        if str(member["path"]).endswith(".json")
+                    )
+                )
+                _validate_crypto_model_payload(
+                    root,
+                    envelope.payload(_admit=admit),
+                    members,
+                    operational["model_trial_ledgers"],
+                    trial_layout,
+                )
+                verify_source()
+            except BaseException as error:
+                clear_exception_frames(error)
+                raise
+            finally:
+                metadata_lease.shrink_to(retained)
 
-        return write_semantic_artifact(
-            logical_root,
-            envelope,
-            write,
-            operational_metadata=operational,
-            staged_validator=verify_models,
-        )
+        try:
+            return write_semantic_artifact(
+                logical_root,
+                envelope,
+                write,
+                operational_metadata=operational,
+                staged_validator=verify_models,
+            )
+        except BaseException as error:
+            clear_exception_frames(error)
+            raise
+        finally:
+            operational.clear()
 
 
 def _intraday_window(window):
@@ -1355,23 +1880,85 @@ def _validate_crypto_model_payload(
             )
             for member in members
         }
+    if trial_layout is None:
+        raise ValueError("model_trial_layout_required")
     contract = envelope["semantic_metadata"]["target_contract"]
     protocol, folds, model_ids = _crypto_model_scope(envelope)
-
+    test = TimeWindow(**protocol["research_plan"]["test"])
+    final_fold_id = protocol["research_plan"]["folds"][-1]["fold_id"]
+    final_fold = next((fold for fold in folds if fold.fold_id == final_fold_id), None)
     payload = read_bounded_qrp_json(
         root / "model.json", expected_identity=member_identities["model.json"]
     )[1]
-    if payload != {
-        "schema_id": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
-        "folds": [fold.fold_id for fold in folds],
-    }:
+    if (
+        set(payload) != {"schema_id", "folds", "final_models"}
+        or payload["schema_id"] != CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID
+        or payload["folds"] != [fold.fold_id for fold in folds]
+        or type(payload["final_models"]) is not list
+        or tuple(entry.get("model_id") for entry in payload["final_models"])
+        != (model_ids if final_fold is not None else ())
+    ):
         raise ValueError("crypto_model_fold_coverage_invalid")
-    if type(refs) is not list or len(refs) != 2 * len(folds) * len(model_ids):
+    expected_references = len(folds) * len(model_ids) + len(payload["final_models"])
+    if type(refs) is not list or len(refs) != expected_references:
         raise ValueError("crypto_model_trial_references_invalid")
     references = {ref["semantic_identity"]: ref for ref in refs}
     if len(references) != len(refs):
         raise ValueError("crypto_model_trial_references_invalid")
+    registered_specs = {
+        value["model_id"]: ModelSpec(
+            **{
+                **value,
+                "input_factor_columns": tuple(value["input_factor_columns"]),
+                "input_feature_columns": tuple(value["input_feature_columns"]),
+            }
+        )
+        for value in contract["model_specs"]
+    }
+    if tuple(registered_specs) != model_ids:
+        raise ValueError("crypto_model_members_invalid")
+
+    def validate_parameters(metadata, parameters):
+        validate_model_metadata_core(metadata)
+        for key in (
+            "model_algorithm",
+            "random_seed",
+            "label_column",
+            "input_factor_columns",
+            "input_feature_columns",
+            "sample_filter_mode",
+            "hyperparameters",
+            "max_train_rows",
+            "training_weighting",
+        ):
+            if metadata[key] != parameters[key]:
+                raise ValueError("crypto_model_parameters_misaligned")
+        if metadata["input_columns"] != (
+            parameters["input_factor_columns"] + parameters["input_feature_columns"]
+        ):
+            raise ValueError("crypto_model_parameters_misaligned")
+
+    def validate_fit_bounds(metadata, windows, cutoff):
+        first, last = (
+            pd.Timestamp(metadata[key]) for key in ("train_start", "train_end")
+        )
+        if (
+            first > last
+            or any(
+                not any(
+                    pd.Timestamp(part.start) <= value <= pd.Timestamp(part.end)
+                    for part in windows
+                )
+                for value in (first, last)
+            )
+            or last
+            + pd.Timedelta(milliseconds=label_horizon_ms(metadata["label_column"]))
+            > pd.Timestamp(cutoff)
+        ):
+            raise ValueError("crypto_model_fit_window_invalid")
+
     models = []
+    selection_references = {}
     required = {"model.json"}
     for fold in folds:
         relative = f"models/{fold.fold_id}/metadata.json"
@@ -1381,41 +1968,57 @@ def _validate_crypto_model_payload(
         )[1]
         entries = record.get("models")
         if (
-            record.get("schema_id") != CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID
+            set(record) != {"schema_id", "models"}
+            or record["schema_id"] != CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID
             or type(entries) is not list
             or tuple(entry.get("model_id") for entry in entries) != model_ids
         ):
             raise ValueError("crypto_model_members_invalid")
         scopes = build_hft_prediction_catalog(
-            configuration=contract["protocol"]["research_configuration"],
+            configuration=protocol["research_configuration"],
             train_end=fold.train.end.isoformat(),
-            test_start=fold.development_test.start.isoformat(),
-            test_end=fold.development_test.end.isoformat(),
+            test_start=fold.validation.start.isoformat(),
+            test_end=fold.validation.end.isoformat(),
         )
         for entry in entries:
             prediction = scopes.get(f"{entry['model_id']}_prediction")
             if (
-                entry["fold_id"] != fold.fold_id
+                set(entry)
+                != {
+                    "fold_id",
+                    "model_id",
+                    "training_window",
+                    "validation_window",
+                    "training_asset_ids",
+                    "validation_asset_ids",
+                    "evaluation_asset_ids",
+                    "model_metadata",
+                    "trial_semantic_identity",
+                    "validation_prediction_path",
+                }
+                or entry["fold_id"] != fold.fold_id
                 or entry["training_window"] != _intraday_window(fold.train)
                 or entry["validation_window"] != _intraday_window(fold.validation)
-                or entry["prediction_window"] != _intraday_window(fold.development_test)
                 or tuple(entry["training_asset_ids"]) != prediction.training_asset_ids
                 or tuple(entry["validation_asset_ids"]) != prediction.training_asset_ids
                 or tuple(entry["evaluation_asset_ids"])
                 != prediction.evaluation_asset_ids
             ):
                 raise ValueError("crypto_model_fold_binding_invalid")
-            validate_model_metadata_core(entry["model_metadata"])
             ref = references.pop(entry["trial_semantic_identity"], None)
-            refit_ref = references.pop(entry["refit_trial_semantic_identity"], None)
-            if ref is None or refit_ref is None:
+            if ref is None:
                 raise ValueError("crypto_model_trial_references_invalid")
-            if trial_layout is None:
-                raise ValueError("model_trial_layout_required")
-            with ExitStack() as ledger_scope:
-                plan, records = ledger_scope.enter_context(
-                    read_model_trial_ledger_reference(trial_layout, ref)
+            with read_model_trial_ledger_reference(trial_layout, ref) as (
+                plan,
+                records,
+            ):
+                expected_spec = replace(
+                    registered_specs[entry["model_id"]],
+                    random_seed=derive_seed(
+                        ROOT_SEED, "crypto_model", fold.fold_id, entry["model_id"]
+                    ),
                 )
+                parameters = model_spec_payload(expected_spec)
                 if (
                     plan.stage != "selection"
                     or plan.market_id != "crypto"
@@ -1426,110 +2029,34 @@ def _validate_crypto_model_payload(
                     or plan.candidate_family_id != entry["model_id"]
                     or plan.target_id != envelope["logical_artifact_id"]
                     or plan.folds != (fold,)
+                    or plan.test != test
                     or plan.candidate_ids != (entry["model_id"],)
-                    or plan.research_protocol_identity
-                    != canonical_json_hash(contract["protocol"])
+                    or plan.selection_metric != "validation_mse"
+                    or plan.selection_direction != "minimize"
+                    or plan.research_protocol_identity != canonical_json_hash(protocol)
+                    or plan.protocol_payload()["candidate_parameters"]
+                    != {entry["model_id"]: parameters}
                     or len(records) != 1
                     or records[0].status != "completed"
+                    or records[0].payload()["normalized_parameters"] != parameters
+                    or records[0].metrics["n_train"]
+                    != entry["model_metadata"]["rows_after_input_label_dropna"]
                 ):
                     raise ValueError("crypto_model_trial_binding_invalid")
-                parameters = records[0].payload()["normalized_parameters"]
-                metadata = entry["model_metadata"]
-                refit_plan, refit_records = ledger_scope.enter_context(
-                    read_model_trial_ledger_reference(trial_layout, refit_ref)
+                validate_parameters(entry["model_metadata"], parameters)
+                validate_fit_bounds(
+                    entry["model_metadata"], (fold.train,), fold.train.end
                 )
-                if (
-                    refit_plan.stage != "refit"
-                    or refit_plan.selection_ledger_semantic_identity
-                    != ref["semantic_identity"]
-                    or refit_plan.market_id != plan.market_id
-                    or refit_plan.research_dataset_id != plan.research_dataset_id
-                    or refit_plan.data_snapshot_id != plan.data_snapshot_id
-                    or refit_plan.input_lineage != plan.input_lineage
-                    or refit_plan.research_protocol_identity
-                    != plan.research_protocol_identity
-                    or refit_plan.target_id != plan.target_id
-                    or refit_plan.candidate_family_id != plan.candidate_family_id
-                    or refit_plan.folds != plan.folds
-                    or refit_plan.final_holdout != plan.final_holdout
-                    or refit_plan.candidate_ids != plan.candidate_ids
-                    or len(refit_records) != 1
-                ):
-                    raise ValueError("crypto_model_refit_binding_invalid")
-                refit_record = refit_records[0]
-                if (
-                    refit_record.status != "completed"
-                    or refit_record.payload()["normalized_parameters"] != parameters
-                    or refit_record.random_seed != metadata["random_seed"]
-                    or refit_record.common_coverage_id != entry["fit_coverage_id"]
-                    or re.fullmatch(r"[0-9a-f]{64}", entry["fit_coverage_id"]) is None
-                    or dict(refit_record.metrics)
-                    != {"n_train": metadata["rows_after_input_label_dropna"]}
-                ):
-                    raise ValueError("crypto_model_refit_binding_invalid")
-                for key in (
-                    "model_algorithm",
-                    "random_seed",
-                    "label_column",
-                    "input_factor_columns",
-                    "input_feature_columns",
-                    "sample_filter_mode",
-                    "hyperparameters",
-                    "max_train_rows",
-                    "training_weighting",
-                ):
-                    if metadata[key] != parameters[key]:
-                        raise ValueError("crypto_model_parameters_misaligned")
-                expected_inputs = list(parameters["input_factor_columns"]) + list(
-                    parameters["input_feature_columns"]
-                )
-                if metadata["input_columns"] != expected_inputs:
-                    raise ValueError("crypto_model_parameters_misaligned")
-                first, last = (
-                    pd.Timestamp(metadata[key]) for key in ("train_start", "train_end")
-                )
-
-                def declared(value, fold=fold):
-                    return any(
-                        pd.Timestamp(part.start) <= value <= pd.Timestamp(part.end)
-                        for part in (fold.train, fold.validation)
-                    )
-
-                if (
-                    first > last
-                    or not declared(first)
-                    or not declared(last)
-                    or last
-                    + pd.Timedelta(
-                        milliseconds=label_horizon_ms(metadata["label_column"])
-                    )
-                    > pd.Timestamp(fold.validation.end)
-                ):
-                    raise ValueError("crypto_model_refit_window_invalid")
-                required.add(f"models/{fold.fold_id}/{entry['model_id']}.pkl")
                 path = entry["validation_prediction_path"]
-                expected_path = (
-                    f"models/{fold.fold_id}/validation/{entry['model_id']}.parquet"
-                )
-                if path != expected_path or path not in {
-                    member["path"] for member in members
-                }:
+                if (
+                    path
+                    != f"models/{fold.fold_id}/validation/{entry['model_id']}.parquet"
+                ):
                     raise ValueError("crypto_model_validation_path_invalid")
                 required.add(path)
-                spec = ModelSpec(
-                    **{
-                        **parameters,
-                        "input_factor_columns": tuple(
-                            parameters["input_factor_columns"]
-                        ),
-                        "input_feature_columns": tuple(
-                            parameters["input_feature_columns"]
-                        ),
-                    }
-                )
                 validation_coverage = ModelSampleCoverage(
                     crypto_validation_coverage_scope(
-                        plan, spec, prediction.training_asset_ids
+                        plan, expected_spec, prediction.training_asset_ids
                     )
                 )
                 with closing_iterator(
@@ -1546,12 +2073,106 @@ def _validate_crypto_model_payload(
                     != records[0].common_coverage_id
                 ):
                     raise ValueError("crypto_model_validation_count_invalid")
-                models.append(entry)
+            selection_references[(fold.fold_id, entry["model_id"])] = ref
+            models.append(entry)
 
-    if {member["path"] for member in members} != required:
+    for entry in payload["final_models"]:
+        if (
+            set(entry)
+            != {
+                "fold_id",
+                "model_id",
+                "fit_windows",
+                "fit_cutoff",
+                "training_asset_ids",
+                "evaluation_asset_ids",
+                "model_metadata",
+                "refit_trial_semantic_identity",
+                "fit_coverage_id",
+            }
+            or entry["fold_id"] != final_fold.fold_id
+            or entry["fit_windows"]
+            != [
+                _intraday_window(part)
+                for part in (final_fold.train, final_fold.validation)
+            ]
+            or entry["fit_cutoff"]
+            != time_value_isoformat(final_fold.validation.end, preserve_datetime=True)
+        ):
+            raise ValueError("crypto_model_refit_binding_invalid")
+        source = next(
+            model
+            for model in models
+            if model["fold_id"] == final_fold.fold_id
+            and model["model_id"] == entry["model_id"]
+        )
+        if any(
+            entry[key] != source[key]
+            for key in ("training_asset_ids", "evaluation_asset_ids")
+        ):
+            raise ValueError("crypto_model_refit_binding_invalid")
+        selection_ref = selection_references[(final_fold.fold_id, entry["model_id"])]
+        refit_ref = references.pop(entry["refit_trial_semantic_identity"], None)
+        if refit_ref is None:
+            raise ValueError("crypto_model_trial_references_invalid")
+        with ExitStack() as ledgers:
+            selection_plan, selection_records = ledgers.enter_context(
+                read_model_trial_ledger_reference(trial_layout, selection_ref)
+            )
+            refit_plan, records = ledgers.enter_context(
+                read_model_trial_ledger_reference(trial_layout, refit_ref)
+            )
+            parameters = selection_records[0].payload()["normalized_parameters"]
+            metadata = entry["model_metadata"]
+            if (
+                refit_plan.stage != "refit"
+                or refit_plan.selection_ledger_semantic_identities
+                != (selection_ref["semantic_identity"],)
+                or refit_plan.fit_windows != (final_fold.train, final_fold.validation)
+                or refit_plan.fit_cutoff != final_fold.validation.end
+                or any(
+                    getattr(refit_plan, key) != getattr(selection_plan, key)
+                    for key in (
+                        "market_id",
+                        "research_dataset_id",
+                        "data_snapshot_id",
+                        "input_lineage",
+                        "research_protocol_identity",
+                        "target_id",
+                        "candidate_family_id",
+                        "test",
+                        "candidate_ids",
+                        "backend_versions",
+                        "cost_assumptions",
+                        "risk_assumptions",
+                    )
+                )
+                or refit_plan.protocol_payload()["candidate_parameters"]
+                != {entry["model_id"]: parameters}
+                or refit_plan.random_seed != parameters["random_seed"]
+                or len(records) != 1
+                or records[0].status != "completed"
+                or records[0].payload()["normalized_parameters"] != parameters
+                or records[0].random_seed != metadata["random_seed"]
+                or records[0].common_coverage_id != entry["fit_coverage_id"]
+                or re.fullmatch(r"[0-9a-f]{64}", entry["fit_coverage_id"]) is None
+                or dict(records[0].metrics)
+                != {"n_train": metadata["rows_after_input_label_dropna"]}
+            ):
+                raise ValueError("crypto_model_refit_binding_invalid")
+            validate_parameters(metadata, parameters)
+            validate_fit_bounds(metadata, refit_plan.fit_windows, refit_plan.fit_cutoff)
+        required.add(f"models/final/{entry['model_id']}.pkl")
+
+    if references or {member["path"] for member in members} != required:
         raise ValueError("crypto_model_members_invalid")
     return PersistedCryptoModelArtifact(
-        root, envelope, tuple(members), tuple(models), member_identities
+        root,
+        envelope,
+        tuple(members),
+        tuple(models),
+        tuple(payload["final_models"]),
+        member_identities,
     )
 
 
@@ -1625,7 +2246,7 @@ def _crypto_validation_chunks(root, entry, *, member_identities):
 
 @contextmanager
 def read_crypto_model_member(artifact, entry, *, resource_policy):
-    relative = f"models/{entry['fold_id']}/{entry['model_id']}.pkl"
+    relative = f"models/final/{entry['model_id']}.pkl"
     with _read_model_member(
         artifact.instance_root,
         artifact.member_records,

@@ -12,6 +12,7 @@ from numbers import Integral
 
 import numpy as np
 import pandas as pd
+from joblib import parallel_config
 from threadpoolctl import threadpool_limits
 
 import quant_research_platform.research.models.dependencies as dependencies
@@ -85,7 +86,9 @@ def prediction_callable(
             prediction_model, (RankEnsemblePredictor, ICWeightedRankEnsemble)
         ):
             columns = tuple(dict.fromkeys(("timestamp", *input_columns)))
-        predicted = prediction_model.predict(frame.loc[:, list(columns)])
+        # Forest prediction must reduce trees in their persisted order.
+        with parallel_config(backend="sequential"):
+            predicted = prediction_model.predict(frame.loc[:, list(columns)])
         return np.asarray(predicted, dtype="float64")
 
     return predict_from_model
@@ -1181,56 +1184,72 @@ def iter_legal_training_chunks(
     input_columns: tuple[str, ...],
     model_algorithm: str,
 ) -> Iterable[pd.DataFrame]:
-    for chunk in chunks:
-        policy = current_runtime_resource_policy()
-        index_bytes = int(chunk.index.memory_usage(deep=True))
-        timestamp_bytes = index_bytes + 8 * len(chunk)
-        mask_bytes = index_bytes + len(chunk)
-        payload_bytes = pandas_frame_payload_bytes(chunk)
-        working_bytes = timestamp_bytes + mask_bytes + payload_bytes
-        if (
-            policy is not None
-            and policy.explicit_memory_cap_bytes is not None
-            and policy.used_memory_bytes + working_bytes
-            > policy.explicit_memory_cap_bytes
-        ):
-            raise ValueError(
-                "prediction_training_working_set_exceeds_task_memory_budget"
+    with closing_iterator(iter(chunks)) as active_chunks:
+        for chunk in active_chunks:
+            policy = current_runtime_resource_policy()
+            index_bytes = int(chunk.index.memory_usage(deep=True))
+            timestamp_bytes = index_bytes + 8 * len(chunk)
+            mask_bytes = index_bytes + len(chunk)
+            payload_bytes = pandas_frame_payload_bytes(chunk)
+            working_bytes = timestamp_bytes + mask_bytes + payload_bytes
+            if (
+                policy is not None
+                and policy.explicit_memory_cap_bytes is not None
+                and policy.used_memory_bytes + working_bytes
+                > policy.explicit_memory_cap_bytes
+            ):
+                raise ValueError(
+                    "prediction_training_working_set_exceeds_task_memory_budget"
+                )
+            working_lease = (
+                policy.lease("research.model.training.chunk", working_bytes)
+                if policy is not None
+                else None
             )
-        working_lease = (
-            policy.lease("research.model.training.chunk", working_bytes)
-            if policy is not None
-            else None
-        )
-        train = None
-        try:
-            availability_column = resolve_training_availability_column(
-                chunk,
-                label_column=label_column,
-            )
-            train = legal_training_rows(
-                chunk,
-                fitting_cutoff=train_end,
-                availability_column=availability_column,
-                feature_columns=model_input_validity_columns(
-                    input_columns, model_algorithm
-                ),
-                target_column=label_column,
-            )
-            if train.empty:
-                train = None
-                if working_lease is not None:
-                    working_lease.close()
-                continue
-            retained_bytes = pandas_frame_payload_bytes(train)
-            if working_lease is not None:
-                working_lease.shrink_to(retained_bytes)
-                working_lease.transfer("research.model.training")
+            train = None
             try:
-                yield train
+                availability_column = resolve_training_availability_column(
+                    chunk,
+                    label_column=label_column,
+                )
+                train = legal_training_rows(
+                    chunk,
+                    fitting_cutoff=train_end,
+                    availability_column=availability_column,
+                    feature_columns=model_input_validity_columns(
+                        input_columns, model_algorithm
+                    ),
+                    target_column=label_column,
+                )
+                if train.empty:
+                    train = None
+                    if working_lease is not None:
+                        working_lease.close()
+                    continue
+                retained_bytes = pandas_frame_payload_bytes(train)
+                if working_lease is not None:
+                    working_lease.shrink_to(retained_bytes)
+                    working_lease.transfer("research.model.training")
+                try:
+                    yield train
+                except BaseException as primary:
+                    train = None
+                    if working_lease is not None:
+                        try:
+                            working_lease.close()
+                        except BaseException as cleanup_error:
+                            primary.add_note(
+                                "model training lease release also failed: "
+                                f"{type(cleanup_error).__name__}"
+                            )
+                    raise
+                else:
+                    train = None
+                    if working_lease is not None:
+                        working_lease.close()
             except BaseException as primary:
                 train = None
-                if working_lease is not None:
+                if working_lease is not None and working_lease.active:
                     try:
                         working_lease.close()
                     except BaseException as cleanup_error:
@@ -1239,23 +1258,8 @@ def iter_legal_training_chunks(
                             f"{type(cleanup_error).__name__}"
                         )
                 raise
-            else:
-                train = None
-                if working_lease is not None:
-                    working_lease.close()
-        except BaseException as primary:
-            train = None
-            if working_lease is not None and working_lease.active:
-                try:
-                    working_lease.close()
-                except BaseException as cleanup_error:
-                    primary.add_note(
-                        "model training lease release also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-            raise
-        finally:
-            chunk = None
+            finally:
+                chunk = None
 
 
 def training_scope_chunks(

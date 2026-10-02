@@ -6,7 +6,7 @@ import struct
 from pathlib import Path
 from typing import Any
 
-from quant_research_platform.contracts.json_codec import render_qrp_json_object
+from quant_research_platform.contracts.json_codec import json_record_working_set_bytes
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -79,10 +79,14 @@ def _inspect_dataset_session_owned(
     *,
     resource_policy: RuntimeResourcePolicy,
 ) -> OwnedValue[DatasetInspection]:
+    result_bound = _inspection_operation_bound(context)
+    resource_policy.require_working_set(
+        result_bound, error="dataset_working_set_exceeds_task_memory_budget"
+    )
     try:
         result_lease = resource_policy.lease(
             "storage.dataset.inspection.result",
-            _inspection_operation_bound(context),
+            result_bound,
         )
     except MemoryError:
         raise ValueError("dataset_working_set_exceeds_task_memory_budget") from None
@@ -117,10 +121,7 @@ def _inspect_dataset_session_owned(
             date_max=runtime["date_max"],
             manifest=context.manifest,
         )
-        result_bytes = dataset_inspection_retained_memory_bytes(result)
-        if result_bytes > result_lease.reserved_bytes:
-            raise ValueError("dataset_inspection_result_bound_invalid")
-        result_lease.shrink_to(result_bytes)
+        result_lease.shrink_to(_inspection_result_bound(context))
         return OwnedValue(result, result_lease)
     except BaseException:
         result = None
@@ -160,34 +161,13 @@ def _inspection_result_bound(
         path_count = len(context.all_paths)
     if columns is None:
         columns = context.physical_columns
-    metadata_bytes = len(context.spec_bytes) + len(context.manifest_bytes)
+    metadata_bytes = json_record_working_set_bytes(
+        len(context.spec_bytes)
+    ) + json_record_working_set_bytes(len(context.manifest_bytes))
     result_bound = metadata_bytes + sum(
         len(str(column).encode("utf-8")) + pointer_bytes for column in columns
     )
     return result_bound + path_count * (8 * pointer_bytes + 64) + 1024
-
-
-def dataset_inspection_retained_memory_bytes(value: DatasetInspection) -> int:
-    return _inspection_retained_memory_bytes(
-        spec=value.spec,
-        manifest=value.manifest,
-        columns=value.columns,
-        partitions=value.partitions,
-    )
-
-
-def _inspection_retained_memory_bytes(
-    *,
-    spec: dict[str, Any],
-    manifest: dict[str, Any],
-    columns: tuple[str, ...],
-    partitions: tuple[str, ...],
-) -> int:
-    retained = len(render_qrp_json_object(spec).encode("utf-8"))
-    retained += len(render_qrp_json_object(manifest).encode("utf-8"))
-    retained += sum(len(item.encode("utf-8")) for item in columns)
-    retained += sum(len(item.encode("utf-8")) for item in partitions)
-    return retained
 
 
 def inspection_from_persisted_session(

@@ -50,6 +50,7 @@ def test_single_selected_model_has_no_invented_comparison():
         family_ids=("chosen",),
         benchmark_id="chosen",
         access_window="development",
+        inference_blocker=None,
         max_lags=0,
         block_size=1,
         repetitions=10,

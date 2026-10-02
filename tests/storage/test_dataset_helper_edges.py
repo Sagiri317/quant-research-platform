@@ -1787,7 +1787,11 @@ def test_write_stats_fail_closed_paths(tmp_path: Path) -> None:
                 data_root=Path("data"),
                 key_tracker=tracker,
                 inventory=inventory,
-            ).payload(target_chunk_bytes=1024**2)
+            ).payload(
+                target_chunk_bytes=1024**2,
+                spec_payload={},
+                admit=lambda _: pytest.fail("missing schema must precede allocation"),
+            )
 
 
 def test_exact_index_preserves_decimal_values_beyond_context_precision(

@@ -20,6 +20,7 @@ import pyarrow as pa
 
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
+    json_record_working_set_bytes,
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.time import (
@@ -879,11 +880,18 @@ def open_dataset_session(
         metadata_identity_span_bytes = len(spec_identity_bytes) + len(
             manifest_identity_bytes
         )
+        # Keep one contract view plus decode/validation projections admitted.
         metadata_bound = (
-            spec_stat_span_bytes
-            + manifest_stat_span_bytes
+            2 * json_record_working_set_bytes(spec_stat_span_bytes)
+            + 2 * json_record_working_set_bytes(manifest_stat_span_bytes)
             + metadata_identity_span_bytes
         )
+        cap = issued_policy.explicit_memory_cap_bytes
+        if cap is None or issued_policy.used_memory_bytes + metadata_bound <= cap:
+            issued_policy.require_working_set(
+                metadata_bound,
+                error="dataset_working_set_exceeds_task_memory_budget",
+            )
         session_lease = issued_policy.lease(
             "storage.dataset.session",
             metadata_bound,
@@ -980,6 +988,7 @@ def open_dataset_session(
                     )
             raise
         assert session is not None
+        del spec_payload, manifest
         with session:
             yield session
 
@@ -1013,9 +1022,20 @@ def dataset_session_from_inventory(
     metadata_identity_span_bytes = len(spec_identity_bytes) + len(
         manifest_identity_bytes
     )
+    metadata_bound = (
+        2 * json_record_working_set_bytes(spec_stat_span_bytes)
+        + 2 * json_record_working_set_bytes(manifest_stat_span_bytes)
+        + metadata_identity_span_bytes
+    )
+    cap = resource_policy.explicit_memory_cap_bytes
+    if cap is None or resource_policy.used_memory_bytes + metadata_bound <= cap:
+        resource_policy.require_working_set(
+            metadata_bound,
+            error="dataset_working_set_exceeds_task_memory_budget",
+        )
     session_lease = resource_policy.lease(
         "storage.dataset.session",
-        spec_stat_span_bytes + manifest_stat_span_bytes + metadata_identity_span_bytes,
+        metadata_bound,
     )
     session: DatasetSession | None = None
     try:
@@ -1261,11 +1281,11 @@ def _dataset_session_retained_memory_bytes(
 ) -> int:
     return (
         inventory_retained_bytes
-        + len(spec_bytes)
+        + 2 * json_record_working_set_bytes(len(spec_bytes))
         + len(spec_identity_bytes)
-        + len(manifest_bytes)
+        + 2 * json_record_working_set_bytes(len(manifest_bytes))
         + len(manifest_identity_bytes)
-        + len(logical_dtype_bytes)
+        + json_record_working_set_bytes(len(logical_dtype_bytes))
         + plan_base_retained_bytes
         + _dataset_session_view_retained_memory_bytes(
             time_window=time_window,

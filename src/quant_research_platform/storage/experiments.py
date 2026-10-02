@@ -104,8 +104,6 @@ def append_trial_record(
                     _validate_trial_completion(existing[-1], record)
                 elif record.attempt_index != len(existing) + 1:
                     raise ValueError("trial_attempt_not_next")
-                if any(item.development_test_contaminated for item in existing):
-                    raise ValueError("trial_contaminated_experiment_requires_new_id")
                 suffix = "-terminal" if finishing else ""
                 path = (
                     Path(root) / "records" / f"{record.attempt_index:08d}{suffix}.json"
@@ -199,8 +197,6 @@ def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
                 raise ValueError("trial_ledger_order_invalid")
             for record in records:
                 validate_trial_record_against_plan(plan, record)
-            if any(record.development_test_contaminated for record in records[:-1]):
-                raise ValueError("trial_contaminated_experiment_reused")
             yield saved, records
 
 

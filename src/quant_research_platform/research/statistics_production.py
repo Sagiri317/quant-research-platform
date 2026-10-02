@@ -9,7 +9,11 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.contracts.experiments import legal_training_rows
+from quant_research_platform.contracts.experiments import (
+    _model_inference_blocker,
+    legal_training_rows,
+)
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
@@ -37,9 +41,6 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
-)
-from quant_research_platform.storage.experiments import (
-    read_model_trial_ledger_reference,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -73,8 +74,14 @@ def build_a_share_statistics_tables(
     time_window: TimeWindow,
     prediction_lookup: object,
     resource_policy: RuntimeResourcePolicy,
+    global_statistics: object | None,
 ) -> OwnedValue[dict[str, pd.DataFrame]]:
     dataset_spec = dataset_catalog.get(dataset_id)
+    selection_group = protocol_manifest["selection_group"]
+    inference_blocker = _model_inference_blocker(
+        access_window=protocol_manifest["access_window"],
+        selection_groups=(selection_group,),
+    )
     primary_label = protocol_manifest["research_configuration"]["evaluation"][
         "primary_label"
     ]
@@ -120,13 +127,13 @@ def build_a_share_statistics_tables(
     model_entries = {
         (item["quarter_id"], item["family_id"]): item
         for item in persisted_model.prediction_models(
-            model_window, access_window=protocol_manifest["access_window"]
+            model_window,
+            selection_group=selection_group,
+            access_window=protocol_manifest["access_window"],
         )
     }
     family_ids = tuple(
-        persisted_model.quarterly_selections[
-            next(iter(persisted_model.quarterly_selections))
-        ]["tie_break_order"]
+        dict.fromkeys(item["family_id"] for item in model_entries.values())
     )
     benchmark_id = protocol_manifest["research_configuration"]["comparison_model_id"]
     if benchmark_id not in family_ids:
@@ -206,12 +213,11 @@ def build_a_share_statistics_tables(
                             <= pd.Timestamp(model_window.end)
                         ):
                             quarter_id = str(timestamp.to_period("Q"))
-                            source_quarter = model_entries[(quarter_id, family_ids[0])][
-                                "source_quarter"
-                            ]
-                            selection = persisted_model.quarterly_selections[
-                                source_quarter
-                            ]
+                            selection = persisted_model.selection(
+                                selection_group,
+                                quarter_id,
+                                access_window=protocol_manifest["access_window"],
+                            )
                             for family_id in family_ids:
                                 entry = model_entries[(quarter_id, family_id)]
                                 metadata = entry["model_metadata"]
@@ -270,6 +276,16 @@ def build_a_share_statistics_tables(
                             for family_id in family_ids:
                                 value = daily[family_id]
                                 defined = bool(np.isfinite(value))
+                                paired_assets = (
+                                    mature.loc[
+                                        mature[[family_id, primary_label]]
+                                        .notna()
+                                        .all(axis=1),
+                                        "asset_id",
+                                    ]
+                                    .astype(str)
+                                    .sort_values()
+                                )
                                 loss_records.append(
                                     {
                                         "timestamp": timestamp,
@@ -282,10 +298,9 @@ def build_a_share_statistics_tables(
                                             (quarter_id, family_id)
                                         ]["model_id"],
                                         "loss": -float(value) if defined else np.nan,
-                                        "observation_count": int(
-                                            mature[[family_id, primary_label]]
-                                            .dropna()
-                                            .shape[0]
+                                        "observation_count": len(paired_assets),
+                                        "asset_coverage_id": canonical_json_hash(
+                                            paired_assets.tolist()
                                         ),
                                         "status": "DEFINED" if defined else "UNDEFINED",
                                         "reason": None
@@ -336,6 +351,7 @@ def build_a_share_statistics_tables(
         prediction_summary = _prediction_summary(
             rank_by_date,
             prediction_id=prediction_id,
+            inference_blocker=inference_blocker,
             max_lags=max_lags,
             block_size=block_size,
             repetitions=repetitions,
@@ -347,7 +363,7 @@ def build_a_share_statistics_tables(
             ),
         )
         model_trials = _model_trials(
-            persisted_model, layout, output_lease=accumulator_lease
+            persisted_model, selection_group, output_lease=accumulator_lease
         )
         model_losses = pd.DataFrame.from_records(
             loss_records,
@@ -363,6 +379,7 @@ def build_a_share_statistics_tables(
                 "reason",
                 "common_date",
                 "common_observation_count",
+                "asset_coverage_id",
             ),
         )
         comparison_by_date = pd.DataFrame.from_records(
@@ -374,7 +391,7 @@ def build_a_share_statistics_tables(
         bootstrap_workspace = (
             64 * repetitions * len(family_ids) ** 2
             + 256 * len(rank_by_date) * len(family_ids)
-            if common_count > block_size
+            if inference_blocker is None and common_count > block_size
             else 65536
         )
         with resource_policy.lease(
@@ -385,11 +402,19 @@ def build_a_share_statistics_tables(
                 family_ids=family_ids,
                 benchmark_id=benchmark_id,
                 access_window=protocol_manifest["access_window"],
+                inference_blocker=inference_blocker,
                 max_lags=max_lags,
                 block_size=block_size,
                 repetitions=repetitions,
                 root_seed=root_seed,
                 dataset_id=dataset_id,
+            )
+            group_comparison = _paired_group_rankic(
+                model_losses,
+                global_statistics=global_statistics,
+                selection_group=selection_group,
+                family_ids=family_ids,
+                protocol_manifest=protocol_manifest,
             )
         fmb_periods = pd.DataFrame.from_records(
             fmb_period_records, columns=_FAMA_MACBETH_PERIOD_COLUMNS
@@ -410,6 +435,7 @@ def build_a_share_statistics_tables(
             "fama_macbeth_periods": fmb_periods,
             "model_losses": model_losses,
             "model_comparison": comparison,
+            "model_group_comparison": group_comparison,
             "model_reality_checks": tests,
         }
         output_bytes = sum(
@@ -421,6 +447,158 @@ def build_a_share_statistics_tables(
         accumulator_lease.transfer("research.statistics.output")
         ownership.pop_all()
         return OwnedValue(tables, accumulator_lease)
+
+
+def _paired_group_rankic(
+    quarterly, *, global_statistics, selection_group, family_ids, protocol_manifest
+):
+    columns = (
+        "family_id",
+        "access_window",
+        "status",
+        "reason",
+        "fdr_method",
+        "bootstrap_status",
+        "bootstrap_reason",
+        "observation_count",
+        "calendar_count",
+        "fdr_family_size",
+        "hac_lag",
+        "bootstrap_block_size",
+        "bootstrap_repetitions",
+        "bootstrap_seed",
+        "global_mean",
+        "quarterly_mean",
+        "mean_difference",
+        "standard_error",
+        "t_statistic",
+        "p_value",
+        "ci_lower",
+        "ci_upper",
+        "fdr_adjusted_p_value",
+        "fdr_alpha",
+        "confidence",
+        "bootstrap_lower",
+        "bootstrap_upper",
+    )
+    if selection_group == "global":
+        return pd.DataFrame(columns=columns)
+    statistics = protocol_manifest["statistics"]
+    declaration = statistics["group_comparison"]
+    keys = ["timestamp", "family_id"]
+    with global_statistics.table("model_losses.parquet") as global_losses:
+        left = global_losses.set_index(keys).sort_index()
+        right = quarterly.set_index(keys).sort_index()
+        if (
+            left.index.has_duplicates
+            or right.index.has_duplicates
+            or left.empty != right.empty
+            or (
+                not left.empty
+                and (
+                    not left.index.equals(right.index)
+                    or not left["asset_coverage_id"].equals(right["asset_coverage_id"])
+                    or not left["observation_count"].equals(right["observation_count"])
+                    or not left["access_window"].equals(right["access_window"])
+                )
+            )
+        ):
+            raise ValueError("model_group_comparison_coverage_invalid")
+        if left.empty:
+            differences = pd.DataFrame(
+                index=pd.DatetimeIndex([], name="timestamp"),
+                columns=family_ids,
+                dtype="float64",
+            )
+            global_values = differences.copy()
+            quarterly_values = differences.copy()
+        else:
+            differences = (left["loss"] - right["loss"]).unstack("family_id")
+            global_values = -left["loss"].unstack("family_id")
+            quarterly_values = -right["loss"].unstack("family_id")
+    if set(differences.columns) != set(family_ids):
+        raise ValueError("model_group_comparison_family_incomplete")
+    access = protocol_manifest["access_window"]
+    inference_blocker = _model_inference_blocker(
+        access_window=access, selection_groups=("global", "quarterly")
+    )
+    inference = (
+        time_series_inference_summary(
+            differences.reset_index(),
+            identity_column="timestamp",
+            max_lags=statistics["hac_lag"],
+            fdr_method=declaration["fdr_method"],
+            fdr_alpha=declaration["alpha"],
+            fdr_family_size=len(family_ids),
+        ).set_index("timestamp")
+        if inference_blocker is None and not differences.empty
+        else None
+    )
+    rows = []
+    for family in family_ids:
+        values = differences[family].dropna().to_numpy(dtype="float64")
+        row = dict.fromkeys(columns, np.nan)
+        row.update(
+            family_id=family,
+            access_window=access,
+            observation_count=len(values),
+            calendar_count=len(differences),
+            global_mean=float(global_values[family].mean()),
+            quarterly_mean=float(quarterly_values[family].mean()),
+            mean_difference=float(values.mean()) if len(values) else np.nan,
+            status="UNDEFINED",
+            reason=inference_blocker if len(values) else "no_common_observations",
+            fdr_family_size=len(family_ids),
+            fdr_method=declaration["fdr_method"],
+            fdr_alpha=declaration["alpha"],
+            hac_lag=statistics["hac_lag"],
+            bootstrap_block_size=statistics["bootstrap_block"],
+            bootstrap_repetitions=statistics["bootstrap_repetitions"],
+            bootstrap_seed=declaration["seed"],
+            confidence=declaration["confidence"],
+            bootstrap_status="UNDEFINED",
+            bootstrap_reason=inference_blocker
+            if len(values)
+            else "no_common_observations",
+        )
+        if inference is not None:
+            estimate = inference.loc[family]
+            for key in (
+                "status",
+                "reason",
+                "standard_error",
+                "t_statistic",
+                "p_value",
+                "ci_lower",
+                "ci_upper",
+                "fdr_adjusted_p_value",
+            ):
+                row[key] = estimate[key]
+            if (
+                estimate["status"] == "DEFINED"
+                and len(values) > statistics["bootstrap_block"]
+            ):
+                interval = stationary_bootstrap_mean_ci(
+                    values,
+                    block_size=statistics["bootstrap_block"],
+                    repetitions=statistics["bootstrap_repetitions"],
+                    seed=declaration["seed"],
+                    confidence=declaration["confidence"],
+                )
+                row.update(
+                    bootstrap_lower=interval.lower,
+                    bootstrap_upper=interval.upper,
+                    bootstrap_status="DEFINED",
+                    bootstrap_reason=None,
+                )
+            else:
+                row["bootstrap_reason"] = (
+                    estimate["reason"]
+                    if estimate["status"] != "DEFINED"
+                    else "bootstrap_block_exceeds_observations"
+                )
+        rows.append(row)
+    return pd.DataFrame.from_records(rows, columns=columns)
 
 
 def _fdr_method(value: object, *, expected: str) -> str:
@@ -504,6 +682,7 @@ def _prediction_summary(
     rank_by_date: pd.DataFrame,
     *,
     prediction_id: str,
+    inference_blocker: str | None,
     max_lags: int,
     block_size: int,
     repetitions: int,
@@ -519,8 +698,8 @@ def _prediction_summary(
         "prediction_id": prediction_id,
         "observation_count": count,
         "status": "UNDEFINED",
-        "reason": "hac_lag_exceeds_observations",
-        "mean": np.nan,
+        "reason": inference_blocker or "hac_lag_exceeds_observations",
+        "mean": float(values.mean()) if count else np.nan,
         "standard_error": np.nan,
         "t_statistic": np.nan,
         "p_value": np.nan,
@@ -532,7 +711,7 @@ def _prediction_summary(
         "bootstrap_repetitions": repetitions,
         "bootstrap_seed": seed,
     }
-    if count < max(2, max_lags + 1):
+    if inference_blocker is not None or count < max(2, max_lags + 1):
         return pd.DataFrame([row])
     try:
         inference = hac_mean(values, max_lags=max_lags)
@@ -562,47 +741,17 @@ def _prediction_summary(
     return pd.DataFrame([row])
 
 
-def _model_trials(
-    persisted_model: object, layout: StorageLayout, *, output_lease
-) -> pd.DataFrame:
-    groups = []
-    pending = {}
-    for quarter_id, selection in persisted_model.quarterly_selections.items():
-        if type(quarter_id) is not str or type(selection) is not dict:
-            raise ValueError("statistics_model_selection_metadata_missing")
-        for family in selection.get("families", ()):
-            if type(family) is not dict or type(family.get("family_id")) is not str:
-                raise ValueError("statistics_model_family_metadata_invalid")
-            identity = family["trial_ledger_semantic_identity"]
-            if identity in pending:
-                raise ValueError("statistics_trial_reference_mismatch")
-            rows = []
-            groups.append(rows)
-            pending[identity] = (
-                quarter_id,
-                selection.get("selected_family_id"),
-                family,
-                rows,
-            )
-    for reference in persisted_model.trial_ledgers:
-        with read_model_trial_ledger_reference(layout, reference) as (plan, records):
-            if plan.stage != "selection":
-                continue
-            identity = reference["semantic_identity"]
-            if identity not in pending:
-                raise ValueError("statistics_trial_reference_mismatch")
-            quarter_id, selected_family, family, rows = pending.pop(identity)
+def _model_trials(persisted_model, selection_group, *, output_lease) -> pd.DataFrame:
+    rows = []
+    for decision_id, selection in persisted_model.selections[selection_group].items():
+        for family in selection["families"]:
             family_id = family["family_id"]
-            selected_config = family.get("selected_config_id")
-            if plan.candidate_family_id != family_id:
-                raise ValueError("statistics_trial_reference_mismatch")
-            for record in records:
-                config_id = record.candidate_id
-                value = record.metrics["validation_rankic"]
+            for metrics in family["trial_metrics"]:
+                config_id = metrics["model_id"]
+                value = metrics["validation_rankic"]
                 defined = type(value) in {int, float} and np.isfinite(value)
-                # Nine scalar columns, row dictionaries, and DataFrame construction.
                 row_bytes = 4096 + 4 * sum(
-                    len(value) for value in (quarter_id, family_id, config_id)
+                    len(value) for value in (decision_id, family_id, config_id)
                 )
                 current_runtime_resource_policy().require_working_set(
                     row_bytes, error="statistics_accumulator_bound_invalid"
@@ -610,31 +759,30 @@ def _model_trials(
                 output_lease.grow(row_bytes)
                 rows.append(
                     {
-                        "quarter_id": quarter_id,
+                        "selection_group": selection_group,
+                        "decision_id": decision_id,
                         "family_id": family_id,
                         "config_id": config_id,
                         "metric_id": "validation_rankic",
                         "value": float(value) if defined else np.nan,
-                        "observation_count": record.metrics["validation_rows"],
+                        "observation_count": metrics["validation_rows"],
                         "status": "DEFINED" if defined else "UNDEFINED",
                         "reason": None
                         if defined
-                        else record.metrics["validation_rankic_reason"],
+                        else metrics["validation_rankic_reason"],
                         "selection_status": (
                             "CHAMPION"
-                            if family_id == selected_family
-                            and config_id == selected_config
+                            if family_id == selection["selected_family_id"]
+                            and config_id == family["selected_config_id"]
                             else "FAMILY_WINNER"
-                            if config_id == selected_config
+                            if config_id == family["selected_config_id"]
                             else "TRIAL"
                         ),
                     }
                 )
-    if pending:
-        raise ValueError("statistics_trial_reference_mismatch")
-    if not any(groups):
+    if not rows:
         raise ValueError("statistics_model_trials_empty")
-    return pd.DataFrame(row for group in groups for row in group)
+    return pd.DataFrame.from_records(rows)
 
 
 def _common_model_rank_ic(frame, *, family_ids, label_column):
@@ -662,6 +810,7 @@ def _model_comparison(
     family_ids,
     benchmark_id,
     access_window,
+    inference_blocker,
     max_lags,
     block_size,
     repetitions,
@@ -677,6 +826,7 @@ def _model_comparison(
         summary = _prediction_summary(
             pd.DataFrame({_PREDICTION_COLUMN: difference}),
             prediction_id=family,
+            inference_blocker=inference_blocker,
             max_lags=max_lags,
             block_size=block_size,
             repetitions=repetitions,
@@ -698,7 +848,12 @@ def _model_comparison(
             root_seed, "a_share_model_reality_check", dataset_id, access_window, test_id
         )
         result = None
-        if access_window == "development" and challengers and len(common) > block_size:
+        if (
+            inference_blocker is None
+            and access_window == "development"
+            and challengers
+            and len(common) > block_size
+        ):
             options = dict(block_size=block_size, repetitions=repetitions, seed=seed)
             if test_id == "spa_reality_check":
                 result = spa_reality_check(
@@ -717,6 +872,8 @@ def _model_comparison(
         reason = (
             result.reason
             if result is not None
+            else inference_blocker
+            if inference_blocker is not None
             else "holdout_excluded"
             if access_window != "development"
             else "no_comparison_models"
@@ -790,6 +947,7 @@ def _model_comparison(
         comparison_table = _prediction_summary(
             pd.DataFrame(),
             prediction_id=benchmark_id,
+            inference_blocker=inference_blocker,
             max_lags=max_lags,
             block_size=block_size,
             repetitions=repetitions,

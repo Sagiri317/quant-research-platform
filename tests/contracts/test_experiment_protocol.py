@@ -17,21 +17,11 @@ def _fold(
     fold_id: str,
     train: tuple[date, date],
     validation: tuple[date, date],
-    development_test: tuple[date, date],
 ) -> ExperimentFold:
     return ExperimentFold(
         fold_id=fold_id,
         train=TimeWindow(*train),
         validation=TimeWindow(*validation),
-        development_test=TimeWindow(*development_test),
-        embargo_steps=0,
-        step_kind="test_steps",
-        train_end_step=0,
-        validation_start_step=21,
-        validation_end_step=22,
-        development_test_start_step=23,
-        development_test_end_step=24,
-        final_holdout_start_step=45,
     )
 
 
@@ -50,16 +40,14 @@ def _plan() -> ExperimentPlan:
                 "fold-1",
                 (date(2018, 1, 1), date(2020, 12, 31)),
                 (date(2021, 2, 1), date(2021, 7, 31)),
-                (date(2021, 8, 1), date(2022, 1, 31)),
             ),
             _fold(
                 "fold-2",
                 (date(2019, 1, 1), date(2021, 12, 31)),
                 (date(2022, 2, 1), date(2022, 7, 31)),
-                (date(2022, 8, 1), date(2023, 1, 31)),
             ),
         ),
-        final_holdout=TimeWindow(date(2023, 2, 1), date(2023, 12, 31)),
+        test=TimeWindow(date(2023, 2, 1), date(2023, 12, 31)),
         selection_metric="validation_rankic",
         selection_direction="maximize",
         candidate_ids=("equal-weight", "ridge"),
@@ -70,6 +58,28 @@ def _plan() -> ExperimentPlan:
         cost_assumptions={"commission_bps": 2.0},
         risk_assumptions={"tracking_error_limit": 0.05},
     )
+
+
+def test_experiment_plan_rejects_duplicate_candidate_ids() -> None:
+    with pytest.raises(ValueError, match="^experiment_candidate_ids$"):
+        replace(_plan(), candidate_ids=("ridge_model", "ridge_model"))
+
+
+@pytest.mark.parametrize(
+    "order,error",
+    (
+        (("other",), "experiment_tie_break_order_mismatch"),
+        (("base",), "experiment_tie_break_order_mismatch"),
+        (("base", "other", "extra"), "experiment_tie_break_order_mismatch"),
+        (("base", "other", "other"), "experiment_tie_break_order"),
+    ),
+)
+def test_experiment_plan_rejects_incomplete_or_nonunique_tie_order(
+    order: tuple[str, ...], error: str
+) -> None:
+    plan = replace(_plan(), candidate_ids=("base", "other"))
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        replace(plan, tie_break_order=order)
 
 
 def test_experiment_plan_is_locked_immutable_and_hash_stable() -> None:
@@ -83,34 +93,35 @@ def test_experiment_plan_is_locked_immutable_and_hash_stable() -> None:
     assert plan.protocol_hash == reordered.protocol_hash
     assert len(plan.protocol_hash) == 64
     assert "protocol_version" not in plan.protocol_payload()
-    assert tuple(fold.development_test for fold in plan.folds) == (
-        TimeWindow(date(2021, 8, 1), date(2022, 1, 31)),
-        TimeWindow(date(2022, 8, 1), date(2023, 1, 31)),
+    assert plan.window("train") == tuple(fold.train for fold in plan.folds)
+    assert plan.window("validation") == (
+        TimeWindow(date(2021, 2, 1), date(2021, 7, 31)),
+        TimeWindow(date(2022, 2, 1), date(2022, 7, 31)),
     )
-    with pytest.raises(PermissionError, match="^final_holdout_locked$"):
-        plan.window("final_holdout")
+    with pytest.raises(PermissionError, match="^test_locked$"):
+        plan.window("test")
+    for removed_role in ("development_test", "final_holdout"):
+        with pytest.raises(ValueError, match="^experiment_role_invalid$"):
+            plan.window(removed_role)
     with pytest.raises(TypeError):
         plan.backend_versions["numpy"] = "changed"  # type: ignore[index]
     with pytest.raises(FrozenInstanceError):
         plan.holdout_status = "OPEN"  # type: ignore[misc]
 
 
-def test_experiment_plan_rejects_holdout_overlap_and_keeps_no_purge_surface() -> None:
+def test_experiment_plan_rejects_test_overlap_and_keeps_no_purge_surface() -> None:
     plan = _plan()
 
     assert not hasattr(plan, "max_label_lookahead_steps")
-    with pytest.raises(ValueError, match="^experiment_holdout_overlap$"):
+    with pytest.raises(ValueError, match="^experiment_test_overlap$"):
         replace(
             plan,
-            final_holdout=TimeWindow(date(2022, 12, 1), date(2023, 12, 31)),
+            test=TimeWindow(date(2022, 7, 31), date(2023, 12, 31)),
         )
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError, match="^experiment_fold_windows_overlap$"):
         replace(
-            plan,
-            folds=(
-                *plan.folds[:-1],
-                replace(plan.folds[-1], final_holdout_start_step=24),
-            ),
+            plan.folds[-1],
+            validation=TimeWindow(date(2021, 12, 31), date(2022, 7, 31)),
         )
 
 
@@ -121,7 +132,9 @@ def test_experiment_plan_rejects_holdout_overlap_and_keeps_no_purge_surface() ->
         "input_lineage",
         "candidate_ids",
         "tie_break_order",
-        "final_holdout",
+        "test",
+        "fit_windows",
+        "selection_ledger_semantic_identities",
         "backend_versions",
         "thread_settings",
         "cost_assumptions",
@@ -155,14 +168,20 @@ def test_refit_stage_has_one_resolved_candidate_and_no_selection_score():
     refit = replace(
         plan,
         stage="refit",
-        folds=plan.folds[:1],
+        folds=(),
+        fit_windows=(
+            TimeWindow(date(2018, 1, 1), date(2020, 12, 31)),
+            TimeWindow(date(2021, 2, 1), date(2022, 7, 31)),
+        ),
+        fit_cutoff=date(2023, 1, 31),
+        selection_group="global",
         candidate_ids=("ridge",),
         candidate_parameters={"ridge": {"random_seed": 7}},
         trial_budget=1,
         selection_metric=None,
         selection_direction=None,
         tie_break_order=(),
-        selection_ledger_semantic_identity="a" * 64,
+        selection_ledger_semantic_identities=("a" * 64, "b" * 64),
     )
     assert ExperimentPlan.from_payload(refit.protocol_payload()) == refit
     assert refit.protocol_hash != plan.protocol_hash
@@ -171,10 +190,69 @@ def test_refit_stage_has_one_resolved_candidate_and_no_selection_score():
         {"trial_budget": 2},
         {"candidate_parameters": {}},
         {"candidate_parameters": {"ridge": {"random_seed": 8}}},
-        {"selection_ledger_semantic_identity": None},
+        {"selection_ledger_semantic_identities": ()},
+        {"folds": plan.folds},
+        {"fit_windows": ()},
+        {"fit_cutoff": None},
+        {"fit_cutoff": date(2022, 7, 30)},
+        {"fit_cutoff": refit.test.start},
+        {"fit_windows": tuple(reversed(refit.fit_windows))},
+        {
+            "fit_windows": (
+                refit.fit_windows[0],
+                TimeWindow(date(2020, 12, 31), date(2022, 7, 31)),
+            )
+        },
         {"tie_break_order": ("ridge",)},
     ):
         with pytest.raises(ValueError, match="experiment_refit_plan_invalid"):
             replace(refit, **changes)
-    with pytest.raises(ValueError, match="experiment_selection_parent_invalid"):
-        replace(plan, selection_ledger_semantic_identity="a" * 64)
+    for changes in (
+        {"folds": ()},
+        {"selection_ledger_semantic_identities": ("a" * 64,)},
+        {"fit_windows": refit.fit_windows},
+        {"fit_cutoff": refit.fit_cutoff},
+    ):
+        with pytest.raises(ValueError, match="^experiment_selection_plan_invalid$"):
+            replace(plan, **changes)
+    for parents in (("b" * 64, "a" * 64), ("a" * 64, "a" * 64), ("invalid",)):
+        with pytest.raises(ValueError, match="^experiment_selection_parents_invalid$"):
+            replace(refit, selection_ledger_semantic_identities=parents)
+    with pytest.raises(ValueError, match="^experiment_selection_group_required$"):
+        replace(refit, selection_group=None)
+    with pytest.raises(ValueError, match="^experiment_selection_group_invalid$"):
+        replace(plan, selection_group="global")
+    assert replace(refit, fit_cutoff=refit.fit_windows[-1].end)
+    for changes in (
+        {"fit_cutoff": date(2023, 1, 30)},
+        {"fit_windows": (refit.fit_windows[0],)},
+        {"selection_ledger_semantic_identities": ("a" * 64,)},
+        {"selection_group": "quarterly"},
+    ):
+        changed = replace(refit, **changes)
+        assert changed.protocol_hash != refit.protocol_hash
+        assert ExperimentPlan.from_payload(changed.protocol_payload()) == changed
+    crypto = replace(refit, market_id=MarketId("crypto"), selection_group=None)
+    assert ExperimentPlan.from_payload(crypto.protocol_payload()) == crypto
+    with pytest.raises(ValueError, match="^experiment_selection_group_invalid$"):
+        replace(crypto, selection_group="global")
+
+
+@pytest.mark.parametrize(
+    "field", ("final_holdout", "selection_ledger_semantic_identity")
+)
+def test_retired_plan_fields_cannot_be_read_as_three_role_payload(field):
+    payload = _plan().protocol_payload()
+    payload[field] = payload["test"] if field == "final_holdout" else "a" * 64
+    with pytest.raises(ValueError, match="^experiment_plan_payload_invalid$"):
+        ExperimentPlan.from_payload(payload)
+
+
+@pytest.mark.parametrize(
+    "field", ("development_test", "embargo_steps", "final_holdout_start_step")
+)
+def test_retired_fold_fields_cannot_recreate_a_fourth_role(field):
+    payload = _plan().protocol_payload()
+    payload["folds"][0][field] = payload["test"] if field == "development_test" else 0
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        ExperimentPlan.from_payload(payload)

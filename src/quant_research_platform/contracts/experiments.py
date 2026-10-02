@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, fields
 from datetime import date, datetime, time
 from math import isfinite
 from types import MappingProxyType
@@ -29,7 +29,17 @@ from quant_research_platform.policy.share_safety import (
 )
 
 SelectionDirection = Literal["maximize", "minimize"]
-ExperimentRole = Literal["train", "validation", "development_test", "final_holdout"]
+ExperimentRole = Literal["train", "validation", "test"]
+
+
+def _model_inference_blocker(
+    *, access_window: str, selection_groups: tuple[str, ...]
+) -> str | None:
+    """Qualify model curves by the information used for parameter selection."""
+
+    if access_window == "development" and "global" in selection_groups:
+        return "global_development_selection_reuses_validation"
+    return None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -37,60 +47,26 @@ class ExperimentFold:
     fold_id: str
     train: TimeWindow
     validation: TimeWindow
-    development_test: TimeWindow
-    step_kind: str = "explicit"
-    train_end_step: int | None = None
-    validation_start_step: int | None = None
-    validation_end_step: int | None = None
-    development_test_start_step: int | None = None
-    development_test_end_step: int | None = None
-    final_holdout_start_step: int | None = None
-    embargo_steps: int = 0
-    complete: bool = True
 
     def __post_init__(self) -> None:
         validate_run_id(self.fold_id)
         if not all(
-            isinstance(window, TimeWindow)
-            for window in (self.train, self.validation, self.development_test)
+            isinstance(window, TimeWindow) for window in (self.train, self.validation)
         ):
             raise TypeError("experiment_fold_window_required")
-        if not _strictly_before(self.train.end, self.validation.start) or not (
-            _strictly_before(self.validation.end, self.development_test.start)
+        if (
+            len(
+                {
+                    isinstance(bound, datetime)
+                    for window in (self.train, self.validation)
+                    for bound in (window.start, window.end)
+                }
+            )
+            != 1
         ):
+            raise ValueError("experiment_time_kind_mismatch")
+        if not _strictly_before(self.train.end, self.validation.start):
             raise ValueError("experiment_fold_windows_overlap")
-        if type(self.embargo_steps) is not int or self.embargo_steps < 0:
-            raise ValueError("experiment_embargo_invalid")
-        _validate_non_empty_string(self.step_kind, "experiment_step_kind_required")
-        steps = (
-            self.train_end_step,
-            self.validation_start_step,
-            self.validation_end_step,
-            self.development_test_start_step,
-            self.development_test_end_step,
-            self.final_holdout_start_step,
-        )
-        if any(step is not None for step in steps):
-            if any(type(step) is not int or step < 0 for step in steps):
-                raise ValueError("experiment_boundary_step_invalid")
-            assert all(step is not None for step in steps)
-            if self.validation_start_step <= self.train_end_step:
-                raise ValueError("experiment_boundary_step_invalid")
-            if self.validation_end_step < self.validation_start_step:
-                raise ValueError("experiment_boundary_step_invalid")
-            if self.development_test_start_step <= self.validation_end_step:
-                raise ValueError("experiment_boundary_step_invalid")
-            if self.development_test_end_step < self.development_test_start_step:
-                raise ValueError("experiment_boundary_step_invalid")
-            if self.final_holdout_start_step <= self.development_test_end_step:
-                raise ValueError("experiment_holdout_boundary_step_invalid")
-            if (
-                self.development_test_start_step - self.validation_end_step - 1
-                != self.embargo_steps
-            ):
-                raise ValueError("experiment_embargo_gap_invalid")
-        if type(self.complete) is not bool:
-            raise ValueError("experiment_fold_complete_invalid")
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -104,7 +80,7 @@ class ExperimentPlan:
     data_snapshot_id: str
     input_lineage: tuple[str, ...]
     folds: tuple[ExperimentFold, ...]
-    final_holdout: TimeWindow
+    test: TimeWindow
     selection_metric: str | None
     selection_direction: SelectionDirection | None
     candidate_ids: tuple[str, ...]
@@ -116,7 +92,10 @@ class ExperimentPlan:
     cost_assumptions: Mapping[str, object] = field(default_factory=dict)
     risk_assumptions: Mapping[str, object] = field(default_factory=dict)
     candidate_parameters: Mapping[str, object] = field(default_factory=dict)
-    selection_ledger_semantic_identity: str | None = None
+    selection_ledger_semantic_identities: tuple[str, ...] = ()
+    fit_windows: tuple[TimeWindow, ...] = ()
+    fit_cutoff: date | datetime | None = None
+    selection_group: Literal["global", "quarterly"] | None = None
     research_protocol_identity: str = ""
     holdout_status: Literal["LOCKED"] = "LOCKED"
 
@@ -136,57 +115,90 @@ class ExperimentPlan:
             _validate_string_tuple(self.tie_break_order, "experiment_tie_break_order")
             if set(self.tie_break_order) != set(self.candidate_ids):
                 raise ValueError("experiment_tie_break_order_mismatch")
-        if (
-            type(self.folds) is not tuple
-            or not self.folds
-            or any(not isinstance(fold, ExperimentFold) for fold in self.folds)
+        if type(self.folds) is not tuple or any(
+            not isinstance(fold, ExperimentFold) for fold in self.folds
         ):
             raise ValueError("experiment_folds_invalid")
         if len({fold.fold_id for fold in self.folds}) != len(self.folds):
             raise ValueError("experiment_fold_ids_duplicate")
-        if len({fold.step_kind for fold in self.folds}) != 1:
-            raise ValueError("experiment_step_kind_mismatch")
-        if not isinstance(self.final_holdout, TimeWindow):
-            raise TypeError("experiment_final_holdout_window_required")
-        if any(
-            not _strictly_before(fold.development_test.end, self.final_holdout.start)
-            for fold in self.folds
+        if not isinstance(self.test, TimeWindow):
+            raise TypeError("experiment_test_window_required")
+        if type(self.fit_windows) is not tuple or any(
+            not isinstance(window, TimeWindow) for window in self.fit_windows
         ):
-            raise ValueError("experiment_holdout_overlap")
-        window_bounds = [self.final_holdout.start, self.final_holdout.end]
+            raise ValueError("experiment_fit_windows_invalid")
+        parents = self.selection_ledger_semantic_identities
+        if (
+            type(parents) is not tuple
+            or any(
+                type(identity) is not str
+                or re.fullmatch(r"[0-9a-f]{64}", identity) is None
+                for identity in parents
+            )
+            or parents != tuple(sorted(set(parents)))
+        ):
+            raise ValueError("experiment_selection_parents_invalid")
+        window_bounds = [self.test.start, self.test.end]
         for fold in self.folds:
-            for window in (fold.train, fold.validation, fold.development_test):
+            for window in (fold.train, fold.validation):
                 window_bounds.extend((window.start, window.end))
+        for window in self.fit_windows:
+            window_bounds.extend((window.start, window.end))
+        if self.fit_cutoff is not None:
+            if not isinstance(self.fit_cutoff, date):
+                raise ValueError("experiment_fit_cutoff_invalid")
+            window_bounds.append(self.fit_cutoff)
         if len({isinstance(bound, datetime) for bound in window_bounds}) != 1:
             raise ValueError("experiment_time_kind_mismatch")
+        if any(
+            not _strictly_before(fold.validation.end, self.test.start)
+            for fold in self.folds
+        ):
+            raise ValueError("experiment_test_overlap")
+        if self.market_id == "a_share" and self.stage == "refit":
+            if self.selection_group not in {"global", "quarterly"}:
+                raise ValueError("experiment_selection_group_required")
+        elif self.selection_group is not None:
+            raise ValueError("experiment_selection_group_invalid")
         if self.stage == "selection":
             _validate_non_empty_string(
                 self.selection_metric, "experiment_selection_metric_required"
             )
             if self.selection_direction not in {"maximize", "minimize"}:
                 raise ValueError("experiment_selection_direction_invalid")
-            if self.selection_ledger_semantic_identity is not None:
-                raise ValueError("experiment_selection_parent_invalid")
+            if (
+                not self.folds
+                or parents
+                or self.fit_windows
+                or self.fit_cutoff is not None
+            ):
+                raise ValueError("experiment_selection_plan_invalid")
         elif self.stage == "refit":
             if (
                 self.selection_metric is not None
                 or self.selection_direction is not None
                 or self.tie_break_order
-                or len(self.folds) != 1
+                or self.folds
                 or len(self.candidate_ids) != 1
                 or self.trial_budget != 1
-                or type(self.selection_ledger_semantic_identity) is not str
-                or re.fullmatch(
-                    r"[0-9a-f]{64}", self.selection_ledger_semantic_identity
+                or not parents
+                or not self.fit_windows
+                or self.fit_cutoff is None
+                or not _strictly_before(self.fit_cutoff, self.test.start)
+                or _strictly_before(self.fit_cutoff, self.fit_windows[-1].end)
+                or any(
+                    not _strictly_before(left.end, right.start)
+                    for left, right in zip(
+                        self.fit_windows, self.fit_windows[1:], strict=False
+                    )
                 )
-                is None
             ):
                 raise ValueError("experiment_refit_plan_invalid")
         else:
             raise ValueError("experiment_stage_invalid")
         if type(self.trial_budget) is not int or self.trial_budget <= 0:
             raise ValueError("experiment_trial_budget_invalid")
-        if self.trial_budget < len(self.candidate_ids) * len(self.folds):
+        if self.trial_budget < len(self.candidate_ids) * len(self.fold_ids):
             raise ValueError("experiment_trial_budget_too_small")
         if type(self.random_seed) is not int or self.random_seed < 0:
             raise ValueError("experiment_random_seed_invalid")
@@ -223,6 +235,14 @@ class ExperimentPlan:
         )
 
     @property
+    def fold_ids(self) -> tuple[str, ...]:
+        return (
+            tuple(fold.fold_id for fold in self.folds)
+            if self.stage == "selection"
+            else ("refit",)
+        )
+
+    @property
     def protocol_hash(self) -> str:
         return canonical_json_hash(self.protocol_payload())
 
@@ -230,8 +250,15 @@ class ExperimentPlan:
         return {
             "experiment_id": self.experiment_id,
             "stage": self.stage,
-            "selection_ledger_semantic_identity": (
-                self.selection_ledger_semantic_identity
+            "selection_group": self.selection_group,
+            "selection_ledger_semantic_identities": list(
+                self.selection_ledger_semantic_identities
+            ),
+            "fit_windows": [_window_payload(window) for window in self.fit_windows],
+            "fit_cutoff": (
+                None
+                if self.fit_cutoff is None
+                else time_value_isoformat(self.fit_cutoff, preserve_datetime=True)
             ),
             "market_id": str(self.market_id),
             "research_dataset_id": self.research_dataset_id,
@@ -240,7 +267,7 @@ class ExperimentPlan:
             "data_snapshot_id": self.data_snapshot_id,
             "input_lineage": list(self.input_lineage),
             "folds": [_fold_payload(fold) for fold in self.folds],
-            "final_holdout": _window_payload(self.final_holdout),
+            "test": _window_payload(self.test),
             "selection_metric": self.selection_metric,
             "selection_direction": self.selection_direction,
             "tie_break_order": list(self.tie_break_order),
@@ -260,10 +287,13 @@ class ExperimentPlan:
     def from_payload(cls, value: dict[str, object]) -> ExperimentPlan:
         if (
             type(value) is not dict
+            or set(value) != {item.name for item in fields(cls)}
             or any(
                 type(value.get(key)) is not list
                 for key in (
                     "folds",
+                    "fit_windows",
+                    "selection_ledger_semantic_identities",
                     "input_lineage",
                     "candidate_ids",
                     "tie_break_order",
@@ -272,7 +302,7 @@ class ExperimentPlan:
             or any(
                 type(value.get(key)) is not dict
                 for key in (
-                    "final_holdout",
+                    "test",
                     "backend_versions",
                     "thread_settings",
                     "cost_assumptions",
@@ -286,24 +316,35 @@ class ExperimentPlan:
         folds = []
         for item in payload["folds"]:
             if type(item) is not dict or any(
-                type(item.get(key)) is not dict
-                for key in ("train", "validation", "development_test")
+                type(item.get(key)) is not dict for key in ("train", "validation")
             ):
                 raise ValueError("experiment_plan_payload_invalid")
             fold = dict(item)
-            for key in ("train", "validation", "development_test"):
+            for key in ("train", "validation"):
                 fold[key] = TimeWindow(**fold[key])
             folds.append(ExperimentFold(**fold))
         payload["folds"] = tuple(folds)
-        payload["final_holdout"] = TimeWindow(**payload["final_holdout"])
-        for key in ("input_lineage", "candidate_ids", "tie_break_order"):
+        payload["test"] = TimeWindow(**payload["test"])
+        payload["fit_windows"] = tuple(
+            TimeWindow(**item) for item in payload["fit_windows"]
+        )
+        cutoff = payload["fit_cutoff"]
+        payload["fit_cutoff"] = (
+            None if cutoff is None else TimeWindow(cutoff, cutoff).start
+        )
+        for key in (
+            "input_lineage",
+            "candidate_ids",
+            "tie_break_order",
+            "selection_ledger_semantic_identities",
+        ):
             payload[key] = tuple(payload[key])
         return cls(**payload)
 
     def window(self, role: ExperimentRole) -> tuple[TimeWindow, ...]:
-        if role == "final_holdout":
-            raise PermissionError("final_holdout_locked")
-        if role not in {"train", "validation", "development_test"}:
+        if role == "test":
+            raise PermissionError("test_locked")
+        if role not in {"train", "validation"}:
             raise ValueError("experiment_role_invalid")
         return tuple(getattr(fold, role) for fold in self.folds)
 
@@ -472,16 +513,6 @@ def _fold_payload(fold: ExperimentFold) -> dict[str, object]:
         "fold_id": fold.fold_id,
         "train": _window_payload(fold.train),
         "validation": _window_payload(fold.validation),
-        "development_test": _window_payload(fold.development_test),
-        "embargo_steps": fold.embargo_steps,
-        "step_kind": fold.step_kind,
-        "train_end_step": fold.train_end_step,
-        "validation_start_step": fold.validation_start_step,
-        "validation_end_step": fold.validation_end_step,
-        "development_test_start_step": fold.development_test_start_step,
-        "development_test_end_step": fold.development_test_end_step,
-        "final_holdout_start_step": fold.final_holdout_start_step,
-        "complete": fold.complete,
     }
 
 
@@ -515,15 +546,13 @@ class TrialRecord:
     thread_settings: Mapping[str, int] = field(default_factory=dict)
     status: TrialStatus
     metrics: Mapping[str, object] = field(default_factory=dict)
-    development_test_metrics: Mapping[str, object] = field(default_factory=dict)
-    development_test_contaminated: bool = False
     undefined_reasons: Mapping[str, object] = field(default_factory=dict)
     cost_assumptions: Mapping[str, object] = field(default_factory=dict)
     risk_assumptions: Mapping[str, object] = field(default_factory=dict)
     rebalance_assumption: str = "not_applicable"
     artifact_lineage: tuple[str, ...] = ()
     holdout_accessed: bool = False
-    contract_version: str = "2.0"
+    contract_version: str = "3.0"
 
     def __post_init__(self) -> None:
         for value in (
@@ -580,16 +609,13 @@ class TrialRecord:
             raise ValueError("trial_thread_settings_invalid")
         if self.holdout_accessed is not False:
             raise ValueError("trial_holdout_access_forbidden")
-        if type(self.development_test_contaminated) is not bool:
-            raise ValueError("trial_development_test_contamination_invalid")
-        if self.contract_version != "2.0":
+        if self.contract_version != "3.0":
             raise ValueError("trial_contract_version_invalid")
         for field_name in (
             "normalized_parameters",
             "backend_versions",
             "thread_settings",
             "metrics",
-            "development_test_metrics",
             "undefined_reasons",
             "cost_assumptions",
             "risk_assumptions",
@@ -630,8 +656,6 @@ class TrialRecord:
             "thread_settings": _thaw_json(self.thread_settings),
             "status": self.status,
             "metrics": _thaw_json(self.metrics),
-            "development_test_metrics": _thaw_json(self.development_test_metrics),
-            "development_test_contaminated": self.development_test_contaminated,
             "undefined_reasons": _thaw_json(self.undefined_reasons),
             "cost_assumptions": _thaw_json(self.cost_assumptions),
             "risk_assumptions": _thaw_json(self.risk_assumptions),
@@ -655,7 +679,6 @@ class TrialRecord:
                     "backend_versions",
                     "thread_settings",
                     "metrics",
-                    "development_test_metrics",
                     "undefined_reasons",
                     "cost_assumptions",
                     "risk_assumptions",
@@ -695,7 +718,7 @@ def validate_trial_record_against_plan(
         != plan.candidate_parameters[record.candidate_id]
     ):
         raise ValueError("trial_parameters_not_frozen")
-    if record.fold_id not in {fold.fold_id for fold in plan.folds}:
+    if record.fold_id not in plan.fold_ids:
         raise ValueError("trial_fold_not_registered")
     if record.attempt_index > plan.trial_budget:
         raise ValueError("trial_budget_exceeded")

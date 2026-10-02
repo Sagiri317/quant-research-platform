@@ -10,6 +10,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 from quant_research_platform.markets.implementations.a_share.processed.panels import (
     _apply_special_treatment,
     _apply_suspension_semantics,
+    _asof_industry,
     _industry_version_active_mask,
     compute_market_panel,
 )
@@ -441,11 +442,13 @@ def test_missing_listing_lifecycle_does_not_enter_the_panel() -> None:
 
 def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) -> None:
     sessions = pd.DatetimeIndex(
-        pd.to_datetime(["2022-12-30", "2023-01-03", "2023-01-04"])
+        pd.to_datetime(
+            ["2022-12-30", "2023-01-03", "2023-04-28", "2023-05-04", "2023-05-05"]
+        )
     )
     bars = pd.DataFrame(
         {
-            "source_asset_id": ["000001"] * 3,
+            "source_asset_id": ["000001"] * len(sessions),
             "timestamp": sessions,
             "market_type": 1,
             "trading_status_code": 0,
@@ -494,7 +497,7 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
     history = pd.DataFrame(
         {
             "source_asset_id": ["000001", "000001"],
-            "timestamp": [pd.Timestamp("2022-12-29"), pd.Timestamp("2023-01-01")],
+            "timestamp": [pd.Timestamp("2022-12-29"), pd.Timestamp("2023-05-01")],
             "industry_standard_id": ["P0207", "P0221"],
             "industry_level1_code": ["A01", "B01"],
             "industry_level1_name": ["not authoritative", "not authoritative"],
@@ -514,28 +517,42 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
             "industry_standard_id": ["P0207", "P0221"],
             "implement_date": [
                 pd.Timestamp("2012-10-26"),
-                pd.Timestamp("2023-01-01"),
+                pd.Timestamp("2023-05-01"),
             ],
-            "abandon_date": [pd.Timestamp("2022-12-31"), pd.NaT],
+            "abandon_date": [pd.NaT, pd.NaT],
         }
     )
 
+    changes = pd.DataFrame(
+        {
+            "source_asset_id": history["source_asset_id"],
+            "effective_date": history["timestamp"],
+            "announcement_date": history["timestamp"] - pd.Timedelta(days=1),
+            "changed_item": history["industry_standard_id"] + "行业代码",
+            "value_after": history["industry_level1_name"],
+        }
+    )
     result = compute_market_panel(
         bars,
         stock_master=stock_master,
         market_cap=market_cap,
         trading_calendar=calendar,
         industry_history=history,
+        industry_changes=changes,
         industry_sets=industry_sets,
         industry_versions=industry_versions,
     )
 
     assert result["industry_standard_id"].tolist() == [
         "CSRC2012",
+        "CSRC2012",
+        "CSRC2012",
         "CAPCO",
         "CAPCO",
     ]
     assert result["industry_level1_name"].tolist() == [
+        "CSRC industry",
+        "CSRC industry",
         "CSRC industry",
         "CAPCO industry",
         "CAPCO industry",
@@ -546,15 +563,16 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
         market_cap=market_cap,
         trading_calendar=calendar,
         industry_history=history.iloc[[0]],
+        industry_changes=changes,
         industry_sets=industry_sets.iloc[[0]],
-        industry_versions=industry_versions.iloc[[0]],
+        industry_versions=industry_versions,
     )
     assert (
         missing_transition.loc[
-            missing_transition["timestamp"].ge(pd.Timestamp("2023-01-01")),
+            missing_transition["timestamp"].ge(pd.Timestamp("2023-05-01")),
             "industry_standard_id",
         ]
-        .isna()
+        .eq("CSRC2012")
         .all()
     )
 
@@ -571,14 +589,15 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
         root, missing_transition.loc[:, list(spec.required_columns)], spec=spec
     )
     restored = read_dataset(root)
-    assert len(restored) == 3
+    assert len(restored) == len(sessions)
     for column in (
         "industry_standard_id",
         "industry_level1_code",
         "industry_level1_name",
     ):
         assert str(restored[column].dtype) == "string"
-        assert restored[column].isna().sum() == 2
+        assert restored[column].isna().sum() == 0
+        pd.testing.assert_series_equal(restored[column], missing_transition[column])
 
     abandoned = compute_market_panel(
         bars,
@@ -586,14 +605,15 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
         market_cap=market_cap,
         trading_calendar=calendar,
         industry_history=history,
+        industry_changes=changes,
         industry_sets=industry_sets,
         industry_versions=industry_versions.assign(
-            abandon_date=[pd.Timestamp("2023-01-04"), pd.Timestamp("2023-01-04")]
+            abandon_date=[pd.Timestamp("2023-05-05"), pd.Timestamp("2023-05-05")]
         ),
     )
     assert (
         abandoned.loc[
-            abandoned["timestamp"].eq(pd.Timestamp("2023-01-04")),
+            abandoned["timestamp"].eq(pd.Timestamp("2023-05-05")),
             [
                 "industry_standard_id",
                 "industry_level1_code",
@@ -604,6 +624,249 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
         .all()
         .all()
     )
+
+
+@pytest.mark.parametrize("cutover", ["2023-05-01", "2024-02-01"])
+def test_industry_cutover_uses_valid_versions_without_backfill(cutover) -> None:
+    start = pd.Timestamp(cutover)
+    retired = start + pd.Timedelta(days=30)
+    resumed = start + pd.Timedelta(days=60)
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["000001"] * 4,
+            "timestamp": pd.Series(
+                [start - pd.Timedelta(days=1), start, retired, resumed],
+                dtype="datetime64[ns]",
+            ),
+        }
+    )
+    for column in (
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        panel[column] = pd.Series(pd.NA, index=panel.index, dtype="string")
+    panel["is_nonfinancial_industry"] = pd.Series(
+        pd.NA, index=panel.index, dtype="boolean"
+    )
+    history = pd.DataFrame(
+        {
+            "source_asset_id": ["000001"] * 3,
+            "timestamp": pd.Series(
+                [start - pd.Timedelta(days=10), start - pd.Timedelta(days=2), start],
+                dtype="datetime64[ns]",
+            ),
+            "industry_standard_id": ["P0207", "P0221", "P0221"],
+            "industry_level1_code": ["A", "C", "B"],
+            "industry_level1_name": ["old", "pre-effective", "current"],
+        }
+    )
+    versions = pd.DataFrame(
+        {
+            "industry_standard_id": ["P0207", "P0221", "P0221", "P0221"],
+            "implement_date": pd.Series(
+                [
+                    pd.Timestamp("2012-10-26"),
+                    pd.Timestamp("2020-01-01"),
+                    start,
+                    resumed,
+                ],
+                dtype="datetime64[ns]",
+            ),
+            "abandon_date": pd.Series(
+                [pd.NaT, pd.Timestamp("2020-01-01"), retired, pd.NaT],
+                dtype="datetime64[ns]",
+            ),
+        }
+    )
+    changes = pd.DataFrame(
+        {
+            "source_asset_id": history["source_asset_id"],
+            "effective_date": history["timestamp"],
+            "announcement_date": history["timestamp"] - pd.Timedelta(days=1),
+            "changed_item": history["industry_standard_id"] + "行业代码",
+            "value_after": history["industry_level1_name"],
+        }
+    )
+    before = [frame.copy(deep=True) for frame in (panel, history, versions)]
+
+    result = _asof_industry(
+        panel,
+        history,
+        industry_sets=None,
+        industry_versions=versions,
+        industry_changes=changes,
+    )
+    assert result["industry_standard_id"].iloc[:2].tolist() == ["CSRC2012", "CAPCO"]
+    assert result["industry_level1_code"].iloc[:2].tolist() == ["A", "B"]
+    assert result["industry_standard_id"].iloc[2:].isna().all()
+    for actual, expected in zip((panel, history, versions), before, strict=True):
+        pd.testing.assert_frame_equal(actual, expected)
+
+    early_only = _asof_industry(
+        panel,
+        history.iloc[:2],
+        industry_sets=None,
+        industry_versions=versions,
+        industry_changes=changes,
+    )
+    assert early_only["industry_standard_id"].tolist() == ["CSRC2012"] * len(panel)
+    missing_versions = _asof_industry(
+        panel, history, industry_sets=None, industry_versions=None
+    )
+    pd.testing.assert_frame_equal(missing_versions, panel)
+    csrc_only = _asof_industry(
+        panel,
+        history.iloc[:1],
+        industry_sets=None,
+        industry_versions=versions.iloc[:1],
+        industry_changes=changes,
+    )
+    assert csrc_only["industry_standard_id"].tolist() == ["CSRC2012"] * len(panel)
+
+
+@pytest.mark.parametrize("provider", ["P0207", "P0221"])
+@pytest.mark.parametrize("missing_name", [None, "event", "announcement", "both"])
+def test_industry_publication_orders_known_events_and_unknown_coverage(
+    provider,
+    missing_name,
+) -> None:
+    dates = pd.to_datetime(
+        [
+            "2023-06-01",
+            "2023-06-02",
+            "2023-06-05",
+            "2023-06-07",
+            "2023-06-08",
+            "2023-06-09",
+        ]
+    ).as_unit("ns")
+    panel = pd.DataFrame({"asset_id": "000001", "timestamp": dates}).astype(
+        {"asset_id": "object"}
+    )
+    for column in (
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        panel[column] = pd.Series(pd.NA, index=panel.index, dtype="string")
+    panel["is_nonfinancial_industry"] = pd.Series(
+        pd.NA, index=panel.index, dtype="boolean"
+    )
+    history = pd.DataFrame(
+        {
+            "source_asset_id": ["000001"] * 4,
+            "timestamp": pd.to_datetime(
+                ["2023-06-01", "2023-06-02", "2023-06-05", "2023-06-09"]
+            ).as_unit("ns"),
+            "industry_standard_id": provider,
+            "industry_level1_code": ["A", "B", "C", "D"],
+            "industry_level1_name": ["old", "late older", "unknown", "newer"],
+        }
+    )
+    versions = pd.DataFrame(
+        {
+            "industry_standard_id": [provider],
+            "implement_date": pd.to_datetime(["2011-01-01"]).as_unit("ns"),
+            "abandon_date": pd.Series([pd.NaT], dtype="datetime64[ns]"),
+        }
+    )
+    changes = pd.DataFrame(
+        {
+            "source_asset_id": history["source_asset_id"],
+            "effective_date": history["timestamp"],
+            "announcement_date": pd.to_datetime(
+                ["2023-05-31", "2023-06-07", None, "2023-06-08"]
+            ).as_unit("ns"),
+            "changed_item": provider + "行业代码",
+            "value_after": history["industry_level1_name"],
+        }
+    )
+    if missing_name is not None:
+        changes.loc[2, "announcement_date"] = pd.Timestamp("2023-06-04")
+        if missing_name in {"event", "both"}:
+            history.loc[2, "industry_level1_name"] = pd.NA
+        if missing_name in {"announcement", "both"}:
+            changes.loc[2, "value_after"] = pd.NA
+    dictionary = pd.DataFrame(
+        {
+            "industry_standard_id": provider,
+            "industry_code": ["A", "B", "D"],
+            "industry_name": ["old", "late older", "newer"],
+            "parent_industry_code": "",
+            "industry_level": "1",
+        }
+    )
+    before = [frame.copy(deep=True) for frame in (panel, history, versions, changes)]
+    result = _asof_industry(
+        panel,
+        history,
+        industry_sets=dictionary,
+        industry_versions=versions,
+        industry_changes=changes,
+    )
+    assert result["industry_level1_code"].fillna("NULL").tolist() == [
+        "A",
+        "A",
+        "NULL",
+        "NULL",
+        "NULL",
+        "D",
+    ]
+    industry_columns = [
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+        "is_nonfinancial_industry",
+    ]
+    assert result.loc[2:4, industry_columns].isna().all().all()
+    pd.testing.assert_frame_equal(
+        result[["asset_id", "timestamp"]], panel[["asset_id", "timestamp"]]
+    )
+    for actual, expected in zip(
+        (panel, history, versions, changes), before, strict=True
+    ):
+        pd.testing.assert_frame_equal(actual, expected)
+
+    known_future = _asof_industry(
+        panel,
+        history.iloc[:2],
+        industry_sets=None,
+        industry_versions=versions,
+        industry_changes=changes.iloc[:2],
+    )
+    assert known_future["industry_level1_code"].tolist() == [
+        "A",
+        "A",
+        "A",
+        "A",
+        "B",
+        "B",
+    ]
+    missing_initial = _asof_industry(
+        panel,
+        history,
+        industry_sets=None,
+        industry_versions=versions,
+        industry_changes=changes.iloc[0:0],
+    )
+    assert missing_initial[industry_columns].isna().all().all()
+    wrong_item = _asof_industry(
+        panel,
+        history,
+        industry_sets=None,
+        industry_versions=versions,
+        industry_changes=changes.assign(changed_item=provider),
+    )
+    assert wrong_item[industry_columns].isna().all().all()
+    wrong_value = _asof_industry(
+        panel,
+        history.iloc[:1],
+        industry_sets=None,
+        industry_versions=versions,
+        industry_changes=changes.iloc[:1].assign(value_after="different native name"),
+    )
+    assert wrong_value[industry_columns].isna().all().all()
 
 
 def test_industry_version_mask_preserves_interval_and_positional_boundaries():
@@ -774,3 +1037,150 @@ def test_special_treatment_shared_availability_and_repeated_state(reverse):
     actual = _apply_special_treatment(panel, history)
     assert actual["is_st"].tolist() == [False, True, False]
     assert actual["is_pt"].tolist() == [False, False, True]
+
+
+def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
+    from quant_research_platform.markets.implementations.a_share.processed import panels
+
+    dates = pd.DatetimeIndex(
+        ["2023-01-02", "2023-01-03", "2023-01-05", "2023-01-11", "2023-01-12"],
+        dtype="datetime64[ns]",
+    )
+    panel = pd.DataFrame({"asset_id": "000001", "timestamp": dates})
+    for column in (
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        panel[column] = pd.Series(pd.NA, index=panel.index, dtype="string")
+    panel["is_nonfinancial_industry"] = pd.Series(
+        pd.NA, index=panel.index, dtype="boolean"
+    )
+    history = pd.DataFrame(
+        {
+            "source_asset_id": ["000001", "000001"],
+            "timestamp": pd.to_datetime(["2023-01-01", "2023-01-05"]),
+            "industry_standard_id": ["CSRC2012", "CAPCO"],
+            "industry_level1_code": ["A01", "B01"],
+            "industry_level1_name": ["old leaf", "new leaf"],
+        }
+    )
+    changes = pd.DataFrame(
+        {
+            "source_asset_id": ["000001", "000001"],
+            "changed_item": ["P0207行业代码", "P0221行业代码"],
+            "effective_date": history["timestamp"],
+            "announcement_date": pd.to_datetime(["2023-01-01", None]),
+            "value_after": history["industry_level1_name"],
+        }
+    )
+    versions = pd.DataFrame(
+        {
+            "industry_standard_id": ["CSRC2012", "CAPCO"],
+            "implement_date": pd.to_datetime(["2012-10-26", "2023-01-03"]),
+            "abandon_date": pd.Series([pd.NaT, pd.NaT], dtype="datetime64[ns]"),
+        }
+    )
+    dictionary = pd.DataFrame(
+        {
+            "industry_standard_id": ["CSRC2012"] * 2 + ["CAPCO"] * 5,
+            "industry_code": ["A", "A01", "B", "B01", "C", "CA", "C01"],
+            "industry_name": [
+                "old root",
+                "old leaf",
+                "new root",
+                "new leaf",
+                "latest root",
+                "manufacturing major",
+                "latest leaf",
+            ],
+            "parent_industry_code": ["", "A", "", "B", "", "C", "CA"],
+            "industry_level": ["1", "2", "1", "3", "1", "2", "3"],
+        }
+    )
+    stocks = panels._canonical_stock_master(
+        pd.DataFrame(
+            {
+                "source_asset_id": ["000001"],
+                "listing_date": pd.to_datetime(["2010-01-01"]),
+                "market_type": [1],
+            }
+        )
+    )
+    snapshots = pd.DataFrame(
+        {
+            "source_asset_id": ["000001", "000001"],
+            "timestamp": pd.to_datetime(["2023-01-11", "2023-01-12"]),
+            "observation_date": pd.to_datetime(["2023-01-04", "2023-01-07"]),
+            "industry_standard_id": ["CAPCO", "CAPCO"],
+            "industry_category_code": ["B", "C"],
+            "industry_major_code": ["", "CA"],
+            "industry_code": ["01", "01"],
+        }
+    )
+    before = snapshots.copy(deep=True)
+    options = dict(
+        industry_sets=dictionary,
+        industry_versions=versions,
+        industry_changes=changes,
+        stock_master=stocks,
+    )
+    result = panels._asof_industry(
+        panel, history, industry_snapshots=snapshots, **options
+    )
+    assert result["industry_level1_code"].fillna("unknown").tolist() == [
+        "A",
+        "A",
+        "unknown",
+        "unknown",
+        "C",
+    ]
+    assert result["industry_standard_id"].fillna("unknown").tolist() == [
+        "CSRC2012",
+        "CSRC2012",
+        "unknown",
+        "unknown",
+        "CAPCO",
+    ]
+    earlier = panels._asof_industry(
+        panel.iloc[:4], history, industry_snapshots=snapshots.iloc[:1], **options
+    )
+    pd.testing.assert_frame_equal(result.iloc[:4], earlier)
+    pd.testing.assert_frame_equal(snapshots, before)
+    conflicting = snapshots.iloc[[1]].assign(
+        industry_category_code="B", industry_major_code=""
+    )
+    with pytest.raises(ValueError, match="industry_history_conflict"):
+        panels._asof_industry(
+            panel,
+            history,
+            industry_snapshots=pd.concat([snapshots, conflicting]),
+            **options,
+        )
+
+    duplicate = snapshots.iloc[[1]].assign(timestamp=pd.Timestamp("2023-01-11"))
+    repeated = panels._asof_industry(
+        panel,
+        history,
+        industry_snapshots=pd.concat([snapshots, duplicate], ignore_index=True),
+        **options,
+    )
+    assert repeated.loc[
+        repeated.timestamp.eq(pd.Timestamp("2023-01-11")), "industry_level1_code"
+    ].tolist() == ["C"]
+    same_parent_leaf = dictionary.iloc[[-1]].assign(
+        industry_code="C02", industry_name="other leaf"
+    )
+    same_parent = snapshots.iloc[[1]].assign(industry_code="02")
+    with pytest.raises(ValueError, match="industry_history_conflict"):
+        panels._asof_industry(
+            panel,
+            history,
+            industry_snapshots=pd.concat([snapshots, same_parent], ignore_index=True),
+            **{
+                **options,
+                "industry_sets": pd.concat(
+                    [dictionary, same_parent_leaf], ignore_index=True
+                ),
+            },
+        )

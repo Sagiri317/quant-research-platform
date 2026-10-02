@@ -91,7 +91,7 @@ def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
                 asset_id="btc_usdt",
                 funding_events=(),
                 funding_forecasts=(FundingForecast(0, 1_000_000_000, ()),),
-                calibrations={"fold": {"buy": calibration, "sell": calibration}},
+                calibrations={"fold": calibration},
                 on_fill=fills.append,
             )
         finally:

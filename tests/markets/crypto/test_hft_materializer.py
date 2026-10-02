@@ -173,8 +173,8 @@ def test_panel_transform_waits_for_reservation_and_closes_source(
                     assert closed == ["transform", "source"]
                 else:
                     emitted = 0
-                    while True:
-                        with policy.lease("test.panel.output", bound) as lease:
+                    with policy.lease("test.panel.output", bound) as lease:
+                        while True:
                             try:
                                 owned = output.send(lease)
                             except StopIteration:
@@ -183,16 +183,82 @@ def test_panel_transform_waits_for_reservation_and_closes_source(
                             pd.testing.assert_frame_equal(owned.value, frame)
                             owned = None
                             emitted += 1
-                        try:
-                            bound = output.send(None)
-                        except StopIteration:
-                            break
+                            assert output.send(None) == (bound, lease)
                     assert emitted == 2 - len(empty_symbols)
                     assert closed.count("transform") == closed.count("source") == 2
                 assert policy.used_memory_bytes == baseline
             finally:
                 output.close()
     assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("exit_mode", ("exhaust", "close_frame", "close_request"))
+def test_event_producer_keeps_common_symbol_inputs_leased_until_close(
+    exit_mode: str,
+) -> None:
+    columns = ("timestamp", "asset_id", "segment_id", "value")
+    timestamps = pd.date_range("2024-01-01", periods=3, freq="100ms")
+    closed = []
+    pulled = []
+    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
+
+    def frames(symbol):
+        try:
+            pulled.append(symbol)
+            yield pd.DataFrame(
+                [
+                    (stamp, symbol, "source", index)
+                    for index, stamp in enumerate(timestamps)
+                ],
+                columns=columns,
+            )
+        finally:
+            closed.append((symbol, lease.active))
+
+    common = producer._common_symbol_panel_frames(
+        {"BTCUSDT": frames("btc_usdt"), "ETHUSDT": frames("eth_usdt")},
+        columns=columns,
+        batch_rows=2,
+    )
+    output = producer._event_frame_producer(
+        common, columns=columns, producer_bound=256 * 1024
+    )
+    with runtime_resource_policy_scope(policy):
+        bound = next(output)
+        assert pulled == []
+        with policy.lease("test.event.output", bound) as lease:
+            try:
+                first = output.send(lease)
+                saved = first.value.copy(deep=True)
+                assert first.lease is lease
+                assert lease.reserved_bytes == bound
+                assert len(first.value) == 2
+                if exit_mode == "close_frame":
+                    output.close()
+                else:
+                    assert output.send(None) == (bound, lease)
+                    if exit_mode == "close_request":
+                        output.close()
+                    else:
+                        emitted = 1
+                        while True:
+                            try:
+                                owned = output.send(lease)
+                            except StopIteration:
+                                break
+                            assert owned.lease is lease
+                            assert lease.reserved_bytes == bound
+                            emitted += 1
+                            del owned
+                            assert output.send(None) == (bound, lease)
+                        assert emitted == 3
+                pd.testing.assert_frame_equal(first.value, saved)
+            finally:
+                first = None
+                output.close()
+        assert policy.used_memory_bytes == 0
+    assert sorted(closed) == [("btc_usdt", True), ("eth_usdt", True)]
+    assert policy.state == "CLOSED"
 
 
 @pytest.mark.parametrize("batch_rows", (2, 4, 8))
@@ -253,6 +319,59 @@ def test_common_panel_gaps_start_new_segments_without_inventing_rows(batch_rows)
         )
         assert labels.future_mid_return_100ms.isna().all()
         assert joined.loc[joined.asset_id.eq(asset), "segment_id"].nunique() == 2
+
+
+def test_panel_batch_cap_preserves_persisted_rows(tmp_path, monkeypatch):
+    from unittest.mock import patch
+
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        research_profile,
+    )
+    from quant_research_platform.workflows import research
+
+    raw_root = tmp_path / "raw"
+    write_binance_hft_run(raw_root)
+    profile = research_profile(CRYPTO_PROFILE_ID)
+    panels = []
+    for limit in (producer._PANEL_MAX_BATCH_ROWS, 3):
+        monkeypatch.setattr(producer, "_PANEL_MAX_BATCH_ROWS", limit)
+        layout = StorageLayout(tmp_path / str(limit))
+        policy = capture_test_policy(available_memory_bytes=2 * 1024**3)
+        with (
+            runtime_resource_policy_scope(policy),
+            patch.object(
+                producer, "iter_panel_frames", wraps=producer.iter_panel_frames
+            ) as symbol_frames,
+        ):
+            result = research.data_materialize(
+                profile=profile,
+                layout=layout,
+                raw_root=raw_root,
+                start_date="1970-01-01T00:00:00",
+                end_date="1970-01-01T00:00:06",
+                data_ids=(HFT_PANEL_DATA_ID,),
+            )
+            assert result["status"] == "COMPLETE", result["target_results"]
+            assert symbol_frames.call_count == 2
+            assert {
+                call.kwargs["batch_rows"] for call in symbol_frames.call_args_list
+            } == {limit // 2}
+            target = result["target_results"][0]
+            assert target["status"] == "BUILT"
+            root = research._target_instance_root(
+                profile, layout, HFT_PANEL_DATA_ID, target["instance_identity"]
+            )
+            panel = read_dataset(root, resource_policy=policy).sort_values(
+                ["timestamp", "asset_id"], ignore_index=True
+            )
+            assert len(panel) == 122
+            assert not panel.duplicated(["timestamp", "asset_id"]).any()
+            assert panel.groupby("timestamp").asset_id.nunique().eq(2).all()
+            panels.append(panel)
+            assert policy.used_memory_bytes == 0
+        assert policy.state == "CLOSED"
+    pd.testing.assert_frame_equal(panels[0], panels[1], check_exact=True)
 
 
 def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
@@ -403,11 +522,11 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
     first_record = read_research_run_record(layout.research_run_path(first["run_id"]))
     changed = deepcopy(configuration)
     changed["research_plan"]["initial_capital"] = 2000.0
-    changed["research_plan"]["final_holdout"] = {
+    changed["research_plan"]["test"] = {
         "start": "1970-01-01T00:00:08",
         "end": "1970-01-01T00:00:09",
     }
-    changed["windows"]["holdout"] = changed["research_plan"]["final_holdout"].copy()
+    changed["windows"]["holdout"] = changed["research_plan"]["test"].copy()
     second = research.research_run(**request, research_plan=changed)
     second_record = read_research_run_record(layout.research_run_path(second["run_id"]))
     assert first_record.protocol_identity != second_record.protocol_identity

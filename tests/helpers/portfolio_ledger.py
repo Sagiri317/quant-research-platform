@@ -56,7 +56,7 @@ def session_frame(batch):
     return frame
 
 
-def write_test_sessions(root, *, envelope, ledger_chunks):
+def write_test_sessions(root, *, envelope, ledger_chunks, final_calibration=None):
     def produce(emit):
         for sequence, frame in enumerate(ledger_chunks):
             emit(
@@ -69,4 +69,6 @@ def write_test_sessions(root, *, envelope, ledger_chunks):
                 )
             )
 
-    return write_portfolio_ledger_artifact(root, envelope=envelope, produce=produce)
+    return write_portfolio_ledger_artifact(
+        root, envelope=envelope, produce=produce, final_calibration=final_calibration
+    )

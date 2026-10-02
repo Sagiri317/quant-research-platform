@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
@@ -19,10 +20,10 @@ from quant_research_platform.contracts.business_manifest import (
 )
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.evaluations import EvaluationSpec
-from quant_research_platform.contracts.experiments import ExperimentFold
+from quant_research_platform.contracts.experiments import _model_inference_blocker
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
+from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import unmeasured_operation_evidence
 from quant_research_platform.contracts.time import TimeWindow
@@ -30,22 +31,12 @@ from quant_research_platform.research import statistics_production
 from quant_research_platform.research.evaluations.runner import (
     build_evaluation_result_from_research_dataset,
 )
-from quant_research_platform.research.models.persisted import (
-    read_quarterly_model_artifact,
-    write_quarterly_model_artifact,
-)
-from quant_research_platform.research.models.production import (
-    QuarterlyModelResult,
-    _fit_selected_model_result,
-)
-from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics_production import (
     build_a_share_statistics_tables,
 )
 from quant_research_platform.runtime.resources import (
-    OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import write_dataset
@@ -59,169 +50,73 @@ from tests.helpers.research_configuration import (
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.workflow_test_support import (
-    _selection_metadata,
-    _trial_reference,
-    fixture_quarterly_results,
-    fixture_refit_reference,
-    fixture_validation_coverage,
+    shared_model_case,
+    shared_model_protocol,
+    shared_model_rows,
 )
 
 
 def _statistics_models(layout, spec, protocol, window):
     factor = spec.factor_columns[0]
+    configuration = research_configuration(small_models=True)
     models = tuple(
         ModelSpec(
-            model_id=f"{spec.data_id}_{algorithm}",
-            model_algorithm=algorithm,
+            model_id=f"{spec.data_id}_{item['model_algorithm']}",
+            model_algorithm=item["model_algorithm"],
             input_factor_columns=(factor,),
             label_column=a_share.PRIMARY_LABEL_COLUMN,
+            hyperparameters=item["hyperparameters"],
         )
-        for algorithm in A_SHARE_MODEL_ALGORITHMS
+        for item in configuration["models"]
     )
+    development_start = pd.Timestamp(window.start).replace(month=1, day=1)
+    development_end = pd.Timestamp(window.end).date().isoformat()
+    model_protocol = shared_model_protocol(models, development_end=development_end)
+    model_protocol.update(
+        scenario_id=spec.data_id,
+        root_seed=protocol["root_seed"],
+        development_window={
+            "start": development_start.date().isoformat(),
+            "end": development_end,
+        },
+        model_chronology={
+            "scoring_lookback_months": 12,
+            "warmup_window": {
+                "start": (development_start - pd.DateOffset(years=1))
+                .date()
+                .isoformat(),
+                "end": (development_start - pd.Timedelta(days=1)).date().isoformat(),
+            },
+        },
+    )
+    protocol.update(
+        scenario_id=spec.data_id,
+        selection_group="global",
+        development_window=model_protocol["development_window"],
+        research_configuration={
+            **configuration,
+            "evaluation": {
+                "factors": list(spec.factor_columns),
+                "labels": [a_share.PRIMARY_LABEL_COLUMN],
+                "primary_label": a_share.PRIMARY_LABEL_COLUMN,
+            },
+            "comparison_model_id": models[0].model_id,
+            "models": model_protocol["research_configuration"]["models"],
+        },
+    )
+    from quant_research_platform.research.models.supervised import preflight_model_specs
+
     preflight_model_specs(models)
-    families = tuple(f"{spec.data_id}_{model.model_algorithm}" for model in models)
-    protocol["research_configuration"] = {
-        **research_configuration(),
-        "evaluation": {
-            "factors": list(spec.factor_columns),
-            "labels": [a_share.PRIMARY_LABEL_COLUMN],
-            "primary_label": a_share.PRIMARY_LABEL_COLUMN,
-        },
-        "comparison_model_id": families[0],
-        "models": [
-            {"model_id": family, "hyperparameters": dict(model.hyperparameters)}
-            for family, model in zip(families, models, strict=True)
-        ],
-    }
-    year = pd.Timestamp(window.start).year
-    training_calendar = pd.bdate_range(f"{year - 1}-01-02", periods=53)
-    rng = np.random.default_rng(101)
-    training = pd.DataFrame(
-        {
-            "market_id": "a_share",
-            "asset_id": [f"asset_{i}" for _ in range(32) for i in range(6)],
-            "timestamp": training_calendar[:32].repeat(6),
-            "eligible": True,
-            factor: rng.normal(size=192),
-            "forward_return_20d_available_at": training_calendar[21:].repeat(6),
-        }
-    )
-    training[a_share.PRIMARY_LABEL_COLUMN] = training[factor] * 0.3 + rng.normal(
-        scale=0.01, size=192
-    )
-
-    def chunks(columns, **_kwargs):
-        yield training.loc[:, list(columns)]
-
-    def fitted():
-        for period in pd.period_range(window.start, window.end, freq="Q"):
-            fold = ExperimentFold(
-                fold_id=f"{period.year}-q{period.quarter}",
-                train=TimeWindow(f"{year - 5}-01-01", f"{year - 2}-12-31"),
-                validation=TimeWindow(f"{year - 1}-01-01", f"{year - 1}-12-31"),
-                development_test=TimeWindow(
-                    period.start_time.date().isoformat(),
-                    period.end_time.date().isoformat(),
-                ),
-            )
-            references = tuple(
-                _trial_reference(
-                    layout,
-                    fold,
-                    family_id=family,
-                    model_id=model.model_id,
-                    dataset_id=spec.data_id,
-                    protocol=protocol,
-                    model_spec=model,
-                    root_seed=42,
-                    validation_specs=models,
-                )
-                for family, model in zip(families, models, strict=True)
-            )
-            selection = _selection_metadata(
-                family_id=families[0], model_id=models[0].model_id, columns=(factor,)
-            )
-            selection.update(
-                common_validation_coverage=fixture_validation_coverage(fold, models),
-                validation_start=f"{year - 1}-01-01",
-                validation_end=f"{year - 1}-12-31",
-                candidate_family_ids=list(families),
-                tie_break_order=list(families),
-                families=[
-                    {
-                        "family_id": family,
-                        "config_tie_break_order": [model.model_id],
-                        "selected_config_id": model.model_id,
-                        "trial_ledger_semantic_identity": reference[
-                            "semantic_identity"
-                        ],
-                    }
-                    for family, model, reference in zip(
-                        families, models, references, strict=True
-                    )
-                ],
-            )
-            for family, model, reference in zip(
-                families, models, references, strict=True
-            ):
-                result, lease = _fit_selected_model_result(
-                    training_counts={},
-                    dataset_spec=spec,
-                    selected_spec=model,
-                    candidate_parameters=dict(model.hyperparameters),
-                    chunks=chunks,
-                    fitting_cutoff=f"{year - 1}-12-31",
-                    quarter_id=str(period),
-                    root_seed=42,
-                )
-                owned = OwnedValue(
-                    QuarterlyModelResult(
-                        fold,
-                        model.model_id,
-                        result,
-                        family,
-                        selection,
-                        (
-                            reference,
-                            fixture_refit_reference(layout, reference, result.metadata),
-                        ),
-                    ),
-                    lease,
-                )
-                result = None
-                try:
-                    yield owned
-                finally:
-                    if owned.lease.active:
-                        owned.release(owner="research.model.artifact")
-
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="model-artifact",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": str(pd.Timestamp(window.start).date()),
-            "end": str(pd.Timestamp(window.end).date()),
-            "access": "development",
-        },
-        upstream_identities={spec.data_id: "d" * 64},
-        semantic_metadata={
-            "target_contract": {
-                "protocol": protocol,
-                "model_specs": [model_spec_payload(model) for model in models],
-            }
-        },
-    )
     with runtime_resource_policy_scope():
-        root = write_quarterly_model_artifact(
-            layout.semantic_artifact_root("a_share", "model-artifact"),
-            model_id="model-artifact",
-            envelope=envelope,
-            quarterly_results=fixture_quarterly_results(fitted()),
-            trial_layout=layout,
+        case = shared_model_case(
+            layout.project_root,
+            specs=models,
+            dataset=spec,
+            protocol=model_protocol,
+            development_end=development_end,
+            frame=shared_model_rows(models, development_end=development_end),
         )
-        return read_quarterly_model_artifact(root, trial_layout=layout)
+        return case.artifact
 
 
 class _PredictionLookup:
@@ -318,7 +213,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     write_dataset(layout.research_dataset_root("a_share", "pv_all"), frame, spec=spec)
     model = _statistics_models(layout, spec, protocol, TimeWindow(dates[0], cutoff))
     envelope = build_business_manifest_envelope(
-        logical_artifact_id="pv_all_statistics",
+        logical_artifact_id="pv_all_global_statistics",
         schema_identity="a" * 64,
         protocol_or_spec_identity="b" * 64,
         software_identity="c" * 64,
@@ -341,10 +236,13 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             time_window=TimeWindow(dates[0], cutoff),
             prediction_lookup=Lookup(),
             resource_policy=policy,
+            global_statistics=None,
         )
         try:
+            global_tables = {name: table.copy() for name, table in owned.value.items()}
+            assert global_tables["model_group_comparison"].empty
             root = write_statistics_artifact(
-                layout.semantic_artifact_root("a_share", "pv_all_statistics"),
+                layout.semantic_artifact_root("a_share", "pv_all_global_statistics"),
                 envelope=envelope,
                 tables=owned.value,
             )
@@ -358,6 +256,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         with artifact.table("model_losses.parquet") as table:
             assert len(table) == 64 * 8
             assert table.common_date.eq(1).all()
+            assert table.asset_coverage_id.eq(canonical_json_hash(sorted(assets))).all()
             losses = (
                 table.pivot(index="timestamp", columns="family_id", values="loss")
                 .loc[:, list(families)]
@@ -377,7 +276,69 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         )
         np.testing.assert_allclose(losses, expected, rtol=0, atol=1e-14)
         benchmark, challengers = losses[families[0]], losses.loc[:, list(families[1:])]
+        blocked_reason = "global_development_selection_reuses_validation"
+        for member in ("prediction_diagnostics.parquet", "model_comparison.parquet"):
+            with artifact.table(member) as summary:
+                assert summary.observation_count.eq(64).all()
+                assert summary.status.eq("UNDEFINED").all()
+                assert summary.reason.eq(blocked_reason).all()
+                assert summary["mean"].notna().all()
+                assert (
+                    summary.loc[
+                        :,
+                        [
+                            "standard_error",
+                            "t_statistic",
+                            "p_value",
+                            "ci_lower",
+                            "ci_upper",
+                            "bootstrap_lower",
+                            "bootstrap_upper",
+                        ],
+                    ]
+                    .isna()
+                    .all()
+                    .all()
+                )
         with artifact.table("model_reality_checks.parquet") as checks:
+            assert checks.status.eq("UNDEFINED").all()
+            assert checks.reason.eq(blocked_reason).all()
+            assert checks.value.isna().all()
+            assert checks.observation_count.eq(64).all()
+        quarterly_protocol = {**protocol, "selection_group": "quarterly"}
+        paired_envelope = build_business_manifest_envelope(
+            **{
+                key: value
+                for key, value in envelope.payload().items()
+                if key not in {"instance_identity", "status", "logical_artifact_id"}
+            },
+            logical_artifact_id="pv_all_quarterly_statistics",
+        )
+        paired_owned = build_a_share_statistics_tables(
+            layout=layout,
+            dataset_catalog=ResearchDatasetCatalog((spec,)),
+            dataset_id="pv_all",
+            prediction_id="quarterly_prediction",
+            persisted_model=model,
+            protocol_manifest=quarterly_protocol,
+            time_window=TimeWindow(dates[0], cutoff),
+            prediction_lookup=Lookup(),
+            resource_policy=policy,
+            global_statistics=artifact,
+        )
+        try:
+            quarterly_losses = paired_owned.value["model_losses"].copy()
+            paired_root = write_statistics_artifact(
+                layout.semantic_artifact_root("a_share", "pv_all_quarterly_statistics"),
+                envelope=paired_envelope,
+                tables=paired_owned.value,
+            )
+        finally:
+            paired_owned.release(owner="research.statistics.output")
+        paired_artifact = read_statistics_artifact(
+            paired_root, expected_identity=paired_envelope.instance_identity
+        )
+        with paired_artifact.table("model_reality_checks.parquet") as checks:
             assert checks.status.eq("DEFINED").all()
             assert checks.observation_count.eq(64).all()
             for test_id, constructor in (
@@ -434,6 +395,67 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                 assert row.mean == pytest.approx(
                     float((losses[families[0]] - losses[row.prediction_id]).mean())
                 )
+        with paired_artifact.table("model_group_comparison.parquet") as paired:
+            assert set(paired.family_id) == set(families)
+            assert paired.observation_count.eq(64).all()
+            np.testing.assert_allclose(paired.mean_difference, 0.0, rtol=0, atol=1e-14)
+            assert paired.status.eq("UNDEFINED").all()
+            assert paired.reason.eq(
+                "global_development_selection_reuses_validation"
+            ).all()
+            assert paired.bootstrap_reason.eq(blocked_reason).all()
+        if not full_factor_history:
+            for mutation in ("key", "count", "asset_identity", "family"):
+                malformed = {
+                    name: table.copy() for name, table in global_tables.items()
+                }
+                losses_table = malformed["model_losses"]
+                if mutation == "key":
+                    losses_table.loc[0, "timestamp"] += pd.Timedelta(days=1000)
+                elif mutation == "count":
+                    losses_table.loc[0, "observation_count"] += 1
+                elif mutation == "family":
+                    malformed["model_losses"] = losses_table.loc[
+                        losses_table.family_id.ne(families[-1])
+                    ].copy()
+                else:
+                    losses_table.loc[0, "asset_coverage_id"] = canonical_json_hash(
+                        sorted([*assets[:-1], "different_asset"])
+                    )
+                mutated_envelope = build_business_manifest_envelope(
+                    **{
+                        key: value
+                        for key, value in envelope.payload().items()
+                        if key
+                        not in {"instance_identity", "status", "logical_artifact_id"}
+                    },
+                    logical_artifact_id=f"coverage_{mutation}",
+                )
+                mutated_root = write_statistics_artifact(
+                    tmp_path / f"coverage_{mutation}",
+                    envelope=mutated_envelope,
+                    tables=malformed,
+                )
+                mutated_artifact = read_statistics_artifact(
+                    mutated_root, expected_identity=mutated_envelope.instance_identity
+                )
+                with pytest.raises(
+                    ValueError,
+                    match="model_group_comparison_family_incomplete"
+                    if mutation == "family"
+                    else "model_group_comparison_coverage_invalid",
+                ):
+                    statistics_production._paired_group_rankic(
+                        quarterly_losses.loc[
+                            quarterly_losses.family_id.ne(families[-1])
+                        ].copy()
+                        if mutation == "family"
+                        else quarterly_losses,
+                        global_statistics=mutated_artifact,
+                        selection_group="quarterly",
+                        family_ids=families,
+                        protocol_manifest=quarterly_protocol,
+                    )
         assert policy.used_memory_bytes == 0
     from quant_research_platform.artifacts.research import (
         load_a_share_run_evidence,
@@ -461,15 +483,15 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         protocol_identity=canonical_json_hash(protocol),
         research_window=envelope.research_window,
         software_identity="c" * 64,
-        terminal_targets=("pv_all_statistics",),
+        terminal_targets=("pv_all_global_statistics",),
         target_results=(
             ResearchRunTargetResult(
-                target_id="pv_all_statistics",
+                target_id="pv_all_global_statistics",
                 producer_kind=ProducerKind.STATISTIC,
                 status=TargetStatus.BUILT,
                 instance_identity=envelope.instance_identity,
                 schema_identity=envelope.schema_identity,
-                artifact_root="data/artifacts/a_share/pv_all_statistics",
+                artifact_root="data/artifacts/a_share/pv_all_global_statistics",
             ),
         ),
         status=RunStatus.COMPLETE,
@@ -486,7 +508,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             layout=layout,
             record=record,
             report_lease=report_lease,
-            quarterly_selections={},
+            selections=model.selections,
         )
         report = build_a_share_report(record=record, evidence=evidence)
         projected = deepcopy(evidence)
@@ -512,11 +534,19 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         assert unavailable["sections"]["risk"]["status"] == "BLOCKED"
         assert unavailable["report_status"] == "BLOCKED"
         assert unavailable["source_run_status"] == "COMPLETE"
-        actual = report["sections"]["OOS prediction"]["reality_checks"]
+        actual = report["sections"]["OOS prediction"]["global"]["reality_checks"]
         assert len(actual) == 26 and all(
-            row["status"] == "DEFINED" and row["observation_count"] == 64
+            row["status"] == "UNDEFINED"
+            and row["reason"] == blocked_reason
+            and row["observation_count"] == 64
             for row in actual
         )
+        assert report["sections"]["OOS prediction"]["global"][
+            "inference_qualification"
+        ] == {"status": "UNDEFINED", "reason": blocked_reason}
+        assert report["sections"]["OOS prediction"]["quarterly"][
+            "inference_qualification"
+        ] == {"status": "ELIGIBLE", "reason": None}
         source_identity = canonical_json_hash(record.payload())
         contract = {
             "schema_id": "qrp-a-share-research-report",
@@ -543,7 +573,10 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         saved_report = read_research_report_artifact(
             report_root, expected_identity=report_envelope.instance_identity
         )
-        assert saved_report["sections"]["OOS prediction"]["reality_checks"] == actual
+        assert (
+            saved_report["sections"]["OOS prediction"]["global"]["reality_checks"]
+            == actual
+        )
     assert report_policy.used_memory_bytes == 0
 
 
@@ -679,6 +712,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
                 time_window=TimeWindow(dates[0], cutoff),
                 prediction_lookup=_PredictionLookup(),
                 resource_policy=policy,
+                global_statistics=None,
             )
             try:
                 outputs.append(
@@ -705,10 +739,11 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     assert set(factors["missing_hypothesis_count"]) == {len(PV25_FACTORS) - 2}
     prediction = outputs[0]["prediction_diagnostics"].iloc[0]
     assert prediction["observation_count"] == 20
-    assert prediction["status"] == "DEFINED"
+    assert prediction["status"] == "UNDEFINED"
+    assert prediction["reason"] == "global_development_selection_reuses_validation"
     assert prediction["mean"] == pytest.approx(0.2, abs=1e-15)
     assert prediction["bootstrap_seed"] == derive_seed(
-        42, "a_share_statistics_bootstrap", "pv_all", "prediction"
+        42, "a_share_statistics_bootstrap", "stats_demo", "prediction"
     )
     fmb = outputs[0]["fama_macbeth"]
     assert {"single:" + CORE6_FACTORS[0], "core_multifactor"}.issubset(
@@ -717,14 +752,15 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     assert "intercept" in set(fmb["coefficient_id"])
     assert {0, 20}.issubset(set(fmb["period_count"]))
     trials = outputs[0]["model_trials"]
-    assert trials.loc[0, ["quarter_id", "family_id", "config_id"]].tolist() == [
-        "2023Q1",
-        "stats_demo_equal_weight_rank_ensemble",
-        "stats_demo_equal_weight_rank_ensemble",
-    ]
-    assert trials.loc[0, "selection_status"] == "CHAMPION"
+    assert trials.selection_group.eq("global").all()
+    assert trials.decision_id.eq("final").all()
+    assert set(trials.family_id) == {
+        f"stats_demo_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS
+    }
+    assert (trials.selection_status == "CHAMPION").sum() == 1
+    assert set(trials.selection_status) == {"CHAMPION", "FAMILY_WINNER"}
     assert set(outputs[0]["robustness"]["reason"]) == {
-        "bootstrap_block_exceeds_common_observations",
+        "global_development_selection_reuses_validation",
     }
     envelope = build_business_manifest_envelope(
         logical_artifact_id="stats_demo_statistics",
@@ -761,6 +797,8 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         "model_comparison.parquet",
         "model_reality_checks.parquet",
     }
+    with artifact.table("model_group_comparison.parquet") as table:
+        assert table.empty
     for member in members:
         with artifact.table(member) as table:
             assert not table.empty
@@ -840,7 +878,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     )
 
     def wrong_schema(staging):
-        for member in members:
+        for member in (*members, "model_group_comparison.parquet"):
             if member == "model_losses.parquet":
                 pq.write_table(
                     pa.table({"wrong": [1]}), native_filesystem_path(staging / member)
@@ -889,3 +927,132 @@ def test_constant_risk_and_sharpe_have_distinct_definition_status(value):
         )
     # Hand-calculated sample variance for [-1, 0, 1] is 1.
     assert return_standard_deviation([-1.0, 0.0, 1.0]) == 1.0
+
+
+@pytest.mark.parametrize(
+    "access,group",
+    [
+        ("development", "global"),
+        ("development", "quarterly"),
+        ("holdout", "global"),
+        ("holdout", "quarterly"),
+    ],
+)
+def test_model_inference_uses_selection_information_before_calling_backends(
+    monkeypatch, access, group
+):
+    rng = np.random.default_rng(22019)
+    values = pd.DataFrame(
+        {
+            "timestamp": pd.bdate_range("2023-01-02", periods=64),
+            "baseline": rng.normal(0.01, 0.04, 64),
+            "challenger": rng.normal(0.02, 0.04, 64),
+        }
+    )
+    blocker = _model_inference_blocker(access_window=access, selection_groups=(group,))
+    if blocker is not None:
+
+        def forbidden(*args, **kwargs):
+            pytest.fail("retrospective selection must not invoke inference backends")
+
+        for name in (
+            "hac_mean",
+            "stationary_bootstrap_mean_ci",
+            "spa_reality_check",
+            "stepm_superior_models",
+            "model_confidence_set",
+        ):
+            monkeypatch.setattr(statistics_production, name, forbidden)
+    with runtime_resource_policy_scope():
+        summary = statistics_production._prediction_summary(
+            values.rename(columns={"baseline": "__prediction_alpha__"}),
+            prediction_id="prediction",
+            inference_blocker=blocker,
+            max_lags=2,
+            block_size=4,
+            repetitions=100,
+            seed=17,
+        )
+        comparison, checks, robustness = statistics_production._model_comparison(
+            values,
+            family_ids=("baseline", "challenger"),
+            benchmark_id="baseline",
+            access_window=access,
+            inference_blocker=blocker,
+            max_lags=2,
+            block_size=4,
+            repetitions=100,
+            root_seed=17,
+            dataset_id="fixture",
+        )
+    assert summary["mean"].iloc[0] == pytest.approx(values.baseline.mean())
+    assert comparison["mean"].iloc[0] == pytest.approx(
+        (values.challenger - values.baseline).mean()
+    )
+    if blocker is not None:
+        assert summary.status.eq("UNDEFINED").all()
+        assert comparison.status.eq("UNDEFINED").all()
+        assert checks.status.eq("UNDEFINED").all()
+        assert robustness.reason.eq(blocker).all()
+    else:
+        assert summary.status.eq("DEFINED").all()
+        assert comparison.status.eq("DEFINED").all()
+        if access == "development":
+            assert checks.status.eq("DEFINED").all()
+        else:
+            assert checks.status.eq("UNDEFINED").all()
+            assert checks.reason.eq("holdout_excluded").all()
+
+
+@pytest.mark.parametrize("has_observations", (False, True))
+def test_paired_model_rankic_consumes_the_statistic_target_manifest(has_observations):
+    protocol = a_share.AShareProtocol(
+        "pv_all", configuration_json=json.dumps(research_configuration())
+    )
+    target_manifest = protocol.target_manifest(
+        protocol.statistics_target_ids[1], "STATISTIC"
+    )
+    families = protocol.model_ids_for_target(protocol.model_selection_target_id)
+    columns = (
+        "timestamp",
+        "family_id",
+        "asset_coverage_id",
+        "observation_count",
+        "access_window",
+        "loss",
+    )
+    losses = pd.DataFrame.from_records(
+        [
+            (pd.Timestamp("2023-01-03"), family, "a" * 64, 2, "development", -0.5)
+            for family in families
+        ]
+        if has_observations
+        else [],
+        columns=columns,
+    )
+
+    class GlobalStatistics:
+        @contextmanager
+        def table(self, member):
+            assert member == "model_losses.parquet"
+            yield losses
+
+    paired = statistics_production._paired_group_rankic(
+        losses,
+        global_statistics=GlobalStatistics(),
+        selection_group="quarterly",
+        family_ids=families,
+        protocol_manifest=target_manifest,
+    )
+    assert set(paired.family_id) == set(families)
+    assert paired.observation_count.eq(int(has_observations)).all()
+    assert paired.status.eq("UNDEFINED").all()
+    assert paired.reason.eq(
+        "global_development_selection_reuses_validation"
+        if has_observations
+        else "no_common_observations"
+    ).all()
+    if has_observations:
+        assert paired.mean_difference.eq(0.0).all()
+    else:
+        assert paired.mean_difference.isna().all()

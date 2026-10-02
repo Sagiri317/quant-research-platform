@@ -34,18 +34,9 @@ def _plan() -> ExperimentPlan:
                 fold_id="fold-1",
                 train=TimeWindow(date(2020, 1, 1), date(2020, 1, 1)),
                 validation=TimeWindow(date(2020, 1, 2), date(2020, 1, 2)),
-                development_test=TimeWindow(date(2020, 1, 3), date(2020, 1, 3)),
-                embargo_steps=0,
-                step_kind="test_steps",
-                train_end_step=0,
-                validation_start_step=1,
-                validation_end_step=1,
-                development_test_start_step=2,
-                development_test_end_step=2,
-                final_holdout_start_step=3,
             ),
         ),
-        final_holdout=TimeWindow(date(2020, 1, 4), date(2020, 1, 4)),
+        test=TimeWindow(date(2020, 1, 3), date(2020, 1, 4)),
         selection_metric="validation_rankic",
         selection_direction="maximize",
         candidate_ids=("ridge",),
@@ -80,7 +71,6 @@ def _record(
         thread_settings={"native_threads": 1},
         status=status,
         metrics={"rankic": None},
-        development_test_metrics={},
         undefined_reasons={"rankic": "insufficient_observations"},
         cost_assumptions={"commission_bps": 2.0},
         risk_assumptions={"tracking_error_limit": 0.05},
@@ -157,23 +147,20 @@ def test_trial_record_deep_snapshots_and_ledger_rejects_backfill(
         )
 
 
-def test_contaminated_development_test_forces_new_experiment_id(tmp_path: Path) -> None:
-    plan = _plan()
-    root = tmp_path / "ledger"
-    contaminated = replace(
-        _record(plan, event_id="event-1", attempt_index=1, status="completed"),
-        development_test_contaminated=True,
-    )
-    append_trial_record(root, plan, contaminated)
-
-    with pytest.raises(
-        ValueError, match="^trial_contaminated_experiment_requires_new_id$"
-    ):
-        append_trial_record(
-            root,
-            plan,
-            _record(plan, event_id="event-2", attempt_index=2, status="completed"),
-        )
+@pytest.mark.parametrize(
+    "field,value",
+    (("development_test_metrics", {}), ("development_test_contaminated", True)),
+)
+def test_retired_fourth_role_trial_fields_are_rejected(field, value):
+    record = _record(_plan(), event_id="event-1", attempt_index=1, status="completed")
+    payload = record.payload()
+    assert payload["contract_version"] == "3.0"
+    assert field not in payload
+    payload[field] = value
+    with pytest.raises(TypeError, match="unexpected keyword argument"):
+        TrialRecord.from_payload(payload)
+    with pytest.raises(ValueError, match="^trial_contract_version_invalid$"):
+        replace(record, contract_version="2.0")
 
 
 def test_trial_ledger_uses_exact_bounded_storage_membership(tmp_path: Path) -> None:
@@ -196,9 +183,7 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
 ) -> None:
     import pandas as pd
 
-    from quant_research_platform.catalog.models import ModelCatalog
     from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
-    from quant_research_platform.contracts.predictions import PredictionSpec
     from quant_research_platform.research.experiments import TrialRecorder
     from quant_research_platform.research.models import trial_selection
     from quant_research_platform.research.models.supervised import preflight_model_specs
@@ -254,17 +239,6 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
             for index, asset in enumerate(("a", "b", "c"), start=1)
         ]
     )
-    prediction = PredictionSpec(
-        prediction_id="prediction",
-        model_id="ridge",
-        candidate_model_ids=("ridge_other",),
-        research_dataset_id=dataset.data_id,
-        train_end="2020-01-01",
-        test_start="2020-01-03",
-        test_end="2020-01-03",
-        model_selection_validation_start="2020-01-02",
-        model_selection_validation_end="2020-01-02",
-    )
     layout = StorageLayout(tmp_path)
     coverage = ModelSampleCoverage(
         model_validation_coverage_scope(plan.data_snapshot_id, plan.folds[0], specs)
@@ -273,21 +247,38 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
 
     def select(run_id: str):
         recorder = TrialRecorder(layout, run_id, plan)
+        predictions, metadata = {}, {}
+
+        def chunks(columns, *, start, end, **_kwargs):
+            selected = frame.loc[frame.timestamp.le(pd.Timestamp(end))]
+            if start is not None:
+                selected = selected.loc[selected.timestamp.ge(pd.Timestamp(start))]
+            yield selected.loc[:, list(columns)]
+
+        def on_validation(spec, values):
+            predictions[spec.model_id] = values.copy()
+
+        def on_candidate(spec, result):
+            metadata[spec.model_id] = dict(result.metadata)
+
         with runtime_resource_policy_scope() as policy:
             try:
-                result = trial_selection.select_prediction_model_spec(
-                    prediction_spec=prediction,
+                trial_selection.fit_validation_candidates(
+                    fold=plan.folds[0],
+                    candidate_specs=specs,
                     dataset_spec=dataset,
-                    model_catalog=ModelCatalog(specs),
-                    chunks=lambda columns, **_kwargs: (frame.loc[:, list(columns)],),
+                    chunks=chunks,
                     trial_recorder=recorder,
                     validation_coverage=coverage,
+                    on_validation=on_validation,
+                    on_candidate=on_candidate,
                 )
             finally:
                 assert policy.used_memory_bytes == 0
-        return result, recorder
+        return (predictions, metadata), recorder
 
-    (_, _metadata), first = select("run_first")
+    (first_predictions, first_metadata), first = select("run_first")
+    assert set(first_predictions) == set(first_metadata) == set(plan.candidate_ids)
     with read_trial_ledger(first.root) as (_saved_plan, records):
         assert [record.status for record in records] == ["completed", "completed"]
         assert all(record.metrics["validation_rows"] == 3 for record in records)
@@ -298,9 +289,16 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
             for record in records
         )
         first_event_id = records[0].event_id
-    # OOS and holdout labels cannot alter validation or the selected config.
+    # Test labels cannot alter candidate validation scores or recorded training.
     frame.loc[frame.timestamp >= "2020-01-03", "label"] = -100000.0
-    (_, _), second = select("run_retry")
+    (retry_predictions, retry_metadata), second = select("run_retry")
+    for candidate_id in plan.candidate_ids:
+        pd.testing.assert_frame_equal(
+            first_predictions[candidate_id],
+            retry_predictions[candidate_id],
+            check_exact=True,
+        )
+    assert first_metadata == retry_metadata
     assert (
         first.reference()["semantic_identity"]
         == second.reference()["semantic_identity"]
@@ -471,9 +469,12 @@ def test_production_begin_survives_hard_exit(tmp_path, stage):
             selection_direction=None,
             tie_break_order=(),
             trial_budget=1,
-            folds=plan.folds[:1],
+            folds=(),
+            fit_windows=(TimeWindow(date(2020, 1, 1), date(2020, 1, 2)),),
+            fit_cutoff=date(2020, 1, 2),
+            selection_group="global",
             candidate_ids=("ridge",),
-            selection_ledger_semantic_identity="b" * 64,
+            selection_ledger_semantic_identities=("b" * 64,),
         )
     code = """import os, sys, json
 from pathlib import Path
@@ -559,7 +560,6 @@ def test_run_ledger_references_have_no_arbitrary_member_limit(tmp_path):
         "backend_versions",
         "thread_settings",
         "metrics",
-        "development_test_metrics",
         "undefined_reasons",
         "cost_assumptions",
         "risk_assumptions",
@@ -813,3 +813,104 @@ def test_trial_ledger_root_stops_real_directory_scan_at_third_member(
         assert policy.used_memory_bytes == 0
     assert len(consumed) == 3
     assert closed == [True]
+
+
+@pytest.mark.parametrize("group", ("global", "quarterly"))
+def test_begin_refit_persists_fit_domain_and_all_real_parent_ledgers(tmp_path, group):
+    from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
+    from quant_research_platform.research.experiments import TrialRecorder
+    from quant_research_platform.storage.layout import StorageLayout
+
+    layout = StorageLayout(tmp_path)
+    spec = ModelSpec(
+        model_id="ridge",
+        model_algorithm="ridge_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+        random_seed=7,
+        hyperparameters={"alpha": 1.0},
+    )
+    recorders = []
+    for index in (1, 2):
+        plan = replace(
+            _plan(),
+            experiment_id=f"selection_{index}",
+            data_snapshot_id=f"snapshot-{index}",
+            candidate_parameters={"ridge": model_spec_payload(spec)},
+        )
+        recorder = TrialRecorder(layout, "run_refit", plan)
+        attempted = recorder.begin(spec, common_coverage_id=f"coverage-{index}")
+        recorder.finish(
+            attempted,
+            metrics={
+                "validation_ic": 0.5,
+                "validation_rankic": 0.5,
+                "validation_mse": 1.0,
+                "validation_ic_reason": None,
+                "validation_rankic_reason": None,
+                "validation_rows": 3,
+            },
+            model_metadata={
+                "resolved_hyperparameters": {},
+                "rows_after_input_label_dropna": 3,
+            },
+        )
+        recorders.append(recorder)
+    parents = tuple(sorted(item.reference()["semantic_identity"] for item in recorders))
+    assert len(set(parents)) == 2
+    before = {
+        path.relative_to(layout.trial_ledger_root("run_refit")): path.read_bytes()
+        for recorder in recorders
+        for path in recorder.root.rglob("*.json")
+    }
+    fit_windows = (
+        TimeWindow(date(2020, 1, 1), date(2020, 1, 1)),
+        TimeWindow(date(2020, 1, 2), date(2020, 1, 2)),
+    )
+    refit, started = recorders[0].begin_refit(
+        spec,
+        common_coverage_id="combined-coverage",
+        fit_windows=fit_windows,
+        fit_cutoff=date(2020, 1, 2),
+        selection_ledger_semantic_identities=parents,
+        selection_group=group,
+    )
+    with read_trial_ledger(refit.root) as (plan, records):
+        assert plan.stage == "refit" and plan.folds == ()
+        assert plan.fold_ids == ("refit",)
+        assert plan.fit_windows == fit_windows
+        assert plan.fit_cutoff == date(2020, 1, 2)
+        assert plan.test == TimeWindow(date(2020, 1, 3), date(2020, 1, 4))
+        assert plan.selection_ledger_semantic_identities == parents
+        assert plan.selection_group == group
+        assert plan.selection_metric is None and plan.selection_direction is None
+        assert plan.candidate_ids == ("ridge",) and plan.trial_budget == 1
+        assert records == (started,) and started.fold_id == "refit"
+    refit.finish(
+        started,
+        model_metadata={
+            "resolved_hyperparameters": {},
+            "rows_after_input_label_dropna": 6,
+        },
+    )
+    with read_trial_ledger(refit.root) as (_, records):
+        assert len(records) == 1
+        assert records[0].status == "completed"
+        assert records[0].metrics == {"n_train": 6}
+        assert records[0].holdout_accessed is False
+    assert {
+        path.relative_to(layout.trial_ledger_root("run_refit")): path.read_bytes()
+        for recorder in recorders
+        for path in recorder.root.rglob("*.json")
+    } == before
+    roots_before = set(layout.trial_ledger_root("run_refit").iterdir())
+    with pytest.raises(ValueError, match="^experiment_refit_plan_invalid$"):
+        recorders[0].begin_refit(
+            spec,
+            common_coverage_id="forbidden-test-cutoff",
+            fit_windows=fit_windows,
+            fit_cutoff=date(2020, 1, 3),
+            selection_ledger_semantic_identities=parents,
+            selection_group=group,
+        )
+    assert set(layout.trial_ledger_root("run_refit").iterdir()) == roots_before

@@ -89,7 +89,8 @@ _ARROW_SCHEMAS = {
     ),
     "model_trials.parquet": pa.schema(
         [
-            pa.field("quarter_id", pa.string()),
+            pa.field("selection_group", pa.string()),
+            pa.field("decision_id", pa.string()),
             pa.field("family_id", pa.string()),
             pa.field("config_id", pa.string()),
             pa.field("metric_id", pa.string()),
@@ -151,6 +152,7 @@ _ARROW_SCHEMAS = {
             pa.field("reason", pa.string()),
             pa.field("common_date", pa.int64()),
             pa.field("common_observation_count", pa.int64()),
+            pa.field("asset_coverage_id", pa.string()),
         ]
     ),
     "model_comparison.parquet": pa.schema(
@@ -172,6 +174,50 @@ _ARROW_SCHEMAS = {
             pa.field("bootstrap_block_size", pa.int64()),
             pa.field("bootstrap_repetitions", pa.int64()),
             pa.field("bootstrap_seed", pa.int64()),
+        ]
+    ),
+    "model_group_comparison.parquet": pa.schema(
+        [
+            pa.field(name, pa.string())
+            for name in (
+                "family_id",
+                "access_window",
+                "status",
+                "reason",
+                "fdr_method",
+                "bootstrap_status",
+                "bootstrap_reason",
+            )
+        ]
+        + [
+            pa.field(name, pa.int64())
+            for name in (
+                "observation_count",
+                "calendar_count",
+                "fdr_family_size",
+                "hac_lag",
+                "bootstrap_block_size",
+                "bootstrap_repetitions",
+                "bootstrap_seed",
+            )
+        ]
+        + [
+            pa.field(name, pa.float64())
+            for name in (
+                "global_mean",
+                "quarterly_mean",
+                "mean_difference",
+                "standard_error",
+                "t_statistic",
+                "p_value",
+                "ci_lower",
+                "ci_upper",
+                "fdr_adjusted_p_value",
+                "fdr_alpha",
+                "confidence",
+                "bootstrap_lower",
+                "bootstrap_upper",
+            )
         ]
     ),
     "model_reality_checks.parquet": pa.schema(
@@ -210,6 +256,54 @@ _ARROW_SCHEMAS = {
             pa.field("benchmark_status", pa.string()),
             pa.field("benchmark_reason", pa.string()),
             pa.field("access_window", pa.string()),
+        ]
+    ),
+    "portfolio_group_comparison.parquet": pa.schema(
+        [
+            *(
+                (name, pa.string())
+                for name in (
+                    "portfolio_id",
+                    "comparison_role",
+                    "access_window",
+                    "status",
+                    "reason",
+                    "bootstrap_status",
+                    "bootstrap_reason",
+                    "fdr_method",
+                )
+            ),
+            *(
+                (name, pa.int64())
+                for name in (
+                    "observation_count",
+                    "hac_lag",
+                    "bootstrap_block_size",
+                    "bootstrap_repetitions",
+                    "bootstrap_seed",
+                    "fdr_family_size",
+                )
+            ),
+            *(
+                (name, pa.float64())
+                for name in (
+                    "global_mean",
+                    "quarterly_mean",
+                    "mean_difference",
+                    "global_terminal_wealth",
+                    "quarterly_terminal_wealth",
+                    "standard_error",
+                    "t_statistic",
+                    "p_value",
+                    "ci_lower",
+                    "ci_upper",
+                    "bootstrap_lower",
+                    "bootstrap_upper",
+                    "confidence",
+                    "fdr_alpha",
+                    "fdr_adjusted_p_value",
+                )
+            ),
         ]
     ),
     "portfolio_performance.parquet": pa.schema(
@@ -431,10 +525,12 @@ STATISTICS_TABLE_GROUPS = {
         "fama_macbeth_periods.parquet",
         "model_losses.parquet",
         "model_comparison.parquet",
+        "model_group_comparison.parquet",
         "model_reality_checks.parquet",
     ),
     "portfolio": (
         "portfolio_daily.parquet",
+        "portfolio_group_comparison.parquet",
         "portfolio_performance.parquet",
         "portfolio_capacity.parquet",
         "portfolio_capacity_summary.parquet",
@@ -466,6 +562,7 @@ _EMPTY_TABLE_MEMBERS = frozenset(
         "holding_factor_returns.parquet",
         "model_comparison.parquet",
         "model_losses.parquet",
+        "model_group_comparison.parquet",
         "portfolio_capacity.parquet",
         "portfolio_exposures.parquet",
     }
@@ -798,7 +895,10 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         ).astype("float64")
     if result.empty and member not in _EMPTY_TABLE_MEMBERS:
         raise ValueError("statistics_table_empty")
-    if member in STATISTICS_TABLE_GROUPS["research"]:
+    if (
+        member in STATISTICS_TABLE_GROUPS["research"]
+        and member != "model_group_comparison.parquet"
+    ):
         if not result.status.isin(("DEFINED", "UNDEFINED")).all():
             raise ValueError("statistics_table_status_invalid")
         defined = result.status.eq("DEFINED")
@@ -820,11 +920,29 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         ]
         if (
             result.loc[defined, measurements].isna().any().any()
-            or result.loc[~defined, measurements].notna().any().any()
+            or result.loc[
+                ~defined,
+                [
+                    column
+                    for column in measurements
+                    if column != "mean"
+                    or member
+                    not in {
+                        "prediction_diagnostics.parquet",
+                        "model_comparison.parquet",
+                    }
+                ],
+            ]
+            .notna()
+            .any()
+            .any()
             or result.loc[defined, "reason"].ne("").any()
             or result.loc[~defined, "reason"].str.strip().eq("").any()
         ):
             raise ValueError("statistics_table_status_value_invalid")
+        if member in {"prediction_diagnostics.parquet", "model_comparison.parquet"}:
+            if result["mean"].notna().ne(result.observation_count.gt(0)).any():
+                raise ValueError("statistics_table_descriptive_mean_count_invalid")
         for column in ("p_value", "fdr_adjusted_p_value", "white_p_value"):
             if column in result and not result[column].dropna().between(0, 1).all():
                 raise ValueError("statistics_table_probability_invalid")
@@ -895,9 +1013,82 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         }[member]
         if result.duplicated(list(keys)).any():
             raise ValueError("statistics_table_duplicate_keys")
+    if member in {
+        "model_group_comparison.parquet",
+        "portfolio_group_comparison.parquet",
+    }:
+        key = (
+            "family_id"
+            if member == "model_group_comparison.parquet"
+            else "portfolio_id"
+        )
+        defined = result.status.eq("DEFINED")
+        bootstrap_defined = result.bootstrap_status.eq("DEFINED")
+        measurements = (
+            "standard_error",
+            "t_statistic",
+            "p_value",
+            "ci_lower",
+            "ci_upper",
+            "fdr_adjusted_p_value",
+        )
+        bootstrap = ("bootstrap_lower", "bootstrap_upper")
+        if (
+            result.duplicated([key]).any()
+            or not result.status.isin(("DEFINED", "UNDEFINED")).all()
+            or not result.bootstrap_status.isin(("DEFINED", "UNDEFINED")).all()
+            or not result.access_window.isin(("development", "holdout")).all()
+            or result.access_window.nunique() > 1
+            or (defined & result.access_window.ne("holdout")).any()
+            or (bootstrap_defined & ~defined).any()
+            or result.loc[defined, list(measurements)].isna().any().any()
+            or result.loc[~defined, list(measurements)].notna().any().any()
+            or result.loc[defined, "reason"].ne("").any()
+            or result.loc[~defined, "reason"].str.strip().eq("").any()
+            or result.loc[bootstrap_defined, list(bootstrap)].isna().any().any()
+            or result.loc[~bootstrap_defined, list(bootstrap)].notna().any().any()
+            or result.loc[bootstrap_defined, "bootstrap_reason"].ne("").any()
+            or result.loc[~bootstrap_defined, "bootstrap_reason"]
+            .str.strip()
+            .eq("")
+            .any()
+            or not result.fdr_method.eq("BY").all()
+            or not result.fdr_alpha.between(0, 1, inclusive="neither").all()
+            or not result.confidence.between(0, 1, inclusive="neither").all()
+            or not result.fdr_family_size.eq(len(result)).all()
+            or result.standard_error.lt(0).any()
+            or result.ci_lower.gt(result.ci_upper).any()
+            or result.bootstrap_lower.gt(result.bootstrap_upper).any()
+            or not result.p_value.dropna().between(0, 1).all()
+            or not result.fdr_adjusted_p_value.dropna().between(0, 1).all()
+        ):
+            raise ValueError("statistics_group_comparison_invalid")
+        if (
+            member == "model_group_comparison.parquet"
+            and result.observation_count.gt(result.calendar_count).any()
+        ):
+            raise ValueError("statistics_group_comparison_count_invalid")
+        if member == "portfolio_group_comparison.parquet" and (
+            not result.comparison_role.isin(("primary", "secondary")).all()
+            or result.comparison_role.eq("primary").sum() != 1
+            or result[
+                [
+                    "global_mean",
+                    "quarterly_mean",
+                    "mean_difference",
+                    "global_terminal_wealth",
+                    "quarterly_terminal_wealth",
+                ]
+            ]
+            .isna()
+            .any()
+            .any()
+        ):
+            raise ValueError("statistics_group_comparison_primary_invalid")
     if member == "model_losses.parquet":
         if (
-            not result["loss"].dropna().between(-1, 1).all()
+            not result.asset_coverage_id.str.fullmatch("[0-9a-f]{64}").all()
+            or not result["loss"].dropna().between(-1, 1).all()
             or not result["common_date"].isin((0, 1)).all()
             or (result["common_observation_count"] > result["observation_count"]).any()
             or result.groupby("timestamp")["common_observation_count"]
@@ -993,7 +1184,10 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             keys = ("candidate_id", "execution_mode", "episode_id", *suffix)
         if result.duplicated(list(keys)).any():
             raise ValueError("statistics_table_duplicate_keys")
-    if member in STATISTICS_TABLE_GROUPS["portfolio"]:
+    if (
+        member in STATISTICS_TABLE_GROUPS["portfolio"]
+        and member != "portfolio_group_comparison.parquet"
+    ):
         keys = {
             "portfolio_daily.parquet": ("candidate_id", "entry_at"),
             "portfolio_performance.parquet": ("candidate_id", "metric_id"),

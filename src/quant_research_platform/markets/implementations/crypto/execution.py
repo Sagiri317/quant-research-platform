@@ -1443,103 +1443,175 @@ def _maker_new_order(order_id, side, quantity, state, row, config):
 
 
 class MakerCalibration:
-    """Reuse one bounded spool; recompute each decision's economic response."""
+    """Own one bounded fold history; recompute each decision's economic response."""
 
     def __init__(self, samples, events, *, resource_policy):
-        self.samples = samples
-        self.events = events
+        self._source_samples = samples
+        self._source_events = events
         self.policy = resource_policy
         self._native = None
         self._native_resources = ExitStack()
+        self._maximum = {}
+        self._lengths = {}
+        self._event_count = 0
 
     def close(self):
-        self.samples = self.events = self._native = None
+        self._source_samples = self._source_events = self._native = None
         self._native_resources.close()
 
-    @contextmanager
-    def _event_replays(self, source):
-        if self._native is None:
-            self._native = self._native_resources.enter_context(
-                reserved_temporary_file(resource_policy=self.policy)
+    def _load(self):
+        if self._native is not None:
+            return
+        with handle_preserving_primary(ExitStack()) as resources:
+            resources.enter_context(
+                self.policy.lease("crypto.calibration.history.buffers", 65536)
             )
-        spool, reservation = self._native
-        policy = self.policy
+            files = {
+                name: resources.enter_context(
+                    reserved_temporary_file(resource_policy=self.policy)
+                )
+                for name in ("buy", "sell", "events", "offsets")
+            }
+            maximum = dict.fromkeys(("buy", "sell", "events"), 0)
 
-        def release_window():
-            spool.seek(0)
-            spool.truncate()
-            reservation.resize(0)
+            def append(name, payload):
+                spool, reservation = files[name]
+                reservation.resize(spool.tell() + len(payload))
+                spool.write(payload)
 
-        with handle_preserving_primary(ExitStack()) as window:
-            window.callback(release_window)
-            maximum = 0
-            with closing_iterator(source):
-                for event in source:
-                    bound = (
-                        4096
-                        + 128
-                        * (
-                            len(getattr(event, "bids", ()))
-                            + len(getattr(event, "asks", ()))
+            for kind, source in (
+                ("samples", self._source_samples),
+                ("events", self._source_events),
+            ):
+                with closing_iterator(source()) as rows:
+                    for row in rows:
+                        values = row if kind == "samples" else vars(row)
+                        name = row["side"] if kind == "samples" else "events"
+                        bound = (
+                            65536
+                            + 256
+                            * (
+                                len(values.get("bids", ()))
+                                + len(values.get("asks", ()))
+                            )
+                            + 32
+                            * sum(
+                                len(value)
+                                for value in values.values()
+                                if isinstance(value, str)
+                            )
                         )
-                        + 8
-                        * sum(
-                            len(value)
-                            for value in vars(event).values()
-                            if isinstance(value, str)
-                        )
-                    )
-                    with policy.lease("crypto.calibration.event_encode", bound):
-                        payload = (
-                            json.dumps(
-                                vars(event), separators=(",", ":"), allow_nan=False
-                            ).encode()
-                            + b"\n"
-                        )
-                        reservation.resize(spool.tell() + len(payload))
-                        spool.write(payload)
-                        maximum = max(maximum, len(payload))
-                        payload = None
-                event = None
-
-            def replay():
-                spool.seek(0)
-                active = None
-                try:
-                    while True:
-                        lease = policy.lease(
-                            "crypto.calibration.event_decode",
-                            json_record_working_set_bytes(maximum),
-                        )
-                        try:
-                            payload = spool.readline(maximum + 1)
-                            if not payload:
-                                return
-                            lease.shrink_to(json_record_working_set_bytes(len(payload)))
-                            event = SimpleNamespace(**parse_qrp_json_object(payload))
+                        with self.policy.lease(
+                            "crypto.calibration.history.encode", bound
+                        ):
+                            payload = (
+                                json.dumps(
+                                    values, separators=(",", ":"), allow_nan=False
+                                ).encode()
+                                + b"\n"
+                            )
+                            if kind == "events":
+                                if row.event_id != self._event_count:
+                                    raise ValueError(
+                                        "crypto_calibration_event_order_invalid"
+                                    )
+                                append(
+                                    "offsets",
+                                    struct.pack(">Q", files["events"][0].tell()),
+                                )
+                                self._event_count += 1
+                            append(name, payload)
+                            maximum[name] = max(maximum[name], len(payload))
                             payload = None
-                            if event.kind == "book":
-                                previous = active
-                                active = OwnedValue(event, lease)
-                                lease = None
-                                try:
-                                    yield event
-                                finally:
-                                    if previous is not None:
-                                        previous.release(
-                                            owner="crypto.calibration.event"
-                                        )
-                            else:
-                                yield event
-                            event = None
-                        finally:
-                            if lease is not None:
-                                lease.close()
-                finally:
-                    if active is not None:
-                        active.release(owner="crypto.calibration.event")
+                        row = values = None
+            append("offsets", struct.pack(">Q", files["events"][0].tell()))
+            for spool, _reservation in files.values():
+                spool.flush()
+            self._maximum = maximum
+            self._lengths = {name: spool.tell() for name, (spool, _) in files.items()}
+            self._native = files
+            self._source_samples = self._source_events = None
+            self._native_resources = resources.pop_all()
 
-            yield replay
+    def samples(self, side):
+        self._load()
+        spool, _reservation = self._native[side]
+        maximum = self._maximum[side]
+        position = 0
+        while position < self._lengths[side]:
+            with self.policy.lease(
+                "crypto.calibration.sample_decode",
+                json_record_working_set_bytes(maximum),
+            ):
+                spool.seek(position)
+                payload = spool.readline(maximum + 1)
+                if (
+                    not payload
+                    or len(payload) > maximum
+                    or not payload.endswith(b"\n")
+                    or position + len(payload) > self._lengths[side]
+                ):
+                    raise ValueError("crypto_calibration_history_invalid")
+                position += len(payload)
+                sample = parse_qrp_json_object(payload)
+                payload = None
+                try:
+                    yield sample
+                finally:
+                    sample = None
+
+    def events(self, start, stop):
+        self._load()
+        if not 0 <= start <= stop <= self._event_count:
+            raise ValueError("crypto_calibration_event_coordinates_invalid")
+        spool, _reservation = self._native["events"]
+        offsets, _reservation = self._native["offsets"]
+        offsets.seek(start * 8)
+        encoded = offsets.read(8)
+        if len(encoded) != 8:
+            raise ValueError("crypto_calibration_history_invalid")
+        position = struct.unpack(">Q", encoded)[0]
+        maximum = self._maximum["events"]
+        active = None
+        try:
+            for event_id in range(start, stop):
+                lease = self.policy.lease(
+                    "crypto.calibration.event_decode",
+                    json_record_working_set_bytes(maximum),
+                )
+                try:
+                    spool.seek(position)
+                    payload = spool.readline(maximum + 1)
+                    if (
+                        not payload
+                        or len(payload) > maximum
+                        or not payload.endswith(b"\n")
+                    ):
+                        raise ValueError("crypto_calibration_history_invalid")
+                    position += len(payload)
+                    lease.shrink_to(json_record_working_set_bytes(len(payload)))
+                    event = SimpleNamespace(**parse_qrp_json_object(payload))
+                    payload = None
+                    if event.event_id != event_id:
+                        raise ValueError("crypto_calibration_history_invalid")
+                    if event.kind == "book":
+                        previous = active
+                        active = OwnedValue(event, lease)
+                        lease = None
+                        try:
+                            yield event
+                        finally:
+                            if previous is not None:
+                                previous.release(owner="crypto.calibration.event")
+                    else:
+                        yield event
+                    event = None
+                finally:
+                    if lease is not None:
+                        lease.close()
+        finally:
+            if active is not None:
+                active.release(owner="crypto.calibration.event")
 
     @contextmanager
     def _book(self, event_id):
@@ -1730,77 +1802,73 @@ class MakerCalibration:
                     for quantity in (0.0, limit):
                         payload = struct.pack(">d", quantity)
                         yield "choices", payload, payload
-                    with closing_iterator(self.samples()) as samples:
+                    with closing_iterator(self.samples(new_order.side)) as samples:
                         for sample in samples:
                             sample_id = sample_count
                             sample_count += 1
                             error = sample["forecast_error"]
                             funded = [0.0] * len(funding)
-                            with self._event_replays(
-                                self.events(
-                                    int(sample["event_start"]), int(sample["event_end"])
-                                )
-                            ) as replay_events:
-                                for replacement in (None, limit):
-                                    cumulative = 0.0
-                                    with closing_iterator(
-                                        self._response(
-                                            sample,
-                                            state=state,
-                                            decision_ns=decision_ns,
-                                            new_order=new_order,
-                                            active_order=active_order,
-                                            commands=commands,
-                                            lifetime_ns=lifetime_ns,
-                                            replace_quantity=replacement,
-                                            events=replay_events(),
-                                        )
-                                    ) as response:
-                                        for (
-                                            elapsed,
-                                            quantity,
-                                            price,
-                                            is_new,
-                                        ) in response:
-                                            if is_new:
-                                                cumulative += quantity
-                                                if 0.0 <= cumulative <= limit:
-                                                    payload = struct.pack(
-                                                        ">d", cumulative
+                            for replacement in (None, limit):
+                                cumulative = 0.0
+                                with closing_iterator(
+                                    self._response(
+                                        sample,
+                                        state=state,
+                                        decision_ns=decision_ns,
+                                        new_order=new_order,
+                                        active_order=active_order,
+                                        commands=commands,
+                                        lifetime_ns=lifetime_ns,
+                                        replace_quantity=replacement,
+                                        events=self.events(
+                                            int(sample["event_start"]),
+                                            int(sample["event_end"]),
+                                        ),
+                                    )
+                                ) as response:
+                                    for (
+                                        elapsed,
+                                        quantity,
+                                        price,
+                                        is_new,
+                                    ) in response:
+                                        if is_new:
+                                            cumulative += quantity
+                                            if 0.0 <= cumulative <= limit:
+                                                payload = struct.pack(">d", cumulative)
+                                                yield "choices", payload, payload
+                                            for index, (stamp, _cash) in enumerate(
+                                                funding
+                                            ):
+                                                if elapsed < stamp:
+                                                    funded[index] = max(
+                                                        funded[index], cumulative
                                                     )
-                                                    yield "choices", payload, payload
-                                                for index, (stamp, _cash) in enumerate(
-                                                    funding
-                                                ):
-                                                    if elapsed < stamp:
-                                                        funded[index] = max(
-                                                            funded[index], cumulative
-                                                        )
+                                        else:
+                                            gain = quantity * (
+                                                sign * (forecast - price)
+                                                - price * fee_bps / 10000.0
+                                                + sign * mid * error
+                                            )
+                                            gain += (
+                                                quantity
+                                                * sign
+                                                * sum(
+                                                    cash
+                                                    for stamp, cash in funding
+                                                    if elapsed < stamp
+                                                )
+                                            )
+                                            if replacement is None:
+                                                keep_gain += gain
                                             else:
-                                                gain = quantity * (
-                                                    sign * (forecast - price)
-                                                    - price * fee_bps / 10000.0
-                                                    + sign * mid * error
-                                                )
-                                                gain += (
-                                                    quantity
-                                                    * sign
-                                                    * sum(
-                                                        cash
-                                                        for stamp, cash in funding
-                                                        if elapsed < stamp
-                                                    )
-                                                )
-                                                if replacement is None:
-                                                    keep_gain += gain
-                                                else:
-                                                    cancel_gain += gain
-                                    if replacement is not None:
-                                        yield (
-                                            "response",
-                                            struct.pack(">dQ", cumulative, sample_id),
-                                            struct.pack(">dd", cumulative, error),
-                                        )
+                                                cancel_gain += gain
+                                if replacement is not None:
+                                    yield (
+                                        "response",
+                                        struct.pack(">dQ", cumulative, sample_id),
+                                        struct.pack(">dd", cumulative, error),
+                                    )
                             for index, quantity in enumerate(funded):
                                 yield (
                                     f"funding_{index}",
@@ -2783,9 +2851,7 @@ def simulate_maker(
                                 row,
                                 config,
                             )
-                            keep, quantity, gain = calibrations[row["fold_id"]][
-                                side
-                            ].select(
+                            keep, quantity, gain = calibrations[row["fold_id"]].select(
                                 state=latest_state,
                                 decision_ns=decision_time_ns,
                                 new_order=proposed,
@@ -2987,7 +3053,14 @@ def simulate_maker(
         "markout_horizon_ms": config.markout_horizon_ms,
         "queue_model": "estimated_queue_ahead",
         "queue_assumption": (
-            "public MBP aggregate depth; cancellations do not advance queue"
+            "public MBP aggregate depth; cancellations do not advance queue; "
+            "positive visible trade-through fills all remaining quantity "
+            "at the resting price; "
+            "same-price fills use visible quantity after queue depletion; "
+            "zero visible quantity neither fills nor advances queue; "
+            "unknown visible quantity blocks; historical replay assumes small orders "
+            "with no market impact; order and position limits "
+            "do not validate this assumption"
         ),
         "same_timestamp_policy": "local_observation_order_then_delayed_commands",
         "maker_policy_id": "paired_validation_calibrated_post_only_maker"

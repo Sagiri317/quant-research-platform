@@ -6,7 +6,7 @@ import sys
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass
+from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
 import numpy as np
@@ -29,6 +29,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
+    _industry_group_codes,
     model_input_validity_columns,
 )
 from quant_research_platform.research.filtering import (
@@ -62,6 +63,7 @@ from quant_research_platform.research.portfolios.schedules import (
     holding_intervals,
     is_rebalance_session,
 )
+from quant_research_platform.runtime.execution_metrics import record_run_observations
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     RuntimeResourcePolicy,
@@ -99,6 +101,7 @@ _ENHANCED_PANEL_COLUMNS = (
     "market_type",
     "period_return",
     "float_market_cap",
+    "industry_standard_id",
     "industry_level1_code",
     "is_nonfinancial_industry",
     *tuple(
@@ -131,72 +134,76 @@ _ALPHA_DIAGNOSTICS = {
 }
 
 
-def frozen_alpha_calibration(
-    batches, *, cutoff: pd.Timestamp
-) -> tuple[AlphaCalibration, str]:
-    """Read the last published, sufficiently observed development calibration."""
-    latest = None
-    with closing_iterator(batches):
-        for batch in batches:
-            observed_at = pd.Timestamp(
-                min(row.timestamp_ns for row in batch.valuations)
-            )
-            if observed_at > cutoff:
-                raise ValueError("holdout_alpha_source_after_cutoff")
-            values = {
-                _ALPHA_DIAGNOSTICS[row.name]: (
-                    row.text if row.text is not None else row.number
-                )
-                for row in batch.diagnostics
-                if row.asset_id == PORTFOLIO_CASH_ASSET_ID
-                and row.name in _ALPHA_DIAGNOSTICS
-            }
-            if values and "status" not in values:
-                raise PortfolioTargetBlocked("holdout_alpha_calibration_missing")
-            if "status" in values:
-                latest = (values, observed_at.date().isoformat())
-    if latest is None:
-        raise PortfolioTargetBlocked("holdout_alpha_calibration_missing")
-    values, observed_at = latest
-    if values["status"] == "UNDEFINED":
-        raise PortfolioTargetBlocked("holdout_alpha_calibration_undefined")
-    if values.pop("status") != "DEFINED":
-        raise ValueError("holdout_alpha_calibration_status_invalid")
-    diagnostic_names = {
-        "inference_status",
-        "inference_reason",
-        "r2_status",
-        "r2_reason",
-    }
-    if not diagnostic_names.issubset(values):
-        raise ValueError("holdout_alpha_calibration_statistics_invalid")
-    diagnostics = {name: values.pop(name) for name in diagnostic_names}
-    missing = set()
-    if diagnostics["inference_status"] == "UNDEFINED":
-        if values.get("slope_standard_error") != 0.0:
-            raise ValueError("holdout_alpha_calibration_statistics_invalid")
-        missing.update(
-            {"slope_t_statistic", "slope_pvalue", "slope_ci_low", "slope_ci_high"}
+def frozen_alpha_calibration(payload, *, cutoff, selection_group):
+    """Validate the final development calibration bound to its actual group inputs."""
+    if (
+        type(payload) is not dict
+        or set(payload)
+        != {
+            "schema_id",
+            "selection_group",
+            "cutoff",
+            "upstream_identities",
+            "calibration",
+        }
+        or (
+            payload["schema_id"] != "qrp-final-alpha-calibration-v1"
+            or payload["selection_group"] != selection_group
+            or pd.Timestamp(payload["cutoff"]) != pd.Timestamp(cutoff)
+            or type(payload["calibration"]) is not dict
+            or set(payload["calibration"])
+            != {field.name for field in fields(AlphaCalibration)}
         )
-    if diagnostics["r2_status"] == "UNDEFINED":
-        missing.add("weighted_r2")
-    expected = (
-        set(_ALPHA_DIAGNOSTICS.values())
-        - {"status", "undefined_reason"}
-        - diagnostic_names
-        - missing
-    )
-    if set(values) != expected:
-        raise ValueError("holdout_alpha_calibration_statistics_invalid")
-    values.update(dict.fromkeys(missing))
-    if values["valid_rebalance_dates"] < 6 or values["coverage"] < 0.8:
+    ):
+        raise ValueError("holdout_alpha_calibration_binding_invalid")
+    values = payload["calibration"]
+    calibration = AlphaCalibration(**values)
+    if calibration.status != "DEFINED":
+        raise PortfolioTargetBlocked("holdout_alpha_calibration_undefined")
+    if calibration.valid_rebalance_dates < 6 or calibration.coverage < 0.8:
         raise PortfolioTargetBlocked("holdout_alpha_calibration_insufficient")
-    for name in ("valid_rebalance_dates", "scheduled_rebalance_dates"):
-        values[name] = int(values[name])
-    calibration = AlphaCalibration(**values, undefined_reason=None)
-    if any(getattr(calibration, name) != value for name, value in diagnostics.items()):
+    required = ("slope", "intercept", "slope_standard_error", "coverage")
+    if any(
+        type(values[name]) not in {int, float} or not np.isfinite(values[name])
+        for name in required
+    ):
         raise ValueError("holdout_alpha_calibration_statistics_invalid")
-    return calibration, observed_at
+    if (
+        calibration.slope_standard_error < 0
+        or not 0 <= calibration.coverage <= 1
+        or type(calibration.valid_rebalance_dates) is not int
+        or type(calibration.scheduled_rebalance_dates) is not int
+        or calibration.scheduled_rebalance_dates < calibration.valid_rebalance_dates
+    ):
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    optional = (
+        "slope_t_statistic",
+        "slope_pvalue",
+        "slope_ci_low",
+        "slope_ci_high",
+        "weighted_r2",
+    )
+    if any(
+        values[name] is not None
+        and (type(values[name]) not in {int, float} or not np.isfinite(values[name]))
+        for name in optional
+    ):
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    if (
+        (calibration.slope_standard_error == 0)
+        != (calibration.slope_t_statistic is None)
+        or len({values[name] is None for name in optional[:4]}) != 1
+        or (
+            calibration.slope_pvalue is not None
+            and not 0 <= calibration.slope_pvalue <= 1
+        )
+        or (
+            calibration.slope_ci_low is not None
+            and calibration.slope_ci_low > calibration.slope_ci_high
+        )
+    ):
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    return calibration, payload["cutoff"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +227,7 @@ def build_portfolio_ledger(
     risk_config: FactorRiskConfig | None = None,
     optimizer_config: OptimizerConfig | None = None,
     frozen_calibration: AlphaCalibration | None = None,
+    on_final_calibration=None,
     prediction_lookup: object,
     persisted_model: object,
     access_window: str,
@@ -300,13 +308,17 @@ def build_portfolio_ledger(
             item["model_metadata"]["model_algorithm"],
         )
         for item in persisted_model.prediction_models(
-            prediction_window, access_window=access_window
+            prediction_window,
+            selection_group=candidate.selection_group,
+            access_window=access_window,
         )
         if item["family_id"]
         == (
-            persisted_model.quarterly_selections[item["source_quarter"]][
-                "selected_family_id"
-            ]
+            persisted_model.selection(
+                candidate.selection_group,
+                item["quarter_id"],
+                access_window=access_window,
+            )["selected_family_id"]
             if candidate.prediction_selector == "champion"
             else candidate.prediction_selector
         )
@@ -532,17 +544,6 @@ def build_portfolio_ledger(
                     current_cross: pd.DataFrame | None = None
                     if enhanced:
                         assert factor_risk is not None
-                        dataset = _read_next_session(
-                            dataset_frames,
-                            dataset_columns,
-                            decision_timestamp,
-                            retained,
-                        )
-                        if dataset.empty:
-                            raise PortfolioTargetBlocked(
-                                "portfolio_research_dataset_session_missing"
-                            )
-                        _validate_input_keys(dataset, panel)
                         risk_frames = []
                         for root, columns in risk_inputs.items():
                             context = _read_next_session(
@@ -622,6 +623,17 @@ def build_portfolio_ledger(
                             waiting_alpha = None
                             resize_state()
                         if decision_timestamp >= alpha_start:
+                            dataset = _read_next_session(
+                                dataset_frames,
+                                dataset_columns,
+                                decision_timestamp,
+                                retained,
+                            )
+                            if dataset.empty:
+                                raise PortfolioTargetBlocked(
+                                    "portfolio_research_dataset_session_missing"
+                                )
+                            _validate_input_keys(dataset, panel)
                             alpha = _prediction_alpha(
                                 dataset,
                                 prediction_lookup,
@@ -800,6 +812,17 @@ def build_portfolio_ledger(
                                 target_override = holdings.div(nav).copy(deep=True)
                                 decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
 
+                        if enhanced:
+                            required_assets = benchmark_weights.index.union(
+                                holdings.index
+                            )
+                            industry = _industry_group_codes(
+                                panel.set_index("asset_id"), "industry_level1_code"
+                            ).reindex(required_assets)
+                            if industry.isna().any():
+                                raise PortfolioTargetBlocked(
+                                    "portfolio_industry_context_missing"
+                                )
                         account, returns, adv, _optimization, decision_delta = (
                             _build_session(
                                 candidate=candidate,
@@ -863,6 +886,30 @@ def build_portfolio_ledger(
                 raise ValueError("misaligned_persisted_prediction_keys")
             if not emitted:
                 raise PortfolioTargetBlocked("portfolio_execution_window_empty")
+            if enhanced and access_window == "development":
+                if on_final_calibration is None:
+                    raise ValueError("portfolio_final_calibration_sink_required")
+                resize_state(extra_bytes=512 * len(calibration_rows))
+                observation = {}
+                with record_run_observations(resource_policy, observation):
+                    calibration = calibrate_expected_alpha(
+                        pd.DataFrame(
+                            calibration_rows,
+                            columns=["timestamp", "alpha_score", "holding_return"],
+                        ),
+                        as_of=pd.Timestamp(output_window.end),
+                        scheduled_intervals=calibration_intervals,
+                    )
+                on_final_calibration(
+                    {
+                        "schema_id": "qrp-final-alpha-calibration-v1",
+                        "selection_group": candidate.selection_group,
+                        "cutoff": pd.Timestamp(output_window.end).date().isoformat(),
+                        "upstream_identities": dict(upstream_identities),
+                        "calibration": asdict(calibration),
+                        "observations": observation,
+                    }
+                )
     finally:
         primary = sys.exception()
         if primary is not None:
@@ -1059,6 +1106,9 @@ def _enhanced_risk_cross(
         .reindex(assets)
         .astype("float64")
     )
+    result["industry_standard_id"] = (
+        panel_by_asset["industry_standard_id"].astype("string").reindex(assets)
+    )
     result["industry_level1_code"] = (
         panel_by_asset["industry_level1_code"].astype("string").reindex(assets)
     )
@@ -1247,7 +1297,7 @@ def _optimizer_assets(
     exposure_columns = tuple(
         column
         for column in exposures.columns
-        if column not in {"asset_id", "industry_level1_code"}
+        if column not in {"asset_id", "industry_standard_id", "industry_level1_code"}
     )
     exposures_by_asset = exposures.set_index("asset_id")
     nonfinancial = _bool_series(

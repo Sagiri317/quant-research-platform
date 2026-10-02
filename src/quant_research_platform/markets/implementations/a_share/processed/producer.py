@@ -75,6 +75,7 @@ _OPTIONAL_SOURCE_IDS = frozenset(
         "industry_classification",
         "industry_classification_sets",
         "industry_classification_versions",
+        "stock_info_changes",
         "trading_no_limit",
         "special_treatment_changes",
     }
@@ -132,6 +133,7 @@ def produce_a_share_processed_data(
                     "trading_calendar",
                     "trading_no_limit",
                     "special_treatment_changes",
+                    "a_share_industry_snapshots",
                 }.difference(source_sessions)
                 if missing:
                     raise ValueError(
@@ -566,6 +568,7 @@ def _compute_processed_frame(
             "trading_calendar",
             "trading_no_limit",
             "special_treatment_changes",
+            "a_share_industry_snapshots",
         }
         if not required.issubset(source):
             raise ValueError("a_share_panel_source_data_missing")
@@ -577,6 +580,8 @@ def _compute_processed_frame(
             industry_history=source.get("industry_classification"),
             industry_sets=source.get("industry_classification_sets"),
             industry_versions=source.get("industry_classification_versions"),
+            industry_changes=source.get("stock_info_changes"),
+            industry_snapshots=source["a_share_industry_snapshots"],
             no_limit_history=source.get("trading_no_limit"),
             special_treatment_history=source.get("special_treatment_changes"),
             session_window=panel_sessions,

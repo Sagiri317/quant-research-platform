@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from hashlib import sha256
 from math import isclose
 from pathlib import Path
 
@@ -35,7 +36,12 @@ from quant_research_platform.research.protocols.crypto_hft import (
     CryptoTakerCandidate,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.storage.identity import native_filesystem_path
+from quant_research_platform.storage.identity import (
+    filesystem_glob,
+    filesystem_is_file,
+    filesystem_read_bytes,
+    native_filesystem_path,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 from tests.helpers.a_share_raw import write_a_share_raw_fixture
@@ -44,19 +50,20 @@ from tests.helpers.binance_hft import (
     write_binance_hft_run,
     write_hft_funding_fixture,
 )
-from tests.helpers.research_configuration import research_configuration
+from tests.helpers.research_configuration import (
+    compact_a_share_configuration,
+    compact_a_share_windows,
+    research_configuration,
+)
 
 
+@compact_a_share_windows()
 def run_a_share_acceptance(project_root: Path):
-    """Exercise provider CSV through actual model selection and active enhancement."""
+    """Exercise both selection groups through full development and frozen test."""
     layout = StorageLayout(project_root=project_root)
     raw_root = project_root / "data/raw"
     profile = research_profile()
-    configuration = research_configuration(name="core6", small_models=True)
-    configuration["windows"]["development"] = {
-        "start": "2019-03-04",
-        "end": "2019-03-15",
-    }
+    configuration = compact_a_share_configuration()
     bound_profile = bind_research_configuration(profile, configuration)
     write_a_share_raw_fixture(
         layout,
@@ -85,10 +92,68 @@ def run_a_share_acceptance(project_root: Path):
     artifact = read_quarterly_model_artifact(
         model_root, expected_identity=model.instance_identity, trial_layout=layout
     )
-    assert set(artifact.quarterly_selections) == {"2019Q1"}
-    assert {item["family_id"] for item in artifact.quarterly_models} == {
-        model["model_id"] for model in configuration["models"]
+    families = {item["model_id"] for item in configuration["models"]}
+    assert len(families) == 8
+    assert {item["family_id"] for item in artifact.candidate_models} == families
+    assert {item["quarter_id"] for item in artifact.candidate_models} == {
+        str(period) for period in pd.period_range("2018Q1", "2019Q2", freq="Q")
     }
+    assert set(artifact.selections["global"]) == {"final"}
+    assert set(artifact.selections["quarterly"]) == {
+        *(str(period) for period in pd.period_range("2019Q1", "2019Q2", freq="Q")),
+        "final",
+    }
+    assert len(artifact.final_models) == 16
+    assert {
+        (item["selection_group"], item["family_id"]) for item in artifact.final_models
+    } == {(group, family) for group in ("global", "quarterly") for family in families}
+    assert all(
+        pd.Timestamp(item["fit_cutoff"]) == pd.Timestamp("2019-06-30")
+        for item in artifact.final_models
+    )
+    trial_root = layout.trial_ledger_root(record.run_id)
+    trial_before = {
+        path.relative_to(trial_root).as_posix(): sha256(
+            filesystem_read_bytes(path)
+        ).hexdigest()
+        for path in filesystem_glob(trial_root, "**/*")
+        if filesystem_is_file(path)
+    }
+    assert trial_before and record.trial_ledgers
+    development_report = research.report_build(
+        profile=profile, layout=layout, run_id=record.run_id
+    )
+    assert development_report["status"] == "COMPLETE"
+    result = research.research_run(
+        profile=research_profile(),
+        layout=layout,
+        research_plan=configuration,
+        raw_root=raw_root,
+        holdout=True,
+        development_run_id=record.run_id,
+    )
+    assert result["status"] == "COMPLETE", [
+        (row["target_id"], row["status"], row["reason"])
+        for row in result["target_results"]
+        if row["status"] not in {"BUILT", "REUSED"}
+    ]
+    held_record = read_research_run_record(layout.research_run_path(result["run_id"]))
+    targets = {row.target_id: row for row in held_record.target_results}
+    held_model = targets["pv_all_model_selection_refit"]
+    assert held_model.status.value == "REUSED"
+    assert held_model.instance_identity == model.instance_identity
+    assert not held_record.trial_ledgers
+    assert {
+        path.relative_to(trial_root).as_posix(): sha256(
+            filesystem_read_bytes(path)
+        ).hexdigest()
+        for path in filesystem_glob(trial_root, "**/*")
+        if filesystem_is_file(path)
+    } == trial_before
+    assert held_record.research_window["access"] == "holdout"
+    assert held_record.research_window["start"] == "2019-07-01"
+    assert held_record.research_window["end"] == "2019-12-31"
+    record = held_record
     with runtime_resource_policy_scope() as policy:
         for candidate in profile.protocol("pv_all").portfolio_candidates():
             target = targets[f"pv_all_{candidate.candidate_id}_ledger"]
@@ -119,8 +184,11 @@ def run_a_share_acceptance(project_root: Path):
         sum(
             row.producer_kind is ProducerKind.PORTFOLIO for row in record.target_results
         )
-        == 5
+        == 10
     )
+    for group in ("global", "quarterly"):
+        assert targets[f"pv_all_{group}_persisted_predictions"].status.value == "BUILT"
+        assert targets[f"pv_all_{group}_statistics"].status.value == "BUILT"
     report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
     assert report["target_result"]["status"] == "BUILT"
     assert report["status"] == "COMPLETE", report["report"]["sections"][
@@ -134,22 +202,44 @@ def run_crypto_acceptance(project_root: Path):
     layout = StorageLayout(project_root)
     raw = project_root / "raw/recorder"
     write_binance_hft_run(raw, count=90, maker_liquidity=True)
-    write_hft_funding_fixture(raw)
+    write_hft_funding_fixture(raw, test_settlement_ns=8_900_000_000)
     profile = research_profile(CRYPTO_PROFILE_ID)
-    configuration = research_configuration("crypto", "baseline", small_models=True)
-    configuration["research_plan"] = hft_research_plan()
-    configuration["windows"] = {
-        "development": {
-            "start": "1970-01-01T00:00:04",
-            "end": "1970-01-01T00:00:08.500000",
-        },
-        "holdout": configuration["research_plan"]["final_holdout"],
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        small_models=True,
+        plan=hft_research_plan(),
+        development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
+    )
+    development = research.research_run(
+        profile=profile, layout=layout, raw_root=raw, research_plan=configuration
+    )
+    assert development["status"] == "COMPLETE", development["target_results"]
+    development_targets = {
+        item["target_id"]: item for item in development["target_results"]
     }
+    assert f"{HFT_RESEARCH_DATASET_ID}_models" in development_targets
+    assert f"{HFT_RESEARCH_DATASET_ID}_predictions" not in development_targets
+    assert not any(
+        item["target_id"].endswith(("_ledger", "_episodes", "_continuous_statistics"))
+        for item in development["target_results"]
+    )
+    development_report = research.report_build(
+        profile=profile, layout=layout, run_id=development["run_id"]
+    )
+    assert development_report["status"] == "COMPLETE"
+    for section in ("OOS prediction", "model comparison"):
+        assert (
+            development_report["report"]["sections"][section]["reason"]
+            == "not_requested"
+        )
     result = research.research_run(
         profile=profile,
         layout=layout,
         raw_root=raw,
         research_plan=configuration,
+        holdout=True,
+        development_run_id=development["run_id"],
     )
     profile = bind_research_configuration(profile, configuration)
     targets = {item["target_id"]: item for item in result["target_results"]}
@@ -160,7 +250,8 @@ def run_crypto_acceptance(project_root: Path):
     ]
     model_id = f"{HFT_RESEARCH_DATASET_ID}_models"
     prediction_id = f"{HFT_RESEARCH_DATASET_ID}_predictions"
-    assert targets[model_id]["status"] == targets[prediction_id]["status"] == "BUILT"
+    assert targets[model_id]["status"] == "REUSED"
+    assert targets[prediction_id]["status"] == "BUILT"
     evaluations = profile.evaluations.list()
     assert len(evaluations) == 17
     assert all(targets[item.evaluation_id]["status"] == "BUILT" for item in evaluations)
@@ -177,7 +268,11 @@ def run_crypto_acceptance(project_root: Path):
     )
     for candidate in makers:
         if candidate.calibrated:
-            assert targets[candidate.calibration_target_id]["status"] == "BUILT"
+            assert (
+                development_targets[candidate.calibration_target_id]["status"]
+                == "BUILT"
+            )
+            assert targets[candidate.calibration_target_id]["status"] == "REUSED"
     assert all(
         targets[target.statistics_target_id]["status"] == "BUILT"
         for target in execution_targets.values()
@@ -237,15 +332,12 @@ def run_crypto_acceptance(project_root: Path):
             summary = summarize_portfolio_ledger(ledger)
             assert summary["fill_events"] > 0
             assert summary["initial_capital"] == 1000.0
-            assert summary["valuation_timestamp_ns"] == 8_500_000_000
+            assert summary["valuation_timestamp_ns"] == 9_000_000_000
             intervals = summarize_crypto_ledger_windows(
                 ledger,
-                windows_ns=(
-                    (4_000_000_000, 5_000_000_000),
-                    (6_500_000_000, 8_500_000_000),
-                ),
+                windows_ns=((8_600_000_000, 9_000_000_000),),
             )
-            assert [row["kind"] for row in intervals] == ["oos", "gap", "oos"]
+            assert [row["kind"] for row in intervals] == ["oos"]
             for key in (
                 "net_pnl",
                 "gross_pnl",
@@ -269,4 +361,6 @@ def run_crypto_acceptance(project_root: Path):
         root, expected_identity=model["instance_identity"], trial_layout=layout
     )
     assert len(saved.models) == 18
+    assert len(saved.final_models) == 9
+    assert {entry["fold_id"] for entry in saved.final_models} == {"fold_2"}
     return result, report

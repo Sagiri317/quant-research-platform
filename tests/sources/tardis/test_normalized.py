@@ -6,6 +6,7 @@ import json
 
 import pytest
 
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.tardis.normalized import (
     download_dataset,
@@ -41,12 +42,26 @@ def test_normalized_original_bytes_nulls_clock_and_hash(tmp_path, monkeypatch):
         )
         assert (root / "data.csv.gz").read_bytes() == raw
         assert manifest["row_count"] == 2
-        rows = list(iter_records(root, resource_policy=policy))
+        rows = list(
+            iter_records(
+                root.parent,
+                archive_paths=(root.name,),
+                time_window=TimeWindow("2026-08-01", "2026-08-01"),
+                resource_policy=policy,
+            )
+        )
         assert rows[0]["amount"] == 2.0
         assert rows[0]["timestamp"] < rows[0]["local_timestamp"]
         (root / "data.csv.gz").write_bytes(raw[:-1] + bytes([raw[-1] ^ 1]))
         with pytest.raises((ValueError, OSError)):
-            list(iter_records(root, resource_policy=policy))
+            list(
+                iter_records(
+                    root.parent,
+                    archive_paths=(root.name,),
+                    time_window=TimeWindow("2026-08-01", "2026-08-01"),
+                    resource_policy=policy,
+                )
+            )
 
 
 def test_normalized_rejects_wrong_schema_and_preserves_existing_output(
@@ -101,7 +116,12 @@ def test_normalized_manifest_mutation_during_iteration(tmp_path, monkeypatch):
             byte_budget=1024**2,
             resource_policy=policy,
         )
-        rows = iter_records(root, resource_policy=policy)
+        rows = iter_records(
+            root.parent,
+            archive_paths=(root.name,),
+            time_window=TimeWindow("2026-08-01", "2026-08-01"),
+            resource_policy=policy,
+        )
         next(rows)
         manifest["coverage"] = "changed"
         (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")

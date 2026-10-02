@@ -218,48 +218,51 @@ def _ledger_curve(artifact, *, stride, policy, retained):
     last_retained_sequence = -1
     with closing_iterator(artifact.iter_chunks()) as batches:
         for batch in batches:
-            last_points = [
-                {
-                    "sequence": batch.sequence,
-                    "timestamp_ns": max(
-                        row.timestamp_ns
-                        for row in batch.valuations
-                        if row.phase == phase
-                    ),
-                    "phase": phase,
-                    "nav": sum(
-                        row.value for row in batch.valuations if row.phase == phase
-                    ),
-                }
-                for phase in ("before", "after", "end")
-            ]
-            total_points += len(last_points)
-            has_marker = any(
-                row.name in {"oos_window_start", "oos_window_end"}
-                for row in batch.diagnostics
-            )
-            if batch.sequence % stride == 0 or has_marker:
-                policy.require_working_set(
-                    1024 * len(last_points),
-                    error="portfolio_curve_exceeds_task_memory_budget",
-                )
-                retained.grow(1024 * len(last_points))
-                points.extend(last_points)
-                last_retained_sequence = batch.sequence
-            for marker in batch.diagnostics:
-                if marker.name not in {"oos_window_start", "oos_window_end"}:
-                    continue
-                policy.require_working_set(
-                    1024, error="portfolio_curve_exceeds_task_memory_budget"
-                )
-                retained.grow(1024)
-                boundaries.append(
+            try:
+                last_points = [
                     {
-                        "timestamp_ns": last_points[-1]["timestamp_ns"],
-                        "kind": marker.name,
-                        "window_index": int(marker.number),
+                        "sequence": batch.sequence,
+                        "timestamp_ns": max(
+                            row.timestamp_ns
+                            for row in batch.valuations
+                            if row.phase == phase
+                        ),
+                        "phase": phase,
+                        "nav": sum(
+                            row.value for row in batch.valuations if row.phase == phase
+                        ),
                     }
+                    for phase in ("before", "after", "end")
+                ]
+                total_points += len(last_points)
+                has_marker = any(
+                    row.name in {"oos_window_start", "oos_window_end"}
+                    for row in batch.diagnostics
                 )
+                if batch.sequence % stride == 0 or has_marker:
+                    policy.require_working_set(
+                        1024 * len(last_points),
+                        error="portfolio_curve_exceeds_task_memory_budget",
+                    )
+                    retained.grow(1024 * len(last_points))
+                    points.extend(last_points)
+                    last_retained_sequence = batch.sequence
+                for marker in batch.diagnostics:
+                    if marker.name not in {"oos_window_start", "oos_window_end"}:
+                        continue
+                    policy.require_working_set(
+                        1024, error="portfolio_curve_exceeds_task_memory_budget"
+                    )
+                    retained.grow(1024)
+                    boundaries.append(
+                        {
+                            "timestamp_ns": last_points[-1]["timestamp_ns"],
+                            "kind": marker.name,
+                            "window_index": int(marker.number),
+                        }
+                    )
+            finally:
+                batch = marker = None
     if last_points and last_retained_sequence != last_points[-1]["sequence"]:
         policy.require_working_set(
             1024 * len(last_points),

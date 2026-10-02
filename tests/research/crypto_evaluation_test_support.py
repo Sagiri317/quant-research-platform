@@ -29,13 +29,11 @@ def check_crypto_evaluation_readback(
 
     oos = pd.Series(False, index=frame.index)
     cutoff = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
-    for fold in plan["folds"]:
-        window = fold["development_test"]
-        mask = frame.timestamp.between(
-            pd.Timestamp(window["start"]), pd.Timestamp(window["end"])
-        )
-        oos |= mask
-        cutoff.loc[mask] = pd.Timestamp(window["end"])
+    window = plan["test"]
+    oos = frame.timestamp.between(
+        pd.Timestamp(window["start"]), pd.Timestamp(window["end"])
+    )
+    cutoff.loc[oos] = pd.Timestamp(window["end"])
     for spec in profile.evaluations.list():
         identity = targets[spec.evaluation_id]["instance_identity"]
         root = layout.instance_root(
@@ -102,21 +100,26 @@ def check_crypto_evaluation_readback(
                         dtype=float
                     )
                     if np.std(values[:, 0]) > 0 and np.std(values[:, 1]) > 0:
+                        direction = (
+                            -1.0
+                            if signal.source_kind == "factor"
+                            and signal.source_column in {"spread", "relative_spread"}
+                            else 1.0
+                        )
                         assert float(pair.ic.iloc[0]) == pytest.approx(
-                            float(np.corrcoef(values.T)[0, 1]), abs=1e-10
+                            direction * float(np.corrcoef(values.T)[0, 1]), abs=1e-10
                         )
         diagnostics = manifest["metadata"]["evaluation_diagnostics"]
         if diagnostics["timestamp_count"]:
-            assert (
-                diagnostics["min_timestamp"]
-                >= plan["folds"][0]["development_test"]["start"]
-            )
+            assert diagnostics["min_timestamp"] >= plan["test"]["start"]
         else:
             assert diagnostics["min_timestamp"] is None
             assert diagnostics["max_timestamp"] is None
 
 
-def check_crypto_evaluation_old_good(*, layout, profile, targets, raw, plan):
+def check_crypto_evaluation_old_good(
+    *, layout, profile, targets, raw, plan, development_run_id
+):
     target = next(
         spec.evaluation_id
         for spec in profile.evaluations.list()
@@ -159,12 +162,15 @@ def check_crypto_evaluation_old_good(*, layout, profile, targets, raw, plan):
             layout=layout,
             raw_root=raw,
             rebuild=True,
+            holdout=True,
+            development_run_id=development_run_id,
             research_plan=research_configuration(
                 "crypto",
                 "baseline",
+                small_models=True,
                 development=(
-                    plan["folds"][0]["development_test"]["start"],
-                    plan["folds"][-1]["development_test"]["end"],
+                    plan["folds"][0]["validation"]["start"],
+                    plan["folds"][-1]["validation"]["end"],
                 ),
                 plan=plan,
             ),
@@ -182,11 +188,10 @@ def check_crypto_evaluation_input_boundaries(
     target_layout = layout.with_target_roots(
         {dataset_id: dataset_root, f"{dataset_id}_predictions": prediction_root}
     )
-    protocol = profile.protocol(profile.research_datasets.list()[0].data_id).manifest()
-    window = TimeWindow(
-        plan["folds"][0]["development_test"]["start"],
-        plan["folds"][-1]["development_test"]["end"],
-    )
+    protocol = profile.protocol(
+        profile.research_datasets.list()[0].data_id, access_window="holdout"
+    ).manifest()
+    window = TimeWindow(**plan["test"])
     original_reader = runner.iter_research_dataset_chunks
     mode = "late_labels"
 

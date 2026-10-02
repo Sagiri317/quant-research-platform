@@ -52,7 +52,7 @@ def _run_calibrated(paths, errors, *, books, trades, quotes, latency):
                 asset_id="btc_usdt",
                 funding_events=(),
                 funding_forecasts=(FundingForecast(0, 2_000_000_000, ()),),
-                calibrations={"fold": {"buy": model, "sell": model}},
+                calibrations={"fold": model},
                 on_ledger=batches.append,
                 on_fill=fills.append,
             )
@@ -340,6 +340,7 @@ def test_many_known_funding_offsets_complete_under_one_small_query_budget():
             0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
         )
         try:
+            model._load()
             retained_before_queries = policy.used_memory_bytes
             for index in range(2048):
                 elapsed = (5000000, 15000000, 25000000)[index % 3] + index
@@ -561,7 +562,7 @@ def test_calibrated_maker_compares_old_expiry_with_real_cancel_replace(
                 asset_id="btc_usdt",
                 funding_events=(),
                 funding_forecasts=(FundingForecast(0, 1_000_000_000, ()),),
-                calibrations={"fold": {"buy": model, "sell": model}},
+                calibrations={"fold": model},
                 on_ledger=batches.append,
                 on_fill=fills.append,
             )
@@ -584,23 +585,21 @@ def test_calibrated_maker_compares_old_expiry_with_real_cancel_replace(
         assert policy.used_memory_bytes == 0
 
 
-def test_decisions_reuse_captured_sample_origins_without_initial_book_reads():
+def test_decisions_reuse_captured_sample_origins_and_read_history_once():
     state = _state(0)
     paths = [([state], [_trade(100, price="99.5", quantity="5", maker_buyer=True)])] * 3
     samples, events = calibration_inputs(paths, [0.0] * 3)
-    initial_ids = {sample["initial_book_event_id"] for sample in samples()}
     reads = []
 
-    def window(start, stop):
-        assert start not in initial_ids
-        reads.append((start, stop))
-        yield from events(start, stop)
+    def history():
+        reads.append(True)
+        yield from events()
 
     order = _maker_new_order(
         0, "buy", 0.3, state, _quote(0, book_segment_id="s1"), _maker_config()
     )
     with runtime_resource_policy_scope() as policy:
-        model = MakerCalibration(samples, window, resource_policy=policy)
+        model = MakerCalibration(samples, history, resource_policy=policy)
         try:
             for prediction in (0.0, 0.01):
                 keep, quantity, gain = model.select(
@@ -619,7 +618,7 @@ def test_decisions_reuse_captured_sample_origins_without_initial_book_reads():
         finally:
             model.close()
         assert policy.used_memory_bytes == 0
-    assert len(reads) == 6
+    assert reads == [True]
 
 
 def test_unknown_historical_visible_quantity_blocks_maker_without_faking_fill():
@@ -712,9 +711,7 @@ def test_future_coverage_end_cannot_change_earlier_maker_decision(
                     asset_id="btc_usdt",
                     funding_events=(),
                     funding_forecasts=(FundingForecast(0, 2_000_000_000, ()),),
-                    calibrations={"fold": {"buy": model, "sell": model}}
-                    if calibrated
-                    else None,
+                    calibrations={"fold": model} if calibrated else None,
                     on_ledger=batches.append,
                 )
             finally:
@@ -734,7 +731,7 @@ def test_future_coverage_end_cannot_change_earlier_maker_decision(
     )
 
 
-def test_native_windows_reuse_one_spool_and_recompute_economic_queries(monkeypatch):
+def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monkeypatch):
     from contextlib import contextmanager
 
     from quant_research_platform.markets.implementations.crypto import execution
@@ -745,13 +742,16 @@ def test_native_windows_reuse_one_spool_and_recompute_economic_queries(monkeypat
         for stamp in (10, 20)
     ]
     sample_source, event_source = calibration_inputs(paths, [-0.002, 0.003])
-    windows = []
-    spools = []
+    reads, spools = [], []
     native_file = execution.reserved_temporary_file
 
-    def events(start, stop):
-        windows.append((start, stop))
-        yield from event_source(start, stop)
+    def samples():
+        reads.append("samples")
+        yield from sample_source()
+
+    def events():
+        reads.append("events")
+        yield from event_source()
 
     @contextmanager
     def observed_file(**kwargs):
@@ -777,18 +777,33 @@ def test_native_windows_reuse_one_spool_and_recompute_economic_queries(monkeypat
         )
         for index in range(4)
     ]
+    queries.append(
+        {
+            **queries[0],
+            "new_order": _maker_new_order(
+                0, "sell", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
+            ),
+        }
+    )
     with runtime_resource_policy_scope() as policy:
-        shared = MakerCalibration(sample_source, events, resource_policy=policy)
+        shared = MakerCalibration(samples, events, resource_policy=policy)
         try:
             answers = [shared.select(**query) for query in queries]
-            assert len(windows) == len(paths) * len(queries)
-            assert len(spools) == 1 and not spools[0].closed
-            assert spools[0].seek(0, 2) == 0 and policy.used_memory_bytes == 0
+            assert reads == ["samples", "events"]
+            assert len(spools) == 4 and all(not spool.closed for spool in spools)
+            sizes = [spool.seek(0, 2) for spool in spools]
+            assert all(size > 0 for size in sizes)
+            assert policy.used_memory_bytes >= 65536
+            shared.select(**queries[0])
+            assert [spool.seek(0, 2) for spool in spools] == sizes
+            assert reads == ["samples", "events"]
         finally:
             shared.close()
-        assert spools[0].closed and policy.used_memory_bytes == 0
+        assert all(spool.closed for spool in spools) and policy.used_memory_bytes == 0
         for answer, query in zip(answers, queries, strict=True):
-            fresh = MakerCalibration(sample_source, events, resource_policy=policy)
+            fresh = MakerCalibration(
+                sample_source, event_source, resource_policy=policy
+            )
             try:
                 assert fresh.select(**query) == answer
             finally:
@@ -796,8 +811,10 @@ def test_native_windows_reuse_one_spool_and_recompute_economic_queries(monkeypat
         assert policy.used_memory_bytes == 0
 
 
-@pytest.mark.parametrize("failure_at", ["source", "response", "truncate"])
-def test_native_window_failure_closes_spool_preserving_primary(monkeypatch, failure_at):
+@pytest.mark.parametrize("failure_at", ["source", "response", "write", "read"])
+def test_native_history_failure_closes_files_preserving_primary(
+    monkeypatch, failure_at
+):
     from contextlib import contextmanager
 
     from quant_research_platform.markets.implementations.crypto import execution
@@ -807,38 +824,41 @@ def test_native_window_failure_closes_spool_preserving_primary(monkeypatch, fail
         [([state], [_trade(10, price="99.5", quantity="2", maker_buyer=True)])],
         [0.0],
     )
-    primary = KeyboardInterrupt("native_window_interrupted")
-    closed = []
-    spools = []
+    primary = KeyboardInterrupt("native_history_interrupted")
+    closed, spools = [], []
     native_file = execution.reserved_temporary_file
 
-    def events(start, stop):
+    def events():
         try:
-            yield from event_source(start, stop)
+            yield from event_source()
             if failure_at == "source":
                 raise primary
         finally:
             closed.append(True)
 
     @contextmanager
-    def failing_close(**kwargs):
+    def failing_file(**kwargs):
         with native_file(**kwargs) as owned:
             spools.append(owned[0])
-            if failure_at == "truncate":
 
-                class TruncateFailure:
-                    def __getattr__(self, name):
-                        return getattr(owned[0], name)
+            class FailingFile:
+                def __getattr__(self, name):
+                    return getattr(owned[0], name)
 
-                    def truncate(self):
+                def write(self, payload):
+                    if failure_at == "write":
                         raise primary
+                    return owned[0].write(payload)
 
-                yield TruncateFailure(), owned[1]
-            else:
-                yield owned
+                def readline(self, size):
+                    if failure_at == "read":
+                        raise primary
+                    return owned[0].readline(size)
+
+            yield FailingFile(), owned[1]
         raise RuntimeError("synthetic_close_failed_after_release")
 
-    monkeypatch.setattr(execution, "reserved_temporary_file", failing_close)
+    monkeypatch.setattr(execution, "reserved_temporary_file", failing_file)
     with runtime_resource_policy_scope() as policy:
         model = MakerCalibration(sample_source, events, resource_policy=policy)
         if failure_at == "response":
@@ -866,8 +886,46 @@ def test_native_window_failure_closes_spool_preserving_primary(monkeypatch, fail
                 fee_bps=0.0,
                 funding=[],
             )
-        assert caught.value is primary and closed == [True]
+        assert caught.value is primary
+        assert closed == ([] if failure_at == "write" else [True])
         assert any("RuntimeError" in note for note in primary.__notes__)
-        assert len(spools) == 1 and spools[0].closed
+        assert len(spools) == 4 and all(spool.closed for spool in spools)
         assert policy.used_memory_bytes == 0
         model.close()
+
+
+@pytest.mark.parametrize("member", ("buy", "events", "offsets"))
+def test_native_history_truncation_is_rejected_and_all_files_close(member):
+    state = _state(0)
+    with runtime_resource_policy_scope() as policy:
+        model = calibration_from_paths(
+            [([state], [_trade(10, price="99.5", quantity="2", maker_buyer=True)])],
+            [0.0],
+            policy,
+        )
+        model._load()
+        handles = [spool for spool, _reservation in model._native.values()]
+        damaged = model._native[member][0]
+        damaged.seek(0)
+        damaged.truncate()
+        with pytest.raises(ValueError, match="^crypto_calibration_history_invalid$"):
+            model.select(
+                state=state,
+                decision_ns=0,
+                new_order=_maker_new_order(
+                    0,
+                    "buy",
+                    1.0,
+                    state,
+                    _quote(0, book_segment_id="s1"),
+                    _maker_config(),
+                ),
+                active_order=None,
+                commands=(),
+                lifetime_ns=500000000,
+                prediction=0.0,
+                fee_bps=0.0,
+                funding=[],
+            )
+        assert all(handle.closed for handle in handles)
+        assert policy.used_memory_bytes == 0

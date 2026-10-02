@@ -10,7 +10,6 @@ from quant_research_platform.contracts.filtering import (
     SampleFilterMode,
     validate_sample_filter_mode,
 )
-from quant_research_platform.contracts.models import MODEL_SELECTION_METRIC_DIRECTIONS
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 from quant_research_platform.contracts.validation import (
@@ -73,11 +72,6 @@ class PredictionSpec:
     sample_filter_mode: SampleFilterMode = "eligible"
     is_oos: bool = True
     is_final_oos_window: bool = True
-    candidate_model_ids: tuple[str, ...] = ()
-    selection_tie_break_order: tuple[str, ...] = ()
-    model_selection_metric: str = "validation_rankic"
-    model_selection_validation_start: str | None = None
-    model_selection_validation_end: str | None = None
     training_asset_ids: tuple[str, ...] = ()
     evaluation_asset_ids: tuple[str, ...] = ()
     contract_version: str = "0.1"
@@ -93,10 +87,7 @@ class PredictionSpec:
         )
         test_start = _time_bound(self.test_start, "test_start")
         if self.train_end is None:
-            if (
-                self.prediction_mode not in {"a_share_oos", "crypto_oos"}
-                or self.candidate_model_ids
-            ):
+            if self.prediction_mode not in {"a_share_oos", "crypto_oos"}:
                 raise ValueError("prediction_train_end_required")
         else:
             train_end = _time_bound(self.train_end, "train_end")
@@ -139,9 +130,7 @@ class PredictionSpec:
             or self.prediction_mode not in PREDICTION_MODES
         ):
             raise ValueError("unsupported_prediction_mode")
-        if self.prediction_mode == "a_share_oos" and (
-            self.train_end is not None or self.candidate_model_ids
-        ):
+        if self.prediction_mode == "a_share_oos" and (self.train_end is not None):
             raise ValueError("a_share_persisted_prediction_requires_quarter_lineage")
         expected_prediction_column = (
             RAW_PREDICTION_COLUMN
@@ -159,7 +148,6 @@ class PredictionSpec:
             raise ValueError("prediction_open_ended_window_must_be_final")
         if self.test_end is not None and self.is_final_oos_window:
             object.__setattr__(self, "is_final_oos_window", False)
-        _validate_model_selection_contract(self)
         _validate_column_tuple(
             self.training_asset_ids, "training_asset_ids", required=False
         )
@@ -186,64 +174,6 @@ def _validate_prediction_output_values(
         frame[prediction_column],
         error="invalid_prediction_values",
     )
-
-
-def _validate_model_selection_contract(spec: PredictionSpec) -> None:
-    candidate_model_ids = spec.candidate_model_ids
-    _validate_column_tuple(
-        candidate_model_ids,
-        "candidate_model_ids",
-        required=False,
-    )
-    if any(
-        not isinstance(model_id, str) or not model_id
-        for model_id in candidate_model_ids
-    ):
-        raise ValueError("candidate_model_ids_must_be_non_empty_strings")
-    if len(set(candidate_model_ids)) != len(candidate_model_ids):
-        raise ValueError("candidate_model_ids_must_not_contain_duplicates")
-    if spec.selection_tie_break_order:
-        _validate_column_tuple(
-            spec.selection_tie_break_order,
-            "selection_tie_break_order",
-        )
-        if set(spec.selection_tie_break_order) != {spec.model_id, *candidate_model_ids}:
-            raise ValueError("selection_tie_break_order_mismatch")
-    if spec.model_id in candidate_model_ids:
-        raise ValueError("candidate_model_ids_must_not_include_model_id")
-    if (
-        type(spec.model_selection_metric) is not str
-        or spec.model_selection_metric not in MODEL_SELECTION_METRIC_DIRECTIONS
-    ):
-        raise ValueError("invalid_model_selection_metric")
-    if not candidate_model_ids:
-        return
-    if (
-        spec.model_selection_validation_start is None
-        or spec.model_selection_validation_end is None
-    ):
-        raise ValueError("model_selection_validation_window_required")
-    if spec.train_end is None:
-        raise ValueError("prediction_train_end_required")
-    train_end = _time_bound(spec.train_end, "train_end")
-    test_start = _time_bound(spec.test_start, "test_start")
-    validation_start = _time_bound(
-        spec.model_selection_validation_start,
-        "model_selection_validation_start",
-    )
-    validation_end = _time_bound(
-        spec.model_selection_validation_end,
-        "model_selection_validation_end",
-    )
-    _require_same_bound_kind(train_end, validation_start)
-    _require_same_bound_kind(validation_start, validation_end)
-    _require_same_bound_kind(validation_end, test_start)
-    if train_end >= validation_start:
-        raise ValueError("model_selection_window_must_follow_train_window")
-    if validation_start > validation_end:
-        raise ValueError("model_selection_window_must_not_be_reversed")
-    if validation_end >= test_start:
-        raise ValueError("model_selection_window_must_precede_test_window")
 
 
 def _time_bound(value: object, field_name: str):

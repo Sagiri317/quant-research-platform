@@ -362,6 +362,7 @@ def test_canonical_pipeline_is_executable_without_a_scenario_bypass():
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2020-01-01"),
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": np.where(np.arange(n) % 2, "A", "B"),
             "log_float_market_cap": np.sin(np.arange(n) / 11) + 10,
             "x": np.cos(np.arange(n) / 7),
@@ -464,6 +465,85 @@ def test_training_row_count_cache_is_exact_and_cutoff_scoped():
         == 1
     )
     assert len(calls) == 2
+
+
+def test_training_count_failure_closes_borrowed_dataset_source(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from quant_research_platform.contracts.experiments import (
+        training_availability_columns,
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.models import fitting, production
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
+
+    dates = pd.to_datetime(["2020-01-01", "2020-01-02"]).as_unit("ns")
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 2,
+            "asset_id": ["a"] * 2,
+            "timestamp": dates,
+            "eligible": [True] * 2,
+            "x": [1.0, 2.0],
+            "y": [2.0, 3.0],
+            training_availability_columns("y")[0]: dates,
+        }
+    )
+    root = tmp_path / "artifact"
+    primary_key = ("market_id", "asset_id", "timestamp")
+    write_low_level_parquet_artifact(
+        root, frame, primary_key=primary_key, partition_columns=("year",)
+    )
+    dataset = SimpleNamespace(primary_key=primary_key, market_id="a_share")
+    model = ModelSpec(
+        model_id="linear",
+        model_algorithm="linear_regression",
+        input_feature_columns=("x",),
+        label_column="y",
+    )
+    primary = MemoryError("training_filter_failure")
+    sources = []
+    cache = {}
+
+    def fail_filter(*args, **kwargs):
+        raise primary
+
+    monkeypatch.setattr(fitting, "legal_training_rows", fail_filter)
+    with runtime_resource_policy_scope() as policy:
+        with open_dataset_session(
+            root, columns=None, time_window=None, resource_policy=policy
+        ) as session:
+            retained = policy.used_memory_bytes
+
+            def chunks(columns, **kwargs):
+                source = production._model_input_chunks(
+                    session,
+                    dataset_spec=dataset,
+                    columns=columns,
+                    time_window=TimeWindow("2020-01-01", "2020-01-02"),
+                )
+                sources.append(source)
+                return source
+
+            try:
+                with pytest.raises(MemoryError) as raised:
+                    production._count_training_rows(
+                        dataset,
+                        model,
+                        chunks=chunks,
+                        train_end="2020-01-02",
+                        cache=cache,
+                    )
+                assert raised.value is primary
+                assert not cache
+                assert sources and all(source.gi_frame is None for source in sources)
+                assert policy.used_memory_bytes == retained
+            finally:
+                for source in sources:
+                    source.close()
+        assert policy.used_memory_bytes == 0
 
 
 def test_risk_manifest_serializes_the_same_runtime_config():

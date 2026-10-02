@@ -69,12 +69,12 @@ from quant_research_platform.storage.identity import (
     _DigestingReader,
     dataset_file_identity,
     dataset_file_identity_from_stat,
-    filesystem_read_bytes,
     filesystem_scandir,
     filesystem_stat,
     open_filesystem_file,
     require_unaliased_path,
 )
+from quant_research_platform.storage.manifests import read_bounded_qrp_json
 
 _FILE_MANIFEST_KEYS = frozenset(
     {
@@ -673,8 +673,8 @@ class RecorderRun:
     _files: tuple[_RunFile, ...] = field(repr=False)
     _coverage_index: ObservationCoverageIndex = field(repr=False)
 
-    def funding_root(self, symbol):
-        return self.root.parent / "funding" / symbol
+    def funding_roots(self, symbol, *, time_window):
+        return (self.root.parent / "funding" / symbol,)
 
     def hft_source_info(self):
         if self.manifest["market_data_status"] == "FAIL":
@@ -1037,28 +1037,31 @@ def _read_run_manifest(
         raise ValueError("binance_replay_run_manifest_invalid")
     bound = json_record_working_set_bytes(identity.size) + 64 * 1024
     with policy.lease("binance.replay.manifest", bound) as lease:
-        raw: bytes | None = None
         manifest: dict[str, Any] | None = None
         try:
             try:
-                raw = filesystem_read_bytes(path)
-                manifest = parse_qrp_json_object(raw)
+                manifest = read_bounded_qrp_json(
+                    path, expected_identity=identity, max_bytes=identity.size
+                )[1]
             except (
                 FileNotFoundError,
                 NotADirectoryError,
                 UnicodeError,
                 ValueError,
             ) as exc:
+                if str(exc) in {
+                    "dataset_metadata_file_identity_changed",
+                    "dataset_metadata_file_too_large",
+                }:
+                    raise ValueError("binance_replay_run_identity_changed") from exc
                 raise ValueError("binance_replay_run_manifest_invalid") from exc
             if _capture_raw_file_identity(path) != identity:
                 raise ValueError("binance_replay_run_identity_changed")
             _validate_run_manifest(manifest)
         except BaseException as error:
             clear_exception_frames(error)
-            raw = None
             manifest = None
             raise
-        raw = None
         assert manifest is not None
         lease.transfer("binance.replay.run_metadata")
         try:

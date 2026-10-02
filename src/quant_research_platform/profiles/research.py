@@ -226,18 +226,20 @@ def _a_share_profile() -> ResearchProfile:
                 for scenario_id in a_share.SCENARIO_IDS
             },
             **{
-                f"{scenario_id}_persisted_predictions": ProducerBinding(
+                f"{scenario_id}_{group}_persisted_predictions": ProducerBinding(
                     ProducerKind.PREDICTION,
                     build_prediction_result_from_persisted_model,
                 )
                 for scenario_id in a_share.SCENARIO_IDS
+                for group in ("global", "quarterly")
             },
             **{
-                f"{scenario_id}_statistics": ProducerBinding(
+                f"{scenario_id}_{group}_statistics": ProducerBinding(
                     ProducerKind.STATISTIC,
                     build_a_share_statistics_tables,
                 )
                 for scenario_id in a_share.SCENARIO_IDS
+                for group in ("global", "quarterly")
             },
             **{
                 f"{scenario_id}_report_artifact": ProducerBinding(
@@ -377,7 +379,11 @@ def _crypto_profile() -> ResearchProfile:
 
 
 def bind_research_configuration(
-    profile: ResearchProfile, configuration, *, tardis_root=None
+    profile: ResearchProfile,
+    configuration,
+    *,
+    tardis_root=None,
+    access_window="development",
 ):
     """Resolve one explicit selection into the existing catalogs and protocol."""
     import json
@@ -454,6 +460,7 @@ def bind_research_configuration(
             STATISTICS_TABLE_COLUMNS,
             read_statistics_artifact,
         )
+        from quant_research_platform.contracts.time import TimeWindow
         from quant_research_platform.markets.implementations.crypto.portfolio import (
             produce_maker_calibration,
             produce_maker_ledger,
@@ -474,11 +481,37 @@ def bind_research_configuration(
             iter_reconstructed_depth,
         )
 
+        archive_paths = (
+            None
+            if config["source_archives"] is None
+            else tuple(config["source_archives"])
+        )
+        source_window = TimeWindow(
+            min(fold.train.start for fold in bound.research_plan.folds),
+            TimeWindow(**config["windows"][access_window]).end,
+        )
+        source_opener = partial(
+            open_market_source,
+            archive_paths=archive_paths,
+            time_window=source_window,
+        )
+        source_root = tardis_root if archive_paths is not None else None
+        panel_binding = bindings[crypto_ids.HFT_PANEL_DATA_ID]
+        bindings[crypto_ids.HFT_PANEL_DATA_ID] = replace(
+            panel_binding,
+            producer=partial(panel_binding.producer, open_run=source_opener),
+            source_identity=partial(
+                market_source_identity,
+                archive_paths=archive_paths,
+                time_window=source_window,
+            ),
+            raw_root=source_root,
+        )
         for candidate in candidates:
             symbol = {"btc_usdt": "BTCUSDT", "eth_usdt": "ETHUSDT"}[candidate.asset_id]
             common = {
                 "symbol": symbol,
-                "open_run": open_market_source,
+                "open_run": source_opener,
                 "reconstruct_depth": partial(
                     iter_reconstructed_depth,
                     market_type=FUTURES_MARKET_TYPE,
@@ -512,7 +545,7 @@ def bind_research_configuration(
                         asset_id=candidate.asset_id,
                         model_ids=candidate.model_ids,
                         market_type=FUTURES_MARKET_TYPE,
-                        open_run=open_market_source,
+                        open_run=source_opener,
                         reconstruct_depth=partial(
                             iter_reconstructed_depth,
                             market_type=FUTURES_MARKET_TYPE,
@@ -523,6 +556,10 @@ def bind_research_configuration(
                         ),
                         read_model_artifact=read_crypto_model_artifact,
                     ),
+                    source_identity=bindings[
+                        crypto_ids.HFT_PANEL_DATA_ID
+                    ].source_identity,
+                    raw_root=source_root,
                 )
             for target in bound.execution_targets():
                 if target.candidate != candidate:
@@ -530,7 +567,13 @@ def bind_research_configuration(
                 bindings[target.target_id] = ProducerBinding(
                     ProducerKind.PORTFOLIO,
                     partial(producer, execution_mode=target.execution_mode),
-                    source_identity=partial(market_funding_identity, symbol=symbol),
+                    source_identity=partial(
+                        market_funding_identity,
+                        symbol=symbol,
+                        archive_paths=archive_paths,
+                        time_window=TimeWindow(**config["windows"]["holdout"]),
+                    ),
+                    raw_root=source_root,
                 )
                 bindings[target.statistics_target_id] = ProducerBinding(
                     ProducerKind.STATISTIC,
@@ -589,6 +632,7 @@ def bind_research_configuration(
         for name, source in auxiliary.items():
             if name in crypto_ids.HFT_EXTERNAL_DATA_IDS:
                 from quant_research_platform.sources.tardis.normalized import (
+                    SCHEMA_ID,
                     iter_records,
                     source_identity,
                 )
@@ -608,17 +652,23 @@ def bind_research_configuration(
                         type(kinds) is not dict
                         or set(kinds) != {"quotes", "trades", "derivative_ticker"}
                         or any(
-                            type(path) is not str
-                            or not path
+                            type(paths) is not list
+                            or not paths
                             or any(
-                                character
-                                not in (
-                                    "abcdefghijklmnopqrstuvwxyz"
-                                    "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                                type(path) is not str
+                                or not path
+                                or any(
+                                    character
+                                    not in (
+                                        "abcdefghijklmnopqrstuvwxyz"
+                                        "ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                                    )
+                                    for character in path
                                 )
-                                for character in path
+                                for path in paths
                             )
-                            for path in kinds.values()
+                            or len(set(paths)) != len(paths)
+                            for paths in kinds.values()
                         )
                     ):
                         raise ValueError("research_external_archive_invalid")
@@ -629,6 +679,7 @@ def bind_research_configuration(
                     source_identity,
                     exchange=instrument["exchange"],
                     archives=source["archives"],
+                    time_window=source_window,
                 )
                 bindings[data_id] = ProducerBinding(
                     ProducerKind.PROCESSED,
@@ -636,6 +687,7 @@ def bind_research_configuration(
                         crypto_producer.produce_normalized_context,
                         read_records=iter_records,
                         source_identity=identity,
+                        source_schema_id=SCHEMA_ID,
                         archives=source["archives"],
                     ),
                     source_identity=identity,
@@ -664,32 +716,43 @@ def bind_research_configuration(
                     raise ValueError("research_state_age_invalid")
                 continue
             expected_fields = (
-                {"archive"} if name == "sol" else {"archive", "max_age_ms"}
+                {"archives"} if name == "sol" else {"archives", "max_age_ms"}
             )
             if type(source) is not dict or set(source) != expected_fields:
                 raise ValueError("research_auxiliary_source_invalid")
             exchange = "binance" if name == "spot" else "binance-futures"
-            relative = source["archive"]
+            relatives = source["archives"]
             if (
-                type(relative) is not str
-                or len(relative.split("/")) != 2
-                or relative.split("/")[0] != exchange
-                or not relative.split("/")[1]
+                type(relatives) is not list
+                or not relatives
                 or any(
-                    character not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
-                    for character in relative.split("/")[1]
+                    type(relative) is not str
+                    or len(relative.split("/")) != 2
+                    or relative.split("/")[0] != exchange
+                    or not relative.split("/")[1]
+                    or any(
+                        character not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
+                        for character in relative.split("/")[1]
+                    )
+                    for relative in relatives
                 )
+                or len(set(relatives)) != len(relatives)
             ):
                 raise ValueError("research_auxiliary_archive_invalid")
             if tardis_root is None:
                 raise ValueError("research_auxiliary_source_root_required")
-            archive_root = tardis_root / relative
+            archive_paths = tuple(relatives)
+            archive_opener = partial(
+                open_tardis_archive,
+                archive_paths=archive_paths,
+                time_window=source_window,
+            )
             if name == "sol":
                 bindings[crypto_ids.HFT_SOL_PANEL_DATA_ID] = ProducerBinding(
                     ProducerKind.PROCESSED,
                     partial(
                         crypto_producer.produce_hft_processed_data,
-                        open_run=open_tardis_archive,
+                        open_run=archive_opener,
                         reconstruct_depth=iter_reconstructed_depth,
                         read_trades=iter_agg_trades,
                         make_stats=ReconstructionStats,
@@ -698,11 +761,13 @@ def bind_research_configuration(
                     ),
                     source_identity=partial(
                         native_source_identity,
+                        archive_paths=archive_paths,
+                        time_window=source_window,
                         exchange="binance-futures",
                         symbols=("solusdt",),
                         channels=("depth", "depthSnapshot", "aggTrade", "markPrice"),
                     ),
-                    raw_root=archive_root,
+                    raw_root=tardis_root,
                 )
                 continue
             ages = source["max_age_ms"]
@@ -720,15 +785,17 @@ def bind_research_configuration(
                     ProducerKind.PROCESSED,
                     partial(
                         crypto_producer.produce_derivative_processed_data,
-                        open_archive=open_tardis_archive,
+                        open_archive=archive_opener,
                     ),
                     source_identity=partial(
                         native_source_identity,
+                        archive_paths=archive_paths,
+                        time_window=source_window,
                         exchange=exchange,
                         symbols=("btcusdt", "ethusdt"),
                         channels=crypto_hft.HFT_DERIVATIVE_CHANNELS,
                     ),
-                    raw_root=archive_root,
+                    raw_root=tardis_root,
                 )
             else:
                 if type(ages) is not int or ages <= 0:
@@ -738,7 +805,7 @@ def bind_research_configuration(
                     ProducerKind.PROCESSED,
                     partial(
                         crypto_producer.produce_hft_processed_data,
-                        open_run=open_tardis_archive,
+                        open_run=archive_opener,
                         reconstruct_depth=iter_reconstructed_depth,
                         read_trades=iter_agg_trades,
                         make_stats=ReconstructionStats,
@@ -747,11 +814,13 @@ def bind_research_configuration(
                     ),
                     source_identity=partial(
                         native_source_identity,
+                        archive_paths=archive_paths,
+                        time_window=source_window,
                         exchange=exchange,
                         symbols=("btcusdt", "ethusdt"),
                         channels=("depth", "depthSnapshot", "aggTrade"),
                     ),
-                    raw_root=archive_root,
+                    raw_root=tardis_root,
                 )
                 bindings[data_id] = ProducerBinding(
                     ProducerKind.PROCESSED,
@@ -837,19 +906,20 @@ def bind_research_configuration(
         if spec.research_dataset_id != scenario:
             continue
         if all(signal.source_kind == "factor" for signal in spec.signals):
-            spec = replace(
-                spec,
-                signals=tuple(
-                    SignalSpec(
-                        signal_id=column, source_kind="factor", source_column=column
-                    )
-                    for column in evaluation["factors"]
-                ),
-                label_columns=tuple(evaluation["labels"]),
-                label_availability_columns={
-                    label: availability[label] for label in evaluation["labels"]
-                },
-            )
+            if str(profile.market_id) == "a_share":
+                spec = replace(
+                    spec,
+                    signals=tuple(
+                        SignalSpec(
+                            signal_id=column, source_kind="factor", source_column=column
+                        )
+                        for column in evaluation["factors"]
+                    ),
+                    label_columns=tuple(evaluation["labels"]),
+                    label_availability_columns={
+                        label: availability[label] for label in evaluation["labels"]
+                    },
+                )
             eval_specs.append(spec)
         elif config["stage"] == "research" and all(
             signal.source_kind == "prediction"

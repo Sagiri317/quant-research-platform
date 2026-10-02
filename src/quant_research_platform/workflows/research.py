@@ -330,6 +330,15 @@ def _plan_targets(
                 and binding.source_identity is None
             ):
                 blocker = "source_identity_provider_missing"
+            elif (
+                protocol.protocol_id == "a_share_low_frequency"
+                and binding.kind is ProducerKind.PREDICTION
+                and protocol.access_window == "development"
+                and protocol.selection_group_for_target(spec.target_id) == "global"
+                and pd.Timestamp(target_window.end)
+                < pd.Timestamp(protocol.manifest()["development_window"]["end"])
+            ):
+                blocker = "global_selection_requires_complete_development"
             else:
                 producer_kind = binding.kind
                 raw_identity = None
@@ -575,7 +584,10 @@ def research_run(
     from quant_research_platform.profiles.research import bind_research_configuration
 
     profile = bind_research_configuration(
-        profile, research_plan, tardis_root=layout.raw_source_root("tardis")
+        profile,
+        research_plan,
+        tardis_root=layout.raw_source_root("tardis"),
+        access_window="holdout" if holdout else "development",
     )
     scenario_id = research_plan["scenario_id"]
     selected_window = research_plan["windows"]["holdout" if holdout else "development"]
@@ -754,6 +766,8 @@ def _frozen_holdout_protocol(
             or record.scenario_id != protocol.scenario_id
             or record.payload()["protocol"] != protocol.manifest()
             or record.research_window["access"] != "development"
+            or pd.Timestamp(record.research_window["start"])
+            != pd.Timestamp(protocol.manifest()["development_window"]["start"])
             or pd.Timestamp(record.research_window["end"])
             != pd.Timestamp(protocol.manifest()["development_window"]["end"])
             or set(record.terminal_targets)
@@ -1546,8 +1560,9 @@ def _build_semantic_target(
             status=TargetStatus.BLOCKED,
             reason="research_window_required",
         )
+    raw_root = binding.raw_root or raw_root
     raw_identity = (
-        binding.source_identity(binding.raw_root or raw_root, spec.target_id)
+        binding.source_identity(raw_root, spec.target_id)
         if binding.source_identity is not None
         else None
     )
@@ -1705,7 +1720,7 @@ def _build_semantic_target(
                     logical_root,
                     model_id=spec.target_id,
                     envelope=envelope,
-                    quarterly_results=model_result,
+                    model_results=model_result,
                     trial_layout=target_layout,
                     verify_source=dataset_session.verify,
                 )
@@ -1745,6 +1760,7 @@ def _build_semantic_target(
             prediction_spec=prediction_spec,
             persisted_model=persisted,
             resource_policy=policy,
+            selection_group=protocol.selection_group_for_target(spec.target_id),
             access_window=protocol.access_window,
         )
 
@@ -1882,6 +1898,15 @@ def _build_semantic_target(
         )
         if prediction_root.name.startswith("__missing_"):
             raise ValueError("prediction_target_root_missing")
+        global_statistics = None
+        if target_protocol["selection_group"] == "quarterly":
+            global_target = protocol.statistics_target_ids[0]
+            global_statistics = read_statistics_artifact(
+                target_layout.target_root(
+                    global_target, Path("__missing_global_statistics__")
+                ),
+                expected_identity=planned["upstream_identities"][global_target],
+            )
         with read_prediction_output_bundle(
             prediction_root / "outputs" / prediction_target,
             expected_output_id=prediction_target,
@@ -1898,6 +1923,7 @@ def _build_semantic_target(
                 time_window=time_window,
                 prediction_lookup=prediction_lookup,
                 resource_policy=policy,
+                global_statistics=global_statistics,
             )
             try:
                 write_statistics_artifact(
@@ -1973,6 +1999,7 @@ def _build_semantic_target(
                 expected_identity=lineage["model_artifact_identity"],
                 trial_layout=target_layout,
             )
+            final_calibrations = []
             portfolio_chunks = binding.producer(
                 candidate=candidate,
                 layout=target_layout,
@@ -1981,7 +2008,10 @@ def _build_semantic_target(
                 input_window=protocol.data_window,
                 formal_dataset_window=protocol.formal_dataset_window,
                 prediction_window=prediction_window,
-                frozen_calibration=protocol.frozen_alpha,
+                frozen_calibration=dict(protocol.frozen_alpha).get(
+                    candidate.selection_group
+                ),
+                on_final_calibration=final_calibrations.append,
                 prediction_lookup=prediction_lookup,
                 persisted_model=persisted,
                 access_window=target_protocol["access_window"],
@@ -1996,10 +2026,19 @@ def _build_semantic_target(
                     for chunk in chunks:
                         emit(chunk)
 
+            def final_calibration():
+                if len(final_calibrations) != 1:
+                    raise ValueError("portfolio_final_calibration_missing")
+                return final_calibrations[0]
+
             write_portfolio_ledger_artifact(
                 logical_root,
                 envelope=envelope,
                 produce=produce_ledger,
+                final_calibration=final_calibration
+                if candidate.construction == "benchmark_enhanced"
+                and target_protocol["access_window"] == "development"
+                else None,
             )
     else:
         raise ValueError("producer_binding_kind_invalid")
@@ -2210,6 +2249,7 @@ def _build_report_from_run(
         profile,
         record.payload()["protocol"]["research_configuration"],
         tardis_root=layout.raw_source_root("tardis"),
+        access_window=record.research_window["access"],
     )
     report_target = f"{record.scenario_id}_report_artifact"
     binding = profile.producer_bindings.get(report_target)
@@ -2236,9 +2276,9 @@ def _build_report_from_run(
                 trial_layout=layout,
                 expected_member_identities=identities,
             )
-            selections = persisted.quarterly_selections
+            selections = persisted.selections
             reference_member_identities[result.target_id] = identities
-        report_inputs["quarterly_selections"] = selections
+        report_inputs["selections"] = selections
         report_inputs["reference_member_identities"] = reference_member_identities
     elif str(profile.market_id) == "crypto":
         report_inputs["execution_targets"] = profile.protocol(
@@ -2616,16 +2656,16 @@ def _validate_semantic_target_root(
             expected_member_identities=identities,
         )
         expected_model_ids = protocol.model_ids_for_target(spec.target_id)
-        for quarter in persisted.quarterly_models:
-            metadata = quarter["model_metadata"]
-            selection = persisted.quarterly_selections[quarter["quarter_id"]]
-            if type(selection) is not dict:
-                raise ValueError("model_selection_metadata_missing")
-            if tuple(selection["candidate_family_ids"]) != expected_model_ids:
-                raise ValueError("model_selection_protocol_mismatch")
-            if tuple(selection["tie_break_order"]) != expected_model_ids:
-                raise ValueError("model_selection_protocol_mismatch")
-            expected_spec_id = quarter["family_id"]
+        for decisions in persisted.selections.values():
+            for selection in decisions.values():
+                if (
+                    tuple(selection["candidate_family_ids"]) != expected_model_ids
+                    or tuple(selection["tie_break_order"]) != expected_model_ids
+                ):
+                    raise ValueError("model_selection_protocol_mismatch")
+        for entry in (*persisted.candidate_models, *persisted.final_models):
+            metadata = entry["model_metadata"]
+            expected_spec_id = entry["family_id"]
             if expected_spec_id not in expected_model_ids:
                 raise ValueError("model_selection_family_mismatch")
             expected_spec = profile.models.get(expected_spec_id)
@@ -2696,6 +2736,7 @@ def _validate_semantic_target_root(
                         prediction_metadata["test_start"],
                         prediction_metadata["test_end"],
                     ),
+                    selection_group=protocol.selection_group_for_target(spec.target_id),
                     access_window=protocol.access_window,
                 ):
                     raise ValueError("prediction_model_lineage_mismatch")
@@ -2947,6 +2988,7 @@ def _semantic_target_payload(
             return payload
         payload["portfolio_candidate"] = {
             "candidate_id": candidate.candidate_id,
+            "selection_group": candidate.selection_group,
             "construction": candidate.construction,
             "prediction_target_id": candidate.prediction_target_id,
             "prediction_selector": candidate.prediction_selector,
@@ -2962,6 +3004,7 @@ def _semantic_target_payload(
             "risk_style_columns": list(candidate.risk_style_columns),
             "risk_context_target_ids": list(candidate.risk_context_target_ids),
         }
+        payload["final_alpha_calibration_schema"] = "qrp-final-alpha-calibration-v1"
         payload["ledger_schema"] = {
             name: list(columns)
             for name, columns in PORTFOLIO_LEDGER_TABLE_COLUMNS.items()

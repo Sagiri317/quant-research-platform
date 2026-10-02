@@ -1076,5 +1076,6 @@
       "start": "2024-01-01",
       "end": "2025-12-31"
     }
-  }
+  },
+  "primary_portfolio_id": "champion_top20_equal_weight"
 }

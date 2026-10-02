@@ -338,3 +338,287 @@ def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
         load_a_share_fee_source(reference_root=root)
     assert caught.value is primary
     assert handle.closed
+
+
+def _industry_observations():
+    return (
+        (
+            "snapshot",
+            "CSRC2012",
+            "2019-12-31",
+            "2020-01-03",
+            [
+                {
+                    "code": "000001",
+                    "name": "synthetic issuer",
+                    "category": "A",
+                    "major": "",
+                    "industry": "01",
+                    "source_locator": "page:1",
+                }
+            ],
+        ),
+    )
+
+
+def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
+    import pandas as pd
+
+    from quant_research_platform.markets.implementations.a_share.processed import panels
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+    from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
+
+    raw_root = tmp_path / "raw"
+    write_industry_reference_fixture(raw_root, observations=_industry_observations())
+    layout = StorageLayout(tmp_path)
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    profile = research_profile()
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2019-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    target = result["target_results"][0]
+    assert target["status"] == "BUILT"
+    root = layout.instance_root(
+        layout.interim_data_root("reference", data_id), target["instance_identity"]
+    )
+    snapshots = read_dataset(root, resource_policy=None)
+    assert str(snapshots["timestamp"].dtype) == "datetime64[ns]"
+    spec = json.loads(filesystem_read_text(root / "spec.json", encoding="utf-8"))
+    assert spec["primary_key"] == ["source_asset_id", "timestamp", "snapshot_id"]
+    assert snapshots["observation_date"].tolist() == [pd.Timestamp("2019-12-31")]
+    assert snapshots["timestamp"].tolist() == [pd.Timestamp("2020-01-04")]
+    manifest = read_dataset_manifest_evidence(root)
+    assert manifest["common_manifest"]["semantic_metadata"][
+        "raw_content_identity"
+    ] == interim.source_content_identity(raw_root / "reference", data_id)
+    dates = pd.bdate_range("2020-01-02", periods=5)
+    inputs = _synthetic_interim_frames(dates)
+    stocks = inputs["stock_master"].assign(market_type=1)
+    stocks["timestamp"] = stocks["listing_date"]
+    dictionary = pd.DataFrame(
+        {
+            "industry_standard_id": ["CSRC2012", "CSRC2012"],
+            "industry_code": ["A", "A01"],
+            "industry_name": ["agriculture", "crops"],
+            "parent_industry_code": ["", "A"],
+            "industry_level": ["1", "2"],
+        }
+    )
+    versions = inputs["industry_classification_versions"].assign(
+        implement_date=pd.Timestamp("2012-10-26")
+    )
+    panel = panels.compute_market_panel(
+        inputs["market_bars_1d"],
+        stock_master=stocks,
+        market_cap=inputs["market_cap"],
+        trading_calendar=inputs["trading_calendar"],
+        industry_sets=dictionary,
+        industry_versions=versions,
+        industry_snapshots=snapshots,
+    )
+    asset = panel.loc[panel["asset_id"].eq("000001")]
+    assert asset["timestamp"].tolist() == list(dates)
+    assert asset["industry_level1_code"].fillna("unknown").tolist() == [
+        "unknown",
+        "unknown",
+        "A",
+        "A",
+        "A",
+    ]
+    assert (
+        panel.loc[~panel["asset_id"].eq("000001"), "industry_level1_code"].isna().all()
+    )
+    again = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2019-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    assert again["target_results"][0]["status"] == "REUSED"
+
+
+def test_industry_snapshot_range_uses_publication_not_observation(tmp_path):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    root = tmp_path / "raw"
+    observations = _industry_observations() + (
+        (
+            "capco",
+            "CAPCO",
+            "2023-06-30",
+            "2024-02-08",
+            [
+                {
+                    "code": "000001",
+                    "name": "synthetic issuer",
+                    "category": "C",
+                    "major": "CE",
+                    "industry": "26",
+                    "source_locator": "page:1",
+                }
+            ],
+        ),
+    )
+    write_industry_reference_fixture(root, observations=observations)
+    layout = StorageLayout(tmp_path)
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    interim.materialize_interim_data(
+        layout=layout,
+        raw_root=root / "reference",
+        data_ids=(data_id,),
+        start_date="2011-01-01",
+        end_date="2023-12-31",
+    )
+    frame = read_dataset(
+        layout.interim_data_root("reference", data_id), resource_policy=None
+    )
+    assert frame["snapshot_id"].tolist() == ["snapshot"]
+    assert frame["industry_standard_id"].tolist() == ["CSRC2012"]
+
+
+@pytest.mark.parametrize(
+    "failure",
+    [
+        "missing_member",
+        "bad_hash",
+        "traversal",
+        "duplicate_asset",
+        "publication_before_observation",
+    ],
+)
+def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    root = write_industry_reference_fixture(
+        tmp_path / "raw", observations=_industry_observations()
+    )
+    metadata = json.loads(
+        filesystem_read_text(root / "metadata.json", encoding="utf-8")
+    )
+    if failure == "missing_member":
+        metadata["snapshots"][0]["document_file"] = "missing.pdf"
+    elif failure == "bad_hash":
+        metadata["files"]["snapshot.pdf"] = "0" * 64
+    elif failure == "traversal":
+        metadata["files"]["../snapshot.pdf"] = metadata["files"].pop("snapshot.pdf")
+    elif failure == "publication_before_observation":
+        metadata["snapshots"][0]["publication_date"] = "2019-12-01"
+    else:
+        candidate = json.loads(
+            filesystem_read_text(root / "snapshot.json", encoding="utf-8")
+        )
+        candidate["records"].append(candidate["records"][0])
+        filesystem_write_text(
+            root / "snapshot.json", json.dumps(candidate), encoding="utf-8"
+        )
+        metadata["files"]["snapshot.json"] = hashlib.sha256(
+            filesystem_read_bytes(root / "snapshot.json")
+        ).hexdigest()
+    filesystem_write_text(
+        root / "metadata.json", json.dumps(metadata), encoding="utf-8"
+    )
+    with runtime_resource_policy_scope(None) as policy:
+        with pytest.raises(ValueError, match="industry_snapshot_"):
+            interim.materialize_interim_data(
+                layout=StorageLayout(tmp_path),
+                raw_root=root.parent,
+                data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
+                resource_policy=policy,
+            )
+        assert policy.used_memory_bytes == 0
+
+
+def test_industry_reference_admission_precedes_decode(tmp_path, monkeypatch):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    root = write_industry_reference_fixture(
+        tmp_path / "raw", observations=_industry_observations()
+    )
+    calls = []
+    reader = interim.read_bounded_qrp_json
+
+    def observed(*args, **kwargs):
+        calls.append(True)
+        return reader(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "read_bounded_qrp_json", observed)
+    with runtime_resource_policy_scope(explicit_cap_bytes=4096) as policy:
+        with pytest.raises(MemoryError, match="^runtime_memory_budget_exceeded$"):
+            interim.materialize_interim_data(
+                layout=StorageLayout(tmp_path),
+                raw_root=root.parent,
+                data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
+                resource_policy=policy,
+            )
+        assert calls == []
+        assert policy.used_memory_bytes == 0
+
+
+def test_industry_source_change_before_publish_preserves_old_good(
+    tmp_path, monkeypatch
+):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    root = write_industry_reference_fixture(
+        tmp_path / "raw", observations=_industry_observations()
+    )
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    layout = StorageLayout(tmp_path)
+    interim.materialize_interim_data(
+        layout=layout, raw_root=root.parent, data_ids=(data_id,)
+    )
+    output = layout.interim_data_root("reference", data_id)
+    before = _file_bytes(output)
+    candidate_layout = StorageLayout(tmp_path / "candidate")
+    candidate_root = candidate_layout.interim_data_root("reference", data_id)
+    writer = interim.write_dataset
+
+    def mutate_source(*args, **kwargs):
+        filesystem_write_text(
+            root / "snapshot.html", "<html>changed</html>", encoding="utf-8"
+        )
+        return writer(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "write_dataset", mutate_source)
+    with runtime_resource_policy_scope(None) as policy:
+        with pytest.raises(ValueError, match="industry_snapshot_member_hash_mismatch"):
+            interim.materialize_interim_data(
+                layout=candidate_layout,
+                raw_root=root.parent,
+                data_ids=(data_id,),
+                resource_policy=policy,
+            )
+        assert policy.used_memory_bytes == 0
+    assert not filesystem_exists(candidate_root)
+    assert _file_bytes(output) == before
+    assert read_dataset(output, resource_policy=None)["snapshot_id"].tolist() == [
+        "snapshot"
+    ]
+
+
+@pytest.mark.parametrize("document_suffix", [".docx", ".xls"])
+def test_industry_reference_preserves_table_row_locator(tmp_path, document_suffix):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    observations = _industry_observations()
+    observations[0][4][0]["source_locator"] = "table:2;row:7"
+    root = write_industry_reference_fixture(
+        tmp_path / "raw", observations=observations, document_suffix=document_suffix
+    )
+    data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    layout = StorageLayout(tmp_path)
+    interim.materialize_interim_data(
+        layout=layout, raw_root=root.parent, data_ids=(data_id,)
+    )
+    frame = read_dataset(
+        layout.interim_data_root("reference", data_id), resource_policy=None
+    )
+    assert frame["source_locator"].tolist() == ["table:2;row:7"]
+    assert "source_page" not in frame

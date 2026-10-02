@@ -42,17 +42,15 @@ def hft_research_plan():
             {
                 "fold_id": "fold_1",
                 "train": window("00", "02"),
-                "validation": window("02.100000", "03.500000"),
-                "development_test": window("04", "05"),
+                "validation": window("04", "05"),
             },
             {
                 "fold_id": "fold_2",
                 "train": window("01", "04"),
-                "validation": window("04.100000", "06"),
-                "development_test": window("06.500000", "08.500000"),
+                "validation": window("06.500000", "08.500000"),
             },
         ],
-        "final_holdout": window("08.600000", "09"),
+        "test": window("08.600000", "09"),
         "initial_capital": 1000.0,
         "valuation_currency": "USDT",
         "exposure_limits": {
@@ -78,7 +76,9 @@ def hft_research_plan():
     }
 
 
-def write_hft_funding_fixture(raw_root: Path) -> None:
+def write_hft_funding_fixture(
+    raw_root: Path, *, test_settlement_ns: int | None = None
+) -> None:
     """Explicit synthetic calendar, settlements, and separately known cash forecasts."""
     from quant_research_platform.sources.binance.funding import (
         FUNDING_COLUMNS,
@@ -105,21 +105,25 @@ def write_hft_funding_fixture(raw_root: Path) -> None:
                 "provenance": "synthetic_explicit_calendar_and_known_forecasts",
                 "settlement_source": None,
             }
+            settlements = [
+                (4_800_000_000, -0.02),
+                (5_700_000_000, 0.001),
+                (7_400_000_000, 0.02),
+            ]
+            if test_settlement_ns is not None:
+                settlements.append((test_settlement_ns, -0.02))
             rows = (
-                ("settlement", 4_800_000_000, None, -0.02, mark, None),
-                ("settlement", 5_700_000_000, None, 0.001, mark, None),
-                ("settlement", 7_400_000_000, None, 0.02, mark, None),
+                *(
+                    ("settlement", timestamp, None, rate, mark, None)
+                    for timestamp, rate in settlements
+                ),
                 (
                     "forecast",
                     0,
                     12_000_000_000,
                     None,
                     None,
-                    [
-                        [4_800_000_000, mark * 0.02],
-                        [5_700_000_000, -mark * 0.001],
-                        [7_400_000_000, -mark * 0.02],
-                    ],
+                    [[timestamp, -mark * rate] for timestamp, rate in settlements],
                 ),
             )
 

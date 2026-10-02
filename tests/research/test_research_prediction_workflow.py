@@ -95,6 +95,59 @@ def test_a_share_prediction_requires_persisted_quarter_lineage() -> None:
         )
 
 
+def test_forest_prediction_keeps_tree_order_without_mutating_fitted_state(monkeypatch):
+    import pickle
+    import threading
+
+    from joblib import parallel_config
+    from joblib.parallel import get_active_backend
+    from sklearn.ensemble import RandomForestRegressor, _forest
+
+    from quant_research_platform.research.models.scaler import (
+        ModelMatrixScaler,
+        ScaledPredictor,
+    )
+
+    frame = pd.DataFrame({"x": [0.0, 1.0]})
+    forest = RandomForestRegressor(
+        n_estimators=3, n_jobs=3, bootstrap=False, random_state=0
+    ).fit(frame, [0.0, 0.0])
+    # Real fitted one-leaf trees make the floating-point counterexample exact.
+    for tree, value in zip(forest.estimators_, (1e16, -1e16, 1.0), strict=True):
+        tree.tree_.value.fill(value)
+    fitted = ScaledPredictor(forest, ModelMatrixScaler.fit(frame))
+    frozen_state = pickle.dumps(fitted)
+    actual_accumulate = _forest._accumulate_prediction
+    caller = threading.current_thread()
+    tree_positions = {id(tree): index for index, tree in enumerate(forest.estimators_)}
+    completed = [threading.Event() for _ in forest.estimators_]
+    predecessors = {0: None, 1: 2, 2: 0}
+
+    def accumulate(predict, *args):
+        position = tree_positions[id(predict.__self__)]
+        if threading.current_thread() is not caller:
+            previous = predecessors[position]
+            if previous is not None:
+                assert completed[previous].wait(10), "forest worker did not finish"
+        actual_accumulate(predict, *args)
+        completed[position].set()
+
+    monkeypatch.setattr(_forest, "_accumulate_prediction", accumulate)
+    predict = prediction_callable(("x",), fitted)
+    # Parallel completion is 0,2,1: (1e16 + 1) - 1e16 == 0.
+    # Persisted tree order is 0,1,2: (1e16 - 1e16) + 1 == 1.
+    with parallel_config(backend="threading", n_jobs=3):
+        outer_backend, outer_jobs = get_active_backend()
+        first = predict(frame)
+        np.testing.assert_array_equal(first, np.full(len(frame), 1.0 / 3.0))
+        for event in completed:
+            event.clear()
+        np.testing.assert_array_equal(predict(frame), first)
+        assert get_active_backend() == (outer_backend, outer_jobs)
+    assert forest.n_jobs == 3
+    assert pickle.dumps(fitted) == frozen_state
+
+
 def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> None:
     specs = configured_models("pv_all")
     dates = pd.date_range("2020-01-01", periods=12, freq="D")

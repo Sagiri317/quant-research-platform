@@ -173,12 +173,15 @@ def bounded_qrp_json_object_snapshot(
     value: Mapping[str, Any],
     *,
     max_bytes: int,
+    _admit: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
     """Copy one JSON object, including frozen containers, within its size bound."""
 
     if type(max_bytes) is not int or max_bytes < 0:
         raise ValueError("qrp_json_max_bytes_invalid")
-    _require_bounded_json_preflight(value, max_bytes=max_bytes)
+    size = _require_bounded_json_preflight(value, max_bytes=max_bytes)
+    if _admit is not None:
+        _admit(json_record_working_set_bytes(size))
     remaining = max_bytes
     active: set[int] = set()
 

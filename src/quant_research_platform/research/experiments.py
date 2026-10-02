@@ -42,7 +42,7 @@ class TrialRecorder:
             candidate_family_id=self.plan.candidate_family_id,
             candidate_id=spec.model_id,
             trial_id=f"trial_{uuid4().hex}",
-            fold_id=self.plan.folds[0].fold_id,
+            fold_id=self.plan.fold_ids[0],
             market_id=str(self.plan.market_id),
             research_dataset_id=self.plan.research_dataset_id,
             target_id=self.plan.target_id,
@@ -64,7 +64,16 @@ class TrialRecorder:
         self.index = record.attempt_index
         return record
 
-    def begin_refit(self, spec: ModelSpec, *, common_coverage_id: str):
+    def begin_refit(
+        self,
+        spec: ModelSpec,
+        *,
+        common_coverage_id: str,
+        fit_windows,
+        fit_cutoff,
+        selection_ledger_semantic_identities: tuple[str, ...],
+        selection_group: str | None,
+    ):
         """Bind a real prepared fit domain to its completed selection ledger."""
         plan = replace(
             self.plan,
@@ -77,7 +86,11 @@ class TrialRecorder:
             trial_budget=1,
             random_seed=spec.random_seed,
             candidate_parameters={spec.model_id: model_spec_payload(spec)},
-            selection_ledger_semantic_identity=self.reference()["semantic_identity"],
+            folds=(),
+            fit_windows=fit_windows,
+            fit_cutoff=fit_cutoff,
+            selection_ledger_semantic_identities=selection_ledger_semantic_identities,
+            selection_group=selection_group,
         )
         recorder = TrialRecorder(self.layout, self.run_id, plan)
         return recorder, recorder.begin(spec, common_coverage_id=common_coverage_id)

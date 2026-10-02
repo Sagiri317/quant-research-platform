@@ -39,6 +39,8 @@ def tables():
         factor_id="factor",
         prediction_id="prediction",
         quarter_id="2023Q1",
+        selection_group="global",
+        decision_id="final",
         config_id="config",
         metric_id="validation_rankic",
         test_id="spa_reality_check",
@@ -78,6 +80,7 @@ def tables():
         white_undefined_period_count=0,
         common_date=1,
         common_observation_count=32,
+        asset_coverage_id="d" * 64,
         block_size=20,
         repetitions=10000,
         alpha=0.05,
@@ -93,7 +96,11 @@ def tables():
             ]
         )
         for member in statistics.STATISTICS_TABLE_GROUPS["research"]
+        if member != "model_group_comparison.parquet"
     }
+    result["model_group_comparison"] = pa.Table.from_pylist(
+        [], schema=statistics._ARROW_SCHEMAS["model_group_comparison.parquet"]
+    ).to_pandas()
     for frame in result.values():
         if "timestamp" in frame:
             frame["timestamp"] = frame["timestamp"].astype("datetime64[ns]")
@@ -137,6 +144,10 @@ def maker_calibration_tables():
     from tests.markets.crypto.test_hft_execution import _state, _trade
 
     plan = hft_research_plan()
+    plan["folds"][0]["validation"] = {
+        "start": "1970-01-01T00:00:02.100000",
+        "end": "1970-01-01T00:00:03.500000",
+    }
     samples, events = [], []
 
     def on_sample(**sample):
@@ -258,8 +269,8 @@ def maker_calibration_tables():
         protocol_or_spec_identity="b" * 64,
         software_identity="c" * 64,
         research_window={
-            "start": "1970-01-01T00:00:04",
-            "end": "1970-01-01T00:00:05",
+            "start": "1970-01-01T00:00:02.100000",
+            "end": "1970-01-01T00:00:03.500000",
             "access": "development",
         },
         upstream_identities={},
@@ -517,7 +528,7 @@ def test_research_measurement_domains(tmp_path, tables, envelope, table, column,
 @pytest.mark.parametrize(
     "factor_case", ["formal", "diagnostic_only", "no_factor_columns"]
 )
-def test_nine_tables_complete_sequentially_under_16_mib(
+def test_research_tables_complete_sequentially_under_16_mib(
     tmp_path,
     tables,
     envelope,
@@ -875,7 +886,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                     layout=StorageLayout(tmp_path),
                     protocol_manifest=manifest,
                     time_window=TimeWindow(
-                        "1970-01-01T00:00:04", "1970-01-01T00:00:05"
+                        "1970-01-01T00:00:02.100000", "1970-01-01T00:00:03.500000"
                     ),
                     upstream_identities={f"{manifest['scenario_id']}_models": "e" * 64},
                     raw_root=tmp_path / "raw",
@@ -1010,10 +1021,9 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
 
     plan = hft_research_plan()
     fold = plan["folds"][0]
-    fold["validation"]["end"] = iso(last + 600)
-    fold["development_test"] = {"start": iso(last + 1000), "end": iso(last + 2000)}
+    fold["validation"] = {"start": iso(first), "end": iso(last + 600)}
     plan["folds"] = [fold]
-    plan["final_holdout"] = {"start": iso(last + 2100), "end": iso(last + 3000)}
+    plan["test"] = {"start": iso(last + 2100), "end": iso(last + 3000)}
     research_protocol = replace(
         protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan),
         configuration_json=json.dumps(
@@ -1030,7 +1040,7 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
     manifest = research_protocol.target_manifest(
         candidate.calibration_target_id, "STATISTIC"
     )
-    window = fold["development_test"]
+    window = fold["validation"]
     envelope = build_business_manifest_envelope(
         logical_artifact_id=candidate.calibration_target_id,
         schema_identity="a" * 64,
@@ -1256,3 +1266,173 @@ def test_maker_calibration_uses_declared_asset_without_btc_limits(
             expected_identity=envelope.instance_identity,
             validate_tables=validate_maker_calibration,
         )
+
+
+@pytest.mark.parametrize("finish", ["normal", "source_changed", "cancel"])
+def test_maker_history_reads_real_artifact_once_and_rechecks_source(
+    tmp_path, monkeypatch, maker_calibration_tables, finish
+):
+    import os
+    from collections import Counter
+    from contextlib import ExitStack
+    from functools import partial
+
+    from quant_research_platform.markets.implementations.crypto import (
+        execution,
+        portfolio,
+    )
+    from quant_research_platform.storage._scratch_ownership import (
+        handle_preserving_primary,
+    )
+    from tests.helpers.binance_hft import _quote
+    from tests.markets.crypto.test_hft_execution import _maker_config, _state
+
+    tables, envelope = maker_calibration_tables
+
+    def produce(on_table):
+        for name, frame in tables.items():
+            on_table(name, frame)
+
+    with runtime_resource_policy_scope() as policy:
+        root = statistics.write_statistics_artifact(
+            tmp_path / "calibration",
+            envelope=envelope,
+            tables=produce,
+            table_group="crypto_maker_calibration",
+            validate_tables=portfolio.validate_maker_calibration,
+        )
+        artifact = statistics.read_statistics_artifact(
+            root,
+            expected_identity=envelope.instance_identity,
+            validate_tables=portfolio.validate_maker_calibration,
+        )
+        batches = statistics.StatisticsArtifact._batches
+        reads = Counter()
+
+        def counted_batches(owner, member, **kwargs):
+            reads[member] += 1
+            yield from batches(owner, member, **kwargs)
+
+        monkeypatch.setattr(statistics.StatisticsArtifact, "_batches", counted_batches)
+        model = execution.MakerCalibration(
+            partial(portfolio._calibration_samples, artifact, "fold_1"),
+            partial(portfolio._calibration_events, artifact, "fold_1"),
+            resource_policy=policy,
+        )
+        primary = KeyboardInterrupt("consumer_cancel")
+        caught = None
+        try:
+            with handle_preserving_primary(ExitStack()) as resources:
+                resources.callback(artifact._verify)
+                resources.callback(model.close)
+                state = _state(0)
+                answers = []
+                for side in ("buy", "sell", "buy"):
+                    answers.append(
+                        model.select(
+                            state=state,
+                            decision_ns=0,
+                            new_order=execution._maker_new_order(
+                                0,
+                                side,
+                                1.0,
+                                state,
+                                _quote(0, book_segment_id="s1"),
+                                _maker_config(),
+                            ),
+                            active_order=None,
+                            commands=(),
+                            lifetime_ns=500000000,
+                            prediction=0.0,
+                            fee_bps=0.0,
+                            funding=[],
+                        )
+                    )
+                assert answers[0] == answers[2]
+                assert reads == {
+                    "crypto_maker_samples.parquet": 1,
+                    "crypto_maker_events.parquet": 1,
+                }
+                if finish != "normal":
+                    path = root / "crypto_maker_events.parquet"
+                    before = filesystem_stat(path)
+                    payload = bytearray(filesystem_read_bytes(path))
+                    payload[4] ^= 1
+                    filesystem_write_bytes(path, payload)
+                    os.utime(
+                        native_filesystem_path(path),
+                        ns=(before.st_atime_ns, before.st_mtime_ns),
+                    )
+                    assert filesystem_stat(path).st_mtime_ns == before.st_mtime_ns
+                if finish == "cancel":
+                    raise primary
+        except (ValueError, KeyboardInterrupt) as error:
+            caught = error
+        assert policy.used_memory_bytes == 0
+        if finish == "normal":
+            assert caught is None
+        elif finish == "source_changed":
+            assert str(caught) == "semantic_artifact_member_integrity_invalid"
+        else:
+            assert caught is primary
+            assert any("ValueError" in note for note in primary.__notes__)
+
+
+@pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
+def test_undefined_model_inference_preserves_descriptive_mean(
+    tmp_path, tables, envelope, name
+):
+    frame = tables[name]
+    frame.loc[0, "status"] = "UNDEFINED"
+    frame.loc[0, "reason"] = "global_development_selection_reuses_validation"
+    inference_columns = [
+        "standard_error",
+        "t_statistic",
+        "p_value",
+        "ci_lower",
+        "ci_upper",
+        "bootstrap_lower",
+        "bootstrap_upper",
+    ]
+    frame.loc[0, inference_columns] = float("nan")
+    with runtime_resource_policy_scope():
+        root = statistics.write_statistics_artifact(
+            tmp_path / "descriptive", envelope=envelope, tables=tables
+        )
+        artifact = statistics.read_statistics_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        with artifact.table(f"{name}.parquet") as result:
+            assert result["mean"].iloc[0] == 0.2
+            assert result.observation_count.iloc[0] == 32
+            assert result.status.iloc[0] == "UNDEFINED"
+            assert result.loc[:, inference_columns].isna().all().all()
+
+
+@pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
+@pytest.mark.parametrize("corruption", ("p_value", "mean_missing", "empty_mean"))
+def test_undefined_model_inference_rejects_inferential_values_and_false_means(
+    tmp_path, tables, envelope, name, corruption
+):
+    frame = tables[name]
+    frame.loc[0, "status"] = "UNDEFINED"
+    frame.loc[0, "reason"] = "global_development_selection_reuses_validation"
+    frame.loc[
+        0,
+        [
+            "standard_error",
+            "t_statistic",
+            "p_value",
+            "ci_lower",
+            "ci_upper",
+            "bootstrap_lower",
+            "bootstrap_upper",
+        ],
+    ] = float("nan")
+    if corruption == "p_value":
+        frame.loc[0, "p_value"] = 0.01
+    elif corruption == "mean_missing":
+        frame.loc[0, "mean"] = float("nan")
+    else:
+        frame.loc[0, "observation_count"] = 0
+    _assert_rejected_at_write_and_read(tmp_path, tables, envelope, f"{name}.parquet")

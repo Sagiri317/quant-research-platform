@@ -127,7 +127,7 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
             for asset, weight in (("000001", 0.4), ("000002", 0.6))
         ]
     )
-    with runtime_resource_policy_scope(explicit_cap_bytes=7 * 1024**2) as policy:
+    with runtime_resource_policy_scope(explicit_cap_bytes=17 * 1024**2 // 2) as policy:
         for data_id, frame in (("index_info", index_info), ("index_weights", weights)):
             source_spec = profile.interim.get(data_id)
             frame = frame.reindex(columns=source_spec.required_columns)

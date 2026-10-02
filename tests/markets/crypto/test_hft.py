@@ -25,7 +25,10 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
 )
-from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+from quant_research_platform.sources.binance.ids import (
+    FUTURES_MARKET_TYPE,
+    SPOT_MARKET_TYPE,
+)
 from tests.helpers.binance_hft import (
     _coverage,
     _panel_rows,
@@ -153,6 +156,76 @@ def test_panel_frames_build_from_column_buffers(
     assert [len(frame) for frame in frames] == [2, 1]
     assert frames[0]["market_id"].tolist() == ["crypto", "crypto"]
     assert frames[0]["asset_id"].tolist() == ["btc_usdt", "btc_usdt"]
+
+
+@pytest.mark.parametrize("market_type", (SPOT_MARKET_TYPE, FUTURES_MARKET_TYPE))
+def test_panel_transaction_clock_is_nullable_integer(market_type) -> None:
+    import pyarrow as pa
+
+    from quant_research_platform.storage.datasets.schema import (
+        physical_schema_from_schema,
+    )
+
+    states = [
+        replace(
+            _state(stamp),
+            market_type=market_type,
+            transaction_time_ms=None if market_type == SPOT_MARKET_TYPE else stamp,
+        )
+        for stamp in (0, 200)
+    ]
+    frames = list(
+        iter_panel_frames(
+            states,
+            [],
+            market_id="crypto",
+            asset_id="btc_usdt",
+            start_ms=0,
+            end_ms=200,
+            book_coverage={"s1": _coverage(0, 300)},
+            trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 300)}),
+            batch_rows=2,
+        )
+    )
+
+    assert [len(frame) for frame in frames] == [2, 1]
+    for frame in frames:
+        assert str(frame["transaction_time_ms"].dtype) == "Int64"
+        table = pa.Table.from_pandas(frame, preserve_index=False)
+        assert table.schema.field("transaction_time_ms").type == pa.int64()
+        physical_schema_from_schema(table.schema)
+    transaction = pd.concat(frames, ignore_index=True)["transaction_time_ms"]
+    if market_type == SPOT_MARKET_TYPE:
+        assert transaction.isna().all()
+    else:
+        assert transaction.tolist() == [0, 0, 200]
+
+
+@pytest.mark.parametrize("close_early", (False, True))
+def test_panel_releases_consumed_buffers_before_yield(close_early) -> None:
+    frames = iter_panel_frames(
+        [_state(0), _state(200)],
+        [],
+        market_id="crypto",
+        asset_id="btc_usdt",
+        start_ms=0,
+        end_ms=200,
+        book_coverage={"s1": _coverage(0, 300)},
+        trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 300)}),
+        batch_rows=2,
+    )
+    first = next(frames)
+    expected = first.copy(deep=True)
+    assert not frames.gi_frame.f_locals["buffers"]
+    if close_early:
+        frames.close()
+    else:
+        last = next(frames)
+        assert not frames.gi_frame.f_locals["buffers"]
+        assert last["timestamp"].tolist() == [pd.Timestamp(200, unit="ms")]
+        with pytest.raises(StopIteration):
+            next(frames)
+    pd.testing.assert_frame_equal(first, expected)
 
 
 def test_panel_first_trade_failure_releases_first_book_and_closes_children() -> None:
@@ -290,6 +363,175 @@ def test_explicit_book_boundary_stops_panel_until_new_segment() -> None:
         (100, "s1:trade-connection-1"),
         (200, "s1:trade-connection-1"),
     ]
+
+
+@pytest.mark.parametrize("phase", (0, 37))
+@pytest.mark.parametrize("gap_ms", (1000, 31 * 86400 * 1000))
+@pytest.mark.parametrize("boundary", (False, True))
+def test_panel_uncovered_gap_keeps_events_ofi_labels_and_grid_phase(
+    phase, gap_ms, boundary
+):
+    resume = phase + gap_ms
+    books = [_state(phase), _state(phase + 50, bid_qty=3.0)]
+    if boundary:
+        books.append(_boundary(phase + 250))
+    books.extend(
+        (
+            _state(resume - 50, segment_id="s2", bid_qty=4.0),
+            _state(resume + 25, segment_id="s2", bid_qty=6.0),
+            _state(resume + 150, segment_id="s2", bid_qty=7.0),
+        )
+    )
+    trades = [
+        _trade(phase + 275, 11.0, maker_buyer=False),
+        _trade(resume - 75, 9.0, maker_buyer=False),
+        _trade(resume, 3.0, maker_buyer=False),
+        _trade(resume + 50, 2.0, maker_buyer=True),
+        _trade(resume + 200, 4.0, maker_buyer=False),
+        _trade(resume + 250, -1.0, maker_buyer=False),
+    ]
+    lookup = coverage_lookup({"trade-connection-1": _coverage(0, resume + 1000)})
+    queries = []
+
+    def covering(start_ns, end_ns):
+        queries.append((start_ns, end_ns))
+        assert len(queries) <= 32, "uncovered wall-clock gap was scanned grid by grid"
+        return lookup(start_ns, end_ns)
+
+    panel = pd.concat(
+        iter_panel_frames(
+            books,
+            trades,
+            start_ms=phase,
+            end_ms=resume + 250,
+            book_coverage={
+                "s1": _coverage(0, phase + 250),
+                "s2": _coverage(resume - 50, resume + 201),
+            },
+            trade_coverage=covering,
+            market_id="crypto",
+            asset_id="btc_usdt",
+            batch_rows=2,
+        ),
+        ignore_index=True,
+    )
+    assert panel.timestamp.tolist() == [
+        pd.Timestamp(stamp, unit="ms")
+        for stamp in (phase, phase + 100, phase + 200, resume + 100, resume + 200)
+    ]
+    assert panel.book_ofi_100ms.tolist() == [0.0, 1.0, 0.0, 2.0, 1.0]
+    assert panel.trade_volume_100ms.tolist() == [0.0, 0.0, 0.0, 2.0, 4.0]
+    assert panel.observed_signed_trade_volume_100ms.tolist() == [
+        0.0,
+        0.0,
+        0.0,
+        -2.0,
+        4.0,
+    ]
+    assert panel.book_segment_id.tolist() == ["s1"] * 3 + ["s2"] * 2
+    assert str(panel.transaction_time_ms.dtype) == "Int64"
+    assert queries == sorted(queries)
+    assert queries[-1][1] == (resume + 200) * 1_000_000
+    labels = pd.concat(
+        iter_label_frames((panel,), horizons_ms=(100, 500, 1000, 5000)),
+        ignore_index=True,
+    )
+    assert labels.future_mid_return_100ms.notna().tolist() == [
+        True,
+        True,
+        False,
+        True,
+        False,
+    ]
+    assert labels.future_mid_return_100ms.dropna().eq(0.0).all()
+    for horizon in (500, 1000, 5000):
+        assert labels[f"future_mid_return_{horizon}ms"].isna().all()
+    assert labels.maker_bid_sell_pressure_proxy_500ms.isna().all()
+
+
+@pytest.mark.parametrize("coverage_end", (400, 401))
+def test_panel_gap_wakes_when_first_book_interval_becomes_fully_covered(coverage_end):
+    phase = 37
+    resume = phase + 31 * 86400 * 1000
+    queries = []
+
+    def covering(start_ns, end_ns):
+        queries.append((start_ns, end_ns))
+        assert len(queries) <= 10, "uncovered leading gap was scanned grid by grid"
+        return ("trade-connection-1",)
+
+    frames = list(
+        iter_panel_frames(
+            [_state(resume + 50)],
+            [],
+            start_ms=phase,
+            end_ms=resume + 450,
+            book_coverage={"s1": _coverage(resume + 50, resume + coverage_end)},
+            trade_coverage=covering,
+            market_id="crypto",
+            asset_id="btc_usdt",
+            batch_rows=2,
+        )
+    )
+    panel = pd.concat(frames, ignore_index=True)
+    assert panel.timestamp.tolist() == [
+        pd.Timestamp(resume + offset, unit="ms")
+        for offset in range(200, min(coverage_end, 450), 100)
+    ]
+    assert panel.book_ofi_100ms.eq(0.0).all()
+    assert panel.trade_count_100ms.eq(0).all()
+
+
+@pytest.mark.parametrize(
+    "failure,expected",
+    (
+        ("book", "hft_book_time_non_monotonic"),
+        ("trade", "hft_trade_time_non_monotonic"),
+        ("earlier_trade", "hft_trade_values_invalid"),
+        ("same_grid", "hft_book_time_non_monotonic"),
+        ("last_grid", "hft_trade_values_invalid"),
+    ),
+)
+def test_panel_uncovered_gap_preserves_event_failures_and_their_order(
+    failure, expected
+):
+    gap = 31 * 86400 * 1000
+    books = [_state(0), _boundary(150), _state(gap), _state(gap - 1)]
+    trades = []
+    if failure == "trade":
+        trades = [
+            _trade(250, 1.0, maker_buyer=False),
+            _trade(249, 1.0, maker_buyer=False),
+        ]
+    elif failure in {"earlier_trade", "same_grid"}:
+        trades = [
+            _trade(250 if failure == "earlier_trade" else gap, -1.0, maker_buyer=False)
+        ]
+    elif failure == "last_grid":
+        books = []
+        trades = [_trade(gap, -1.0, maker_buyer=False)]
+    calls = 0
+
+    def covering(_start_ns, _end_ns):
+        nonlocal calls
+        calls += 1
+        assert calls <= 16, "uncovered gap delayed validation of a stream event"
+        return ("trade-connection-1",)
+
+    with pytest.raises(ValueError, match=expected):
+        list(
+            iter_panel_frames(
+                books,
+                trades,
+                start_ms=0,
+                end_ms=gap + 99,
+                book_coverage={"s1": _coverage(0, 150)},
+                trade_coverage=covering,
+                market_id="crypto",
+                asset_id="btc_usdt",
+                batch_rows=2,
+            )
+        )
 
 
 def test_factor_rows_are_hand_calculated_from_panel_sufficient_statistics() -> None:

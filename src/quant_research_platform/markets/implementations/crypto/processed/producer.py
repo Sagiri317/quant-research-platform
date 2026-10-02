@@ -7,7 +7,8 @@ import json
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
-from itertools import chain
+from heapq import merge
+from itertools import chain, islice
 
 import pandas as pd
 
@@ -49,6 +50,7 @@ from quant_research_platform.storage.datasets.schema import dataset_identity_pay
 
 _PANEL_ROW_BUFFER_BYTES = 4 * 1024
 _FRAME_FIXED_BYTES = 1024 * 1024
+_PANEL_MAX_BATCH_ROWS = 64 * 1024
 _EPOCH = dt.datetime(1970, 1, 1)
 
 # OKX USDT contract face values effective March 2020; Bybit linear sizes are base.
@@ -104,7 +106,10 @@ def produce_hft_processed_data(
                 _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
                 resource_policy.planning_headroom_bytes // 2,
             )
-            batch_rows = (target - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES
+            batch_rows = min(
+                _PANEL_MAX_BATCH_ROWS,
+                (target - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES,
+            )
             bound = _FRAME_FIXED_BYTES + batch_rows * _PANEL_ROW_BUFFER_BYTES
             symbol_rows = max(1, batch_rows // len(symbols))
 
@@ -370,8 +375,8 @@ def _event_frame_producer(
 ) -> Iterator[object]:
     active_frames = iter(frames)
     with closing_iterator(active_frames):
+        lease = yield producer_bound
         while True:
-            lease = yield producer_bound
             try:
                 frame = next(active_frames)
             except StopIteration:
@@ -381,9 +386,9 @@ def _event_frame_producer(
             actual_bound = pandas_frame_payload_bytes(frame) + 64 * 1024
             if actual_bound > lease.reserved_bytes:
                 raise ValueError("hft_dataframe_producer_bound_invalid")
-            lease.shrink_to(actual_bound)
             yield OwnedValue(frame, lease)
             del frame
+            lease = yield (producer_bound, lease)
 
 
 def _panel_frame_producer(
@@ -616,6 +621,51 @@ def produce_spot_perp_context(
             yield data, metadata, verify
 
 
+def _union_panel_frames(
+    frame_streams: Iterable[Iterable[pd.DataFrame]],
+    *,
+    columns: tuple[str, ...],
+    batch_rows: int,
+) -> Iterator[pd.DataFrame]:
+    """Merge complete time-ordered panels without changing their scalar dtypes."""
+    dtypes = {}
+    timestamp_position = columns.index("timestamp")
+    asset_position = columns.index("asset_id")
+
+    def rows(frames: Iterable[pd.DataFrame]) -> Iterator[tuple[object, ...]]:
+        with closing_iterator(iter(frames)) as active:
+            for frame in active:
+                dtypes.update(frame.dtypes)
+                yield from frame.itertuples(index=False, name=None)
+
+    with ExitStack() as live:
+        streams = [
+            live.enter_context(closing_iterator(rows(frames)))
+            for frames in frame_streams
+        ]
+        merged = merge(
+            *streams, key=lambda row: (row[timestamp_position], row[asset_position])
+        )
+        records = list(islice(merged, batch_rows))
+        if not dtypes:
+            return
+        while True:
+            frame = pd.DataFrame(
+                {
+                    column: pd.array(
+                        [row[position] for row in records], dtype=dtypes[column]
+                    )
+                    for position, column in enumerate(columns)
+                }
+            )
+            records.clear()
+            yield frame
+            del frame
+            records = list(islice(merged, batch_rows))
+            if not records:
+                return
+
+
 @contextmanager
 def produce_information_panel(
     spec,
@@ -655,15 +705,18 @@ def produce_information_panel(
             resource_policy.planning_headroom_bytes // 2,
         )
 
-        def frames():
-            for session in sessions:
-                with closing_iterator(
-                    iter_dataset_chunks(session, target_chunk_bytes=max(1, bound // 4))
-                ) as chunks:
-                    yield from chunks
-
+        batch_rows = (bound - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES
+        target_bytes = max(1, bound // (4 * len(sessions)))
+        frames = _union_panel_frames(
+            (
+                iter_dataset_chunks(session, target_chunk_bytes=target_bytes)
+                for session in sessions
+            ),
+            columns=spec.required_columns,
+            batch_rows=batch_rows,
+        )
         data = _event_frame_producer(
-            frames(), columns=spec.required_columns, producer_bound=bound
+            frames, columns=spec.required_columns, producer_bound=bound
         )
 
         def verify(_receipt):
@@ -782,6 +835,7 @@ def produce_normalized_context(
     expected_source_identity,
     read_records,
     source_identity,
+    source_schema_id,
     archives,
 ):
     """Publish source-verified external information on Binance BTC/ETH keys."""
@@ -806,7 +860,9 @@ def produce_normalized_context(
         )
         metadata = {
             "source_artifact_identity": {
-                "normalized_archives_sha256": expected_source_identity
+                "schema_id": source_schema_id,
+                "artifact_id": spec.data_id,
+                "manifest_hash": expected_source_identity,
             },
             "input_dataset_identities": {
                 HFT_PANEL_DATA_ID: dataset_identity_payload(
@@ -835,13 +891,21 @@ def produce_normalized_context(
             yield from iter_external_context_frames(
                 chain((first,), frames),
                 quotes=read_records(
-                    raw_root / paths["quotes"], resource_policy=resource_policy
+                    raw_root,
+                    archive_paths=paths["quotes"],
+                    time_window=time_window,
+                    resource_policy=resource_policy,
                 ),
                 trades=read_records(
-                    raw_root / paths["trades"], resource_policy=resource_policy
+                    raw_root,
+                    archive_paths=paths["trades"],
+                    time_window=time_window,
+                    resource_policy=resource_policy,
                 ),
                 tickers=read_records(
-                    raw_root / paths["derivative_ticker"],
+                    raw_root,
+                    archive_paths=paths["derivative_ticker"],
+                    time_window=time_window,
                     resource_policy=resource_policy,
                 ),
                 venue=parameters["venue"],

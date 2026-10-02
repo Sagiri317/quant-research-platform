@@ -5,7 +5,10 @@ import json
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.sources import market_funding_identity, open_market_source
 from quant_research_platform.sources.binance.funding import read_funding_observations
 from quant_research_platform.sources.tardis.funding import import_funding_history
 from quant_research_platform.sources.tardis.raw import import_slices
@@ -84,8 +87,15 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
                 end_ms=start_ms + slice_count * 600_000 - 1,
                 byte_budget=1024**2,
             )
+            full_window = TimeWindow(
+                pd.Timestamp(start_ms, unit="ms"),
+                pd.Timestamp(start_ms + slice_count * 600_000 - 1, unit="ms"),
+            )
+            roots = day.funding_roots("BTCUSDT", time_window=full_window)
+            assert len(roots) == 1
+            funding_root = roots[0]
             with read_funding_observations(
-                day.funding_root("BTCUSDT"), symbol="BTCUSDT", resource_policy=policy
+                roots, symbol="BTCUSDT", resource_policy=policy
             ) as source:
                 assert source.events[0].rate == 0.1
                 assert source.events[0].mark_price == 200.0
@@ -95,23 +105,251 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
                 assert forecasts[0].cashflows == (
                     ((start_ms + 10000) * 1_000_000, -5.0),
                 )
+            outside = pd.Timestamp(start_ms + slice_count * 600_000, unit="ms")
+            outside_window = TimeWindow(outside, outside)
+            assert day.funding_roots("BTCUSDT", time_window=outside_window) == ()
+            if slice_count > 144:
+                later_window = TimeWindow("2026-09-02T00:00:00", "2026-09-02T00:01:00")
+                assert day.funding_roots("BTCUSDT", time_window=later_window) == roots
+                with open_tardis_archive(
+                    tmp_path / "published", policy, time_window=later_window
+                ) as later:
+                    assert (
+                        later.funding_roots("BTCUSDT", time_window=later_window)
+                        == roots
+                    )
+                    with read_funding_observations(
+                        roots, symbol="BTCUSDT", resource_policy=policy
+                    ) as source:
+                        assert source.coverage == (
+                            (
+                                start_ms * 1_000_000,
+                                (start_ms + slice_count * 600_000) * 1_000_000 - 1,
+                            ),
+                        )
+                        assert source.events[0].rate == 0.1
+            with pytest.raises(
+                PortfolioTargetBlocked, match="tardis_archive_window_empty"
+            ):
+                with open_tardis_archive(
+                    tmp_path / "published", policy, time_window=outside_window
+                ):
+                    pytest.fail("half-open archive end cannot cover the next instant")
             metadata = json.loads(
-                (day.funding_root("BTCUSDT") / "response.metadata.json").read_text(
-                    encoding="utf-8"
-                )
+                (funding_root / "response.metadata.json").read_text(encoding="utf-8")
             )["metadata"]["settlement_source"]
             assert metadata["source_id"] == source_id
             assert ("xoomar.com" in metadata["endpoint"]) == (source_id == "xoomar")
-            preserved = day.funding_root("BTCUSDT").parent / "settlements.json"
+            preserved = funding_root.parent / "settlements.json"
             assert preserved.read_bytes() == original == response.read_bytes()
             preserved.write_bytes(original.replace(b"200", b"201"))
             with pytest.raises(
                 ValueError, match="binance_funding_settlement_source_changed"
             ):
                 with read_funding_observations(
-                    day.funding_root("BTCUSDT"),
+                    roots,
                     symbol="BTCUSDT",
                     resource_policy=policy,
                 ):
                     pass
+        assert policy.used_memory_bytes == 0
+
+
+def _publish_funding_archive(root, date, policy, *, include_funding=True):
+    start_ms = pd.Timestamp(date).value // 1_000_000
+    native = _line(
+        1,
+        "markPrice@1s",
+        {
+            "e": "markPriceUpdate",
+            "s": "BTCUSDT",
+            "E": start_ms + 900,
+            "p": "100",
+            "r": "0.05",
+            "T": start_ms + 10_000,
+        },
+    ).replace(b"2026-09-01T", (date + "T").encode())
+    slices = _slices(root / ("native-" + date), native, count=1)
+    destination = root / ("archive-" + date)
+    import_slices(
+        destination,
+        date=date,
+        slices=slices,
+        byte_budget=1024**2,
+        resource_policy=policy,
+    )
+    if include_funding:
+        response = root / (date + "-settlements.json")
+        response.write_text(
+            json.dumps(
+                [
+                    {
+                        "symbol": "BTCUSDT",
+                        "fundingTime": start_ms + 10_000,
+                        "fundingRate": "0.1",
+                        "markPrice": "200",
+                    }
+                ]
+            ),
+            encoding="utf-8",
+        )
+        with open_tardis_archive(destination, policy) as archive:
+            import_funding_history(
+                archive,
+                symbol="BTCUSDT",
+                source_id="binance",
+                response_path=response,
+                http_status=200,
+                start_ms=start_ms,
+                end_ms=start_ms + 600_000 - 1,
+                byte_budget=1024**2,
+            )
+    return destination
+
+
+def test_selected_validation_funding_never_reads_other_months(tmp_path, monkeypatch):
+    import quant_research_platform.sources.binance.funding as funding
+
+    dates = ("2026-07-01", "2026-08-01", "2026-09-01")
+    validation = TimeWindow("2026-08-01T00:00:00", "2026-08-01T00:09:59")
+    with runtime_resource_policy_scope() as policy:
+        archives = tuple(
+            _publish_funding_archive(tmp_path, date, policy) for date in dates
+        )
+        archive_paths = tuple(path.name for path in archives)
+        inspected = []
+        original_manifest = funding._manifest
+
+        def observed_manifest(root, symbol):
+            inspected.append(root)
+            return original_manifest(root, symbol)
+
+        monkeypatch.setattr(funding, "_manifest", observed_manifest)
+        with open_market_source(
+            tmp_path,
+            policy,
+            archive_paths=archive_paths,
+            time_window=validation,
+        ) as source:
+            assert [item["date"] for item in source.source_identity["archives"]] == [
+                "2026-08-01"
+            ]
+            roots = source.funding_roots("BTCUSDT", time_window=validation)
+            assert len(roots) == 1 and roots[0].is_relative_to(archives[1])
+            with read_funding_observations(
+                roots, symbol="BTCUSDT", resource_policy=policy
+            ) as observations:
+                expected_identity = observations.identity
+                forecasts = tuple(observations.forecasts)
+                assert [item.available_at_ns for item in forecasts] == [
+                    pd.Timestamp("2026-08-01T00:00:01").value
+                ]
+            no_roots = source.funding_roots(
+                "BTCUSDT",
+                time_window=TimeWindow("2026-09-01T00:00:00", "2026-09-01T00:01:00"),
+            )
+            assert no_roots == ()
+            with pytest.raises(
+                PortfolioTargetBlocked, match="binance_funding_input_missing"
+            ):
+                with read_funding_observations(no_roots, symbol="BTCUSDT"):
+                    pytest.fail("selected source cannot discover another month")
+        assert (
+            market_funding_identity(
+                tmp_path,
+                "ledger",
+                symbol="BTCUSDT",
+                archive_paths=archive_paths,
+                time_window=validation,
+            )
+            == expected_identity
+        )
+        assert inspected and set(inspected) == set(roots)
+        assert policy.used_memory_bytes == 0
+
+
+def test_separate_native_funding_archives_cannot_supply_continuous_months(tmp_path):
+    from types import SimpleNamespace
+
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _funding_check,
+        _qualified_episodes,
+    )
+
+    dates = ("2026-07-01", "2026-08-01", "2026-09-01")
+    starts = tuple(pd.Timestamp(date).value for date in dates)
+    intervals = tuple((start, start + 600_000_000_000 - 1) for start in starts)
+    window = TimeWindow(pd.Timestamp(intervals[0][0]), pd.Timestamp(intervals[-1][1]))
+    bounds = ((intervals[0][0], intervals[-1][1]),)
+    with runtime_resource_policy_scope() as policy:
+        archives = tuple(
+            _publish_funding_archive(tmp_path, date, policy) for date in dates
+        )
+        with open_market_source(
+            tmp_path,
+            policy,
+            archive_paths=tuple(path.name for path in archives),
+            time_window=window,
+        ) as source:
+            roots = source.funding_roots("BTCUSDT", time_window=window)
+            assert len(roots) == 3
+            with read_funding_observations(
+                roots, symbol="BTCUSDT", resource_policy=policy
+            ) as observations:
+                assert observations.coverage == intervals
+                with pytest.raises(
+                    PortfolioTargetBlocked, match="binance_funding_coverage_incomplete"
+                ):
+                    _funding_check(observations, observations.identity, bounds)
+                market_span = (bounds[0][0], bounds[0][1] + 1)
+                episodes = list(
+                    _qualified_episodes(
+                        {"book": market_span},
+                        SimpleNamespace(intervals=lambda: iter((market_span,))),
+                        observations,
+                        bounds,
+                    )
+                )
+                assert [(item[0], item[1]) for item in episodes] == [
+                    (start, end + 1) for start, end in intervals
+                ]
+                assert [item[2] for item in episodes] == [
+                    "TRUNCATED",
+                    "TRUNCATED",
+                    "PLANNED_END",
+                ]
+        assert policy.used_memory_bytes == 0
+
+
+def test_selected_archive_or_funding_missing_does_not_fall_back(tmp_path):
+    window = TimeWindow("2026-08-01T00:00:00", "2026-08-01T00:09:59")
+    with runtime_resource_policy_scope() as policy:
+        july = _publish_funding_archive(tmp_path, "2026-07-01", policy)
+        august = _publish_funding_archive(
+            tmp_path, "2026-08-01", policy, include_funding=False
+        )
+        with open_market_source(
+            tmp_path, policy, archive_paths=(july.name, august.name), time_window=window
+        ) as source:
+            roots = source.funding_roots("BTCUSDT", time_window=window)
+            assert len(roots) == 1 and roots[0].is_relative_to(august)
+            with pytest.raises(
+                PortfolioTargetBlocked, match="binance_funding_input_missing"
+            ):
+                with read_funding_observations(
+                    roots, symbol="BTCUSDT", resource_policy=policy
+                ):
+                    pytest.fail(
+                        "July funding cannot substitute for missing August funding"
+                    )
+        with pytest.raises(FileNotFoundError):
+            with open_market_source(
+                tmp_path,
+                policy,
+                archive_paths=(july.name, "missing-august-archive"),
+                time_window=window,
+            ):
+                pytest.fail(
+                    "missing declared archive cannot fall back to another source"
+                )
         assert policy.used_memory_bytes == 0

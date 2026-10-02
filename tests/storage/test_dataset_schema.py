@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import json
 import weakref
+from collections import UserDict
+from dataclasses import replace
 from datetime import date
 from decimal import Decimal
 from pathlib import Path
@@ -926,8 +928,78 @@ def test_unordered_category_domain_uses_live_exact_index_namespace(
         staged_validator=validate,
         resource_policy=capture_test_policy(
             available_memory_bytes=64 * 1024**2,
-            explicit_cap_bytes=32 * 1024 * 1024,
+            explicit_cap_bytes=64 * 1024 * 1024,
         ),
     )
     assert observed_counts == [len(categories)]
     assert len(read_dataset(root)["asset_id"].cat.categories) == len(categories)
+
+
+def test_instance_metadata_admission_preserves_typed_mapping_and_error_order() -> None:
+    identities = UserDict(
+        {
+            "input": UserDict(
+                {"data_id": "input", "spec_hash": "a" * 64, "manifest_hash": "b" * 64}
+            )
+        }
+    )
+    archive = UserDict(
+        {"schema_id": "archive", "artifact_id": "first", "manifest_hash": "c" * 64}
+    )
+    metadata = UserDict(
+        {
+            "input_dataset_identities": identities,
+            "source_artifact_identity": archive,
+        }
+    )
+    sizes: list[int] = []
+    expected = dataset_schema.merge_dataset_instance_metadata({}, metadata)
+    actual = dataset_schema.merge_dataset_instance_metadata(
+        {}, metadata, _admit=sizes.append
+    )
+    assert actual == expected
+    assert len(sizes) >= 4 and all(size > 0 for size in sizes)
+    actual["input_dataset_identities"]["input"]["spec_hash"] = "d" * 64
+    assert identities["input"]["spec_hash"] == "a" * 64
+
+    with pytest.raises(ValueError, match="invalid_input_dataset_identities_metadata"):
+        dataset_schema.merge_dataset_instance_metadata(
+            {},
+            {
+                "input_dataset_identities": UserDict({"input": {"data_id": "wrong"}}),
+                "producer_diagnostics": object(),
+            },
+            _admit=sizes.append,
+        )
+
+
+def test_spec_parameters_admitted_before_decoding(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    spec = replace(
+        make_processed_dataset_spec("parameter_admission"),
+        parameters_json=json.dumps({"counts": [{} for _ in range(2000)]}),
+    )
+    expected = dataset_schema.data_spec_payload(spec)
+    remaining = 64 * 1024
+    decode_calls = 0
+    original = dataset_schema.parse_qrp_json_object
+
+    def decode(raw):  # noqa: ANN001
+        nonlocal decode_calls
+        decode_calls += 1
+        return original(raw)
+
+    def admit(size: int) -> None:
+        nonlocal remaining
+        if size > remaining:
+            raise MemoryError("parameter_copy_not_admitted")
+        remaining -= size
+
+    monkeypatch.setattr(dataset_schema, "parse_qrp_json_object", decode)
+    with pytest.raises(MemoryError, match="parameter_copy_not_admitted"):
+        dataset_schema.data_spec_payload(spec, _admit=admit)
+    assert decode_calls == 0
+    sizes: list[int] = []
+    assert dataset_schema.data_spec_payload(spec, _admit=sizes.append) == expected
+    assert decode_calls == 1

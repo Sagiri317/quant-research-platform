@@ -1340,7 +1340,9 @@ def test_write_dataset_activates_and_closes_caller_iterator_under_policy(
             events.append(("iter", current_runtime_resource_policy()))
             return InputIterator()
 
-    monkeypatch.setattr(dataset_writing, "validate_dataset_spec", lambda _spec: None)
+    monkeypatch.setattr(
+        dataset_writing, "validate_dataset_spec", lambda _spec, **_kwargs: None
+    )
     monkeypatch.setattr(
         dataset_writing,
         "validate_dataset_artifact_root",
@@ -1687,7 +1689,9 @@ def test_write_dataset_requires_artifact_root_before_writer_or_data_pull(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     policy = _policy(1)
-    monkeypatch.setattr(dataset_writing, "validate_dataset_spec", lambda _spec: None)
+    monkeypatch.setattr(
+        dataset_writing, "validate_dataset_spec", lambda _spec, **_kwargs: None
+    )
     monkeypatch.setattr(
         dataset_writing,
         "validate_dataset_artifact_root",

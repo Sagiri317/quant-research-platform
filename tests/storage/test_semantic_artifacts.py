@@ -654,3 +654,136 @@ def test_parent_capture_is_preserved_even_for_same_content_replacement(
     filesystem_replace(replacement, path)
     with pytest.raises(ValueError, match="identity_changed"):
         read_semantic_artifact_record(root, expected_member_identities=identities)
+
+
+@pytest.mark.parametrize(
+    ("available", "cap", "error", "message"),
+    (
+        (512 * 1024**2, 4 * 1024**2, MemoryError, "runtime_memory_budget_exceeded"),
+        (
+            2 * 1024**2,
+            None,
+            ValueError,
+            "semantic_artifact_metadata_exceeds_memory_capacity",
+        ),
+        (
+            2 * 1024**2,
+            64 * 1024**2,
+            ValueError,
+            "semantic_artifact_metadata_exceeds_memory_capacity",
+        ),
+    ),
+)
+def test_semantic_writer_admits_envelope_projection_before_publication(
+    tmp_path, monkeypatch, available, cap, error, message
+):
+    import quant_research_platform.storage.semantic_artifacts as storage
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    old_root = _write_artifact(tmp_path)
+    old_bytes = _immediate_file_bytes(old_root)
+    payload = _envelope().payload()
+    envelope = build_business_manifest_envelope(
+        **{
+            key: (
+                {"counts": [{} for _ in range(20000)]}
+                if key == "semantic_metadata"
+                else value
+            )
+            for key, value in payload.items()
+            if key not in {"instance_identity", "status"}
+        }
+    )
+    writes = 0
+    original = storage.write_manifest
+
+    def write_manifest(path, value, **kwargs):
+        nonlocal writes
+        writes += 1
+        return original(path, value, **kwargs)
+
+    monkeypatch.setattr(storage, "write_manifest", write_manifest)
+    policy = capture_test_policy(
+        available_memory_bytes=available, explicit_cap_bytes=cap
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(error, match=message):
+            storage.write_semantic_artifact(
+                old_root.parent.parent,
+                envelope,
+                lambda staging: filesystem_write_bytes(staging / "member", b"data"),
+            )
+        assert policy.used_memory_bytes == 0
+    assert writes == 0
+    assert not (old_root.parent / envelope.instance_identity).exists()
+    assert _immediate_file_bytes(old_root) == old_bytes
+    assert len(envelope.semantic_metadata["counts"]) == 20000
+
+    if cap is None:
+        policy = capture_test_policy(available_memory_bytes=256 * 1024**2)
+        with runtime_resource_policy_scope(policy):
+            published = storage.write_semantic_artifact(
+                old_root.parent.parent,
+                envelope,
+                lambda staging: filesystem_write_bytes(staging / "member", b"data"),
+            )
+            assert policy.used_memory_bytes == 0
+        assert writes == 1
+        assert published.name == envelope.instance_identity
+        assert (
+            len(read_semantic_artifact(published)["semantic_metadata"]["counts"])
+            == 20000
+        )
+        assert _immediate_file_bytes(old_root) == old_bytes
+
+
+@pytest.mark.parametrize("cap", (None, 128 * 1024**2))
+def test_semantic_writer_failure_releases_metadata_with_retained_exception(
+    tmp_path, monkeypatch, cap
+):
+    import quant_research_platform.storage.semantic_artifacts as storage
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    old_root = _write_artifact(tmp_path)
+    old_bytes = _immediate_file_bytes(old_root)
+    policy = capture_test_policy(
+        available_memory_bytes=512 * 1024**2, explicit_cap_bytes=cap
+    )
+    failure = RuntimeError("semantic_manifest_boundary_primary")
+    manifest_id = None
+
+    def fail_manifest(path, payload, **kwargs):
+        nonlocal manifest_id
+        manifest_id = id(payload)
+        assert any(
+            lease.owner == "storage.semantic.write.metadata"
+            and lease.reserved_bytes > 0
+            for lease in policy._leases
+        )
+        raise failure
+
+    monkeypatch.setattr(storage, "write_manifest", fail_manifest)
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(RuntimeError) as caught:
+            storage.write_semantic_artifact(
+                tmp_path / "candidate",
+                _envelope(),
+                lambda staging: filesystem_write_bytes(staging / "member", b"data"),
+            )
+        assert caught.value is failure
+        current = failure.__traceback__
+        while current is not None:
+            local_values = current.tb_frame.f_locals
+            if current.tb_frame.f_code.co_name == "fail_manifest":
+                assert not local_values
+            assert all(id(value) != manifest_id for value in local_values.values())
+            current = current.tb_next
+        assert policy.used_memory_bytes == 0
+        with policy.lease("test.semantic.after_failure", 64 * 1024**2):
+            pass
+    assert _immediate_file_bytes(old_root) == old_bytes
+    assert not (
+        tmp_path / "candidate" / "instances" / _envelope().instance_identity
+    ).exists()

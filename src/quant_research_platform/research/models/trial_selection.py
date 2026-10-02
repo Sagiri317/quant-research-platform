@@ -21,15 +21,12 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _summarize_correlation_aggregates,
 )
 from quant_research_platform.contracts.experiments import (
-    legal_training_rows,
+    label_maturity_mask,
     resolve_training_availability_column,
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.models import (
-    MODEL_SELECTION_METRIC_DIRECTIONS,
-)
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.experiments import TrialRecorder
@@ -736,106 +733,20 @@ def _insert_metric_chunk(
     )
 
 
-def build_model_selection_metadata(
+def fit_validation_candidates(
     *,
-    configured_model_id: str,
-    selected_model_id: str,
-    selected_model_input_columns: tuple[str, ...],
-    candidate_model_ids: tuple[str, ...],
-    selection_metric: str,
-    validation_start: str,
-    validation_end: str,
-    trial_metrics: pd.DataFrame,
-    tie_break_order: tuple[str, ...] = (),
-) -> dict[str, object]:
-    """Build prediction model selection metadata from validation metrics."""
-
-    if selection_metric not in MODEL_SELECTION_METRIC_DIRECTIONS:
-        raise ValueError("invalid_model_selection_metric")
-    if selected_model_id not in candidate_model_ids:
-        raise ValueError("selected_model_not_in_candidates")
-    tie_break_order = tie_break_order or candidate_model_ids
-    if set(tie_break_order) != set(candidate_model_ids):
-        raise ValueError("trial_tie_break_order_mismatch")
-    missing_fact_columns = sorted(
-        {
-            "resolved_hyperparameters",
-            "random_seed",
-            "n_train",
-            "dependency_status",
-        }.difference(trial_metrics.columns)
-    )
-    if missing_fact_columns:
-        raise ValueError(
-            "model_selection_trial_facts_missing: " + ", ".join(missing_fact_columns)
-        )
-    records = trial_metrics.loc[
-        :, ("model_id", *VALIDATION_METRIC_COLUMNS, *VALIDATION_METRIC_REASON_COLUMNS)
-    ].to_dict("records")
-    for record in records:
-        for key in (
-            "validation_ic",
-            "validation_rankic",
-            "validation_ic_reason",
-            "validation_rankic_reason",
-        ):
-            if pd.isna(record[key]):
-                record[key] = None
-        record["validation_rows"] = int(
-            trial_metrics.loc[
-                trial_metrics["model_id"] == record["model_id"],
-                "validation_rows",
-            ].iloc[0]
-        )
-        source = trial_metrics.loc[
-            trial_metrics["model_id"] == record["model_id"]
-        ].iloc[0]
-        for key in (
-            "resolved_hyperparameters",
-            "random_seed",
-            "n_train",
-            "dependency_status",
-        ):
-            value = source[key]
-            if hasattr(value, "item"):
-                value = value.item()
-            if key == "random_seed" and pd.isna(value):
-                value = None
-            if key == "dependency_status" and type(value) is dict:
-                value = dict(value)
-            record[key] = value
-    return {
-        "status": "selected",
-        "configured_model_id": configured_model_id,
-        "selected_model_id": selected_model_id,
-        "selected_model_input_columns": list(selected_model_input_columns),
-        "candidate_model_ids": list(candidate_model_ids),
-        "tie_break_order": list(tie_break_order),
-        "selection_metric": selection_metric,
-        "selection_direction": MODEL_SELECTION_METRIC_DIRECTIONS[selection_metric],
-        "validation_start": validation_start,
-        "validation_end": validation_end,
-        "candidate_count": len(candidate_model_ids),
-        "trial_metrics": records,
-    }
-
-
-def select_prediction_model_spec(
-    *,
-    prediction_spec,
+    fold,
+    candidate_specs,
     dataset_spec,
-    model_catalog,
     chunks,
     validation_input_columns: tuple[str, ...] | None = None,
-    trial_recorder: TrialRecorder | None = None,
-    validation_coverage: ModelSampleCoverage | None = None,
+    trial_recorder: TrialRecorder,
+    validation_coverage: ModelSampleCoverage,
+    on_validation,
+    on_candidate,
 ):
-    """Select one model spec from validation trials for model-owned callers."""
+    """Fit every candidate once and publish its original validation scores."""
 
-    candidate_specs = tuple(
-        model_catalog.get(model_id)
-        for model_id in (prediction_spec.model_id, *prediction_spec.candidate_model_ids)
-    )
     label_columns = {spec.label_column for spec in candidate_specs}
     if len(label_columns) != 1:
         raise ValueError("model_selection_label_column_mismatch")
@@ -845,9 +756,8 @@ def select_prediction_model_spec(
         if validation_input_columns is None
         else validation_input_columns
     )
-    validation_start = pd.Timestamp(prediction_spec.model_selection_validation_start)
-    validation_end = pd.Timestamp(prediction_spec.model_selection_validation_end)
-    trial_metric_records: list[dict[str, object]] = []
+    validation_start = pd.Timestamp(fold.validation.start)
+    validation_end = pd.Timestamp(fold.validation.end)
     for candidate_spec in candidate_specs:
         train_read_columns = fitting.model_training_read_columns(
             dataset_spec.primary_key,
@@ -866,7 +776,7 @@ def select_prediction_model_spec(
                     ),
                     label_column,
                     *training_availability_columns(label_column),
-                    *required_filter_columns(prediction_spec.sample_filter_mode),
+                    *required_filter_columns(candidate_spec.sample_filter_mode),
                 )
             )
         )
@@ -890,13 +800,13 @@ def select_prediction_model_spec(
                         train_read_columns,
                         input_columns=candidate_spec.input_columns,
                         start=None,
-                        end=prediction_spec.train_end,
+                        end=fold.train.end,
                     ),
-                    asset_ids=prediction_spec.training_asset_ids,
+                    asset_ids=(),
                 ),
                 candidate_spec,
                 estimator=build_estimator_from_model_spec(candidate_spec),
-                fitting_cutoff=pd.Timestamp(prediction_spec.train_end),
+                fitting_cutoff=pd.Timestamp(fold.train.end),
             )
             model_result = (
                 owned_model.value
@@ -913,8 +823,8 @@ def select_prediction_model_spec(
             ):
                 return chunks(
                     validation_columns,
-                    start=prediction_spec.model_selection_validation_start,
-                    end=prediction_spec.model_selection_validation_end,
+                    start=fold.validation.start,
+                    end=fold.validation.end,
                     input_columns=tuple(
                         dict.fromkeys(
                             (*common_validation_input_columns, *candidate_input_columns)
@@ -924,18 +834,41 @@ def select_prediction_model_spec(
 
             validation_chunks = iter_validation_prediction_chunks(
                 validation_source,
-                prediction_spec=prediction_spec,
                 candidate_spec=candidate_spec,
                 model_result=model_result,
                 validation_start=validation_start,
                 validation_end=validation_end,
-                usable_input_columns=common_validation_input_columns,
+                scoring_input_columns=common_validation_input_columns,
             )
+
+            def observed_chunks(source=validation_chunks, candidate=candidate_spec):
+                with closing_iterator(iter(source)) as frames:
+                    for item in frames:
+                        frame = item.value if isinstance(item, OwnedValue) else item
+                        on_validation(candidate, frame)
+                        with current_runtime_resource_policy().lease(
+                            "research.model.validation.maturity",
+                            max(1, 3 * pandas_frame_payload_bytes(frame)),
+                        ):
+                            mature = frame.loc[
+                                label_maturity_mask(
+                                    frame,
+                                    fitting_cutoff=validation_end,
+                                    availability_column="label_available_at",
+                                    target_column=label_column,
+                                )
+                                & frame["score_eligible"]
+                            ]
+                            if isinstance(item, OwnedValue):
+                                yield OwnedValue(mature, item.lease)
+                            else:
+                                yield mature
+
             trial_metrics = evaluate_model_trial_metrics_from_chunks(
-                validation_chunks,
+                observed_chunks(),
                 model_id=candidate_spec.model_id,
                 label_column=label_column,
-                prediction_column=prediction_spec.prediction_column,
+                prediction_column="prediction_score",
                 expected_coverage=validation_coverage,
             )
             trial_metrics.update(
@@ -954,7 +887,7 @@ def select_prediction_model_spec(
                 trial_recorder.finish(
                     attempt, metrics=trial_metrics, model_metadata=model_result.metadata
                 )
-            trial_metric_records.append(trial_metrics)
+            on_candidate(candidate_spec, model_result)
         except BaseException as exc:
             primary_error = exc
             if trial_recorder is not None and attempt is not None:
@@ -989,47 +922,16 @@ def select_prediction_model_spec(
             finally:
                 cleanup_owner = None
                 cleanup_lease = None
-    trial_metrics = pd.DataFrame.from_records(trial_metric_records)
-    direction = (
-        MODEL_SELECTION_METRIC_DIRECTIONS[prediction_spec.model_selection_metric]
-        == "maximize"
-    )
-    selected_model_id = select_best_validation_trial(
-        trial_metrics,
-        trial_id_column="model_id",
-        selection_metric=prediction_spec.model_selection_metric,
-        maximize=direction,
-        validation_metric_columns=VALIDATION_METRIC_COLUMNS,
-        test_metric_columns=TEST_METRIC_COLUMNS,
-        tie_break_order=(prediction_spec.selection_tie_break_order or None),
-    )
-    metadata = build_model_selection_metadata(
-        configured_model_id=prediction_spec.model_id,
-        selected_model_id=selected_model_id,
-        candidate_model_ids=tuple(spec.model_id for spec in candidate_specs),
-        selection_metric=prediction_spec.model_selection_metric,
-        validation_start=prediction_spec.model_selection_validation_start,
-        validation_end=prediction_spec.model_selection_validation_end,
-        tie_break_order=(
-            prediction_spec.selection_tie_break_order
-            or tuple(spec.model_id for spec in candidate_specs)
-        ),
-        selected_model_input_columns=model_catalog.get(selected_model_id).input_columns,
-        trial_metrics=trial_metrics,
-    )
-    return model_catalog.get(selected_model_id), metadata
 
 
 def iter_validation_prediction_chunks(
     chunks: Callable[[], Iterable[pd.DataFrame]],
     *,
-    prediction_spec,
     candidate_spec,
     model_result: fitting.ModelFitResult,
     validation_start: pd.Timestamp,
     validation_end: pd.Timestamp,
-    usable_input_columns: tuple[str, ...] | None = None,
-    include_availability: bool = False,
+    scoring_input_columns: tuple[str, ...] | None = None,
     extra_output_columns: tuple[str, ...] = (),
 ) -> Iterable[object]:
     predictor = prediction_callable(
@@ -1058,10 +960,10 @@ def iter_validation_prediction_chunks(
                 + index_bytes
                 + len(chunk)
                 * 8
-                * (len(usable_input_columns or candidate_spec.input_columns) + 6),
+                * (len(scoring_input_columns or candidate_spec.input_columns) + 6),
                 _filter_working_set_bound(
                     chunk,
-                    mode=prediction_spec.sample_filter_mode,
+                    mode=candidate_spec.sample_filter_mode,
                 ),
             )
             chunk_lease = (
@@ -1083,7 +985,7 @@ def iter_validation_prediction_chunks(
                 if not validation.empty:
                     filtered, _filter_metadata = apply_filter_mode(
                         validation,
-                        mode=prediction_spec.sample_filter_mode,
+                        mode=candidate_spec.sample_filter_mode,
                         metadata_key="sample_filter_mode",
                     )
                     availability_column = resolve_training_availability_column(
@@ -1093,27 +995,20 @@ def iter_validation_prediction_chunks(
                     prediction_rows = filtered.loc[
                         filtered.loc[:, list(prediction_inputs)].notna().all(axis=1)
                     ]
-                    usable = legal_training_rows(
-                        prediction_rows,
-                        fitting_cutoff=validation_end,
-                        availability_column=availability_column,
-                        feature_columns=(
-                            usable_input_columns
-                            if usable_input_columns is not None
-                            else prediction_inputs
-                        ),
-                        target_column=candidate_spec.label_column,
-                    )
+                    usable = prediction_rows.loc[prediction_rows["eligible"]]
                     if not usable.empty:
                         predictions = pd.Series(
                             predictor(prediction_rows), index=prediction_rows.index
                         )
                         output = usable.loc[:, list(output_columns)].copy()
-                        if include_availability:
-                            output["label_available_at"] = usable[availability_column]
-                        output[prediction_spec.prediction_column] = predictions.loc[
-                            usable.index
-                        ]
+                        output["label_available_at"] = usable[availability_column]
+                        output["prediction_score"] = predictions.loc[usable.index]
+                        if scoring_input_columns is not None:
+                            output["score_eligible"] = (
+                                usable.loc[:, list(scoring_input_columns)]
+                                .notna()
+                                .all(axis=1)
+                            )
                         if chunk_lease is not None:
                             output_bytes = pandas_frame_payload_bytes(output)
                             if output_bytes > chunk_lease.reserved_bytes:

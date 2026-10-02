@@ -14,13 +14,19 @@ import pytest
 import quant_research_platform.research.models.fitting as model_fitting
 import quant_research_platform.research.models.trial_selection as model_selection_owner
 import quant_research_platform.research.predictions.runner as prediction_runner
-from quant_research_platform.catalog.models import ModelCatalog
-from quant_research_platform.catalog.predictions import PredictionCatalog
+from quant_research_platform.contracts.experiments import (
+    ExperimentFold,
+    ExperimentPlan,
+    legal_training_rows,
+)
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
 from quant_research_platform.contracts.predictions import PredictionSpec
+from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.experiments import TrialRecorder
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
@@ -28,17 +34,18 @@ from quant_research_platform.research.models.trial_selection import (
     evaluate_model_trial_metrics_from_chunks,
 )
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
     current_runtime_resource_policy,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
+from quant_research_platform.storage.experiments import read_trial_ledger
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_prediction_inputs import (
     make_prediction_frame,
 )
 from tests.helpers.research_specs import (
     make_demo_research_dataset_spec,
-    make_research_dataset_catalog,
 )
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.workflow_test_support import _column_predictor
@@ -49,51 +56,17 @@ def test_prediction_runner_selects_model_using_validation_metric(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = make_research_dataset_catalog(
-        make_demo_research_dataset_spec(
-            data_id="research_demo",
-            input_data_ids=("processed_demo",),
-            base_input_data_id="processed_demo",
-            factor_columns=("factor_a", "factor_b"),
-            label_columns=("label",),
-            filter_columns=("eligible",),
-            context_columns=("label_available_at",),
-        )
-    )
-    model_catalog = _model_catalog(
+    dataset = _selection_dataset()
+    specs = (
         _model("base_model", ("factor_a",)),
         _model("candidate_model", ("factor_b",)),
     )
-    prediction_catalog = PredictionCatalog(
-        (
-            PredictionSpec(
-                prediction_id="prediction_demo",
-                model_id="base_model",
-                research_dataset_id="research_demo",
-                train_end="2023-01-03",
-                test_start="2023-01-07",
-                test_end="2023-01-08",
-                candidate_model_ids=("candidate_model",),
-                model_selection_metric="validation_mse",
-                model_selection_validation_start="2023-01-04",
-                model_selection_validation_end="2023-01-06",
-            ),
-        )
-    )
+    frame = _development_frame()
     write_dataset(
-        layout.research_dataset_root(MarketId("a_share"), "research_demo"),
-        _development_frame(),
-        spec=make_demo_research_dataset_spec(
-            data_id="research_demo",
-            input_data_ids=("processed_demo",),
-            base_input_data_id="processed_demo",
-            factor_columns=("factor_a", "factor_b"),
-            label_columns=("label",),
-            filter_columns=("eligible",),
-            context_columns=("label_available_at",),
-        ),
+        layout.research_dataset_root(MarketId("a_share"), dataset.data_id),
+        frame,
+        spec=dataset,
     )
-
     original_to_dict = pd.DataFrame.to_dict
 
     def reject_validation_row_graph(frame, *args, **kwargs):  # noqa: ANN001, ANN002, ANN003
@@ -110,73 +83,53 @@ def test_prediction_runner_selects_model_using_validation_metric(
         return original_to_dict(frame, *args, **kwargs)
 
     monkeypatch.setattr(pd.DataFrame, "to_dict", reject_validation_row_graph)
-
-    with runtime_resource_policy_scope():
-        selected, model_selection = model_selection_owner.select_prediction_model_spec(
-            prediction_spec=prediction_catalog.get("prediction_demo"),
-            dataset_spec=dataset_catalog.get("research_demo"),
-            model_catalog=model_catalog,
-            chunks=lambda columns, *, input_columns, start, end: (
-                iter_research_dataset_chunks(
-                    layout,
-                    market_id=MarketId("a_share"),
-                    dataset_id="research_demo",
-                    columns=columns,
-                )
-            ),
+    with runtime_resource_policy_scope() as policy:
+        result = _fit_validation_trials(
+            layout, dataset, specs, frame, read_persisted=True
         )
-
-    assert model_selection["selected_model_id"] == "candidate_model"
-    assert model_selection["selection_metric"] == "validation_mse"
-    assert model_selection["selection_direction"] == "minimize"
-    assert model_selection["candidate_model_ids"] == ["base_model", "candidate_model"]
-    assert selected.input_columns == ("factor_b",)
-    assert model_selection["selected_model_input_columns"] == ["factor_b"]
+        selected = model_selection_owner.select_best_validation_trial(
+            result.metrics,
+            trial_id_column="model_id",
+            selection_metric=result.plan.selection_metric,
+            maximize=result.plan.selection_direction == "maximize",
+            validation_metric_columns=("validation_mse",),
+            test_metric_columns=(),
+            tie_break_order=result.plan.tie_break_order,
+        )
+        assert selected == "candidate_model"
+        assert result.plan.selection_metric == "validation_mse"
+        assert result.plan.selection_direction == "minimize"
+        assert result.plan.candidate_ids == ("base_model", "candidate_model")
+        assert result.parameters[selected]["input_factor_columns"] == ["factor_b"]
+        assert result.metrics.set_index("model_id").loc[
+            selected, "validation_mse"
+        ] == pytest.approx(0.0)
+        assert policy.used_memory_bytes == 0
 
 
 def test_model_selection_compares_common_validation_primary_keys(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = _development_frame()
     frame.loc[frame["timestamp"].eq("2023-01-04"), "factor_a"] = np.nan
     frame.loc[frame["timestamp"].eq("2023-01-05"), "factor_b"] = np.nan
-    model_catalog = _model_catalog(
+    specs = (
         _model("base_model", ("factor_a",)),
         _model("candidate_model", ("factor_b",)),
     )
-    prediction_spec = PredictionSpec(
-        prediction_id="prediction_demo",
-        model_id="base_model",
-        research_dataset_id="research_demo",
-        train_end="2023-01-03",
-        test_start="2023-01-07",
-        test_end="2023-01-08",
-        candidate_model_ids=("candidate_model",),
-        model_selection_metric="validation_mse",
-        model_selection_validation_start="2023-01-04",
-        model_selection_validation_end="2023-01-06",
-    )
     validation_keys: list[tuple[tuple[pd.Timestamp, str], ...]] = []
     original_metrics = model_selection_owner.evaluate_model_trial_metrics_from_chunks
-
-    def chunks(columns, *, input_columns, start, end):  # noqa: ANN001
-        del input_columns
-        return (frame.loc[:, list(columns)],)
 
     def record_validation_keys(chunks, **kwargs):  # noqa: ANN001, ANN003
         keys: list[tuple[pd.Timestamp, str]] = []
 
         def observed_chunks():
             for item in chunks:
-                frame_value = (
-                    item.value
-                    if isinstance(item, prediction_runner.OwnedValue)  # noqa: SLF001
-                    else item
-                )
+                frame_value = item.value if isinstance(item, OwnedValue) else item
                 keys.extend(
                     frame_value[["timestamp", "asset_id"]].itertuples(
-                        index=False,
-                        name=None,
+                        index=False, name=None
                     )
                 )
                 yield item
@@ -190,21 +143,18 @@ def test_model_selection_compares_common_validation_primary_keys(
         "evaluate_model_trial_metrics_from_chunks",
         record_validation_keys,
     )
-
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024**2,
         explicit_cap_bytes=64 * 1024**2,
     )
-    with prediction_runner.runtime_resource_policy_scope(policy):
-        model_selection_owner.select_prediction_model_spec(
-            prediction_spec=prediction_spec,
-            dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
-            model_catalog=model_catalog,
-            chunks=chunks,
+    with runtime_resource_policy_scope(policy):
+        result = _fit_validation_trials(
+            StorageLayout(tmp_path), _selection_dataset(), specs, frame
         )
-
-    assert len(validation_keys) == 2
-    assert validation_keys[0] == validation_keys[1]
+        assert result.metrics.validation_rows.tolist() == [1, 1]
+        assert policy.used_memory_bytes == 0
+    expected = ((pd.Timestamp("2023-01-06"), "asset_a"),)
+    assert validation_keys == [expected, expected]
 
 
 def test_empty_validation_chunk_releases_its_lease() -> None:
@@ -226,10 +176,6 @@ def test_empty_validation_chunk_releases_its_lease() -> None:
         input_factor_columns=("factor_a",),
         label_column="label",
     )
-    prediction_spec = SimpleNamespace(
-        sample_filter_mode="unfiltered",
-        prediction_column="prediction",
-    )
     model_result = model_fitting.ModelFitResult(
         metadata={},
         prediction_model=_column_predictor("factor_a"),
@@ -239,7 +185,6 @@ def test_empty_validation_chunk_releases_its_lease() -> None:
         result = list(
             model_selection_owner.iter_validation_prediction_chunks(
                 lambda: iter((frame,)),
-                prediction_spec=prediction_spec,
                 candidate_spec=candidate_spec,
                 model_result=model_result,
                 validation_start=pd.Timestamp("2023-01-02"),
@@ -252,24 +197,13 @@ def test_empty_validation_chunk_releases_its_lease() -> None:
 
 
 def test_model_selection_drops_candidate_model_alias_before_lease_close(
+    tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frame = _development_frame()
-    model_catalog = _model_catalog(
+    specs = (
         _model("base_model", ("factor_a",)),
         _model("candidate_model", ("factor_b",)),
-    )
-    prediction_spec = PredictionSpec(
-        prediction_id="prediction_demo",
-        model_id="base_model",
-        research_dataset_id="research_demo",
-        train_end="2023-01-03",
-        test_start="2023-01-07",
-        test_end="2023-01-08",
-        candidate_model_ids=("candidate_model",),
-        model_selection_metric="validation_mse",
-        model_selection_validation_start="2023-01-04",
-        model_selection_validation_end="2023-01-06",
     )
     created_refs: list[weakref.ReferenceType[object]] = []
 
@@ -281,14 +215,13 @@ def test_model_selection_drops_candidate_model_alias_before_lease_close(
         predictor = Predictor()
         created_refs.append(weakref.ref(predictor))
         lease = current_runtime_resource_policy().lease(
-            "research.test.candidate_model",
-            1024,
+            "research.test.candidate_model", 1024
         )
-        return prediction_runner.OwnedValue(  # noqa: SLF001
+        return OwnedValue(
             model_fitting.ModelFitResult(
                 metadata={
                     "resolved_hyperparameters": {},
-                    "random_seed": None,
+                    "random_seed": 0,
                     "rows_after_input_label_dropna": 1,
                     "dependency_status": {
                         "status": "available",
@@ -301,29 +234,17 @@ def test_model_selection_drops_candidate_model_alias_before_lease_close(
             lease,
         )
 
-    monkeypatch.setattr(
-        model_fitting,
-        "_fit_model_result_owned_from_frames",
-        fit_owned,
-    )
-
-    def chunks(columns, *, input_columns, start, end):  # noqa: ANN001
-        del input_columns
-        return (frame.loc[:, list(columns)],)
-
+    monkeypatch.setattr(model_fitting, "_fit_model_result_owned_from_frames", fit_owned)
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024**2,
         explicit_cap_bytes=64 * 1024**2,
     )
     with runtime_resource_policy_scope(policy):
-        model_selection_owner.select_prediction_model_spec(
-            prediction_spec=prediction_spec,
-            dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
-            model_catalog=model_catalog,
-            chunks=chunks,
+        result = _fit_validation_trials(
+            StorageLayout(tmp_path), _selection_dataset(), specs, frame
         )
-
-    assert created_refs
+        assert result.metrics.model_id.tolist() == ["base_model", "candidate_model"]
+    assert len(created_refs) == 2
     assert all(reference() is None for reference in created_refs)
     assert policy.used_memory_bytes == 0
 
@@ -359,136 +280,62 @@ def test_prediction_runner_applies_sample_filter_to_validation_metrics(
     tmp_path: Path,
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = make_research_dataset_catalog(
-        make_demo_research_dataset_spec(
-            data_id="research_demo",
-            input_data_ids=("processed_demo",),
-            base_input_data_id="processed_demo",
-            factor_columns=("factor_a", "factor_b"),
-            label_columns=("label",),
-            filter_columns=("eligible",),
-            context_columns=("label_available_at",),
-        )
-    )
-    model_catalog = _model_catalog(
+    dataset = _selection_dataset()
+    specs = (
         _model("base_model", ("factor_a",)),
         _model("candidate_model", ("factor_b",)),
     )
-    prediction_catalog = PredictionCatalog(
-        (
-            PredictionSpec(
-                prediction_id="prediction_demo",
-                model_id="base_model",
-                research_dataset_id="research_demo",
-                train_end="2023-01-03",
-                test_start="2023-01-07",
-                test_end="2023-01-08",
-                candidate_model_ids=("candidate_model",),
-                model_selection_metric="validation_mse",
-                model_selection_validation_start="2023-01-04",
-                model_selection_validation_end="2023-01-06",
-                sample_filter_mode="eligible",
-            ),
-        )
-    )
+    frame = _development_frame(filter_flip=True)
     write_dataset(
-        layout.research_dataset_root(MarketId("a_share"), "research_demo"),
-        _development_frame(filter_flip=True),
-        spec=make_demo_research_dataset_spec(
-            data_id="research_demo",
-            input_data_ids=("processed_demo",),
-            base_input_data_id="processed_demo",
-            factor_columns=("factor_a", "factor_b"),
-            label_columns=("label",),
-            filter_columns=("eligible",),
-            context_columns=("label_available_at",),
-        ),
+        layout.research_dataset_root(MarketId("a_share"), dataset.data_id),
+        frame,
+        spec=dataset,
     )
-
-    with runtime_resource_policy_scope():
-        selected, model_selection = model_selection_owner.select_prediction_model_spec(
-            prediction_spec=prediction_catalog.get("prediction_demo"),
-            dataset_spec=dataset_catalog.get("research_demo"),
-            model_catalog=model_catalog,
-            chunks=lambda columns, *, input_columns, start, end: (
-                iter_research_dataset_chunks(
-                    layout,
-                    market_id=MarketId("a_share"),
-                    dataset_id="research_demo",
-                    columns=columns,
-                )
-            ),
+    with runtime_resource_policy_scope() as policy:
+        result = _fit_validation_trials(
+            layout, dataset, specs, frame, read_persisted=True
         )
-    assert selected.input_columns == ("factor_b",)
-
-    assert model_selection["selected_model_id"] == "candidate_model"
-    assert model_selection["selected_model_input_columns"] == ["factor_b"]
+        selected = model_selection_owner.select_best_validation_trial(
+            result.metrics,
+            trial_id_column="model_id",
+            selection_metric="validation_mse",
+            maximize=False,
+            validation_metric_columns=("validation_mse",),
+            test_metric_columns=(),
+        )
+        assert selected == "candidate_model"
+        assert result.parameters[selected]["input_factor_columns"] == ["factor_b"]
+        assert result.metrics.validation_rows.tolist() == [1, 1]
+        assert policy.used_memory_bytes == 0
 
 
 def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
-    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    dataset_catalog = make_research_dataset_catalog(
-        make_demo_research_dataset_spec(
-            data_id="research_demo",
-            input_data_ids=("processed_demo",),
-            base_input_data_id="processed_demo",
-            factor_columns=("factor_a", "factor_b"),
-            label_columns=("label",),
-            filter_columns=("eligible",),
-            context_columns=("label_available_at",),
-        )
-    )
-    model_catalog = _model_catalog(
+    specs = (
         _model("base_model", ("factor_a",), label_column="label"),
         _model("candidate_model", ("factor_b",), label_column="other_label"),
     )
-    prediction_catalog = PredictionCatalog(
-        (
-            PredictionSpec(
-                prediction_id="prediction_demo",
-                model_id="base_model",
-                research_dataset_id="research_demo",
-                train_end="2023-01-03",
-                test_start="2023-01-07",
-                candidate_model_ids=("candidate_model",),
-                model_selection_validation_start="2023-01-04",
-                model_selection_validation_end="2023-01-06",
-            ),
-        )
-    )
-    write_dataset(
-        layout.research_dataset_root(MarketId("a_share"), "research_demo"),
-        _development_frame().assign(other_label=1.0),
-        spec=make_demo_research_dataset_spec(
-            data_id="research_demo",
-            input_data_ids=("processed_demo",),
-            base_input_data_id="processed_demo",
-            factor_columns=("factor_a", "factor_b"),
-            label_columns=("label", "other_label"),
-            filter_columns=("eligible",),
-            context_columns=("label_available_at",),
-        ),
-    )
 
-    with (
-        runtime_resource_policy_scope(),
-        pytest.raises(ValueError, match="model_selection_label_column_mismatch"),
-    ):
-        model_selection_owner.select_prediction_model_spec(
-            prediction_spec=prediction_catalog.get("prediction_demo"),
-            dataset_spec=dataset_catalog.get("research_demo"),
-            model_catalog=model_catalog,
-            chunks=lambda columns, *, input_columns, start, end: (
-                iter_research_dataset_chunks(
-                    layout,
-                    market_id=MarketId("a_share"),
-                    dataset_id="research_demo",
-                    columns=columns,
-                )
-            ),
-        )
+    def unexpected_fit(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        pytest.fail("label mismatch reached fitting")
+
+    monkeypatch.setattr(
+        model_fitting, "_fit_model_result_owned_from_frames", unexpected_fit
+    )
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError, match="^model_selection_label_column_mismatch$"):
+            model_selection_owner.fit_validation_candidates(
+                fold=_selection_fold(),
+                candidate_specs=specs,
+                dataset_spec=_selection_dataset(),
+                chunks=lambda *args, **kwargs: (),
+                trial_recorder=None,
+                validation_coverage=model_selection_owner.ModelSampleCoverage({}),
+                on_validation=lambda *args: None,
+                on_candidate=lambda *args: None,
+            )
+        assert policy.used_memory_bytes == 0
 
 
 def test_prediction_runner_accepts_equivalent_timezone_representations() -> None:
@@ -554,8 +401,134 @@ def test_prediction_result_context_preserves_body_primary() -> None:
     assert current_runtime_resource_policy() is None
 
 
-def _model_catalog(*models: ModelSpec) -> ModelCatalog:
-    return ModelCatalog(models)
+def _selection_dataset():
+    return make_demo_research_dataset_spec(
+        data_id="research_demo",
+        input_data_ids=("processed_demo",),
+        base_input_data_id="processed_demo",
+        factor_columns=("factor_a", "factor_b"),
+        label_columns=("label",),
+        filter_columns=("eligible",),
+        context_columns=("label_available_at",),
+    )
+
+
+def _selection_fold():
+    return ExperimentFold(
+        fold_id="validation",
+        train=TimeWindow("2023-01-01", "2023-01-03"),
+        validation=TimeWindow("2023-01-04", "2023-01-06"),
+    )
+
+
+def _fit_validation_trials(
+    layout,
+    dataset,
+    specs,
+    frame,
+    *,
+    fold=None,
+    chunk_size=None,
+    read_persisted=False,
+    tie_break_order=(),
+):
+    """Exercise the real fit and immutable trial owners without a selection wrapper."""
+    fold = _selection_fold() if fold is None else fold
+    plan = ExperimentPlan(
+        stage="selection",
+        experiment_id="validation_candidates",
+        market_id=MarketId("a_share"),
+        research_dataset_id=dataset.data_id,
+        target_id="validation_models",
+        candidate_family_id="validation_candidates",
+        data_snapshot_id="fixture",
+        input_lineage=("fixture",),
+        folds=(fold,),
+        test=TimeWindow(
+            (pd.Timestamp(fold.validation.end) + pd.Timedelta(days=1)).date(),
+            (pd.Timestamp(fold.validation.end) + pd.Timedelta(days=2)).date(),
+        ),
+        selection_metric="validation_mse",
+        selection_direction="minimize",
+        candidate_ids=tuple(spec.model_id for spec in specs),
+        trial_budget=len(specs),
+        random_seed=0,
+        tie_break_order=tie_break_order or tuple(spec.model_id for spec in specs),
+        candidate_parameters={
+            spec.model_id: model_spec_payload(spec) for spec in specs
+        },
+    )
+    common_inputs = model_selection_owner.model_validation_inputs(specs)
+    coverage = model_selection_owner.ModelSampleCoverage(
+        model_selection_owner.model_validation_coverage_scope("fixture", fold, specs)
+    )
+    validation = frame.loc[
+        frame.timestamp.between(
+            pd.Timestamp(fold.validation.start), pd.Timestamp(fold.validation.end)
+        )
+    ]
+    coverage.add(
+        legal_training_rows(
+            validation,
+            fitting_cutoff=fold.validation.end,
+            feature_columns=common_inputs,
+            target_column=specs[0].label_column,
+        )
+    )
+
+    def chunks(columns, *, input_columns, start, end):
+        del input_columns
+        step = len(frame) if chunk_size is None else chunk_size
+        source = (
+            iter_research_dataset_chunks(
+                layout,
+                market_id=MarketId("a_share"),
+                dataset_id=dataset.data_id,
+                columns=columns,
+            )
+            if read_persisted
+            else (
+                frame.iloc[offset : offset + step].loc[:, list(columns)]
+                for offset in range(0, len(frame), step)
+            )
+        )
+        with closing_iterator(iter(source)) as values:
+            for value in values:
+                keep = value.timestamp.le(pd.Timestamp(end))
+                if start is not None:
+                    keep &= value.timestamp.ge(pd.Timestamp(start))
+                yield value.loc[keep]
+
+    recorder = TrialRecorder(layout, "validation_run", plan)
+    model_selection_owner.fit_validation_candidates(
+        fold=fold,
+        candidate_specs=specs,
+        dataset_spec=dataset,
+        chunks=chunks,
+        trial_recorder=recorder,
+        validation_coverage=coverage,
+        on_validation=lambda *_args: None,
+        on_candidate=lambda *_args: None,
+    )
+    with read_trial_ledger(recorder.root, plan) as (saved_plan, records):
+        assert saved_plan == plan
+        assert [record.status for record in records] == ["completed"] * len(specs)
+        completed = tuple(record for record in records if record.status == "completed")
+        metrics = pd.DataFrame(
+            [
+                {"model_id": record.candidate_id, **record.metrics}
+                for record in completed
+            ]
+        )
+        parameters = {
+            record.candidate_id: record.payload()["normalized_parameters"]
+            for record in completed
+        }
+        assert all(
+            record.common_coverage_id == coverage.semantic_identity
+            for record in completed
+        )
+    return SimpleNamespace(plan=plan, metrics=metrics, parameters=parameters)
 
 
 @pytest.mark.parametrize(
@@ -600,21 +573,16 @@ def test_real_rank_validation_predictions_and_winner_preserve_split_sessions(
         ModelSpec(
             model_id=algorithm,
             model_algorithm=algorithm,
+            random_seed=0,
             input_factor_columns=("factor_a",),
             label_column="label",
         )
         for algorithm in ("equal_weight_rank_ensemble", "ic_weighted_rank_ensemble")
     )
-    prediction = PredictionSpec(
-        prediction_id="rank",
-        model_id=specs[0].model_id,
-        candidate_model_ids=(specs[1].model_id,),
-        research_dataset_id="research",
-        train_end="2023-01-02",
-        test_start="2023-01-05",
-        model_selection_validation_start="2023-01-03",
-        model_selection_validation_end="2023-01-04",
-        model_selection_metric="validation_mse",
+    fold = ExperimentFold(
+        fold_id="rank",
+        train=TimeWindow("2023-01-01", "2023-01-02"),
+        validation=TimeWindow("2023-01-03", "2023-01-04"),
     )
     policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
     with runtime_resource_policy_scope(policy):
@@ -623,7 +591,7 @@ def test_real_rank_validation_predictions_and_winner_preserve_split_sessions(
                 (frame,),
                 spec,
                 estimator=build_estimator_from_model_spec(spec),
-                fitting_cutoff=prediction.train_end,
+                fitting_cutoff=fold.train.end,
             )
             try:
                 outputs = []
@@ -633,7 +601,6 @@ def test_real_rank_validation_predictions_and_winner_preserve_split_sessions(
                         lambda step=step: (
                             frame.iloc[i : i + step] for i in range(0, len(frame), step)
                         ),
-                        prediction_spec=prediction,
                         candidate_spec=spec,
                         model_result=fitted.value,
                         validation_start=pd.Timestamp("2023-01-03"),
@@ -643,32 +610,57 @@ def test_real_rank_validation_predictions_and_winner_preserve_split_sessions(
                         item.release(owner="test.rank.validation")
                     outputs.append(pd.concat(pieces, ignore_index=True))
                 pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
-                expected = (
-                    [-1 / 3, 0.0, 0.0]
+                # Missing raw factors have neutral rank contribution; they remain
+                # valid forecasts, while unavailable labels only exclude scoring.
+                expected_by_asset = (
+                    {"a": -1 / 3, "b": 0.0, "c": 0.0, "d": 1 / 3}
                     if missing_input
-                    else [-0.375, -0.125, 0.125]
-                    if future_label
-                    else [-0.375, -0.125, 0.125, 0.375]
+                    else {"a": -0.375, "b": -0.125, "c": 0.125, "d": 0.375}
                 )
-                assert outputs[0][
-                    prediction.prediction_column
-                ].tolist() == pytest.approx(expected * 2)
+                assert outputs[0].asset_id.tolist() == ["a", "b", "c", "d"] * 2
+                assert outputs[0]["prediction_score"].tolist() == pytest.approx(
+                    list(expected_by_asset.values()) * 2
+                )
+                mature = outputs[0].loc[
+                    outputs[0].label_available_at.le(pd.Timestamp(fold.validation.end))
+                ]
+                expected_mature_assets = (
+                    ["a", "b", "c"] if future_label else ["a", "b", "c", "d"]
+                )
+                assert mature.asset_id.tolist() == expected_mature_assets * 2
+                assert mature.prediction_score.tolist() == pytest.approx(
+                    [expected_by_asset[asset] for asset in expected_mature_assets] * 2
+                )
             finally:
                 fitted.release(owner="test.rank.fit")
         selections = []
         for step in (len(frame), 2):
-            selected, metadata = model_selection_owner.select_prediction_model_spec(
-                prediction_spec=prediction,
-                dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
-                model_catalog=ModelCatalog(specs),
-                chunks=lambda columns, *, input_columns, start, end, step=step: (
-                    frame.iloc[i : i + step].loc[:, list(columns)]
-                    for i in range(0, len(frame), step)
-                ),
+            result = _fit_validation_trials(
+                StorageLayout(tmp_path / f"trials-{step}"),
+                dataset,
+                specs,
+                frame,
+                fold=fold,
+                chunk_size=step,
             )
-            selections.append((selected.model_id, metadata))
-        assert selections[0] == selections[1]
-        assert selections[0][0] == specs[0].model_id
+            selected = model_selection_owner.select_best_validation_trial(
+                result.metrics,
+                trial_id_column="model_id",
+                selection_metric="validation_mse",
+                maximize=False,
+                validation_metric_columns=("validation_mse",),
+                test_metric_columns=(),
+                tie_break_order=result.plan.tie_break_order,
+            )
+            selections.append((selected, result.metrics))
+            assert result.metrics.validation_rows.tolist() == [
+                len(expected_mature_assets) * 2,
+                len(expected_mature_assets) * 2,
+            ]
+        assert selections[0][0] == selections[1][0] == specs[0].model_id
+        pd.testing.assert_frame_equal(
+            selections[0][1], selections[1][1], check_exact=True
+        )
     assert policy.used_memory_bytes == 0
 
 
@@ -776,6 +768,7 @@ def _model(
     return ModelSpec(
         model_id=model_id,
         model_algorithm="linear_regression",
+        random_seed=0,
         input_factor_columns=input_columns,
         label_column=label_column,
     )
@@ -792,13 +785,16 @@ def _development_frame(*, filter_flip: bool = False) -> pd.DataFrame:
     "order,expected",
     (((), "base"), (("other", "base"), "other"), (("base", "other"), "base")),
 )
-def test_explicit_tie_order_uses_the_full_fitted_candidate_universe(order, expected):
+def test_explicit_tie_order_uses_the_full_fitted_candidate_universe(
+    tmp_path, order, expected
+):
     from quant_research_platform.research.models.supervised import preflight_model_specs
 
     specs = tuple(
         ModelSpec(
             model_id=name,
             model_algorithm="ridge_regression",
+            random_seed=0,
             input_factor_columns=("x",),
             label_column="label",
             hyperparameters={"alpha": 1.0},
@@ -806,18 +802,6 @@ def test_explicit_tie_order_uses_the_full_fitted_candidate_universe(order, expec
         for name in ("base", "other")
     )
     preflight_model_specs(specs)
-    prediction = PredictionSpec(
-        prediction_id="tie",
-        model_id="base",
-        candidate_model_ids=("other",),
-        research_dataset_id="fixture",
-        train_end="2020-01-01",
-        test_start="2020-01-03",
-        test_end="2020-01-03",
-        model_selection_validation_start="2020-01-02",
-        model_selection_validation_end="2020-01-02",
-        selection_tie_break_order=order,
-    )
     frame = pd.DataFrame(
         [
             {
@@ -836,18 +820,34 @@ def test_explicit_tie_order_uses_the_full_fitted_candidate_universe(order, expec
     dataset = make_demo_research_dataset_spec(
         data_id="fixture",
         factor_columns=("x",),
-        label_columns=("label", "label_available_at"),
+        label_columns=("label",),
         filter_columns=("eligible",),
-        context_columns=(),
+        context_columns=("label_available_at",),
+    )
+    fold = ExperimentFold(
+        fold_id="tie",
+        train=TimeWindow("2020-01-01", "2020-01-01"),
+        validation=TimeWindow("2020-01-02", "2020-01-02"),
     )
     with runtime_resource_policy_scope() as policy:
-        model, metadata = model_selection_owner.select_prediction_model_spec(
-            prediction_spec=prediction,
-            dataset_spec=dataset,
-            model_catalog=ModelCatalog(specs),
-            chunks=lambda columns, **kwargs: (frame.loc[:, list(columns)],),
+        result = _fit_validation_trials(
+            StorageLayout(tmp_path),
+            dataset,
+            specs,
+            frame,
+            fold=fold,
+            tie_break_order=order,
         )
-        assert model.model_id == expected
-        assert metadata["candidate_model_ids"] == ["base", "other"]
-        assert metadata["tie_break_order"] == list(order or ("base", "other"))
+        selected = model_selection_owner.select_best_validation_trial(
+            result.metrics,
+            trial_id_column="model_id",
+            selection_metric="validation_mse",
+            maximize=False,
+            validation_metric_columns=("validation_mse",),
+            test_metric_columns=(),
+            tie_break_order=result.plan.tie_break_order,
+        )
+        assert selected == expected
+        assert result.plan.candidate_ids == ("base", "other")
+        assert result.plan.tie_break_order == (order or ("base", "other"))
         assert policy.used_memory_bytes == 0

@@ -14,6 +14,7 @@ import pandas as pd
 from quant_research_platform.markets.implementations.a_share.ids import (
     FORMAL_BENCHMARKS,
 )
+from quant_research_platform.research.protocols import a_share
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import choice_session
@@ -44,7 +45,9 @@ def _write_csmar(root, data_id, rows, *, extra_columns=()):
 
 
 def write_a_share_raw_fixture(
-    layout: StorageLayout, *, benchmark_total_return_indices: Mapping[str, str]
+    layout: StorageLayout,
+    *,
+    benchmark_total_return_indices: Mapping[str, str],
 ) -> None:
     """Keep real source, processed, dataset, model, and portfolio bindings intact."""
     with runtime_resource_policy_scope() as policy:
@@ -56,8 +59,15 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
     raw_root = layout.raw_source_root("csmar").parent
     root = Path(raw_root) / "csmar"
     filesystem_mkdir(root, parents=True)
-    # Preserve 312 warm-up sessions before formal training starts in 2014.
-    sessions = pd.bdate_range("2012-10-01", "2019-09-30")
+    # Preserve the production factor owner's 312-session warm-up.
+    history_end = a_share.HOLDOUT_END
+    sessions = pd.bdate_range(
+        pd.Timestamp(a_share.FORMAL_DATASET_START) - pd.offsets.BDay(312),
+        history_end,
+    )
+    benchmark_dates = pd.bdate_range(
+        pd.Timestamp(a_share.DEVELOPMENT_START) - pd.offsets.BDay(1), history_end
+    )
     # Active enhancement requires the risk owner's 100-asset cross-section floor.
     assets = tuple(f"{index:06}" for index in range(1, 101))
     rng = np.random.default_rng(91027)
@@ -151,11 +161,29 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
                 "Symbol": asset,
                 "IndustryClassificationID": "P0207",
                 "ImplementDate": "2011-01-03",
-                "IndustryCode": "A" if index % 2 else "C",
+                "IndustryCode": "A01" if index % 2 else "C10",
                 "IndustryName": "synthetic industry",
             }
             for index, asset in enumerate(assets)
         ),
+    )
+    _write_csmar(
+        root,
+        "stock_info_changes",
+        (
+            {
+                "Symbol": asset,
+                "AnnouncementDate": "2011-01-02",
+                "ImplementDate": "2011-01-03",
+                "ChangedItem": "P0207行业代码",
+                "SecurityID": asset,
+                "ListedCoID": asset,
+                "Value_Before": "",
+                "Value_After": "synthetic industry",
+            }
+            for asset in assets
+        ),
+        extra_columns=("SecurityID", "ListedCoID"),
     )
     _write_csmar(
         root,
@@ -165,11 +193,11 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
                 "INDUSTRYCODE": code,
                 "INDCLASSIFYSYSTEMCODE": "P0207",
                 "INDUSTRYNAME": f"synthetic_{code}",
-                "P_INDUSTRYCODE": "",
+                "P_INDUSTRYCODE": "" if len(code) == 1 else code[0],
                 "INDUSTRYID": code,
-                "RANK": "1",
+                "RANK": "1" if len(code) == 1 else "2",
             }
-            for code in ("A", "C")
+            for code in ("A", "C", "A01", "C10")
         ),
     )
     _write_csmar(
@@ -249,7 +277,7 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
                 "Weight": 100 / len(assets),
             }
             for code in sorted(FORMAL_BENCHMARKS)
-            for timestamp in pd.bdate_range("2019-03-01", "2019-03-29")
+            for timestamp in benchmark_dates
             for asset in assets
         ),
     )
@@ -272,6 +300,28 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
                 }
 
     _write_csmar(root, "index_market", index_rows())
+    write_industry_reference_fixture(
+        raw_root,
+        observations=(
+            (
+                "initial",
+                "CSRC2012",
+                "2011-01-03",
+                "2011-01-04",
+                [
+                    {
+                        "code": asset,
+                        "name": "synthetic issuer",
+                        "category": "A" if index % 2 else "C",
+                        "major": "",
+                        "industry": "01" if index % 2 else "10",
+                        "source_locator": "page:1",
+                    }
+                    for index, asset in enumerate(assets)
+                ],
+            ),
+        ),
+    )
     schedule_root = Path(raw_root) / "reference/a_share_fee_schedule"
     filesystem_mkdir(schedule_root, parents=True)
     schedule = schedule_root / A_SHARE_FEE_CSV_NAME
@@ -323,7 +373,9 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
     )
     profitability = np.random.default_rng(563).uniform(0.03, 0.08, len(assets))
     with choice_session(SDK(response()), resource_policy=policy) as session:
-        for period in pd.period_range("2010Q1", "2019Q2", freq="Q"):
+        for period in pd.period_range(
+            "2010Q1", pd.Timestamp(history_end).to_period("Q") - 1, freq="Q"
+        ):
             quarter = period.quarter
             first = pd.Timestamp(
                 year=period.year + int(quarter == 4),
@@ -375,3 +427,59 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
                     for index, asset in enumerate(assets)
                 },
             )
+
+
+def write_industry_reference_fixture(raw_root, *, observations, document_suffix=".pdf"):
+    """Write reviewed-source-shaped snapshots for the real reference reader."""
+    root = Path(raw_root) / "reference/a_share_industry_snapshots"
+    filesystem_mkdir(root, parents=True, exist_ok=True)
+    files = {}
+    snapshots = []
+    for identifier, standard, observed, published, rows in observations:
+        document_name = identifier + document_suffix
+        page_name = identifier + ".html"
+        candidate_name = identifier + ".json"
+        filesystem_write_text(
+            root / document_name, "synthetic public source", encoding="utf-8"
+        )
+        filesystem_write_text(
+            root / page_name, "<html>" + published + "</html>", encoding="utf-8"
+        )
+        candidate = {
+            "source": document_name,
+            "source_sha256": hashlib.sha256(
+                filesystem_read_bytes(root / document_name)
+            ).hexdigest(),
+            "records": rows,
+        }
+        filesystem_write_text(
+            root / candidate_name,
+            json.dumps(candidate, ensure_ascii=False),
+            encoding="utf-8",
+        )
+        for name in (document_name, page_name, candidate_name):
+            files[name] = hashlib.sha256(filesystem_read_bytes(root / name)).hexdigest()
+        host = "www.csrc.gov.cn" if standard == "CSRC2012" else "www.capco.org.cn"
+        snapshots.append(
+            {
+                "snapshot_id": identifier,
+                "industry_standard_id": standard,
+                "observation_date": observed,
+                "publication_date": published,
+                "source_url": "https://" + host + "/synthetic.html",
+                "candidate_file": candidate_name,
+                "document_file": document_name,
+                "page_file": page_name,
+            }
+        )
+    metadata = {
+        "schema_id": "a_share_industry_snapshots/0.1",
+        "files": files,
+        "snapshots": snapshots,
+    }
+    filesystem_write_text(
+        root / "metadata.json",
+        json.dumps(metadata, ensure_ascii=False),
+        encoding="utf-8",
+    )
+    return root

@@ -473,7 +473,9 @@ def test_known_missing_coordinates_are_blocked_in_the_real_run_and_report(
     targets = {row.target_id: row for row in record.target_results}
     assert targets["financial_balance"].status.value == "BLOCKED"
     assert targets["financial_balance"].reason == reason
-    assert targets["pv_all_champion_csi500_enhanced_ledger"].status.value == "BLOCKED"
+    for group in ("global", "quarterly"):
+        ledger = targets[f"pv_all_{group}_champion_csi500_enhanced_ledger"]
+        assert ledger.status.value == "BLOCKED"
     report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
     assert report["status"] != "COMPLETE"
     assert reason in str(report["report"]["sections"]["readiness/blockers"])

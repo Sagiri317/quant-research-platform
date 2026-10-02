@@ -3,6 +3,8 @@
 import hashlib
 from pathlib import Path
 
+import pandas as pd
+
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
     json_record_working_set_bytes,
@@ -32,6 +34,7 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
 )
 from quant_research_platform.sources.tardis.raw import SLICE_MINUTES, iter_native_slice
+from quant_research_platform.sources.tardis.replay import _archive_span
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
@@ -54,6 +57,15 @@ def import_funding_history(
     byte_budget,
 ):
     """Preserve source bytes and publish forecasts with vendor availability."""
+    selected = [
+        item
+        for item in archive.archives
+        if pd.Timestamp(start_ms, unit="ms", tz="UTC").to_pydatetime()
+        == _archive_span(item.manifest)[0]
+    ]
+    if len(selected) != 1:
+        raise ValueError("tardis_funding_archive_window_invalid")
+    archive = selected[0]
     endpoint = settlement_endpoint(source_id, symbol)
     if (
         symbol not in RESEARCH_SYMBOLS

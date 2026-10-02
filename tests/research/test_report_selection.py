@@ -42,12 +42,12 @@ def test_a_share_factor_only_report_uses_evaluation_without_model_blockers():
         record=record(),
         evidence={
             "references": {"factors_only_evaluation": "e" * 64},
-            "statistics": unavailable,
+            "statistics": {"global": unavailable, "quarterly": unavailable},
             "portfolio_statistics": unavailable,
             "coverage": {"status": "DEFINED"},
             "portfolios": [],
             "issues": [],
-            "quarterly_selections": {},
+            "selections": {},
             "factor_evaluation": evaluation,
         },
     )
@@ -55,6 +55,10 @@ def test_a_share_factor_only_report_uses_evaluation_without_model_blockers():
     assert result["sections"]["factor diagnostics"] == evaluation
     for key in ("model selection", "OOS prediction", "portfolio", "risk", "robustness"):
         assert result["sections"][key] == unavailable
+
+    _check_notebook_unrequested_diagnostics(
+        result, is_crypto=False, sections=("cost", "risk")
+    )
 
 
 def test_crypto_factor_only_report_does_not_claim_missing_unrequested_models():
@@ -85,6 +89,45 @@ def test_crypto_factor_only_report_does_not_claim_missing_unrequested_models():
             "status": "UNDEFINED",
             "reason": "not_requested",
         }
+
+    _check_notebook_unrequested_diagnostics(
+        result, is_crypto=True, sections=("daily statistics",)
+    )
+
+
+def _check_notebook_unrequested_diagnostics(result, *, is_crypto, sections):
+    import json
+    from pathlib import Path
+
+    import pandas as pd
+    from IPython.display import Markdown
+
+    notebook_path = (
+        Path(__file__).resolve().parents[2] / "notebooks/research-interview-demo.ipynb"
+    )
+    notebook = json.loads(notebook_path.read_text(encoding="utf-8"))
+    diagnostic_cell = next(
+        "".join(cell["source"])
+        for cell in notebook["cells"]
+        if cell["cell_type"] == "code"
+        and any("metric_rows =" in line for line in cell["source"])
+    )
+    displayed = []
+    namespace = {
+        "report": result,
+        "is_crypto": is_crypto,
+        "pd": pd,
+        "Markdown": Markdown,
+        "display": displayed.append,
+    }
+    exec(compile(diagnostic_cell, str(notebook_path), "exec"), namespace)
+    assert namespace["metric_rows"] == []
+    assert [
+        view.to_dict("records") for view in displayed if isinstance(view, pd.DataFrame)
+    ] == [
+        [{"section": name, "status": "UNDEFINED", "reason": "not_requested"}]
+        for name in sections
+    ]
 
 
 def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
@@ -139,12 +182,14 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
         layout=StorageLayout(tmp_path),
         record=run,
         report_lease=None,
-        quarterly_selections={},
+        selections={},
     )
     assert checked == ["factors_only", "factors_only_evaluation"]
     assert evidence["issues"] == []
     assert evidence["factor_evaluation"]["status"] == "DEFINED"
-    assert evidence["statistics"]["reason"] == "not_requested"
+    assert all(
+        value["reason"] == "not_requested" for value in evidence["statistics"].values()
+    )
     assert evidence["portfolio_statistics"]["reason"] == "not_requested"
 
 
@@ -164,7 +209,10 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(tmp_
     from tests.helpers.research_configuration import research_configuration
 
     current = research_configuration("crypto", "baseline")
-    profile = bind_research_configuration(research_profile(CRYPTO_PROFILE_ID), current)
+    profile = bind_research_configuration(
+        research_profile(CRYPTO_PROFILE_ID), current, access_window="holdout"
+    )
+    assert profile.protocol(current["scenario_id"]).execution_targets()
     frozen = research_configuration("crypto", "baseline")
     frozen.update(
         stage="evaluation", models=[], portfolios=[], comparison_model_id=None
@@ -174,8 +222,7 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(tmp_
 
     def capture_report(**kwargs):
         calls.append(kwargs)
-        assert kwargs["calibration_candidates"] == ()
-        assert kwargs["comparison_ids"] == frozenset()
+        assert kwargs["execution_targets"] == ()
         raise RuntimeError("frozen_report_selection_verified")
 
     profile = replace(
@@ -189,6 +236,7 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(tmp_
     )
     record = SimpleNamespace(
         scenario_id=frozen["scenario_id"],
+        research_window={"access": "holdout"},
         payload=lambda: {"protocol": {"research_configuration": frozen}},
     )
     with pytest.raises(RuntimeError, match="frozen_report_selection_verified"):
@@ -206,6 +254,7 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked():
     from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_GROUPS
 
     run = record()
+    run.research_window = {"access": "holdout"}
     run.protocol["research_configuration"].update(
         stage="portfolio",
         portfolios=[{"candidate_id": "candidate", "asset_id": "btc_usdt"}],

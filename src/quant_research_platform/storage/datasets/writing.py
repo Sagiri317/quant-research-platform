@@ -16,11 +16,16 @@ import pyarrow.parquet as pq
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.json_codec import (
+    bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
+    json_record_working_set_bytes,
     parse_qrp_json_object,
 )
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    clear_exception_frames,
+    strict_timestamp_series,
+)
 from quant_research_platform.runtime.resources import (
     MemoryLease,
     OwnedValue,
@@ -34,7 +39,6 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.datasets.inspection import (
     _inspection_result_bound,
-    dataset_inspection_retained_memory_bytes,
     inspection_from_persisted_session,
 )
 from quant_research_platform.storage.datasets.inventory import (
@@ -306,14 +310,37 @@ class _WriteStats:
             )
         )
 
-    def payload(self, *, target_chunk_bytes: int) -> dict[str, Any]:
+    def payload(
+        self,
+        *,
+        target_chunk_bytes: int,
+        spec_payload: Mapping[str, Any],
+        admit: Callable[[int], None],
+    ) -> dict[str, Any]:
         if self.columns is None or self._schema is None or self.schema_hash is None:
             raise ValueError("dataset_schema_missing")
         self.logical_dtypes = self.materialized_logical_dtypes(
-            target_chunk_bytes=target_chunk_bytes
+            target_chunk_bytes=target_chunk_bytes, admit=admit
         )
         self.logical_dtype_hash = canonical_json_hash(self.logical_dtypes)
-        payload = data_spec_payload(self.spec)
+        # The accumulator owns scalars; these are the new sorted containers.
+        admit(
+            json_record_working_set_bytes(
+                2
+                + 2 * len(spec_payload)
+                + len(self.columns)
+                + 2 * len(self.partition_row_counts)
+                + len(self.partitions)
+                + 2
+                * (
+                    len(self._summary_observer.null_count_summary)
+                    + len(self._summary_observer.non_finite_count_summary)
+                    + len(self._summary_observer.factor_nan_profile)
+                    + len(self._summary_observer.label_nan_profile)
+                )
+            )
+        )
+        payload = dict(spec_payload)
         summary = self._summary_observer.summary_payload()
         payload.update(
             {
@@ -341,9 +368,14 @@ class _WriteStats:
         self,
         *,
         target_chunk_bytes: int,
+        admit: Callable[[int], None],
     ) -> dict[str, Any]:
         if self._logical_dtype_plan is None:
             raise ValueError("dataset_logical_dtypes_missing")
+        plan_bytes = bounded_rendered_qrp_json_object_size(
+            self._logical_dtype_plan, lazy_arrays={}, max_bytes=target_chunk_bytes
+        )
+        admit(json_record_working_set_bytes(plan_bytes))
         logical_dtypes = merge_logical_dtype_payloads([self._logical_dtype_plan])
 
         def streamed_category_payloads(
@@ -363,6 +395,7 @@ class _WriteStats:
             category_payloads=streamed_category_payloads,
             target_chunk_bytes=target_chunk_bytes,
         )
+        admit(json_record_working_set_bytes(exact_metadata_bytes))
         for descriptor in logical_dtypes["columns"]:
             if descriptor["kind"] != "categorical" or descriptor["ordered"]:
                 continue
@@ -389,21 +422,36 @@ def write_dataset(
 ) -> DatasetInspection:
     with runtime_resource_policy_scope(resource_policy) as policy:
         final_root = Path(dataset_root)
-        validate_dataset_spec(spec)
-        validate_dataset_artifact_root(final_root, spec)
-        final_root = require_artifact_root(final_root)
-        with policy.lease(
-            "storage.dataset.write", _DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-        ):
-            owned = _write_dataset_body(
-                final_root,
-                data,
-                spec=spec,
-                instance_metadata=instance_metadata,
-                staged_validator=staged_validator,
-                borrowed_input=borrowed_input,
-                resource_policy=policy,
-            )
+        with policy.lease("storage.dataset.write", 0) as write_lease:
+
+            def admit(size: int) -> None:
+                cap = policy.explicit_memory_cap_bytes
+                if cap is None or policy.used_memory_bytes + size <= cap:
+                    policy.require_working_set(
+                        size, error="dataset_working_set_exceeds_task_memory_budget"
+                    )
+                write_lease.grow(size)
+
+            try:
+                validate_dataset_spec(spec, _admit=admit)
+                validate_dataset_artifact_root(final_root, spec)
+                final_root = require_artifact_root(final_root)
+                write_lease.shrink_to(0)
+                admit(_DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES)
+                owned = _write_dataset_body(
+                    final_root,
+                    data,
+                    spec=spec,
+                    instance_metadata=instance_metadata,
+                    staged_validator=staged_validator,
+                    borrowed_input=borrowed_input,
+                    resource_policy=policy,
+                    write_lease=write_lease,
+                    admit=admit,
+                )
+            except BaseException as error:
+                clear_exception_frames(error)
+                raise
         result = owned.value
         owned.release(owner="storage.dataset.write.result")
         return result
@@ -418,6 +466,8 @@ def _write_dataset_body(
     staged_validator: Callable[[DatasetWriteReceipt], None] | None,
     borrowed_input: bool,
     resource_policy: RuntimeResourcePolicy,
+    write_lease: MemoryLease,
+    admit: Callable[[int], None],
 ) -> OwnedValue[DatasetInspection]:
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
     close = getattr(input_chunks, "close", None)
@@ -502,30 +552,36 @@ def _write_dataset_body(
                     borrowed_input=borrowed_input,
                     active_producer_leases=active_producer_leases,
                     active_producer_values=active_producer_values,
+                    admit=admit,
                 )
+                spec_payload = data_spec_payload(spec, _admit=admit)
                 write_internal_artifact_manifest(
                     temp_root / "spec.json",
-                    data_spec_payload(spec),
+                    spec_payload,
+                    _admit=admit,
+                )
+                payload = accumulator.payload(
+                    target_chunk_bytes=resource_policy.operation_headroom_bytes,
+                    spec_payload=spec_payload,
+                    admit=admit,
+                )
+                payload["schema_id"] = "qrp-dataset-manifest"
+                payload["content_hash"] = inventory.content_hash(
+                    resource_policy=resource_policy
                 )
                 manifest = merge_dataset_instance_metadata(
-                    {
-                        **accumulator.payload(
-                            target_chunk_bytes=(
-                                resource_policy.operation_headroom_bytes
-                            )
-                        ),
-                        "schema_id": "qrp-dataset-manifest",
-                        "content_hash": inventory.content_hash(
-                            resource_policy=resource_policy
-                        ),
-                    },
+                    payload,
                     instance_metadata,
-                    spec=data_spec_payload(spec),
+                    spec=spec_payload,
+                    _admit=admit,
                 )
                 write_internal_artifact_manifest(
                     temp_root / "_manifest" / "manifest.json",
                     manifest,
+                    _admit=admit,
                 )
+                del manifest, payload, spec_payload, accumulator
+                write_lease.shrink_to(_DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES)
                 with dataset_session_from_inventory(
                     temp_root,
                     inventory=inventory,
@@ -543,6 +599,10 @@ def _write_dataset_body(
                         )
                     session.verify()
                     result_bound = _inspection_result_bound(session)
+                    resource_policy.require_working_set(
+                        result_bound,
+                        error="dataset_working_set_exceeds_task_memory_budget",
+                    )
                     try:
                         result_lease = resource_policy.lease(
                             "storage.dataset.write.result",
@@ -557,10 +617,6 @@ def _write_dataset_body(
                             session,
                             published_root=final_root,
                         )
-                        result_bytes = dataset_inspection_retained_memory_bytes(result)
-                        if result_bytes > result_lease.reserved_bytes:
-                            raise ValueError("dataset_write_result_bound_invalid")
-                        result_lease.shrink_to(result_bytes)
                         pending_result = OwnedValue(result, result_lease)
                     except BaseException:
                         result = None
@@ -571,6 +627,8 @@ def _write_dataset_body(
                         raise
                 return pending_result
         finally:
+            accumulator = spec_payload = payload = manifest = None
+            del accumulator, spec_payload, payload, manifest
             close_input_and_active_leases()
 
     try:
@@ -601,11 +659,12 @@ def _write_contents(
     borrowed_input: bool,
     active_producer_leases: list[MemoryLease],
     active_producer_values: list[OwnedValue[pd.DataFrame]],
+    admit: Callable[[int], None],
 ) -> _WriteStats:
     resource_policy = current_runtime_resource_policy()
     if resource_policy is None:
         raise RuntimeError("runtime_resource_policy_not_active")
-    timestamp_column = validate_dataset_spec(spec)
+    timestamp_column = validate_dataset_spec(spec, _admit=admit)
     timestamp_key_count = sum(
         spec.column_roles.get(column) is ColumnRole.TIMESTAMP
         for column in spec.primary_key
@@ -686,7 +745,11 @@ def _write_contents(
                     "storage.dataset.producer",
                     producer_bound,
                 )
-            active_producer_leases.append(producer_lease)
+            if (
+                not active_producer_leases
+                or active_producer_leases[-1] is not producer_lease
+            ):
+                active_producer_leases.append(producer_lease)
             send = getattr(chunks, "send", None)
             if not callable(send):
                 raise TypeError("invalid_dataset_producer")
@@ -774,8 +837,13 @@ def _write_contents(
                         producer_finished = True
                     else:
                         producer_finished = False
-                    producer_lease.close()
-                    active_producer_leases.pop()
+                    if not (
+                        isinstance(producer_bound, tuple)
+                        and len(producer_bound) == 2
+                        and producer_bound[1] is producer_lease
+                    ):
+                        producer_lease.close()
+                        active_producer_leases.pop()
                     producer_lease = None
                     if producer_finished:
                         break
@@ -902,8 +970,13 @@ def _write_contents(
                 producer_finished = True
             else:
                 producer_finished = False
-            producer_lease.close()
-            active_producer_leases.pop()
+            if not (
+                isinstance(producer_bound, tuple)
+                and len(producer_bound) == 2
+                and producer_bound[1] is producer_lease
+            ):
+                producer_lease.close()
+                active_producer_leases.pop()
             producer_lease = None
             if producer_finished:
                 break
@@ -912,7 +985,7 @@ def _write_contents(
     if saw_empty_schema:
         metadata_budget = resource_policy.operation_headroom_bytes
         logical_dtypes = accumulator.materialized_logical_dtypes(
-            target_chunk_bytes=metadata_budget
+            target_chunk_bytes=metadata_budget, admit=admit
         )
         partition = "" if accumulator.row_count == 0 else min(part_indices)
         part_index = part_indices.get(partition, 0)

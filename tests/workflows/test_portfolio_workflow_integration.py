@@ -45,19 +45,8 @@ from quant_research_platform.profiles.research import (
     research_profile,
 )
 from quant_research_platform.reports.a_share import REQUIRED_REPORT_SECTIONS
-from quant_research_platform.research.models.dependencies import (
-    preflight_model_dependency,
-)
-from quant_research_platform.research.models.persisted import (
-    write_quarterly_model_artifact,
-)
-from quant_research_platform.research.models.production import (
-    _fit_selected_model_result,
-)
-from quant_research_platform.research.models.rank_ensemble import RankEnsemblePredictor
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.runtime.resources import (
-    OwnedValue,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.csmar.interim import InterimImportResult
@@ -81,14 +70,9 @@ from tests.helpers.portfolio_ledger import session_frame
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     PV25_FACTORS,
+    compact_a_share_configuration,
+    compact_a_share_windows,
     research_configuration,
-)
-from tests.research.workflow_test_support import (
-    _quarterly_result,
-    _trial_reference,
-    fixture_quarterly_results,
-    fixture_refit_reference,
-    fixture_validation_coverage,
 )
 
 
@@ -156,6 +140,7 @@ def _processed_specs() -> ProcessedDataCatalog:
             "market_type": ColumnRole.CONTEXT,
             "period_return": ColumnRole.CONTEXT,
             "float_market_cap": ColumnRole.CONTEXT,
+            "industry_standard_id": ColumnRole.KEY,
             "industry_level1_code": ColumnRole.KEY,
             "is_nonfinancial_industry": ColumnRole.CONTEXT,
             "is_a_share_scope": ColumnRole.CONTEXT,
@@ -265,7 +250,7 @@ def _dataset_spec() -> ResearchDatasetSpec:
 
 def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
     if dates is None:
-        dates = pd.bdate_range("2018-12-03", "2019-01-15")
+        dates = pd.bdate_range("2014-01-01", "2023-12-31")
     calendar_dates = dates.append(
         pd.bdate_range(dates[-1] + pd.offsets.BDay(1), periods=21)
     )
@@ -323,7 +308,8 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
     )
     panel["period_return"] = 0.001
     panel["float_market_cap"] = panel["asset_id"].map({"a": 1_000.0, "b": 2_000.0})
-    panel["industry_level1_code"] = "A01"
+    panel["industry_standard_id"] = "CSRC2012"
+    panel["industry_level1_code"] = "A"
     panel["is_nonfinancial_industry"] = True
     panel = panel.assign(
         is_a_share_scope=True,
@@ -466,7 +452,6 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
         resource_policy: object,
         instance_metadata: dict[str, object],
     ) -> InterimImportResult:
-        del start_date, end_date
         data_id = data_ids[0]
         spec = interim.get(data_id)
         root = layout.target_root(
@@ -475,7 +460,13 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
         )
         write_dataset(
             root,
-            frames[data_id].copy(),
+            (
+                frames[data_id].loc[
+                    frames[data_id].timestamp.between(start_date, end_date)
+                ]
+                if "timestamp" in frames[data_id]
+                else frames[data_id]
+            ).copy(),
             spec=spec,
             instance_metadata=instance_metadata,
             resource_policy=resource_policy,
@@ -503,11 +494,16 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
             pandas_frame_payload_bytes,
         )
 
-        del layout, time_window, processed_catalog, source_catalog, resource_policy
+        del layout, processed_catalog, source_catalog, resource_policy
+        selected_frame = frames[spec.data_id].loc[
+            frames[spec.data_id].timestamp.between(
+                pd.Timestamp(time_window.start), pd.Timestamp(time_window.end)
+            )
+        ]
 
         def output():
-            lease = yield pandas_frame_payload_bytes(frames[spec.data_id])
-            yield OwnedValue(frames[spec.data_id].copy(), lease)
+            lease = yield pandas_frame_payload_bytes(selected_frame)
+            yield OwnedValue(selected_frame.copy(), lease)
 
         with closing_iterator(output()) as data:
             yield data, {}, None
@@ -522,15 +518,32 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
         resource_policy: object,
         instance_metadata: dict[str, object],
     ) -> Path:
-        del processed_catalog, time_window
+        del processed_catalog
         selected = dataset_catalog.get(dataset_id)
         root = layout.target_root(
             dataset_id,
             layout.research_dataset_root(selected.market_id, dataset_id),
         )
+        output = (
+            frames[dataset_id]
+            .loc[
+                frames[dataset_id].timestamp.between(
+                    pd.Timestamp(time_window.start), pd.Timestamp(time_window.end)
+                ),
+                list(selected.required_columns),
+            ]
+            .copy()
+        )
+        for availability in (
+            column for column in output if column.endswith("_available_at")
+        ):
+            label = availability.removesuffix("_available_at")
+            invisible = output[availability] > pd.Timestamp(time_window.end)
+            output.loc[invisible, label] = float("nan")
+            output.loc[invisible, availability] = pd.NaT
         write_dataset(
             root,
-            frames[dataset_id].loc[:, list(selected.required_columns)].copy(),
+            output,
             spec=selected,
             instance_metadata=instance_metadata,
             resource_policy=resource_policy,
@@ -600,163 +613,17 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
                     model_algorithm=algorithm,
                     input_factor_columns=("x",),
                     label_column="label",
+                    hyperparameters=next(
+                        item["hyperparameters"]
+                        for item in research_configuration(small_models=True)["models"]
+                        if item["model_algorithm"] == algorithm
+                    ),
                 )
                 for algorithm in A_SHARE_MODEL_ALGORITHMS
             )
         ),
         producer_bindings=bindings,
     )
-
-
-def _prepare_model_artifacts(
-    profile: ResearchProfile,
-    layout: StorageLayout,
-    plan: dict[str, object],
-) -> None:
-    protocol = profile.protocol(scenario_id="pv_all", access_window="development")
-    plans = {item["target_id"]: item for item in plan["targets"]}
-    requested_window = plan["research_window"]
-    champion_ids = tuple(
-        f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS
-    )
-    target_id, model_ids = protocol.model_selection_target_id, champion_ids
-    target = next(
-        item
-        for item in protocol.target_specs("research run")
-        if item.target_id == target_id
-    )
-    target_window = research._semantic_target_time_window(
-        "research run",
-        protocol,
-        target,
-        None,
-        requested_window,
-    )
-    target_research_window = research._window_payload(
-        target_window,
-        access=str(requested_window["access"]),
-    )
-    envelope = research._target_envelope_for_spec(
-        profile=profile,
-        protocol=protocol,
-        target_spec=target,
-        data_spec=None,
-        research_window=target_research_window,
-        upstream_identities=plans[target_id]["upstream_identities"],
-        software_identity=research.production_software_identity(),
-        raw_content_identity=None,
-    )
-    selected_model_id = "pv_all_equal_weight_rank_ensemble"
-    quarterly = _quarterly_result(
-        1,
-        trial_layout=layout,
-        model_spec=profile.models.get(selected_model_id),
-        protocol=protocol.manifest(),
-        predictor=RankEnsemblePredictor(columns=("x",), directions=(1.0,)),
-    )
-    selection = quarterly.selection_metadata
-    selection["candidate_family_ids"] = list(model_ids)
-    selection["tie_break_order"] = list(model_ids)
-    selection["selected_family_id"] = selected_model_id
-    selection["selected_model_id"] = selected_model_id
-    selection["families"] = []
-    validation_specs = tuple(profile.models.get(model_id) for model_id in model_ids)
-    selection["common_validation_coverage"] = fixture_validation_coverage(
-        quarterly.quarter,
-        validation_specs,
-        plans[target_id]["upstream_identities"][protocol.scenario_id],
-    )
-    references = []
-    for model_id in model_ids:
-        reference = _trial_reference(
-            layout,
-            quarterly.quarter,
-            family_id=model_id,
-            model_id=model_id,
-            target_id=target_id,
-            dataset_id=protocol.scenario_id,
-            data_identity=plans[target_id]["upstream_identities"][protocol.scenario_id],
-            protocol=protocol.target_manifest(target_id, "MODEL"),
-            rankic=0.3 if model_id == selected_model_id else 0.2,
-            model_spec=profile.models.get(model_id),
-            root_seed=42,
-            validation_specs=validation_specs,
-        )
-        references.append(reference)
-        selection["families"].append(
-            {
-                "family_id": model_id,
-                "config_tie_break_order": [model_id],
-                "selected_config_id": model_id,
-                "trial_ledger_semantic_identity": reference["semantic_identity"],
-            }
-        )
-    training = pd.DataFrame(
-        [
-            {
-                "market_id": "a_share",
-                "asset_id": str(asset),
-                "timestamp": timestamp,
-                "x": float(asset),
-                "label": float(asset) / 10,
-                "label_available_at": timestamp + pd.offsets.BDay(1),
-                "eligible": True,
-            }
-            for timestamp in pd.bdate_range("2018-11-01", periods=30)
-            for asset in range(6)
-        ]
-    )
-
-    def chunks(columns, *, input_columns, start, end):
-        history_start = protocol.manifest()["formal_dataset_window"]["start"]
-        selected = training["timestamp"].between(
-            pd.Timestamp(history_start if start is None else start), pd.Timestamp(end)
-        )
-        yield training.loc[selected, list(columns)]
-
-    def fitted_families():
-        for model_id, reference in zip(model_ids, references, strict=True):
-            fitted, lease = _fit_selected_model_result(
-                training_counts={},
-                dataset_spec=profile.research_datasets.get("pv_all"),
-                selected_spec=profile.models.get(model_id),
-                candidate_parameters=dict(profile.models.get(model_id).hyperparameters),
-                chunks=chunks,
-                fitting_cutoff="2018-12-31",
-                quarter_id="2019Q1",
-                root_seed=42,
-            )
-            owned = OwnedValue(
-                replace(
-                    quarterly,
-                    model_id=model_id,
-                    family_id=model_id,
-                    model_result=fitted,
-                    trial_ledgers=(
-                        reference,
-                        fixture_refit_reference(layout, reference, fitted.metadata),
-                    ),
-                ),
-                lease,
-            )
-            fitted = None
-            try:
-                yield owned
-            finally:
-                if owned.lease.active:
-                    owned.release(owner="test.model")
-                owned = None
-
-    for algorithm in A_SHARE_MODEL_ALGORITHMS:
-        preflight_model_dependency(algorithm)
-    with runtime_resource_policy_scope(None):
-        write_quarterly_model_artifact(
-            layout.semantic_artifact_root("a_share", target_id),
-            model_id=target_id,
-            envelope=envelope,
-            quarterly_results=fixture_quarterly_results(fitted_families()),
-            trial_layout=layout,
-        )
 
 
 @pytest.mark.parametrize(
@@ -777,7 +644,7 @@ def test_factor_and_model_windows_keep_separate_formal_boundaries(
     )
     assert factor_window == TimeWindow(expected_start, end)
     assert model_window == requested
-    for target in ("pv_all_evaluation", "pv_all_statistics"):
+    for target in ("pv_all_evaluation", *protocol.statistics_target_ids):
         assert (
             protocol.target_window("research run", None, requested, target)
             == factor_window
@@ -815,7 +682,12 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_
     facts = (
         ("pv_all", ProducerKind.DATASET, "b" * 64),
         (protocol.model_selection_target_id, ProducerKind.MODEL, "c" * 64),
-        (protocol.persisted_prediction_target_id, ProducerKind.PREDICTION, "d" * 64),
+        *(
+            (target, ProducerKind.PREDICTION, identity * 64)
+            for target, identity in zip(
+                protocol.prediction_target_ids, ("d", "1"), strict=True
+            )
+        ),
     )
     results = tuple(
         ResearchRunTargetResult(
@@ -836,7 +708,7 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_
         protocol_identity=canonical_json_hash(protocol.manifest()),
         research_window=window,
         software_identity="f" * 64,
-        terminal_targets=(protocol.persisted_prediction_target_id,),
+        terminal_targets=protocol.prediction_target_ids,
         target_results=results,
         status="COMPLETE",
         operation_evidence=unmeasured_operation_evidence("fixture"),
@@ -919,15 +791,17 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_
             "run_id": "run_other_development",
         },
     )
-    changed_output = (*results[:-1], replace(results[-1], instance_identity="1" * 64))
     assert (
-        research._holdout_evidence(
-            **{
-                **arguments,
-                "protocol": new_protocol,
-                "target_results": changed_output,
-            }
-        )["qualification"]
+        research._holdout_evidence(**{**arguments, "protocol": new_protocol})[
+            "qualification"
+        ]
+        == "REUSE"
+    )
+    changed_output = (*results[:-1], replace(results[-1], instance_identity="3" * 64))
+    assert (
+        research._holdout_evidence(**{**arguments, "target_results": changed_output})[
+            "qualification"
+        ]
         == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
     )
     assert (
@@ -952,7 +826,7 @@ def test_portfolio_statistics_target_identity_tracks_its_consumed_contract(
     original = protocol.target_manifest(target_id, "STATISTIC")
     model = protocol.target_manifest("pv_all_model_selection_refit", "MODEL")
     ledger = protocol.target_manifest(
-        "pv_all_ew_rank_top20_equal_weight_ledger", "PORTFOLIO"
+        "pv_all_global_ew_rank_top20_equal_weight_ledger", "PORTFOLIO"
     )
     assert original["portfolio_candidates"] == [
         candidate.candidate_id for candidate in protocol.portfolio_candidates()
@@ -967,12 +841,13 @@ def test_portfolio_statistics_target_identity_tracks_its_consumed_contract(
     assert protocol.target_manifest("pv_all_model_selection_refit", "MODEL") == model
     assert (
         protocol.target_manifest(
-            "pv_all_ew_rank_top20_equal_weight_ledger", "PORTFOLIO"
+            "pv_all_global_ew_rank_top20_equal_weight_ledger", "PORTFOLIO"
         )
         == ledger
     )
 
 
+@compact_a_share_windows()
 def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -997,20 +872,21 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
 
     monkeypatch.setattr(resources, "_capture_runtime_resource_policy", capture)
 
-    dates = (
-        pd.bdate_range("2014-01-01", "2025-12-31", freq="BME")
-        .union(pd.bdate_range("2023-12-01", "2024-01-15"))
-        .union(pd.bdate_range("2025-12-01", "2025-12-31"))
-    )
+    import numpy as np
+
+    configuration = compact_a_share_configuration()
+    dates = pd.bdate_range("2017-10-01", "2019-12-31")
     frames = _frames(dates)
+    # Avoid a perfectly interpolated two-point target with zero Huber residual scale.
+    dataset = frames["pv_all"]
+    day = (dataset.timestamp - pd.Timestamp("2017-10-01")).dt.days
+    dataset["label"] += 0.002 * np.sin(day * 0.173 + dataset.asset_id.eq("b") * 0.71)
     profile = _profile(frames)
     base = research_profile()
-    configuration = research_configuration(development=("2023-12-01", "2023-12-31"))
     for model in configuration["models"]:
         model["input_factor_columns"] = ["reversal_1d"]
         model["input_feature_columns"] = []
         model["label_column"] = "forward_return_1d"
-        model["hyperparameters"] = {}
         model.pop("parameter_candidates", None)
         if model["model_algorithm"] == "ridge_regression":
             model["hyperparameters"] = {"alpha": 0.1}
@@ -1137,7 +1013,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
             dataset_id="pv_all",
             columns=("timestamp",),
         ):
-            assert chunk.timestamp.max() <= pd.Timestamp("2023-12-31")
+            assert chunk.timestamp.max() <= pd.Timestamp("2019-06-30")
         with pytest.raises(
             PermissionError, match="research_dataset_access_window_forbidden"
         ):
@@ -1145,7 +1021,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 dataset_layout,
                 market_id="a_share",
                 dataset_id="pv_all",
-                time_window=TimeWindow("2024-01-01", "2024-01-02"),
+                time_window=TimeWindow("2019-07-01", "2019-07-02"),
             )
         assert policy.used_memory_bytes == 0
     source_model = next(
@@ -1170,16 +1046,16 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         raise AssertionError("holdout attempted supervised learning")
 
     monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", forbidden)
-    monkeypatch.setattr(production, "_select_model_family_winners", forbidden)
+    monkeypatch.setattr(production, "_build_a_share_models", forbidden)
     monkeypatch.setattr(portfolios, "calibrate_expected_alpha", forbidden)
     from quant_research_platform.research.predictions import runner as predictions
 
     loaded_sources = []
     original_predictor_reader = predictions.read_quarterly_predictor
 
-    def counted_predictor(artifact, source_quarter, family, **kwargs):
-        loaded_sources.append((source_quarter, family))
-        return original_predictor_reader(artifact, source_quarter, family, **kwargs)
+    def counted_predictor(artifact, selection_group, family, **kwargs):
+        loaded_sources.append((selection_group, family))
+        return original_predictor_reader(artifact, selection_group, family, **kwargs)
 
     monkeypatch.setattr(predictions, "read_quarterly_predictor", counted_predictor)
     request = dict(
@@ -1203,10 +1079,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         research.research_run(
             **{
                 **request,
-                "research_plan": research_configuration(
-                    name="fusion_nf_core",
-                    development=("2023-12-01", "2023-12-31"),
-                ),
+                "research_plan": compact_a_share_configuration(name="fusion_nf_core"),
             },
             plan=True,
         )
@@ -1277,19 +1150,40 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     previous = len(captured)
     holdout = research.research_run(**request)
     assert holdout["status"] == "COMPLETE", holdout
-    assert len(loaded_sources) == len(A_SHARE_MODEL_ALGORITHMS)
+    assert len(loaded_sources) == 2 * len(A_SHARE_MODEL_ALGORITHMS)
     assert len(set(loaded_sources)) == len(loaded_sources)
     assert_one_capture(previous)
     record = read_research_run_record(layout.research_run_path(holdout["run_id"]))
     assert record.trial_ledgers == ()
     assert record.holdout_evidence["qualification"] == "HOLDOUT_FIRST_EVIDENCE"
-    assert len(record.protocol["frozen_development"]["alpha_sources"]) == 2
+    expected_sources = {"global": [], "quarterly": []}
+    for candidate in profile.protocol("pv_all").portfolio_candidates():
+        if candidate.construction != "benchmark_enhanced":
+            continue
+        reference = next(
+            item
+            for item in development_record.target_results
+            if item.target_id == f"pv_all_{candidate.candidate_id}_ledger"
+        )
+        expected_sources[candidate.selection_group].append(
+            {
+                "selection_group": candidate.selection_group,
+                "reference": reference.payload(),
+                "observed_at": development_record.research_window["end"],
+            }
+        )
+    assert all(len(values) == 2 for values in expected_sources.values())
+    assert (
+        record.payload()["protocol"]["frozen_development"]["alpha_sources"]
+        == expected_sources
+    )
     results = {item.target_id: item for item in record.target_results}
     assert (
         results[source_model.target_id].instance_identity
         == source_model.instance_identity
     )
-    prediction_id = profile.protocol("pv_all").persisted_prediction_target_id
+    prediction_ids = profile.protocol("pv_all").prediction_target_ids
+    prediction_id = prediction_ids[0]
     prediction_root = layout.instance_root(
         layout.semantic_artifact_root("a_share", prediction_id),
         results[prediction_id].instance_identity,
@@ -1299,12 +1193,28 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         expected_output_id=prediction_id,
         expected_run_id=f"run_{prediction_id}",
     )
-    models = manifest["metadata"]["model_metadata"]["quarterly_models"]
-    assert {item["source_quarter"] for item in models} == {"2023Q4"}
-    assert {item["quarter_id"] for item in models} == {
-        str(period) for period in pd.period_range("2024Q1", "2025Q4", freq="Q")
-    }
-    assert len(models) == 8 * len(A_SHARE_MODEL_ALGORITHMS)
+    for group, current_prediction_id in zip(
+        ("global", "quarterly"), prediction_ids, strict=True
+    ):
+        current_root = layout.instance_root(
+            layout.semantic_artifact_root("a_share", current_prediction_id),
+            results[current_prediction_id].instance_identity,
+        )
+        current_manifest, _ = validate_output_bundle(
+            current_root / "outputs" / current_prediction_id,
+            expected_output_id=current_prediction_id,
+            expected_run_id=f"run_{current_prediction_id}",
+        )
+        metadata = current_manifest["metadata"]["model_metadata"]
+        assert metadata["selection_group"] == group
+        assert {item["quarter_id"] for item in metadata["quarterly_models"]} == {
+            str(period) for period in pd.period_range("2019Q3", "2019Q4", freq="Q")
+        }
+        assert len(metadata["quarterly_models"]) == 2 * len(A_SHARE_MODEL_ALGORITHMS)
+        assert all(
+            item["prediction_source"] == "final"
+            for item in metadata["quarterly_models"]
+        )
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
     )
@@ -1314,8 +1224,8 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         layout,
         profile.protocol("pv_all"),
         development["run_id"],
-        "2024-01-01",
-        "2025-12-31",
+        "2019-07-01",
+        "2019-12-31",
     )
     assert blocker is None
     target_layout = layout.with_target_roots(
@@ -1328,7 +1238,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     )
     rebuild_layout = StorageLayout(tmp_path / "prediction_statistics_rebuild")
     with runtime_resource_policy_scope() as policy:
-        for target_id in (prediction_id, "pv_all_statistics"):
+        for target_id in (*prediction_ids, *frozen.statistics_target_ids):
             spec = next(
                 item
                 for item in frozen.target_specs("research run")
@@ -1366,7 +1276,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     assert not filesystem_exists(
         rebuild_layout.semantic_artifact_root("a_share", source_model.target_id)
     )
-    sources = []
+    sources = {"global": [], "quarterly": []}
     for candidate in profile.protocol("pv_all").portfolio_candidates():
         target_id = f"pv_all_{candidate.candidate_id}_ledger"
         artifact = research.read_portfolio_ledger_artifact(
@@ -1397,14 +1307,18 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 expected_identity=source.instance_identity,
             )
             calibration, _ = portfolios.frozen_alpha_calibration(
-                original.iter_chunks(), cutoff=pd.Timestamp("2023-12-31")
+                original.final_alpha_calibration,
+                cutoff=pd.Timestamp("2019-06-30"),
+                selection_group=candidate.selection_group,
             )
             assert (
                 calibration.valid_rebalance_dates >= 6 and calibration.coverage >= 0.8
             )
             assert values == {calibration.slope}
-            sources.append(values)
-    assert sources[0] == sources[1]
+            sources[candidate.selection_group].append(values)
+    for values in sources.values():
+        assert len(values) == 2
+        assert values[0] == values[1]
     report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
     assert (
         report["report"]["sections"]["development vs holdout"]["evidence"][
@@ -1432,7 +1346,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     assert new_development["status"] == "COMPLETE", new_development
     assert_one_capture(previous)
     assert new_development["run_id"] != development["run_id"]
-    future = frames["pv_all"].timestamp.ge("2024-01-01")
+    future = frames["pv_all"].timestamp.ge("2019-07-01")
     frames["pv_all"].loc[
         future, ["label", "forward_return_1d", "forward_return_20d"]
     ] *= -100.0
@@ -1504,11 +1418,19 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     )
 
 
-def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
+@compact_a_share_windows()
+def test_both_groups_build_and_reuse_one_real_persisted_chain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    frames = _frames()
+    import numpy as np
+
+    configuration = compact_a_share_configuration()
+    frames = _frames(pd.bdate_range("2017-10-01", "2019-06-30"))
+    # Avoid a perfectly interpolated two-point target with zero Huber residual scale.
+    dataset = frames["pv_all"]
+    day = (dataset.timestamp - pd.Timestamp("2017-10-01")).dt.days
+    dataset["label"] += 0.002 * np.sin(day * 0.173 + dataset.asset_id.eq("b") * 0.71)
     profile = _profile(frames)
     layout = StorageLayout(project_root=tmp_path)
     for spec in profile.interim.list():
@@ -1521,17 +1443,14 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         filesystem_mkdir(marker.parent, parents=True, exist_ok=True)
         filesystem_write_bytes(marker, spec.data_id.encode("utf-8"))
     request = {
-        "start": "2019-01-02",
-        "end": "2019-01-15",
+        "start": "2019-01-01",
+        "end": "2019-06-30",
         "access": "development",
     }
     from functools import partial
 
     from quant_research_platform.profiles import research as profile_module
 
-    configuration = research_configuration(
-        development=(request["start"], request["end"])
-    )
     bound_library = profile_module.bind_research_configuration(
         research_profile(), configuration
     )
@@ -1578,7 +1497,6 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         scenario_id="pv_all",
         research_window=request,
     )
-    _prepare_model_artifacts(profile, layout, planned)
     result = research.research_run(
         profile=profile,
         layout=layout,
@@ -1595,6 +1513,8 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     with pytest.raises(ValueError, match="research_run_record_invalid"):
         research_run_record_from_payload(forged)
     protocol = profile.protocol(scenario_id="pv_all", access_window="development")
+    prediction_id = protocol.prediction_target_ids[0]
+    statistics_id = protocol.statistics_target_ids[0]
     portfolio_ids = tuple(
         f"pv_all_{candidate.candidate_id}_ledger"
         for candidate in protocol.portfolio_candidates()
@@ -1606,42 +1526,36 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         )
         for target_id in (
             protocol.model_selection_target_id,
-            protocol.persisted_prediction_target_id,
-            "pv_all_statistics",
+            *protocol.prediction_target_ids,
+            *protocol.statistics_target_ids,
             *portfolio_ids,
         )
         if results[target_id]["status"] not in {"BUILT", "REUSED"}
     }
     assert not failed, failed
-    statistics_identity = results[
-        protocol.persisted_prediction_target_id.replace(
-            "persisted_predictions",
-            "statistics",
-        )
-    ]["instance_identity"]
+    assert len(portfolio_ids) == 10
+    statistics_identity = results[statistics_id]["instance_identity"]
     assert statistics_identity is not None
-    assert results[protocol.persisted_prediction_target_id]["status"] == "BUILT"
-    champion_identity = results[protocol.persisted_prediction_target_id][
-        "instance_identity"
-    ]
+    assert results[prediction_id]["status"] == "BUILT"
+    champion_identity = results[prediction_id]["instance_identity"]
     champion_root = layout.instance_root(
         layout.semantic_artifact_root(
             "a_share",
-            protocol.persisted_prediction_target_id,
+            prediction_id,
         ),
         champion_identity,
     )
     prediction_manifest, _prediction_members = validate_output_bundle(
-        champion_root / "outputs" / protocol.persisted_prediction_target_id,
-        expected_output_id=protocol.persisted_prediction_target_id,
-        expected_run_id=f"run_{protocol.persisted_prediction_target_id}",
+        champion_root / "outputs" / prediction_id,
+        expected_output_id=prediction_id,
+        expected_run_id=f"run_{prediction_id}",
     )
     assert (
         prediction_manifest["metadata"]["prediction_metadata"]["test_start"]
         == "2019-01-01"
     )
     statistics_root = layout.instance_root(
-        layout.semantic_artifact_root("a_share", "pv_all_statistics"),
+        layout.semantic_artifact_root("a_share", statistics_id),
         statistics_identity,
     )
     statistics_artifact = research.read_statistics_artifact(
@@ -1649,41 +1563,15 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         expected_identity=statistics_identity,
     )
     with statistics_artifact.table("prediction_diagnostics.parquet") as table:
-        prediction_diagnostics = table.iloc[0].copy()
-    assert prediction_diagnostics["status"] == "UNDEFINED"
-    assert prediction_diagnostics["reason"] == "hac_lag_exceeds_observations"
-    with statistics_artifact.table("robustness.parquet") as table:
-        robustness = table.copy()
-    assert robustness["status"].eq("UNDEFINED").all()
-    assert set(robustness["reason"]) == {
-        "bootstrap_block_exceeds_common_observations",
-    }
-    observations = frames["pv_all"]
-    mature_dates = observations.loc[
-        observations.timestamp.between(request["start"], request["end"])
-        & observations.forward_return_20d_available_at.le(pd.Timestamp(request["end"])),
-        "timestamp",
-    ].nunique()
-    assert (
-        robustness.loc[
-            robustness.test_id.isin(
-                ("spa_reality_check", "stepm_superior_models", "model_confidence_set")
+        observations = frames["pv_all"]
+        mature_dates = observations.loc[
+            observations.timestamp.between(request["start"], request["end"])
+            & observations.forward_return_20d_available_at.le(
+                pd.Timestamp(request["end"])
             ),
-            "observation_count",
-        ]
-        .eq(mature_dates)
-        .all()
-    )
-    assert (
-        robustness.loc[
-            ~robustness.test_id.isin(
-                ("spa_reality_check", "stepm_superior_models", "model_confidence_set")
-            ),
-            "observation_count",
-        ]
-        .eq(0)
-        .all()
-    )
+            "timestamp",
+        ].nunique()
+        assert table.observation_count.eq(mature_dates).all()
     from quant_research_platform.artifacts.outputs.bundle_validation import (
         read_prediction_output_bundle,
     )
@@ -1699,7 +1587,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     )
     from tests.helpers.runtime_resources import capture_test_policy
 
-    bundle = champion_root / "outputs" / protocol.persisted_prediction_target_id
+    bundle = champion_root / "outputs" / prediction_id
     damaged = tmp_path / "missing_family"
     shutil.copytree(native_filesystem_path(bundle), native_filesystem_path(damaged))
     values = pd.read_parquet(native_filesystem_path(damaged / "prediction.parquet"))
@@ -1732,11 +1620,146 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             )
         }
     )
-    failed_policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
+    from quant_research_platform.artifacts.statistics import write_statistics_artifact
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+
+    for end_date in ("2019-01-15", "2019-02-15"):
+        narrow_window = TimeWindow("2019-01-02", end_date)
+        narrow_policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
+        narrow_global = None
+        with runtime_resource_policy_scope(narrow_policy):
+            for index, group in enumerate(("global", "quarterly")):
+                group_prediction_id = protocol.prediction_target_ids[index]
+                group_statistics_id = protocol.statistics_target_ids[index]
+                group_root = layout.instance_root(
+                    layout.semantic_artifact_root("a_share", group_prediction_id),
+                    results[group_prediction_id]["instance_identity"],
+                )
+                with read_prediction_output_bundle(
+                    group_root / "outputs" / group_prediction_id,
+                    expected_output_id=group_prediction_id,
+                    time_window=narrow_window,
+                ) as (_manifest, lookup):
+                    narrow = build_a_share_statistics_tables(
+                        layout=data_layout,
+                        dataset_catalog=profile.research_datasets,
+                        dataset_id="pv_all",
+                        prediction_id=group_prediction_id,
+                        persisted_model=model,
+                        protocol_manifest=protocol.target_manifest(
+                            group_statistics_id, "STATISTIC"
+                        ),
+                        time_window=narrow_window,
+                        prediction_lookup=lookup,
+                        resource_policy=narrow_policy,
+                        global_statistics=narrow_global,
+                    )
+                    try:
+                        prediction_diagnostics = narrow.value[
+                            "prediction_diagnostics"
+                        ].iloc[0]
+                        assert prediction_diagnostics["status"] == "UNDEFINED"
+                        if end_date == "2019-01-15":
+                            assert prediction_diagnostics["observation_count"] == 0
+                        else:
+                            assert 0 < prediction_diagnostics["observation_count"] < 20
+                        robustness = narrow.value["robustness"]
+                        assert robustness.status.eq("UNDEFINED").all()
+                        assert robustness.observation_count.lt(20).all()
+                        if group == "global":
+                            reason = "global_development_selection_reuses_validation"
+                            assert prediction_diagnostics["reason"] == reason
+                            assert robustness.reason.eq(reason).all()
+                            narrow_envelope = build_business_manifest_envelope(
+                                **{
+                                    key: value
+                                    for key, value in read_semantic_artifact(
+                                        statistics_root
+                                    ).items()
+                                    if key
+                                    not in {
+                                        "instance_identity",
+                                        "status",
+                                        "logical_artifact_id",
+                                        "research_window",
+                                    }
+                                },
+                                logical_artifact_id=f"pv_all_global_narrow_{end_date}_statistics",
+                                research_window={
+                                    "start": "2019-01-02",
+                                    "end": end_date,
+                                    "access": "development",
+                                },
+                            )
+                            narrow_root = write_statistics_artifact(
+                                tmp_path / f"narrow_global_statistics_{end_date}",
+                                envelope=narrow_envelope,
+                                tables=narrow.value,
+                            )
+                            narrow_global = research.read_statistics_artifact(
+                                narrow_root,
+                                expected_identity=narrow_envelope.instance_identity,
+                            )
+                        else:
+                            assert (
+                                prediction_diagnostics["reason"]
+                                == "hac_lag_exceeds_observations"
+                            )
+                            assert robustness.reason.eq(
+                                "bootstrap_block_exceeds_common_observations"
+                            ).all()
+                            paired = narrow.value["model_group_comparison"]
+                            assert set(paired.family_id) == {
+                                item["model_id"] for item in configuration["models"]
+                            }
+                            if end_date == "2019-01-15":
+                                assert paired.observation_count.eq(0).all()
+                                assert paired.reason.eq("no_common_observations").all()
+                                assert paired.bootstrap_reason.eq(
+                                    "no_common_observations"
+                                ).all()
+                                assert paired.status.eq("UNDEFINED").all()
+                                narrow_payload = narrow_envelope.payload()
+                                quarterly_envelope = build_business_manifest_envelope(
+                                    **{
+                                        key: value
+                                        for key, value in narrow_payload.items()
+                                        if key
+                                        not in {
+                                            "instance_identity",
+                                            "status",
+                                            "logical_artifact_id",
+                                        }
+                                    },
+                                    logical_artifact_id="pv_all_quarterly_zero_mature_statistics",
+                                )
+                                quarterly_root = write_statistics_artifact(
+                                    tmp_path / "quarterly_zero_mature_statistics",
+                                    envelope=quarterly_envelope,
+                                    tables=narrow.value,
+                                )
+                                quarterly_artifact = research.read_statistics_artifact(
+                                    quarterly_root,
+                                    expected_identity=quarterly_envelope.instance_identity,
+                                )
+                                with quarterly_artifact.table(
+                                    "model_group_comparison.parquet"
+                                ) as saved:
+                                    assert saved.observation_count.eq(0).all()
+                                    assert saved.status.eq("UNDEFINED").all()
+                                    assert saved.reason.eq(
+                                        "no_common_observations"
+                                    ).all()
+                    finally:
+                        narrow.release(owner="research.statistics.output")
+            assert narrow_policy.used_memory_bytes == 0
+    failed_policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
     with runtime_resource_policy_scope(failed_policy):
         with read_prediction_output_bundle(
             damaged,
-            expected_output_id=protocol.persisted_prediction_target_id,
+            expected_output_id=prediction_id,
             time_window=TimeWindow(request["start"], request["end"]),
         ) as (_manifest, lookup):
             with pytest.raises(ValueError, match="missing_required_prediction_keys"):
@@ -1744,28 +1767,24 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
                     layout=data_layout,
                     dataset_catalog=profile.research_datasets,
                     dataset_id="pv_all",
-                    prediction_id=protocol.persisted_prediction_target_id,
+                    prediction_id=prediction_id,
                     persisted_model=model,
-                    protocol_manifest=protocol.manifest(),
+                    protocol_manifest=protocol.target_manifest(
+                        statistics_id, "STATISTIC"
+                    ),
                     time_window=TimeWindow(request["start"], request["end"]),
                     prediction_lookup=lookup,
                     resource_policy=failed_policy,
+                    global_statistics=None,
                 )
         assert failed_policy.used_memory_bytes == 0
 
     def forged_writer(staging):
         shutil.copytree(
             native_filesystem_path(bundle),
-            native_filesystem_path(
-                staging / "outputs" / protocol.persisted_prediction_target_id
-            ),
+            native_filesystem_path(staging / "outputs" / prediction_id),
         )
-        path = (
-            staging
-            / "outputs"
-            / protocol.persisted_prediction_target_id
-            / "manifest.json"
-        )
+        path = staging / "outputs" / prediction_id / "manifest.json"
         forged = json.loads(
             Path(native_filesystem_path(path)).read_text(encoding="utf-8")
         )
@@ -1784,7 +1803,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     prediction_target = next(
         target
         for target in protocol.target_specs("research run")
-        if target.target_id == protocol.persisted_prediction_target_id
+        if target.target_id == prediction_id
     )
     with pytest.raises(ValueError, match="prediction_model_lineage_mismatch"):
         research._validate_semantic_target_root(
@@ -1836,7 +1855,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     ):
         patch.setattr(prediction_writer, "write_parquet_chunks", fail_merged_write)
         pspec = PredictionSpec(
-            prediction_id=protocol.persisted_prediction_target_id,
+            prediction_id=prediction_id,
             model_id=protocol.model_selection_target_id,
             research_dataset_id="pv_all",
             train_end=None,
@@ -1851,6 +1870,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             prediction_spec=pspec,
             persisted_model=model,
             resource_policy=interrupt_policy,
+            selection_group="global",
         )
         with pytest.raises(KeyboardInterrupt) as caught:
             with output:
@@ -1872,6 +1892,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         Path(native_filesystem_path(bundle / "prediction.parquet")).read_bytes()
         == original_bytes
     )
+    requested_years = {}
     for target_id in portfolio_ids:
         identity = results[target_id]["instance_identity"]
         root = layout.instance_root(
@@ -1882,6 +1903,25 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             root,
             expected_identity=identity,
         )
+        requested_years[target_id.removeprefix("pv_all_").removesuffix("_ledger")] = (
+            set()
+        )
+        with closing_iterator(artifact.iter_chunks()) as stream:
+            for batch in stream:
+                demanded = {
+                    item.asset_id
+                    for item in batch.diagnostics
+                    if item.name == "decision_delta_weight"
+                    and item.asset_id != "__cash__"
+                    and item.number != 0.0
+                }
+                requested_years[
+                    target_id.removeprefix("pv_all_").removesuffix("_ledger")
+                ].update(
+                    str(pd.Timestamp(item.text).year)
+                    for item in batch.diagnostics
+                    if item.name == "decision_timestamp" and item.asset_id in demanded
+                )
         chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
         assert chunks
         assert all(
@@ -1907,8 +1947,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         reused_results[target_id]["status"] == "REUSED"
         for target_id in (
             *portfolio_ids,
-            protocol.persisted_prediction_target_id,
-            protocol.persisted_prediction_target_id,
+            *protocol.prediction_target_ids,
         )
     )
 
@@ -1976,13 +2015,12 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         if manifest["column_roles"][column] == "factor"
     }
     assert coverage["pit"]["raw_completeness"] == "UNDEFINED"
-    assert report["sections"]["factor diagnostics"]["results"]
-    assert report["sections"]["model selection"]["quarterly_selections"]
+    assert report["sections"]["factor diagnostics"]["global"]["results"]
+    assert report["sections"]["model selection"]["selections"]
     assert report["sections"]["model selection"]["configurations"]
     blocked_ids = {
         "fundamental_factors",
-        "pv_all_champion_csi500_enhanced_ledger",
-        "pv_all_champion_csi1000_enhanced_ledger",
+        *(target_id for target_id in portfolio_ids if "enhanced" in target_id),
         "pv_all_portfolio_statistics",
     }
     partial = replace(
@@ -2012,11 +2050,11 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             layout=layout,
             record=partial,
             report_lease=report_lease,
-            quarterly_selections=model.quarterly_selections,
+            selections=model.selections,
         )
     assert partial_report["report_status"] == "BLOCKED"
     retained = partial_report["sections"]["portfolio"]["results"]
-    assert len(retained) == 3
+    assert len(retained) == 6
     assert all(
         row["ledger_identity"] and row["economics"]["nav"] > 0 for row in retained
     )
@@ -2028,8 +2066,26 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
     undefined_capacity = [
         row for row in capacity["results"] if row["status"] == "UNDEFINED"
     ]
-    assert len(capacity["results"]) == 96
-    assert len(defined_capacity) == 72 and len(undefined_capacity) == 24
+    expected_capacity_keys = {
+        (candidate, participation, period, metric)
+        for candidate, years in requested_years.items()
+        for participation in protocol.manifest()["execution_assumptions"][
+            "adv_sensitivities"
+        ]
+        for period in {"all", *years}
+        for metric in ("p05", "median", "minimum")
+    }
+    assert {
+        (row["candidate_id"], row["participation"], row["period"], row["metric_id"])
+        for row in capacity["results"]
+    } == expected_capacity_keys
+    assert len(capacity["results"]) == len(expected_capacity_keys)
+    assert len(undefined_capacity) == 4 * 4 * 3
+    assert {row["candidate_id"] for row in undefined_capacity} == {
+        candidate.candidate_id
+        for candidate in protocol.portfolio_candidates()
+        if candidate.construction == "benchmark_enhanced"
+    }
     assert all(
         row["value"] is not None and row["reason"] == "" for row in defined_capacity
     )
@@ -2066,7 +2122,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         filesystem_rename(saved_statistics_manifest, statistics_manifest)
     assert damaged_report["source_run_status"] == "COMPLETE"
     assert damaged_report["status"] == "FAILED"
-    assert damaged_report["report"]["sections"]["factor diagnostics"] == {
+    assert damaged_report["report"]["sections"]["factor diagnostics"]["global"] == {
         "status": "FAILED",
         "reason": "target_reference_invalid",
     }
@@ -2079,7 +2135,7 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
         scenario_id="pv_all",
         research_window={
             "start": "2019-01-03",
-            "end": "2019-01-15",
+            "end": "2019-06-30",
             "access": "development",
         },
     )
@@ -2102,6 +2158,6 @@ def test_five_portfolio_candidates_build_and_reuse_one_real_persisted_chain(
             != second[target_id]["requested_identity"]
         )
     assert (
-        first[protocol.persisted_prediction_target_id]["requested_identity"]
-        == second[protocol.persisted_prediction_target_id]["requested_identity"]
+        first[prediction_id]["requested_identity"]
+        == second[prediction_id]["requested_identity"]
     )

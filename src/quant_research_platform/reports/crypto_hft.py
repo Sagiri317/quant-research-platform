@@ -175,7 +175,17 @@ def build_crypto_research_report(*, record, evidence):
             "status": "UNDEFINED",
             "reason": "not_requested",
         }
-    if not configuration["portfolios"]:
+    if record.research_window["access"] == "development":
+        for name in ("OOS prediction", "model comparison"):
+            sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
+        sections["Data/Coverage"]["execution_coverage"] = {
+            "status": "UNDEFINED",
+            "reason": "not_requested",
+        }
+    if (
+        not configuration["portfolios"]
+        or record.research_window["access"] == "development"
+    ):
         for name in (
             "portfolio",
             "execution",

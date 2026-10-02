@@ -3,10 +3,14 @@
 研究窗口以连续UTC timestamp定义；午夜不是episode或账本状态边界。book、features、labels、
 position、cash、NAV和funding跨午夜延续，仅真实gap、sequence或disconnect断状态。
 
-开发到留出复用共享frozen target/reference。development_run_id必须指向已完成且参数完全一致的
-development运行；冻结最后开发fold已存在的train+validation refit模型和maker calibration，
-不消费development_test重新拟合。final_holdout只构建新的prediction/evaluation/ledger/statistics/report，
-并保存holdout_evidence；禁止训练、选模型、调参或重新校准。
+数据角色只有 train、validation、test；development 是执行访问阶段。
+每个开发 fold 在 train 内拟合模型并产生 validation 预测，maker calibration 只消费
+该 validation 窗内截至其截止时点已成熟的结果。Crypto 不执行 parameter_candidates 自动搜索。
+开发最后一个 fold 结束后，在其真实 train 与 validation 两个窗口上进行最终 refit；
+两个窗口保持独立，不能用包络补齐中间空白，也不构造重叠或虚假的 fold。
+development_run_id 必须指向已完成且参数完全一致的开发运行；
+最终 test 复用冻结模型及 maker calibration，只构建新的预测、评估、账本、统计和报告，
+并保存 holdout_evidence；禁止在 test 训练、选模型、调参或重新校准。
 
 Crypto label由统一LabelDefinition/LabelCatalog拥有，horizon单位为milliseconds，
 available_at、模型期限、评估binding与processed label合同由它派生。
@@ -110,6 +114,8 @@ L4 的读取行范围、模型训练/评估资产、信息资产与执行资产�
 cross_btc_eth.json 不依赖 SOL；cross_asset.json 显式加入 SOL native 归档及
 SOL→BTC、BTC/ETH→SOL 的迁移选择。只有训练或评估需要 SOL 行时，研究基表才读取三资产信息 panel；
 仅把 SOL 用作辅助信息时，研究基表仍为 BTC/ETH。任何配置均不能把 SOL 加入执行组合。
+三资产信息 panel 按时间和资产有界归并两个输入的完整并集；保留各自独有时间、原始分段
+与 nullable dtype，不按共同时间取交集，也不按资产串接造成跨批时间回退。
 
 三资产共用 native panel、微观结构因子、完整窗口标签和模型生产器。
 跨资产 context 只读取持久化的成熟 100/500ms 收益、深度归一 OFI 和 TFI；
@@ -128,7 +134,7 @@ execution.backtest_modes显式选择continuous、independent_segments中的非�
 连续模式覆盖不足不自动退化；独立分段在每个最大合法连续区间从相同初始资本、空仓、
 无挂单开始，复用同一执行引擎和原冻结模型，不在新段重新拟合。不得跨缺口拼连续收益。
 
-研究计划必须显式给定滚动训练、验证、开发OOS、锁定留出窗口，初始资金、估值币种和暴露上限；
+研究计划必须显式给定各 fold 的 train/validation、唯一锁定 test、初始资金、估值币种和暴露上限；
 不为适应短录制而缩窗，不随机打乱事件行，不用排序掩盖同时间戳顺序歧义。
 训练资格由成熟标签和拟合截止时间决定。额外隔离间隔若必要，属于显式实验语义，
 不是第二套通用机械purge规则。特征只消费决策时已知事实，未来盘口/成交和未来派生分类不得回填。
@@ -258,6 +264,15 @@ baseline.json 的价格分支在同一个 500 ms 收益目标上比较线性回�
 #### 历史归档来源
 
 保留上述 Binance 官方录制入口，历史归档通过 Tardis 原生切片下载与导入。
+正式三段方案使用 2026-07-01 train、2026-08-01 validation 和 2026-09-01 test 的各自真实原件。
+source_archives 是显式归档集合；source owner 按清单实际覆盖跨度与请求窗口相交选择，
+逐原件验证精确身份，不能只改一个归档的日期来冒充三段。
+跨日归档按实际首尾切片范围选择，date 上界与 datetime 上界复用统一 TimeWindow 合同。
+不同原件可重置本地序号；持久化 observation/segment 身份带原件命名空间，
+跨原件空白保持真实 gap，不拼成连续事件段。
+资金费使用同一窗口路由选中日根，逐根执行 forecast/settlement 完整性及身份验证；
+coverage 保存实际不重叠区间集合，缺失所需根明确阻塞，不取多段包络填补未知月份。
+
 免费公开日期可直接下载；需要 key 时明确权限不足，不自动注册、购买或切换替代来源。
 原始字节、日期、原生频道及频率、文件哈希、稳定行序、断线标记与可证明区间进入来源清单；
 正式 raw 布局和来源安全由 [数据合同](data.md) 统一约束。
@@ -269,7 +284,7 @@ baseline.json 的价格分支在同一个 500 ms 收益目标上比较线性回�
 跨午夜连续，只有真实断连或原生序列缺口才切断连续性。已建立连续盘口后，忽略额外的日初引导快照，
 遵循 [Tardis 官方回放实现](https://github.com/tardis-dev/tardis-node/blob/master/src/mappers/binance.ts)；
 断连后的新观察段仍须重新用快照和增量桥接。资金费查询绑定实际归档范围。
-训练、验证、开发测试与锁定留出按时间先后划分，可以跨日，不要求自然日对齐；
+train、validation、test 按时间先后划分；最后一折的实际 train 与 validation 窗口用于最终 refit，可以跨日，不要求自然日对齐；
 特征与标签不能跨越实际无效行情区间，标签成熟检查不因跨日而放宽。
 不同原件日期共同进入一个来源清单和精确身份，不另设日内/跨日研究路径。
 已有原件通过同一 `import_slices` 重新生成归档清单，保留原生字节及原始来源证据。
@@ -333,7 +348,10 @@ Tardis 相同 UTC 按切片及原生行序排序，`receive_monotonic_ns` 保持
 身份摘要在现有 runtime 预算内保留，结束或提前关闭时释放。
 观察段标识只表示来源可证明的区间，不冒充物理连接。
 PANEL 的 `observed_utc`、`book_source_sequence`、`book_observation_id` 及
-成交行序范围保存该身份；缺失的单调时钟以 nullable Int64 持久化。
+成交行序范围保存该身份；单调时钟与交易时钟 `transaction_time_ms` 统一以 nullable
+Int64 持久化。Spot 深度事件没有交易时钟时保持 NULL，不用事件时钟或接收时钟替代。
+PANEL 构造输出帧后释放已消费列缓冲；仍跨批存活的逐品种输入帧、变换状态与输出
+保留 producer 原预留，沿 writer 既有租约交接连续持有，直到生成器耗尽或关闭。
 
 晚到快照之前的原生深度可在系统临时区有界暂存，随后只推进共用重建器，
 不输出历史 BookState、不提前建立覆盖。只有快照后实际收到并成功应用的深度
@@ -393,6 +411,16 @@ maker 报价采用公开 L2 队列近似和显式延迟。生效时会穿价的 
 不会改为 taker 或读取未来盘口重新选量。KEEP 固定旧剩余数量、原队列与真实剩余期限；
 真实取消重挂作为独立动作，可同价同量，但重置队列并承担显式延迟。
 两者与零/取消动作按实际预期净收益比较，不把 KEEP 偷换成续期。
+
+已生效挂单随后遇到同方向、同观察连接且覆盖合法的穿价成交时，只有已知且正的
+`visible_quantity` 才触发全剩余量成交，按自身挂单价记账，不受该笔可见量封顶。
+同价成交先按可见量消耗估计前方队列，再用余下可见量部分成交；零可见量既不成交
+也不推进队列，未知可见量明确 BLOCKED。买卖方向使用同一规则，校准与正式执行共用 owner。
+这属于固定历史路径上的小单无市场冲击假设，不是历史成交量对任意订单容量的证明。
+`max_order_quantity` 与 `max_position_quantity` 只约束下单和仓位，不证明订单已足够小；
+不能据此将大单模拟成交视为可实现容量。该规则与限制沿既有 `queue_assumption` /
+`execution_summary` 写入账本，再由统计和报告原样读取。
+
 每张报价最晚在其自身决策后 500ms 到期；未来盘口或成交覆盖的末端不能预先缩短
 该期限或影响 KEEP、重挂、数量及预期收益。报价决策只消费当时已观测到的缺口；
 事后证明的无效覆盖用于研究资格，不能冒充当时已知的取消时刻。
@@ -410,10 +438,13 @@ maker 报价采用公开 L2 队列近似和显式延迟。生效时会穿价的 
 校准样本在既有捕获生命周期内保存初始买/卖 `price_index`，读取时与其确切初始盘口事件
 核对。OOS decision 复用这两个已验证原点，不为每次 KEEP/替换重放重读初始盘口。
 当前订单数量、队列、待执行命令和期限仍决定各样本响应，不能将决策相关的响应
-冻结为统一成交率；不新增另一份 sample store 或 calibration cache。
-同一校准对象只复用一个临时事件文件句柄，每个样本窗口仍读取、解码并重算响应；
-窗口消费结束后截断文件并释放 scratch 预算，关闭校准对象时关闭句柄。
-不跨窗口保留事件或跨决策复用经济结果，峰值工作集不随历史窗口数量累计。
+冻结为统一成交率。每个确切 fold 的校准对象在当前消费作用域内，只读取并编码一次
+已验证样本与事件；买卖方向共用唯一事件历史，沿既有 event_id 和窗口坐标定位。
+历史与固定宽度位置索引仅保存于已有 owner 管理的有界临时文件，样本保留方向和配对残差；
+不在内存累积历史，也不创建长期 cache、新公开格式或另一份业务真值。
+每次决策仍重算订单、队列、待执行命令、期限、费用及 funding 的精确响应，不复用经济结果。
+消费结束（包括提前退出和失败）复核原 artifact 的精确身份，关闭临时句柄并释放准入预算；
+次生验证或清理失败不得覆盖主异常。
 maker/taker 的待成熟 markout 文件也由现有 scratch owner 在写入前准入；
 FIFO 读空后截断并释放预算，不累计已消费历史。内存文件系统上的文件字节计入同一 RAM 账。
 

@@ -49,6 +49,11 @@ def configuration(profile_id, scenario, model=None):
         "models": [] if model is None else [model_spec_payload(model)],
         "portfolios": [],
         "comparison_model_id": None if model is None else model.model_id,
+        **(
+            {"primary_portfolio_id": None}
+            if profile_id == "a_share_csmar_choice"
+            else {}
+        ),
     }
 
 
@@ -108,6 +113,7 @@ def test_crypto_selection_keeps_execution_assets_and_can_evaluate_only():
     profile = research_profile("crypto_binance_hft")
     config = configuration(profile.profile_id, crypto_ids.HFT_RESEARCH_DATASET_ID)
     config["research_plan"] = hft_research_plan()
+    config["source_archives"] = None
     selected = bind_research_configuration(profile, config)
     assert selected.research_datasets.list()[0].factor_columns == ("ofi_500ms",)
     protocol = selected.protocol(crypto_ids.HFT_RESEARCH_DATASET_ID)
@@ -193,6 +199,7 @@ def test_portfolio_parameters_flow_through_existing_candidate_contracts():
             "rebalance_schedule": "weekly-last-trading-day",
         }
     ]
+    config["primary_portfolio_id"] = config["portfolios"][0]["candidate_id"]
     bound = bind_research_configuration(research_profile(), config)
     candidate = bound.protocol("pv_expanded").portfolio_candidates()[0]
     assert candidate.top_quantile == 0.1
@@ -202,7 +209,7 @@ def test_portfolio_parameters_flow_through_existing_candidate_contracts():
     ledger = next(
         target
         for target in bound.protocol("pv_expanded").target_specs("research run")
-        if target.target_id == "pv_expanded_champion_top20_equal_weight_ledger"
+        if target.target_id == "pv_expanded_global_champion_top20_equal_weight_ledger"
     )
     assert set(candidate.risk_context_target_ids) <= set(ledger.dependencies)
     config["portfolios"][0]["top_quantile"] = 0
@@ -239,10 +246,12 @@ def test_auxiliary_source_dependency_and_age_context_are_selected_locally(tmp_pa
         research_profile("crypto_binance_hft"), config, tardis_root=tmp_path
     )
     binding = selected.producer_bindings[HFT_DERIVATIVE_DATA_ID]
+    assert binding.raw_root == tmp_path
+    archives = tuple(config["auxiliary_sources"]["derivatives_state"]["archives"])
     assert (
-        binding.raw_root
-        == tmp_path / config["auxiliary_sources"]["derivatives_state"]["archive"]
+        binding.producer.keywords["open_archive"].keywords["archive_paths"] == archives
     )
+    assert binding.source_identity.keywords["archive_paths"] == archives
     config["auxiliary_sources"]["derivatives_state"]["max_age_ms"]["openInterest"] = 0
     with pytest.raises(ValueError, match="state_age_invalid"):
         bind_research_configuration(
@@ -312,14 +321,12 @@ def test_research_windows_allow_continuous_crypto_across_midnight():
     with pytest.raises(ValueError, match="outside_access_boundary"):
         bind_research_configuration(research_profile(), config)
     config = research_configuration("crypto", "baseline")
-    config["research_plan"]["final_holdout"]["end"] = "2026-08-02T00:00:00"
-    config["windows"]["holdout"]["end"] = "2026-08-02T00:00:00"
+    config["research_plan"]["test"]["end"] = "2026-09-30T00:00:00"
+    config["windows"]["holdout"]["end"] = "2026-09-30T00:00:00"
     bound = bind_research_configuration(research_profile("crypto_binance_hft"), config)
     assert (
-        bound.protocol(
-            config["scenario_id"]
-        ).research_plan.final_holdout.end.isoformat()
-        == "2026-08-02T00:00:00"
+        bound.protocol(config["scenario_id"]).research_plan.test.end.isoformat()
+        == "2026-09-30T00:00:00"
     )
 
 
@@ -343,7 +350,10 @@ def test_spot_uses_shared_native_owner_and_only_selected_graph_dependencies(tmp_
     )
     binding = selected.producer_bindings[HFT_SPOT_PANEL_DATA_ID]
     assert binding.producer.func is crypto_producer.produce_hft_processed_data
-    assert binding.raw_root == tmp_path / config["auxiliary_sources"]["spot"]["archive"]
+    assert binding.raw_root == tmp_path
+    archives = tuple(config["auxiliary_sources"]["spot"]["archives"])
+    assert binding.producer.keywords["open_run"].keywords["archive_paths"] == archives
+    assert binding.source_identity.keywords["archive_paths"] == archives
     assert binding.producer.keywords["market_type"] == "spot"
     protocol = selected.protocol(config["scenario_id"])
     graph = resolve_target_graph(
@@ -508,7 +518,9 @@ def test_external_sources_have_independent_owners_units_and_sol_nulls(tmp_path):
         ]
         == "sparse"
     )
-    config["auxiliary_sources"]["bybit"]["archives"]["BTCUSDT"]["quotes"] = "../escape"
+    config["auxiliary_sources"]["bybit"]["archives"]["BTCUSDT"]["quotes"] = [
+        "../escape"
+    ]
     with pytest.raises(ValueError, match="external_archive_invalid"):
         bind_research_configuration(
             research_profile("crypto_binance_hft"),
@@ -534,27 +546,40 @@ def test_a_share_portfolio_configuration_owns_names_and_construction():
         "rebalance_schedule": "monthly-last-trading-day",
     }
     config["portfolios"] = [selected_item]
+    config["primary_portfolio_id"] = selected_item["candidate_id"]
     selected = bind_research_configuration(research_profile(), config)
     protocol = selected.protocol(config["scenario_id"])
-    (candidate,) = protocol.portfolio_candidates()
-    assert candidate.candidate_id == "custom_monthly_top_decile"
-    assert candidate.top_quantile == 0.1
-    assert candidate.construction == "top20_float_cap"
-    assert candidate.rebalance_schedule == "monthly-last-trading-day"
-    target = config["scenario_id"] + "_custom_monthly_top_decile_ledger"
-    assert target in selected.producer_bindings
+    candidates = protocol.portfolio_candidates()
+    assert [item.selection_group for item in candidates] == ["global", "quarterly"]
+    targets = []
+    for candidate in candidates:
+        assert (
+            candidate.candidate_id
+            == candidate.selection_group + "_custom_monthly_top_decile"
+        )
+        assert candidate.top_quantile == 0.1
+        assert candidate.construction == "top20_float_cap"
+        assert candidate.rebalance_schedule == "monthly-last-trading-day"
+        target = config["scenario_id"] + "_" + candidate.candidate_id + "_ledger"
+        assert target in selected.producer_bindings
+        targets.append(target)
     graph = resolve_target_graph(
         _target_specs(selected, action="research run", protocol=protocol),
         protocol.terminal_targets("research run"),
     )
-    assert target in {item.target_id for item in graph}
+    assert set(targets).issubset({item.target_id for item in graph})
     assert "fundamental_factors" not in {item.target_id for item in graph}
     assert not any("champion_csi" in item.target_id for item in graph)
     baseline = research_configuration(name="core6")
     formal = bind_research_configuration(research_profile(), baseline)
     candidates = formal.protocol(baseline["scenario_id"]).portfolio_candidates()
-    assert len(candidates) == 5
-    assert [item.benchmark_id for item in candidates[-2:]] == ["csi500", "csi1000"]
+    assert len(candidates) == 10
+    for group in ("global", "quarterly"):
+        selected_group = [item for item in candidates if item.selection_group == group]
+        assert [item.benchmark_id for item in selected_group[-2:]] == [
+            "csi500",
+            "csi1000",
+        ]
 
 
 def test_crypto_named_selections_drive_ledger_statistics_and_asset_calibration(
@@ -587,7 +612,12 @@ def test_crypto_named_selections_drive_ledger_statistics_and_asset_calibration(
     selected = bind_research_configuration(
         research_profile("crypto_binance_hft"), config
     )
-    protocol = selected.protocol(config["scenario_id"])
+    development = selected.protocol(config["scenario_id"])
+    assert not any(
+        target.endswith("_ledger")
+        for target in development.terminal_targets("research run")
+    )
+    protocol = selected.protocol(config["scenario_id"], access_window="holdout")
     candidates = protocol.portfolio_candidates()
     assert [item.candidate_id for item in candidates] == [
         "eth_price_taker",
@@ -660,6 +690,7 @@ def test_model_names_and_latency_scenarios_do_not_select_hidden_baselines():
     model["model_id"] = "my_ridge_trial"
     config["models"] = [model]
     config["portfolios"] = []
+    config["primary_portfolio_id"] = None
     config["comparison_model_id"] = "my_ridge_trial"
     selected = bind_research_configuration(research_profile(), config)
     assert [item.model_id for item in selected.models.list()] == ["my_ridge_trial"]
@@ -703,7 +734,12 @@ def test_crypto_common_comparisons_reuse_evaluation_and_require_individual_cover
         and item["label_column"] == models[reference]["label_column"]
         for item in config["models"]
     )
-    protocol = selected.protocol(config["scenario_id"])
+    development = selected.protocol(config["scenario_id"])
+    assert not any(
+        spec.evaluation_id in development.terminal_targets("research run")
+        for spec in comparisons
+    )
+    protocol = selected.protocol(config["scenario_id"], access_window="holdout")
     targets = {item.target_id: item for item in protocol.target_specs("research run")}
     for spec in comparisons:
         assert spec.signals[0].signal_id == reference
@@ -733,8 +769,8 @@ def test_crypto_model_horizon_follows_selected_label_and_taker_requires_returns(
         "crypto",
         "baseline",
         development=(
-            plan["folds"][0]["development_test"]["start"],
-            plan["folds"][0]["development_test"]["end"],
+            plan["folds"][0]["validation"]["start"],
+            plan["folds"][0]["validation"]["end"],
         ),
         plan=plan,
     )
@@ -831,6 +867,9 @@ def test_benchmark_manifest_follows_candidates_instead_of_scenario(enhanced):
         ]
     else:
         config["portfolios"] = []
+    config["primary_portfolio_id"] = (
+        config["portfolios"][0]["candidate_id"] if enhanced else None
+    )
     selected = bind_research_configuration(research_profile(), config)
     protocol = selected.protocol(config["scenario_id"])
     expected = {"csi500": "H00905", "csi1000": "H00852"} if enhanced else {}
@@ -848,7 +887,9 @@ def test_crypto_modes_share_models_and_isolate_execution_targets():
 
     config = research_configuration("crypto", "baseline")
     profile = research_profile("crypto_binance_hft")
-    base = bind_research_configuration(profile, config).protocol(config["scenario_id"])
+    base = bind_research_configuration(profile, config).protocol(
+        config["scenario_id"], access_window="holdout"
+    )
     changed = copy.deepcopy(config)
     changed["research_plan"]["execution"]["backtest_modes"] = [
         "independent_segments",
@@ -856,7 +897,7 @@ def test_crypto_modes_share_models_and_isolate_execution_targets():
     ]
     changed["research_plan"]["execution"]["taker_fee_bps"] += 1
     altered = bind_research_configuration(profile, changed).protocol(
-        config["scenario_id"]
+        config["scenario_id"], access_window="holdout"
     )
     model_id = config["scenario_id"] + "_models"
     assert base.target_manifest(model_id, "MODEL") == altered.target_manifest(
@@ -884,7 +925,7 @@ def test_crypto_modes_share_models_and_isolate_execution_targets():
     ) != canonical_json_hash(altered.target_manifest(taker.target_id, "PORTFOLIO"))
     changed["models"][0]["input_factor_columns"] = ["ofi_500ms"]
     input_changed = bind_research_configuration(profile, changed).protocol(
-        config["scenario_id"]
+        config["scenario_id"], access_window="holdout"
     )
     assert input_changed.target_manifest(model_id, "MODEL") != altered.target_manifest(
         model_id, "MODEL"
@@ -896,12 +937,14 @@ def test_crypto_factor_evaluation_manifest_ignores_model_configuration():
 
     config = research_configuration("crypto", "baseline")
     profile = research_profile("crypto_binance_hft")
-    base = bind_research_configuration(profile, config).protocol(config["scenario_id"])
+    base = bind_research_configuration(profile, config).protocol(
+        config["scenario_id"], access_window="holdout"
+    )
     changed = copy.deepcopy(config)
     changed["models"][0]["model_algorithm"] = "linear_regression"
     changed["models"][0]["hyperparameters"] = {}
     altered = bind_research_configuration(profile, changed).protocol(
-        config["scenario_id"]
+        config["scenario_id"], access_window="holdout"
     )
 
     factor_evaluation = f"{config['scenario_id']}_evaluation"
@@ -951,3 +994,114 @@ def test_crypto_maker_inventory_uses_candidate_asset_limit(inventory, valid):
     else:
         with pytest.raises(ValueError, match="crypto_maker_inventory_target_invalid"):
             bind_research_configuration(profile, config)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "baseline",
+        "cross_asset",
+        "cross_btc_eth",
+        "derivatives_state",
+        "external_context",
+        "multiscale",
+        "spot_context",
+    ],
+)
+def test_crypto_configurations_preserve_market_signal_semantics(tmp_path, name):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", name)
+    profile = bind_research_configuration(
+        research_profile("crypto_binance_hft"), config, tardis_root=tmp_path
+    )
+    target_id = config["scenario_id"] + "_evaluation"
+    actual = profile.evaluations.get(target_id)
+    assert [signal.signal_id for signal in actual.signals] == config["evaluation"][
+        "factors"
+    ]
+    assert [signal.direction for signal in actual.signals] == [
+        "lower_is_better"
+        if name in {"spread", "relative_spread"}
+        else "higher_is_better"
+        for name in config["evaluation"]["factors"]
+    ]
+    assert all(signal.transform == "identity" for signal in actual.signals)
+    assert actual.label_columns == tuple(config["evaluation"]["labels"])
+    assert actual == crypto_hft.build_crypto_evaluation_catalog(
+        configuration=config
+    ).get(target_id)
+    assert all(
+        signal.direction == "higher_is_better"
+        for spec in profile.evaluations.list()
+        for signal in spec.signals
+        if signal.source_kind == "prediction"
+    )
+    protocol = profile.protocol(config["scenario_id"])
+    assert target_id in protocol.terminal_targets("research run")
+    target = next(
+        spec
+        for spec in protocol.target_specs("research run")
+        if spec.target_id == target_id
+    )
+    assert target.dependencies == (config["scenario_id"],)
+
+
+@pytest.mark.parametrize(
+    "factors",
+    [["spread"], ["relative_spread", "mark_mid_basis", "spread"]],
+)
+def test_crypto_factor_and_label_subsets_keep_order_and_catalog_identity(
+    tmp_path, factors
+):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "derivatives_state")
+    config.update(
+        stage="evaluation", models=[], portfolios=[], comparison_model_id=None
+    )
+    config["evaluation"] = {
+        "factors": factors,
+        "labels": ["future_mid_return_500ms"],
+        "primary_label": "future_mid_return_500ms",
+    }
+    selected = bind_research_configuration(
+        research_profile("crypto_binance_hft"), config, tardis_root=tmp_path
+    )
+    (actual,) = selected.evaluations.list()
+    (expected,) = crypto_hft.build_crypto_evaluation_catalog(
+        configuration=config
+    ).list()
+    assert actual == expected
+    assert [signal.signal_id for signal in actual.signals] == factors
+    assert actual.label_columns == ("future_mid_return_500ms",)
+    assert dict(actual.label_availability_columns) == {
+        "future_mid_return_500ms": "future_mid_return_500ms_available_at"
+    }
+
+
+@pytest.mark.parametrize(
+    "name", ["core6", "fusion_nf_core", "fusion_nf_expectations", "pv25", "pv_expanded"]
+)
+def test_a_share_configurations_keep_natural_signal_direction(name):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("a_share", name)
+    selected = bind_research_configuration(research_profile(), config)
+    assert all(
+        signal.direction == "higher_is_better"
+        for spec in selected.evaluations.list()
+        for signal in spec.signals
+    )
+
+
+@pytest.mark.parametrize(
+    "primary", [None, "unknown_portfolio", "global_champion_top20_equal_weight"]
+)
+def test_a_share_primary_portfolio_requires_declared_candidate_identity(primary):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration()
+    config["primary_portfolio_id"] = primary
+    with pytest.raises(ValueError, match="research_primary_portfolio_invalid"):
+        bind_research_configuration(research_profile(), config)

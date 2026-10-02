@@ -9,7 +9,10 @@ from itertools import groupby
 import pandas as pd
 
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.contracts.filtering import (
+    filter_definition,
+    required_filter_columns,
+)
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import (
@@ -28,11 +31,14 @@ from quant_research_platform.research.models.persisted import (
 )
 from quant_research_platform.research.predictions.outputs import (
     PredictionResult,
+    _add_a_share_scores,
     build_prediction_result_from_frames,
 )
+from quant_research_platform.runtime.dataframes import iter_complete_time_sized_frames
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
+    pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets.reading import (
@@ -50,6 +56,7 @@ def build_prediction_result_from_persisted_model(
     prediction_spec,
     persisted_model: PersistedQuarterlyModelArtifact,
     resource_policy: RuntimeResourcePolicy,
+    selection_group: str,
     access_window: str = "development",
 ) -> PredictionResult:
     """Build predictions from the persisted quarterly model members."""
@@ -58,7 +65,9 @@ def build_prediction_result_from_persisted_model(
     requested_start = pd.Timestamp(prediction_spec.test_start)
     requested_end = pd.Timestamp(prediction_spec.test_end or prediction_spec.test_start)
     selected = persisted_model.prediction_models(
-        TimeWindow(requested_start, requested_end), access_window=access_window
+        TimeWindow(requested_start, requested_end),
+        selection_group=selection_group,
+        access_window=access_window,
     )
     if not selected:
         raise ValueError("persisted_model_prediction_window_empty")
@@ -91,6 +100,60 @@ def build_prediction_result_from_persisted_model(
     state = _PredictionMetadataState(selected_input_columns)
 
     def output_chunks() -> Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]]:
+        if access_window == "development":
+            with runtime_resource_policy_scope(resource_policy) as policy:
+                for entry in selected:
+                    count = 0
+                    last = None
+                    source = iter_complete_time_sized_frames(
+                        iter(persisted_model.validation_chunks(entry)),
+                        timestamp_column="timestamp",
+                        resource_policy=policy,
+                    )
+                    with closing_iterator(source):
+                        for frame in source:
+                            with policy.lease(
+                                "research.prediction.saved_validation",
+                                max(
+                                    1,
+                                    4 * pandas_frame_payload_bytes(frame)
+                                    + len(frame) * 512,
+                                ),
+                            ):
+                                frame = frame.loc[
+                                    frame.timestamp.between(
+                                        requested_start, requested_end
+                                    )
+                                ]
+                                if frame.empty:
+                                    continue
+                                output = frame.loc[:, ["timestamp", "asset_id"]].copy()
+                                output["family_id"] = entry["family_id"]
+                                output["quarter_id"] = entry["quarter_id"]
+                                output["model_id"] = entry["model_id"]
+                                _add_a_share_scores(output, frame["prediction_score"])
+                                count += len(output)
+                                last = output.timestamp.max()
+                                yield output
+                    if count:
+                        state.add(
+                            {
+                                "filter_columns_used": list(
+                                    required_filter_columns(
+                                        prediction_spec.sample_filter_mode
+                                    )
+                                ),
+                                "filter_definition": filter_definition(
+                                    prediction_spec.sample_filter_mode
+                                ),
+                                "rows_input": count,
+                                "rows_after_filter_mode": count,
+                                "rows_after_input_dropna": count,
+                                "prediction_rows": count,
+                                "effective_test_end": last.isoformat(),
+                            }
+                        )
+            return
         window = _research_dataset_access_window(
             dataset_spec.market_id,
             TimeWindow(requested_start, requested_end),
@@ -108,13 +171,13 @@ def build_prediction_result_from_persisted_model(
         ):
 
             def source_key(item):
-                return item["source_quarter"], item["family_id"]
+                return item["family_id"]
 
-            for (source_quarter, family), entries in groupby(
+            for family, entries in groupby(
                 sorted(selected, key=source_key), key=source_key
             ):
                 with read_quarterly_predictor(
-                    persisted_model, source_quarter, family, resource_policy=policy
+                    persisted_model, selection_group, family, resource_policy=policy
                 ) as predictor:
                     for item in entries:
                         metadata = dict(item["model_metadata"])
@@ -209,9 +272,6 @@ def build_prediction_result_from_persisted_model(
                             train_end=None,
                             test_start=q_start,
                             test_end=q_end,
-                            candidate_model_ids=(),
-                            model_selection_validation_start=None,
-                            model_selection_validation_end=None,
                         )
                         q_metadata = dict(metadata)
                         q_metadata.pop("fit_cutoff")
@@ -236,7 +296,9 @@ def build_prediction_result_from_persisted_model(
         spec=prediction_spec,
         output_chunks=source,
         model_metadata=persisted_model.prediction_lineage(
-            TimeWindow(requested_start, requested_end), access_window=access_window
+            TimeWindow(requested_start, requested_end),
+            selection_group=selection_group,
+            access_window=access_window,
         ),
         prediction_metadata_factory=lambda: state.metadata(prediction_spec),
         _close=source.close,
@@ -368,7 +430,7 @@ def build_crypto_predictions(
                 folded = replace(
                     spec,
                     prediction_mode="minimal_oos",
-                    train_end=entry["validation_window"]["end"],
+                    train_end=entry["fit_cutoff"],
                     test_start=pd.Timestamp(window.start).isoformat(),
                     test_end=pd.Timestamp(window.end).isoformat(),
                 )

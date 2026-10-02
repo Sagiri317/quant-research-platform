@@ -74,12 +74,12 @@ def test_expanded_pv_uses_existing_owners_and_keeps_formal_selections():
     assert core.protocol("pv_all").factor_columns == CORE6_FACTORS
     assert full.protocol("pv_all").factor_columns == PV25_FACTORS
     assert profile.protocol("pv_all").portfolio_candidates() == ()
-    assert len(core.protocol("pv_all").portfolio_candidates()) == 5
+    assert len(core.protocol("pv_all").portfolio_candidates()) == 10
     expanded_profile = bind_research_configuration(
         profile, research_configuration(name="pv_expanded")
     )
     expanded = expanded_profile.protocol("pv_expanded")
-    assert len(expanded.portfolio_candidates()) == 3
+    assert len(expanded.portfolio_candidates()) == 6
     targets = {
         target.target_id: target for target in expanded.target_specs("research run")
     }

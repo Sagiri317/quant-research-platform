@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -219,14 +219,21 @@ def read_dataset_manifest_evidence(
     return payload
 
 
-def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
-    snapshot = _bounded_qrp_json_snapshot(payload)
+def write_manifest(
+    path: Path, payload: dict[str, Any], *, _admit: Callable[[int], None] | None = None
+) -> Path:
+    snapshot = _bounded_qrp_json_snapshot(payload, _admit=_admit)
     _require_schema_id(snapshot)
     text = render_qrp_json_object(snapshot) + "\n"
     return atomic_write_text(path, text, encoding="utf-8")
 
 
-def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Path:
+def write_internal_artifact_manifest(
+    path: Path,
+    payload: dict[str, Any],
+    *,
+    _admit: Callable[[int], None] | None = None,
+) -> Path:
     """Write private artifact metadata without corrupting schema keys.
 
     Internal manifests are private artifacts, so schema fields such as
@@ -234,7 +241,9 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     and row-sample payloads that do not belong in schema metadata.
     """
 
-    snapshot = _bounded_qrp_json_snapshot(payload)
+    snapshot = bounded_qrp_json_object_snapshot(
+        payload, max_bytes=MAX_QRP_JSON_BYTES - 1, _admit=_admit
+    )
     _require_schema_id(snapshot)
     assert_internal_artifact_metadata_safe(snapshot)
     text = render_qrp_json_object(snapshot) + "\n"
@@ -249,8 +258,11 @@ def _require_schema_id(payload: object) -> None:
         raise ValueError("manifest_json_identity_invalid")
 
 
-def _bounded_qrp_json_snapshot(payload: dict[str, Any]) -> dict[str, Any]:
+def _bounded_qrp_json_snapshot(
+    payload: dict[str, Any], *, _admit: Callable[[int], None] | None = None
+) -> dict[str, Any]:
     return bounded_qrp_json_object_snapshot(
         payload,
         max_bytes=MAX_QRP_JSON_BYTES - 1,
+        _admit=_admit,
     )

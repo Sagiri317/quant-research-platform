@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import struct
@@ -18,6 +19,7 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.contracts.order_book import validate_price_unit
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+from quant_research_platform.contracts.time import time_window_timestamp_interval
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
@@ -224,7 +226,30 @@ def _validate_manifest(value):
     _descriptor(value["observation_intervals"], "observation_intervals.jsonl.gz")
 
 
-def _decode_interval(value, *, markets, symbols):
+def _archive_span(manifest):
+    start = dt.datetime.combine(_date(manifest["date"]), dt.time(), dt.UTC)
+    return (
+        start + dt.timedelta(minutes=manifest["files"][0]["offset_minutes"]),
+        start
+        + dt.timedelta(minutes=manifest["files"][-1]["offset_minutes"] + SLICE_MINUTES),
+    )
+
+
+def _archive_intersects(manifest, time_window):
+    if time_window is None:
+        return True
+    lower, upper = _archive_span(manifest)
+    requested_start, requested_end, end_closed = time_window_timestamp_interval(
+        time_window
+    )
+    start, end = (
+        value.replace(tzinfo=dt.UTC) if value.tzinfo is None else value
+        for value in (requested_start, requested_end)
+    )
+    return start < upper and (end >= lower if end_closed else end > lower)
+
+
+def _decode_interval(value, *, markets, symbols, archive_identity):
     try:
         if (
             type(value) is not dict
@@ -239,7 +264,7 @@ def _decode_interval(value, *, markets, symbols):
             or markets not in ({FUTURES_MARKET_TYPE}, {SPOT_MARKET_TYPE})
         ):
             raise ValueError("tardis_observation_interval_invalid")
-        identity = value["observation_id"]
+        identity = archive_identity + ":" + value["observation_id"]
         kind = value["data_kind"]
         return (
             identity,
@@ -264,6 +289,7 @@ class TardisArchive:
     _replay_resources: ExitStack
     _spools: dict = field(default_factory=dict)
     _native_records: object = field(init=False)
+    _sequence_offset: int = 0
 
     def __post_init__(self):
         self._native_records = self._replay_resources.enter_context(
@@ -283,6 +309,7 @@ class TardisArchive:
                 self.manifest["exchange"], observe_trade=observe_trade
             )
             for member in self.manifest["files"]:
+                number = 0
                 with closing_iterator(
                     iter_native_slice(
                         self.root / member["path"],
@@ -312,7 +339,7 @@ class TardisArchive:
                                     "receive_time": timestamp,
                                     "channel": channel,
                                     "payload": value["data"],
-                                    "epoch": tracker.epoch,
+                                    "epoch": self._sequence_offset + tracker.epoch,
                                 },
                             )
                             continue
@@ -328,7 +355,9 @@ class TardisArchive:
                         yield (
                             (symbol, "depth" if depth else "agg_trades"),
                             {
-                                "source_sequence": prefix + number,
+                                "source_sequence": self._sequence_offset
+                                + prefix
+                                + number,
                                 "market_type": market_type,
                                 "data_kind": "depth_snapshot"
                                 if channel == "depthSnapshot"
@@ -338,12 +367,20 @@ class TardisArchive:
                                 "payload": payload,
                                 "receive_time": timestamp,
                                 "receive_monotonic_ns": None,
-                                "observation_id": identity,
-                                "segment_id": identity if depth else None,
+                                "observation_id": self.source_identity["manifest_hash"]
+                                + ":"
+                                + identity,
+                                "segment_id": self.source_identity["manifest_hash"]
+                                + ":"
+                                + identity
+                                if depth
+                                else None,
                                 "price_unit": self.manifest["price_units"][symbol],
                             },
                         )
-                prefix += member["line_count"]
+                if number != member["line_count"]:
+                    raise ValueError("tardis_native_line_count_mismatch")
+                prefix += number
             for interval in tracker.finish():
                 self._check_interval(interval)
 
@@ -440,7 +477,7 @@ class TardisArchive:
 
     def _check_interval(self, row):
         if self._coverage_index.bounds(
-            row["observation_id"],
+            self.source_identity["manifest_hash"] + ":" + row["observation_id"],
             symbol=row["symbol"],
             market_type=FUTURES_MARKET_TYPE
             if self.manifest["exchange"] == EXCHANGE
@@ -532,7 +569,7 @@ class TardisArchive:
 
 
 @contextmanager
-def open_tardis_archive(root, resource_policy=None):
+def _open_tardis_archive(root, resource_policy, *, expected_manifest_hash):
     root = Path(root)
     with (
         runtime_resource_policy_scope(resource_policy) as policy,
@@ -550,6 +587,8 @@ def open_tardis_archive(root, resource_policy=None):
                 )
                 _validate_manifest(manifest)
                 manifest_hash = canonical_json_hash(manifest)
+                if manifest_hash != expected_manifest_hash:
+                    raise ValueError("tardis_archive_selection_identity_changed")
                 _raw = None
                 members = (
                     *manifest["files"],
@@ -582,6 +621,7 @@ def open_tardis_archive(root, resource_policy=None):
                     resource_policy=policy,
                     decode_interval=partial(
                         _decode_interval,
+                        archive_identity=manifest_hash,
                         symbols={symbol.upper() for symbol in manifest["symbols"]},
                     ),
                 )
@@ -631,16 +671,204 @@ def open_tardis_archive(root, resource_policy=None):
                 _raw = manifest = members = identities = _after_raw = after = run = None
 
 
-def native_source_identity(root, _target_id, *, exchange, symbols, channels):
-    """Bind an exact approved native information-source scope."""
-    try:
-        with open_tardis_archive(root) as archive:
-            if (
-                archive.manifest["exchange"] != exchange
-                or set(archive.manifest["symbols"]) != set(symbols)
-                or not set(channels) <= set(archive.manifest["requested_channels"])
+class _ArchiveCoverage:
+    def __init__(self, readers):
+        self.readers = readers
+
+    def get(self, observation_id, default=None):
+        for reader in self.readers:
+            value = reader.get(observation_id)
+            if value is not None:
+                return value
+        return default
+
+    def __getitem__(self, observation_id):
+        value = self.get(observation_id)
+        if value is None:
+            raise KeyError(observation_id)
+        return value
+
+    def covering(self, start_ns, end_ns):
+        result = []
+        for reader in self.readers:
+            result.extend(reader.covering(start_ns, end_ns))
+            if len(result) >= 2:
+                break
+        return tuple(result[:2])
+
+    def intervals(self):
+        for reader in self.readers:
+            with closing_iterator(reader.intervals()) as intervals:
+                yield from intervals
+
+
+@dataclass(frozen=True)
+class _TardisArchives:
+    archives: tuple[TardisArchive, ...]
+    source_identity: dict
+    resource_policy: object
+    _lease: object
+
+    @property
+    def _coverage_index(self):
+        return self
+
+    def bounds(self, observation_id, **scope):
+        for archive in self.archives:
+            value = archive._coverage_index.bounds(observation_id, **scope)
+            if value is not None:
+                return value
+        return None
+
+    def hft_source_info(self):
+        values = [archive.hft_source_info() for archive in self.archives]
+        return {
+            key: sum(value[key] for value in values)
+            for key in ("raw_record_count", "source_file_count")
+        }
+
+    def market_metadata(self, market_type, symbol):
+        values = [
+            archive.market_metadata(market_type, symbol) for archive in self.archives
+        ]
+        if any(value != values[0] for value in values[1:]):
+            raise ValueError("tardis_archive_market_metadata_mismatch")
+        return values[0]
+
+    def observation_coverage(self, **scope):
+        return _ArchiveCoverage(
+            tuple(archive.observation_coverage(**scope) for archive in self.archives)
+        )
+
+    def iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
+        self.market_metadata(market_type, symbol)
+        for archive in self.archives:
+            with closing_iterator(
+                archive.iter_market_records(
+                    symbol=symbol,
+                    market_type=market_type,
+                    data_kinds=data_kinds,
+                    end_ns=end_ns,
+                )
+            ) as records:
+                yield from records
+
+    def iter_state_observations(self, *, symbol):
+        for archive in self.archives:
+            with closing_iterator(
+                archive.iter_state_observations(symbol=symbol)
+            ) as records:
+                yield from records
+
+    def funding_roots(self, symbol, *, time_window):
+        return tuple(
+            archive.funding_root(symbol)
+            for archive in self.archives
+            if _archive_intersects(archive.manifest, time_window)
+        )
+
+
+@contextmanager
+def open_tardis_archive(
+    root, resource_policy=None, *, archive_paths=None, time_window=None
+):
+    """Read explicitly declared daily archives without joining their continuity."""
+    root = Path(root)
+    paths = (
+        (root,)
+        if archive_paths is None
+        else tuple(root / item for item in archive_paths)
+    )
+    if not paths or len(set(paths)) != len(paths):
+        raise ValueError("tardis_archive_set_invalid")
+    with (
+        runtime_resource_policy_scope(resource_policy) as policy,
+        ExitStack() as readers,
+    ):
+        selected = []
+        for path in paths:
+            identity = _capture_raw_file_identity(path / "manifest.json")
+            with policy.lease(
+                "tardis.archive_selection", json_record_working_set_bytes(identity.size)
             ):
-                raise ValueError("tardis_auxiliary_scope_invalid")
-            return canonical_json_hash(archive.source_identity)
+                _, manifest = read_bounded_qrp_json(
+                    path / "manifest.json",
+                    expected_identity=identity,
+                    max_bytes=identity.size,
+                )
+                _validate_manifest(manifest)
+                if _archive_intersects(manifest, time_window):
+                    selected.append((path, canonical_json_hash(manifest)))
+                manifest = None
+        if not selected:
+            raise PortfolioTargetBlocked("tardis_archive_window_empty")
+        archives = tuple(
+            readers.enter_context(
+                _open_tardis_archive(path, policy, expected_manifest_hash=identity)
+            )
+            for path, identity in selected
+        )
+        dates = tuple(archive.manifest["date"] for archive in archives)
+        if dates != tuple(sorted(set(dates))):
+            raise ValueError("tardis_archive_dates_invalid")
+        spans = tuple(_archive_span(archive.manifest) for archive in archives)
+        if any(
+            current[0] < previous[1]
+            for previous, current in zip(spans, spans[1:], strict=False)
+        ):
+            raise ValueError("tardis_archive_spans_overlap")
+        scope = archives[0].manifest
+        if any(
+            archive.manifest[key] != scope[key]
+            for archive in archives[1:]
+            for key in ("exchange", "symbols", "requested_channels")
+        ):
+            raise ValueError("tardis_archive_scope_mismatch")
+        offset = 0
+        for archive in archives:
+            archive._sequence_offset = offset
+            offset += 1 + sum(
+                member["line_count"] for member in archive.manifest["files"]
+            )
+        coverage_lease = readers.enter_context(
+            policy.lease("tardis.archive_set_coverage", 0)
+        )
+        yield _TardisArchives(
+            archives,
+            {
+                "schema_id": SCHEMA_ID,
+                "archives": [
+                    {"date": archive.manifest["date"], **archive.source_identity}
+                    for archive in archives
+                ],
+            },
+            policy,
+            coverage_lease,
+        )
+
+
+def native_source_identity(
+    root,
+    _target_id,
+    *,
+    exchange,
+    symbols,
+    channels,
+    archive_paths=None,
+    time_window=None,
+):
+    """Bind every exact approved native information-source archive."""
+    try:
+        with open_tardis_archive(
+            root, archive_paths=archive_paths, time_window=time_window
+        ) as source:
+            for archive in source.archives:
+                if (
+                    archive.manifest["exchange"] != exchange
+                    or set(archive.manifest["symbols"]) != set(symbols)
+                    or not set(channels) <= set(archive.manifest["requested_channels"])
+                ):
+                    raise ValueError("tardis_auxiliary_scope_invalid")
+            return canonical_json_hash(source.source_identity)
     except FileNotFoundError:
         return None

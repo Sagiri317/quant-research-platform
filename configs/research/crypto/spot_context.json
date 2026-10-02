@@ -466,23 +466,15 @@
       {
         "fold_id": "development",
         "train": {
-          "start": "2026-08-01T00:00:00",
-          "end": "2026-08-01T08:00:00"
+          "start": "2026-07-01T00:00:00",
+          "end": "2026-07-01T23:59:59.900000"
         },
         "validation": {
-          "start": "2026-08-01T08:00:01",
-          "end": "2026-08-01T12:00:00"
-        },
-        "development_test": {
-          "start": "2026-08-01T12:00:01",
-          "end": "2026-08-01T20:00:00"
+          "start": "2026-08-01T00:00:00",
+          "end": "2026-08-01T23:59:59.900000"
         }
       }
     ],
-    "final_holdout": {
-      "start": "2026-08-01T20:00:01",
-      "end": "2026-08-01T23:59:59.900000"
-    },
     "initial_capital": 100000.0,
     "valuation_currency": "USDT",
     "exposure_limits": {
@@ -496,7 +488,9 @@
       }
     },
     "execution": {
-      "backtest_modes": ["continuous"],
+      "backtest_modes": [
+        "continuous"
+      ],
       "taker_fee_bps": 5.0,
       "latency_ms": 100,
       "markout_horizon_ms": 500,
@@ -522,23 +516,36 @@
         "inventory_target": 0.0,
         "inventory_skew": 0.0
       }
+    },
+    "test": {
+      "start": "2026-09-01T00:00:00",
+      "end": "2026-09-01T23:59:59.900000"
     }
   },
   "comparison_model_id": "crypto_hft_btc_independent",
   "windows": {
     "development": {
-      "start": "2026-08-01T12:00:01",
-      "end": "2026-08-01T20:00:00"
+      "start": "2026-08-01T00:00:00",
+      "end": "2026-08-01T23:59:59.900000"
     },
     "holdout": {
-      "start": "2026-08-01T20:00:01",
-      "end": "2026-08-01T23:59:59.900000"
+      "start": "2026-09-01T00:00:00",
+      "end": "2026-09-01T23:59:59.900000"
     }
   },
   "auxiliary_sources": {
     "spot": {
-      "archive": "binance/2026-08-01-btcusdt-ethusdt-native",
-      "max_age_ms": 200
+      "max_age_ms": 200,
+      "archives": [
+        "binance/2026-07-01-btcusdt-ethusdt-native",
+        "binance/2026-08-01-btcusdt-ethusdt-native",
+        "binance/2026-09-01-btcusdt-ethusdt-native"
+      ]
     }
-  }
+  },
+  "source_archives": [
+    "binance-futures/2026-07-01-btcusdt-ethusdt-native",
+    "binance-futures/2026-08-01-btcusdt-ethusdt-native",
+    "binance-futures/2026-09-01-btcusdt-ethusdt-native"
+  ]
 }

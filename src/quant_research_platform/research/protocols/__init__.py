@@ -31,6 +31,10 @@ def bind_research_selection(profile, library, configuration):
         "comparison_model_id",
         "windows",
     }
+    if str(profile.market_id) == "a_share":
+        required.add("primary_portfolio_id")
+    else:
+        required.add("source_archives")
     if set(config) - {"research_plan", "auxiliary_sources"} != required or (
         config["schema_id"] != "qrp-research-configuration"
         or config["profile_id"] != profile.profile_id
@@ -39,6 +43,25 @@ def bind_research_selection(profile, library, configuration):
         raise ValueError("research_configuration_invalid")
     from quant_research_platform.contracts.time import TimeWindow
 
+    if str(profile.market_id) == "crypto":
+        archives = config["source_archives"]
+        if archives is not None and (
+            type(archives) is not list
+            or not archives
+            or any(
+                type(path) is not str
+                or len(path.split("/")) != 2
+                or path.split("/")[0] != "binance-futures"
+                or not path.split("/")[1]
+                or any(
+                    character not in "abcdefghijklmnopqrstuvwxyz0123456789-_"
+                    for character in path.split("/")[1]
+                )
+                for path in archives
+            )
+            or len(set(archives)) != len(archives)
+        ):
+            raise ValueError("research_source_archives_invalid")
     if str(profile.market_id) == "crypto" and "research_plan" not in config:
         raise ValueError("crypto_research_plan_required")
     if str(profile.market_id) == "a_share" and "research_plan" in config:
@@ -291,6 +314,13 @@ def bind_research_selection(profile, library, configuration):
             config, sort_keys=True, separators=(",", ":"), allow_nan=False
         ),
     )
+    if str(profile.market_id) == "a_share":
+        primary = config["primary_portfolio_id"]
+        declared = {item["candidate_id"] for item in config["portfolios"]}
+        if (declared and (type(primary) is not str or primary not in declared)) or (
+            not declared and primary is not None
+        ):
+            raise ValueError("research_primary_portfolio_invalid")
     candidates = bound.portfolio_candidates()
     ids = [candidate.candidate_id for candidate in candidates]
     if len(set(ids)) != len(ids):

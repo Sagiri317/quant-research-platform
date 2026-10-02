@@ -44,10 +44,12 @@ def calibration_inputs(paths, errors):
     offsets.append(len(event_rows))
 
     def sample_rows():
-        yield from samples
+        for side in ("buy", "sell"):
+            for sample in samples:
+                yield {**sample, "side": side}
 
-    def events(start, stop):
-        for event_id in range(start, stop):
+    def events():
+        for event_id in range(len(offsets) - 1):
             rows = event_rows[offsets[event_id] : offsets[event_id + 1]]
             first = rows[0]
             yield SimpleNamespace(

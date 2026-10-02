@@ -73,6 +73,14 @@ Crypto 的训练、评估资产由每个模型的显式范围决定，不由模�
 读取者核对不变身份后投影当前状态。硬退出留下 attempted，不能宣称从未开始或已完成；
 不自动重试、不改写旧事件，也不因此解锁 HOLDOUT_LOCKED。
 ExperimentPlan.stage 是 selection/refit 阶段的唯一事实，TrialRecord 通过 plan/protocol_hash 绑定。
+数据角色统一为 train、validation、test；development 是访问阶段，不是第四角色。
+selection fold 只声明互不重叠的 train/validation，Plan 唯一声明锁定 test。
+refit 使用空 folds 与显式 fit_windows/fit_cutoff、selection_group 及来源选择集合：
+A 股最终拟合为一个合法历史窗，Crypto 保留最后 fold 的两个真实窗口。
+任何拟合/选择/监督校准均按自己的 cutoff 验证 label maturity；test 不参与冻结状态生成。
+模型候选预测和经济使用由既有模型 artifact owner 持久化：
+同一成员保留候选自身合法预测及共同评分资格，评分域不得削去经济预测行。
+
 同一 TrialRecorder/存储机制分别记录选择与真实 refit；refit 使用实际 resolved spec、seed、
 单候选单 fold 及 budget=1，并绑定父 selection 语义身份。refit 不复用选择预算或伪造验证成绩。
 TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指标，refit 记录真实 n_train。

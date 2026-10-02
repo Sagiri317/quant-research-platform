@@ -140,6 +140,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             {
                 "timestamp": entry - pd.Timedelta(days=1),
                 "asset_id": assets,
+                "industry_standard_id": "CSRC2012",
                 "industry_level1_code": ["A01"] * 50 + ["B01"] * 50,
                 "float_market_cap": np.geomspace(100.0, 1e8, 100),
                 "asset_return": rng.normal(scale=0.03, size=100),
@@ -439,7 +440,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
             layout=StorageLayout(tmp_path),
             record=record,
             report_lease=report_lease,
-            quarterly_selections={},
+            selections={},
         )
         report = build_a_share_report(record=record, evidence=evidence)
         assert {
@@ -451,6 +452,30 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         assert evidence["portfolio_statistics"]["artifact_status"] == "DEFINED"
         assert report["sections"]["risk"]["status"] == "BLOCKED"
         assert report["source_run_status"] == "COMPLETE"
+        blocker = "global_development_selection_reuses_validation"
+        sections = report["sections"]
+        assert sections["portfolio"]["development_robustness_groups"] == ["quarterly"]
+        assert sections["OOS prediction"]["global"]["inference_qualification"] == {
+            "status": "UNDEFINED",
+            "reason": blocker,
+        }
+        assert sections["OOS prediction"]["quarterly"]["inference_qualification"] == {
+            "status": "ELIGIBLE",
+            "reason": None,
+        }
+        robustness = pd.DataFrame(evidence["portfolio_statistics"]["robustness"])
+        blocked_ids = [
+            item.candidate_id for item in candidates if item.selection_group == "global"
+        ]
+        global_rows = robustness.loc[robustness.candidate_id.isin(blocked_ids)]
+        assert len(global_rows) == 10 and global_rows.status.eq("UNDEFINED").all()
+        assert global_rows.reason.eq(blocker).all() and global_rows.value.isna().all()
+        assert robustness.candidate_count.eq(5).all()
+        assert sections["portfolio"]["paired_comparison"]
+        assert all(
+            row["reason"] == row["bootstrap_reason"] == blocker
+            for row in sections["portfolio"]["paired_comparison"]
+        )
         assert any(
             row.get("test_id") == "psr" for row in report["sections"]["robustness"]
         )
@@ -492,6 +517,7 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
             "market_type": 1,
             "period_return": returns.ravel(),
             "float_market_cap": np.tile(np.geomspace(100.0, 1e6, 105), 350),
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": np.tile(["A01"] * 52 + ["B01"] * 53, 350),
         }
     )
@@ -648,10 +674,13 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
         assert policy.used_memory_bytes == 0
 
 
-@pytest.mark.parametrize("constant", (False, True))
-def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
-    tmp_path, constant
+@pytest.mark.parametrize(
+    ("constant", "swap_group_metadata"), ((False, False), (True, False), (False, True))
+)
+def test_mixed_group_ledgers_publish_qualified_universe_robustness(
+    tmp_path, constant, swap_group_metadata
 ):
+    from dataclasses import replace
     from itertools import combinations
 
     import numpy as np
@@ -689,6 +718,34 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
         research_profile(), research_configuration(name="pv25")
     ).protocol("pv_all")
     candidates = selected_protocol.portfolio_candidates()
+    if swap_group_metadata:
+        # Candidate IDs are opaque for inference eligibility.
+        targets = dict(
+            zip(
+                ("global", "quarterly"),
+                selected_protocol.prediction_target_ids,
+                strict=True,
+            )
+        )
+        candidates = tuple(
+            replace(
+                candidate,
+                selection_group=other,
+                prediction_target_id=targets[other],
+            )
+            for candidate in candidates
+            for other in (
+                "quarterly" if candidate.selection_group == "global" else "global",
+            )
+        )
+    qualified = tuple(
+        item for item in candidates if item.selection_group == "quarterly"
+    )
+    blocked = tuple(item for item in candidates if item.selection_group == "global")
+    assert len(qualified) == len(blocked) == 5
+    qualified_ids = [item.candidate_id for item in qualified]
+    blocked_ids = [item.candidate_id for item in blocked]
+    reason = "global_development_selection_reuses_validation"
     returns = np.random.default_rng(802).normal(0.0002, 0.008, (73, 5))
     if constant:
         returns[:, 0] = 0.1
@@ -697,8 +754,8 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
         "end": str(dates[-1].date()),
         "access": "development",
     }
-    ledgers = {}
-    for column, candidate in enumerate(candidates):
+
+    def persisted_ledger(candidate, series, destination):
         envelope = build_business_manifest_envelope(
             logical_artifact_id=candidate.candidate_id,
             schema_identity="a" * 64,
@@ -707,22 +764,23 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
             research_window=window,
             upstream_identities={},
             semantic_metadata={
+                "fixture_returns": series.tolist(),
                 "portfolio_capital": {
                     "candidate_id": candidate.candidate_id,
                     "initial_capital": 1000.0,
                     "valuation_currency": "CNY",
                     "valuation_method": "adjusted_notional",
-                }
+                },
             },
         )
         frames = []
         nav = 1000.0
         for index in range(73):
             rows = []
-            for asset in (f"asset_{column}", "__cash__"):
+            for asset in ("asset", "__cash__"):
                 cash = asset == "__cash__"
                 value = 0.0 if cash else nav
-                rate = 0.0 if cash else returns[index, column]
+                rate = 0.0 if cash else series[index]
                 row = {name: np.nan for name in CONTINUOUS_EXECUTION_COLUMNS}
                 row.update(
                     decision_timestamp=dates[index],
@@ -742,15 +800,25 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
             frame = pd.DataFrame(rows, columns=CONTINUOUS_EXECUTION_COLUMNS)
             frame.attrs["end_timestamp"] = dates[index + 2]
             frames.append(frame)
-            nav *= 1 + returns[index, column]
+            nav *= 1 + series[index]
         root = write_test_sessions(
-            tmp_path / candidate.candidate_id,
+            destination,
             envelope=envelope,
             ledger_chunks=iter(frames),
         )
-        ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(
+        return read_portfolio_ledger_artifact(
             root, expected_identity=envelope.instance_identity
         )
+
+    ledgers = {}
+    for group in (qualified, blocked):
+        for column, candidate in enumerate(group):
+            series = returns[:, column]
+            if candidate.selection_group == "global":
+                series = 0.015 + 2 * series
+            ledgers[candidate.candidate_id] = persisted_ledger(
+                candidate, series, tmp_path / candidate.candidate_id
+            )
     inputs = [
         HoldingFactorInputs(
             dates[i],
@@ -773,9 +841,10 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
         upstream_identities={},
         semantic_metadata={},
     )
-    with runtime_resource_policy_scope() as policy:
-        owned = _portfolio_statistics_tables(
-            ledgers=ledgers,
+
+    def produce(policy, selected_ledgers):
+        return _portfolio_statistics_tables(
+            ledgers=selected_ledgers,
             candidates=candidates,
             protocol_manifest=selected_protocol.manifest(),
             time_window=TimeWindow(dates[0], dates[-1]),
@@ -787,6 +856,9 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
             ),
             holding_inputs=iter(inputs),
         )
+
+    with runtime_resource_policy_scope() as policy:
+        owned = produce(policy, ledgers)
         try:
             root = write_statistics_artifact(
                 tmp_path / "statistics",
@@ -822,14 +894,40 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
         artifact = read_statistics_artifact(
             root, expected_identity=envelope.instance_identity
         )
+        with artifact.table("portfolio_robustness.parquet") as rows:
+            assert len(rows) == 21 and rows.candidate_count.eq(5).all()
+            global_rows = rows.loc[rows.candidate_id.isin(blocked_ids)]
+            assert len(global_rows) == 10
+            assert global_rows.status.eq("UNDEFINED").all()
+            assert global_rows.reason.eq(reason).all()
+            assert global_rows.value.isna().all()
+            baseline_qualified = (
+                rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
+                .reset_index(drop=True)
+                .copy()
+            )
+        with artifact.table("portfolio_group_comparison.parquet") as rows:
+            assert len(rows) == 5
+            assert rows.status.eq("UNDEFINED").all()
+            assert rows.reason.eq(reason).all()
+            assert rows.bootstrap_status.eq("UNDEFINED").all()
+            assert rows.bootstrap_reason.eq(reason).all()
+            assert (
+                rows[["p_value", "bootstrap_lower", "bootstrap_upper"]]
+                .isna()
+                .all()
+                .all()
+            )
+            assert rows.global_mean.notna().all() and rows.quarterly_mean.notna().all()
         if constant:
             with artifact.table("portfolio_performance.parquet") as rows:
                 selected = rows.loc[
-                    rows.candidate_id.eq(candidates[0].candidate_id)
+                    rows.candidate_id.eq(qualified[0].candidate_id)
                 ].set_index("metric_id")
                 assert selected.loc["sharpe", "status"] == "UNDEFINED"
                 assert selected.loc["annualized_volatility", "value"] == 0.0
             with artifact.table("portfolio_robustness.parquet") as rows:
+                rows = rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
                 assert len(rows) == 11
                 assert rows.candidate_count.eq(5).all()
                 assert rows.loc[rows.test_id.eq("dsr"), "status"].eq("UNDEFINED").all()
@@ -839,22 +937,19 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
                     .all()
                 )
                 psr = rows.loc[rows.test_id.eq("psr")].set_index("candidate_id")
-                assert psr.loc[candidates[0].candidate_id, "status"] == "UNDEFINED"
-                assert (
-                    psr.loc[[item.candidate_id for item in candidates[1:]], "status"]
-                    .eq("DEFINED")
-                    .all()
-                )
+                assert psr.loc[qualified[0].candidate_id, "status"] == "UNDEFINED"
+                assert psr.loc[qualified_ids[1:], "status"].eq("DEFINED").all()
             assert policy.used_memory_bytes == 0
             return
         with artifact.table("portfolio_robustness.parquet") as rows:
+            rows = rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
             assert len(rows) == 11 and rows.status.eq("DEFINED").all()
             sharpes = returns.mean(axis=0) / returns.std(axis=0, ddof=1)
             reference = sharpes.std(ddof=1) * (
                 (1 - np.euler_gamma) * norm.ppf(0.8)
                 + np.euler_gamma * norm.ppf(1 - 1 / (5 * np.e))
             )
-            for column, candidate in enumerate(candidates):
+            for column, candidate in enumerate(qualified):
                 series = returns[:, column]
                 score = sharpes[column]
                 se = np.sqrt(
@@ -895,6 +990,63 @@ def test_five_persisted_no_order_ledgers_publish_fixed_universe_robustness(
                 rows.status.eq("UNDEFINED").all()
                 and rows.reason.eq("no_rebalance_requests").all()
             )
+        if not swap_group_metadata:
+            altered_ledgers = dict(ledgers)
+            for column, candidate in enumerate(blocked):
+                extreme = np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10)
+                altered_ledgers[candidate.candidate_id] = persisted_ledger(
+                    candidate,
+                    extreme,
+                    tmp_path / "changed_global" / candidate.candidate_id,
+                )
+            changed = produce(policy, altered_ledgers)
+            try:
+                changed_envelope = build_business_manifest_envelope(
+                    logical_artifact_id="pv_all_portfolio_statistics",
+                    schema_identity="a" * 64,
+                    protocol_or_spec_identity="b" * 64,
+                    software_identity="c" * 64,
+                    research_window=window,
+                    upstream_identities={
+                        key: ledger.identity for key, ledger in altered_ledgers.items()
+                    },
+                    semantic_metadata={},
+                )
+                changed_root = write_statistics_artifact(
+                    tmp_path / "changed_statistics",
+                    envelope=changed_envelope,
+                    tables=changed.value,
+                    table_group="portfolio",
+                )
+                saved = read_statistics_artifact(
+                    changed_root, expected_identity=changed_envelope.instance_identity
+                )
+                with saved.table("portfolio_robustness.parquet") as changed_rows:
+                    pd.testing.assert_frame_equal(
+                        changed_rows.loc[
+                            changed_rows.candidate_id.isin([*qualified_ids, "joint"])
+                        ].reset_index(drop=True),
+                        baseline_qualified,
+                        check_exact=True,
+                    )
+                changed_rows = changed.value["portfolio_robustness"]
+                global_rows = changed_rows.loc[
+                    changed_rows.candidate_id.isin(blocked_ids)
+                ]
+                assert global_rows.status.eq("UNDEFINED").all()
+                assert global_rows.reason.eq(reason).all()
+                assert global_rows.value.isna().all()
+                actual = changed.value["portfolio_daily"]
+                for column, candidate in enumerate(blocked):
+                    selected = actual.loc[
+                        actual.candidate_id.eq(candidate.candidate_id)
+                    ]
+                    np.testing.assert_allclose(
+                        selected.net_return,
+                        np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10),
+                    )
+            finally:
+                changed.release(owner="research.portfolio.statistics.output")
         assert policy.used_memory_bytes == 0
 
 

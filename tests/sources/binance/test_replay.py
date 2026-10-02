@@ -16,6 +16,7 @@ import pytest
 
 import quant_research_platform.contracts.order_book as order_book
 import quant_research_platform.sources.binance.replay as replay
+import quant_research_platform.storage.manifests as storage_manifests
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
@@ -551,7 +552,7 @@ def test_successful_run_releases_manifests_inside_owner_leases(
         ],
     )
     released: list[int] = []
-    parse_json = replay.parse_qrp_json_object
+    parse_json = storage_manifests.parse_qrp_json_object
     canonical_hash = replay.canonical_json_hash
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
@@ -569,7 +570,7 @@ def test_successful_run_releases_manifests_inside_owner_leases(
         weakref.finalize(tracked, lambda: released.append(policy.used_memory_bytes))
         return tracked
 
-    monkeypatch.setattr(replay, "parse_qrp_json_object", track_manifest)
+    monkeypatch.setattr(storage_manifests, "parse_qrp_json_object", track_manifest)
     monkeypatch.setattr(
         replay,
         "canonical_json_hash",
@@ -714,7 +715,7 @@ def test_invalid_manifest_releases_decode_inside_owner_lease(
         + 64 * 1024
     )
     released: list[int] = []
-    parse_json = replay.parse_qrp_json_object
+    parse_json = storage_manifests.parse_qrp_json_object
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=16 * 1024**2,
@@ -732,7 +733,7 @@ def test_invalid_manifest_releases_decode_inside_owner_lease(
         weakref.finalize(tracked, lambda: released.append(policy.used_memory_bytes))
         return tracked
 
-    monkeypatch.setattr(replay, "parse_qrp_json_object", track_manifest)
+    monkeypatch.setattr(storage_manifests, "parse_qrp_json_object", track_manifest)
     with runtime_resource_policy_scope(policy):
         with pytest.raises(
             ValueError,
@@ -2381,7 +2382,13 @@ def test_recorder_file_boundaries_preserve_serious_io(tmp_path, monkeypatch, bou
         "coverage_open": root / "connection_intervals.jsonl.gz",
     }.get(boundary, member)
     primary = OSError(errno.EIO, "controlled_io_failure")
-    owner = os if boundary == "member_fstat" else replay
+    owner = (
+        os
+        if boundary == "member_fstat"
+        else storage_manifests
+        if boundary == "manifest_open"
+        else replay
+    )
     operation = (
         "fstat"
         if boundary == "member_fstat"
@@ -2389,8 +2396,6 @@ def test_recorder_file_boundaries_preserve_serious_io(tmp_path, monkeypatch, bou
         if boundary == "scandir"
         else "filesystem_stat"
         if boundary.endswith("stat")
-        else "filesystem_read_bytes"
-        if boundary == "manifest_open"
         else "open_filesystem_file"
     )
     original = getattr(owner, operation)
@@ -2741,3 +2746,187 @@ def test_coverage_empty_connections_keep_facts_without_sweep_contribution(
         assert policy.used_memory_bytes == 0
     assert not filesystem_exists(scratch)
     assert hashlib.sha256(filesystem_read_bytes(source)).hexdigest() == raw_hash
+
+
+@pytest.mark.parametrize("change", ("grow", "truncate", "replace"))
+def test_manifest_race_is_bounded_and_rejected_before_decode(
+    tmp_path, monkeypatch, change
+):
+    from quant_research_platform.sources import open_market_source
+    from quant_research_platform.storage.identity import filesystem_replace
+
+    root = tmp_path / "run"
+    _write_run(
+        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
+    )
+    path = root / "run.json"
+    original = filesystem_read_bytes(path)
+    original_open = storage_manifests.open_filesystem_file
+    reads, handles, decodes = [], [], []
+
+    class ObservedReader:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size=-1):
+            assert size == len(original) + 1
+            filesystem_write_bytes(
+                path,
+                original + b" " * (2 * 1024**2)
+                if change == "grow"
+                else original[: len(original) // 2],
+            )
+            result = self.handle.read(size)
+            reads.append((size, len(result)))
+            return result
+
+        def close(self):
+            self.handle.close()
+
+    def open_changed(candidate, *args, **kwargs):
+        assert candidate == path
+        if change == "replace":
+            replacement = root / "replacement.json"
+            filesystem_write_bytes(replacement, original.replace(b"run-1", b"run-2"))
+            filesystem_replace(replacement, path)
+        reader = ObservedReader(original_open(candidate, *args, **kwargs))
+        handles.append(reader.handle)
+        return reader
+
+    def forbidden_decode(raw):
+        decodes.append(len(raw))
+        pytest.fail("changed manifest reached JSON decoding")
+
+    monkeypatch.setattr(storage_manifests, "open_filesystem_file", open_changed)
+    monkeypatch.setattr(storage_manifests, "parse_qrp_json_object", forbidden_decode)
+    with runtime_resource_policy_scope() as policy:
+        with (
+            pytest.raises(ValueError, match="^binance_replay_run_identity_changed$"),
+            open_market_source(root, policy),
+        ):
+            pytest.fail("changed manifest reached the source consumer")
+        assert policy.used_memory_bytes == 0
+    assert not decodes
+    assert handles and all(handle.closed for handle in handles)
+    assert reads == (
+        []
+        if change == "replace"
+        else [
+            (
+                len(original) + 1,
+                len(original) + 1 if change == "grow" else len(original) // 2,
+            )
+        ]
+    )
+
+
+def test_manifest_read_failure_preserves_primary_and_closes_handle(
+    tmp_path, monkeypatch
+):
+    import errno
+
+    root = tmp_path / "run"
+    _write_run(
+        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
+    )
+    path = root / "run.json"
+    original = filesystem_read_bytes(path)
+    original_open = storage_manifests.open_filesystem_file
+    primary = OSError(errno.EIO, "manifest_read_primary")
+    handles = []
+
+    class FailedReader:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def fileno(self):
+            return self.handle.fileno()
+
+        def read(self, size=-1):
+            assert size == len(original) + 1
+            filesystem_write_bytes(path, original + b" ")
+            raise primary
+
+        def close(self):
+            self.handle.close()
+            raise OSError("manifest_close_secondary")
+
+    def open_failed(candidate, *args, **kwargs):
+        reader = FailedReader(original_open(candidate, *args, **kwargs))
+        handles.append(reader.handle)
+        return reader
+
+    monkeypatch.setattr(storage_manifests, "open_filesystem_file", open_failed)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(OSError) as caught, open_recorder_run(root, policy):
+            pytest.fail("failed read reached the consumer")
+        assert caught.value is primary
+        assert policy.used_memory_bytes == 0
+    assert handles and all(handle.closed for handle in handles)
+    assert primary.__notes__ == [
+        "file identity verification also failed: ValueError",
+        "scratch handle close also failed: OSError",
+    ]
+
+
+def test_manifest_growth_blocks_materialization_and_preserves_old_good(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.markets.implementations.crypto.ids import (
+        HFT_PANEL_DATA_ID,
+    )
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        research_profile,
+    )
+    from quant_research_platform.storage.identity import filesystem_walk
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.workflows import research
+    from tests.helpers.binance_hft import write_binance_hft_run
+
+    raw_root = tmp_path / "raw"
+    write_binance_hft_run(raw_root)
+    layout = StorageLayout(tmp_path / "project")
+    profile = research_profile(CRYPTO_PROFILE_ID)
+    kwargs = dict(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        data_ids=(HFT_PANEL_DATA_ID,),
+        start_date="1970-01-01T00:00:00",
+        end_date="1970-01-01T00:00:06",
+    )
+    result = research.data_materialize(**kwargs)
+    assert result["status"] == "COMPLETE"
+    spec = profile.processed.get(HFT_PANEL_DATA_ID)
+    instances = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+
+    def published_bytes():
+        return {
+            (parent / name).relative_to(instances): filesystem_read_bytes(parent / name)
+            for parent, _directories, files in filesystem_walk(instances)
+            for name in files
+        }
+
+    old_good = published_bytes()
+    assert old_good
+    manifest_path = raw_root / "run.json"
+    original = filesystem_read_bytes(manifest_path)
+    read_manifest = replay.read_bounded_qrp_json
+    attempts = []
+
+    def grow_after_admission(path, **options):
+        if path == manifest_path:
+            attempts.append(options["max_bytes"])
+            filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
+        return read_manifest(path, **options)
+
+    monkeypatch.setattr(replay, "read_bounded_qrp_json", grow_after_admission)
+    rejected = research.data_materialize(**kwargs, rebuild=True)
+    assert rejected["status"] == "BLOCKED"
+    assert rejected["target_results"][0]["reason"] == "source_identity_invalid"
+    assert attempts and attempts[0] == len(original)
+    assert published_bytes() == old_good

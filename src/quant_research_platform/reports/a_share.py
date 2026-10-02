@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 
+from quant_research_platform.contracts.experiments import _model_inference_blocker
 from quant_research_platform.contracts.targets import ResearchRunRecord
 from quant_research_platform.reports import diagnostic_status, report_status
 
@@ -47,21 +48,28 @@ def build_a_share_report(
         raise ValueError("a_share_report_evidence_invalid")
     portfolio_statistics = evidence["portfolio_statistics"]
     scenario = record.scenario_id
-    factor_section = (
-        {
+    factor_section = {
+        group: {
             "status": "DEFINED",
-            "statistics_identity": statistics["identity"],
-            "row_count": statistics["factor_row_count"],
-            "defined_rows": statistics["factor_defined_rows"],
-            "undefined_rows": statistics["factor_undefined_rows"],
-            "results": statistics["factor_diagnostics"],
+            "statistics_identity": result["identity"],
+            "row_count": result["factor_row_count"],
+            "defined_rows": result["factor_defined_rows"],
+            "undefined_rows": result["factor_undefined_rows"],
+            "results": result["factor_diagnostics"],
         }
-        if statistics.get("status") == "DEFINED"
-        else dict(statistics)
-    )
+        if result.get("status") == "DEFINED"
+        else dict(result)
+        for group, result in statistics.items()
+    }
     portfolio_rows = [dict(item) for item in portfolios if type(item) is dict]
     if len(portfolio_rows) != len(portfolios):
         raise ValueError("a_share_report_evidence_invalid")
+    inference_blockers = {
+        group: _model_inference_blocker(
+            access_window=record.research_window["access"], selection_groups=(group,)
+        )
+        for group in ("global", "quarterly")
+    }
     sections = {
         "Data/Coverage": dict(evidence["coverage"]),
         "factor diagnostics": factor_section,
@@ -70,13 +78,36 @@ def build_a_share_report(
             f"{scenario}_model_selection_refit",
             "model_artifact_identity",
         ),
-        "OOS prediction": _identity_section(
-            references,
-            f"{scenario}_persisted_predictions",
-            "prediction_artifact_identity",
-        ),
+        "OOS prediction": {
+            group: {
+                **_identity_section(
+                    references,
+                    f"{scenario}_{group}_persisted_predictions",
+                    "prediction_artifact_identity",
+                ),
+                "inference_qualification": {
+                    "status": "UNDEFINED"
+                    if inference_blockers[group] is not None
+                    else "ELIGIBLE",
+                    "reason": inference_blockers[group],
+                },
+                "interpretation": (
+                    "retrospective_validation_selected_at_development_end"
+                    if inference_blockers[group] is not None
+                    else "causal_quarterly_validation"
+                    if record.research_window["access"] == "development"
+                    else "frozen_final_test"
+                ),
+            }
+            for group in ("global", "quarterly")
+        },
         "portfolio": {
             "status": "DEFINED" if portfolio_rows else "BLOCKED",
+            "development_robustness_groups": [
+                group for group, reason in inference_blockers.items() if reason is None
+            ]
+            if record.research_window["access"] == "development"
+            else [],
             "results": portfolio_rows,
         },
         "cost": {
@@ -119,7 +150,11 @@ def build_a_share_report(
             "frozen_development": run_payload["protocol"].get("frozen_development"),
             "evidence": run_payload["holdout_evidence"],
         },
-        "robustness": statistics.get("robustness", [dict(statistics)])
+        "robustness": [
+            {"selection_group": group, **row}
+            for group, result in statistics.items()
+            for row in result.get("robustness", [dict(result)])
+        ]
         + portfolio_statistics.get("robustness", [dict(portfolio_statistics)]),
         "readiness/blockers": {
             "source_run_status": record.status.value,
@@ -128,7 +163,25 @@ def build_a_share_report(
         },
     }
     sections["portfolio"]["nav_path"] = portfolio_statistics.get("nav_path", {})
-    sections["run observations"] = run_payload["operation_evidence"]
+    sections["portfolio"]["paired_comparison"] = portfolio_statistics.get(
+        "group_comparison", []
+    )
+    sections["OOS prediction"]["paired_family_rankic"] = statistics.get(
+        "quarterly", {}
+    ).get("model_group_comparison", [])
+    sections["portfolio"]["comparison_interpretation"] = (
+        "Frozen final test compares development selection and calibration pipelines; "
+        "it does not estimate test-time adaptation. Choosing a winner on this test "
+        "does not create independent validation of that winner."
+    )
+    sections["run observations"] = {
+        "run": run_payload["operation_evidence"],
+        "model_phases": evidence.get("model_costs", []),
+        "accounting": (
+            "Shared candidate fits are counted once. Group scoring and final refits "
+            "are recorded separately; boundary samples are not full process peaks."
+        ),
+    }
     for name in ("cost", "risk", "capacity", "attribution"):
         rows = sections[name]["results"]
         if rows:
@@ -145,15 +198,20 @@ def build_a_share_report(
     sections["model selection"]["trial_ledger"] = evidence.get(
         "model_trials", {"status": "UNDEFINED"}
     )
-    sections["model selection"]["quarterly_selections"] = evidence[
-        "quarterly_selections"
-    ]
-    if statistics.get("status") == "DEFINED":
-        sections["model selection"]["configurations"] = statistics["model_trials"]
-        sections["OOS prediction"]["family_comparison"] = statistics["model_comparison"]
-        sections["OOS prediction"]["reality_checks"] = statistics[
-            "model_reality_checks"
-        ]
+    sections["model selection"]["selections"] = evidence["selections"]
+    sections["model selection"]["configurations"] = {
+        group: result["model_trials"]
+        for group, result in statistics.items()
+        if result.get("status") == "DEFINED"
+    }
+    for group, result in statistics.items():
+        if result.get("status") == "DEFINED":
+            sections["OOS prediction"][group]["family_comparison"] = result[
+                "model_comparison"
+            ]
+            sections["OOS prediction"][group]["reality_checks"] = result[
+                "model_reality_checks"
+            ]
     if configuration["stage"] == "evaluation":
         sections["factor diagnostics"] = dict(evidence["factor_evaluation"])
         for name in ("model selection", "OOS prediction", "robustness"):

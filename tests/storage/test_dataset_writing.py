@@ -459,6 +459,165 @@ def test_private_writer_handoffs_pending_lease_without_second_reservation(
     assert policy.used_memory_bytes == 0
 
 
+@pytest.mark.parametrize(
+    ("empty_first", "empty_last", "request_after_last"),
+    (
+        (False, False, False),
+        (True, False, False),
+        (False, True, False),
+        (False, True, True),
+    ),
+)
+def test_private_writer_keeps_same_producer_lease_across_chunks(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    empty_first: bool,
+    empty_last: bool,
+    request_after_last: bool,
+) -> None:
+    policy = _writer_test_policy()
+    expected = make_default_dataset_frame()
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    expected[["market_id", "asset_id"]] = expected[["market_id", "asset_id"]].astype(
+        "string"
+    )
+    holder = {}
+    events = []
+    original_close = runtime_resources.MemoryLease.close
+
+    def observed_close(lease):
+        if lease is holder.get("lease"):
+            events.append(("lease_closed", holder["retained"]() is None))
+        original_close(lease)
+
+    monkeypatch.setattr(runtime_resources.MemoryLease, "close", observed_close)
+
+    def producer():
+        lease = yield 256 * 1024
+        holder["lease"] = lease
+        retained = expected.copy()
+        holder["retained"] = weakref.ref(retained)
+        try:
+            split = 0 if empty_first else 1
+            spans = [(0, split), (split, len(retained))]
+            if empty_last:
+                spans.append((0, 0))
+            for index, (start, end) in enumerate(spans):
+                assert lease.active
+                assert lease.reserved_bytes == 256 * 1024
+                yield runtime_resources.OwnedValue(
+                    retained.iloc[start:end].copy(), lease
+                )
+                if index + 1 < len(spans) or request_after_last:
+                    resumed = yield (256 * 1024, lease)
+                    assert resumed is lease
+        finally:
+            del retained
+            events.append(("producer_closed", lease.active))
+
+    def validate(_receipt):
+        assert events == [("producer_closed", True), ("lease_closed", True)]
+
+    root = make_dataset_artifact_root(tmp_path, "continuous_producer_lease")
+    dataset_writing.write_dataset(
+        root,
+        producer(),
+        spec=make_processed_dataset_spec("continuous_producer_lease"),
+        resource_policy=policy,
+        staged_validator=validate,
+    )
+
+    assert events == [("producer_closed", True), ("lease_closed", True)]
+    assert policy.state == "CLOSED"
+    assert policy.used_memory_bytes == 0
+    pd.testing.assert_frame_equal(
+        read_dataset(root)
+        .sort_values(["timestamp", "asset_id"])
+        .reset_index(drop=True),
+        expected.sort_values(["timestamp", "asset_id"]).reset_index(drop=True),
+    )
+
+
+@pytest.mark.parametrize(
+    ("failure", "error_type", "message"),
+    (
+        ("zero", ValueError, "invalid_dataset_producer_handoff"),
+        ("bool", ValueError, "invalid_dataset_producer_handoff"),
+        ("grow", MemoryError, "runtime_memory_budget_exceeded"),
+        ("producer", RuntimeError, "continuous_producer_primary"),
+        ("writer", RuntimeError, "continuous_producer_primary"),
+        ("cancel", KeyboardInterrupt, "continuous_producer_primary"),
+        ("close", GeneratorExit, "continuous_producer_primary"),
+    ),
+)
+def test_private_writer_closes_continuous_producer_before_its_lease_on_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+    error_type: type[BaseException],
+    message: str,
+) -> None:
+    policy = _writer_test_policy()
+    holder = {}
+    events = []
+    primary = error_type(message)
+    original_close = runtime_resources.MemoryLease.close
+    original_write = dataset_writing.write_parquet_file
+    writes = 0
+
+    def observed_close(lease):
+        if lease is holder.get("lease"):
+            events.append(("lease_closed", holder["retained"]() is None))
+        original_close(lease)
+
+    def observed_write(*args, **kwargs):
+        nonlocal writes
+        writes += 1
+        if writes == 2 and failure in {"writer", "cancel", "close"}:
+            raise primary
+        return original_write(*args, **kwargs)
+
+    monkeypatch.setattr(runtime_resources.MemoryLease, "close", observed_close)
+    monkeypatch.setattr(dataset_writing, "write_parquet_file", observed_write)
+
+    def producer():
+        lease = yield 256 * 1024
+        holder["lease"] = lease
+        retained = make_default_dataset_frame()
+        holder["retained"] = weakref.ref(retained)
+        try:
+            yield runtime_resources.OwnedValue(retained.iloc[:1].copy(), lease)
+            bound = {
+                "zero": 0,
+                "bool": True,
+                "grow": policy.memory_budget_bytes,
+            }.get(failure, 256 * 1024)
+            resumed = yield (bound, lease)
+            assert resumed is lease
+            assert lease.active
+            if failure == "producer":
+                raise primary
+            yield runtime_resources.OwnedValue(retained.iloc[1:].copy(), lease)
+        finally:
+            del retained
+            events.append(("producer_closed", lease.active))
+
+    root = make_dataset_artifact_root(tmp_path, "continuous_producer_failure")
+    with pytest.raises(error_type, match=message) as raised:
+        dataset_writing.write_dataset(
+            root,
+            producer(),
+            spec=make_processed_dataset_spec("continuous_producer_failure"),
+            resource_policy=policy,
+        )
+    if failure in {"producer", "writer", "cancel", "close"}:
+        assert raised.value is primary
+    assert events == [("producer_closed", True), ("lease_closed", True)]
+    assert policy.state == "CLOSED"
+    assert policy.used_memory_bytes == 0
+    assert not filesystem_exists(root)
+
+
 @pytest.mark.parametrize("handoff_kind", ("malformed", "inactive", "foreign"))
 def test_private_writer_rejects_invalid_pending_lease_handoff(
     tmp_path: Path,
@@ -997,3 +1156,83 @@ def test_float_primary_key_zero_identity_publication(tmp_path, dtype):
         fingerprint_dataset(root)
     comparison = compare_datasets(root, root)
     assert comparison.status == "INSPECTION_FAILED"
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    (
+        "reverse",
+        "duplicate_date",
+        "date_format",
+        "empty",
+        "missing_hash",
+        "schema",
+        "duplicate_identity",
+        "nested",
+        "hash",
+    ),
+)
+def test_archive_source_identity_is_validated_on_write_and_read(tmp_path, mutation):
+    from copy import deepcopy
+
+    from quant_research_platform.sources.tardis.raw import SCHEMA_ID
+
+    identity = {
+        "schema_id": SCHEMA_ID,
+        "archives": [
+            {
+                "date": day,
+                "schema_id": SCHEMA_ID,
+                "artifact_id": "native_archive_" + token * 24,
+                "manifest_hash": token * 64,
+            }
+            for day, token in (("2026-07-01", "a"), ("2026-08-01", "b"))
+        ],
+    }
+    spec = make_processed_dataset_spec("archive_identity")
+    root = make_dataset_artifact_root(tmp_path, spec.data_id)
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=spec,
+        instance_metadata={"source_artifact_identity": identity},
+    )
+    assert inspect_dataset(root).manifest["source_artifact_identity"] == identity
+    assert len(read_dataset(root)) == 3
+    invalid = deepcopy(identity)
+    archives = invalid["archives"]
+    if mutation == "reverse":
+        archives.reverse()
+    elif mutation == "duplicate_date":
+        archives[1]["date"] = archives[0]["date"]
+    elif mutation == "date_format":
+        archives[0]["date"] = "20260701"
+    elif mutation == "empty":
+        archives.clear()
+    elif mutation == "missing_hash":
+        del archives[0]["manifest_hash"]
+    elif mutation == "schema":
+        archives[0]["schema_id"] = "other"
+    elif mutation == "duplicate_identity":
+        archives[1]["artifact_id"] = archives[0]["artifact_id"]
+        archives[1]["manifest_hash"] = archives[0]["manifest_hash"]
+    elif mutation == "nested":
+        archives[0] = identity
+    else:
+        archives[0]["manifest_hash"] = "bad"
+    candidate = make_dataset_artifact_root(tmp_path / "candidate", spec.data_id)
+    with pytest.raises(ValueError, match="invalid_source_artifact_identity"):
+        write_dataset(
+            candidate,
+            make_default_dataset_frame(),
+            spec=spec,
+            instance_metadata={"source_artifact_identity": invalid},
+        )
+    assert not candidate.exists()
+    assert inspect_dataset(root).manifest["source_artifact_identity"] == identity
+    manifest_path = root / "_manifest" / "manifest.json"
+    manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+    manifest["source_artifact_identity"] = invalid
+    filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid_source_artifact_identity"):
+        read_dataset(root)

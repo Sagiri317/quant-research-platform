@@ -191,7 +191,7 @@ def load_a_share_run_evidence(
     layout: StorageLayout,
     record: ResearchRunRecord,
     report_lease,
-    quarterly_selections,
+    selections,
     reference_member_identities=None,
 ) -> dict[str, object]:
     references = {result.target_id: result for result in record.target_results}
@@ -243,7 +243,13 @@ def load_a_share_run_evidence(
         scenario,
         f"{scenario}_evaluation",
         *(
-            (f"{scenario}_model_selection_refit", f"{scenario}_persisted_predictions")
+            (
+                f"{scenario}_model_selection_refit",
+                *(
+                    f"{scenario}_{group}_persisted_predictions"
+                    for group in ("global", "quarterly")
+                ),
+            )
             if full_research
             else ()
         ),
@@ -332,6 +338,7 @@ def load_a_share_run_evidence(
             report_lease=report_lease,
         )
         coverage["evaluation"] = factor_evaluation["metadata"]["evaluation_diagnostics"]
+    model_costs = []
     for target in record.target_results:
         if target.producer_kind is not ProducerKind.MODEL:
             continue
@@ -345,6 +352,13 @@ def load_a_share_run_evidence(
             expected_member_identities=captured[model_ref.target_id],
             operational_metadata=operational,
         )
+        if "model_phase_observations" in operational:
+            model_costs.append(
+                {
+                    "model_target_id": model_ref.target_id,
+                    **operational["model_phase_observations"],
+                }
+            )
         for item in operational.get("model_trial_ledgers", []):
             trial_refs[(item["run_id"], item["experiment_id"])] = item
     trial_counts = Counter()
@@ -362,50 +376,54 @@ def load_a_share_run_evidence(
                 _issue("model_trials", "FAILED", "trial_ledger_reference_invalid")
             )
 
-    statistics_target = f"{scenario}_statistics"
-    statistics_ref = load(statistics_target) if full_research else None
-    statistics: dict[str, object]
-    if statistics_ref is None:
-        statistics = (
-            _unavailable(issues, statistics_target)
-            if full_research
-            else {"status": "UNDEFINED", "reason": "not_requested"}
-        )
-    else:
-        try:
-            artifact = read_statistics_artifact(
-                _instance_root(layout, statistics_ref),
-                expected_identity=str(statistics_ref.instance_identity),
-                expected_member_identities=captured[statistics_ref.target_id],
+    statistics = {}
+    for group in ("global", "quarterly"):
+        statistics_target = f"{scenario}_{group}_statistics"
+        statistics_ref = load(statistics_target) if full_research else None
+        if statistics_ref is None:
+            group_statistics = (
+                _unavailable(issues, statistics_target)
+                if full_research
+                else {"status": "UNDEFINED", "reason": "not_requested"}
             )
-            tables = {
-                name: table_records(artifact, name + ".parquet")
-                for name in (
-                    "factor_diagnostics",
-                    "model_trials",
-                    "model_comparison",
-                    "model_reality_checks",
-                    "robustness",
+        else:
+            try:
+                artifact = read_statistics_artifact(
+                    _instance_root(layout, statistics_ref),
+                    expected_identity=str(statistics_ref.instance_identity),
+                    expected_member_identities=captured[statistics_ref.target_id],
                 )
-            }
-            factors = tables["factor_diagnostics"]
-            statistics = {
-                "status": "DEFINED",
-                "identity": statistics_ref.instance_identity,
-                "factor_row_count": len(factors),
-                "factor_defined_rows": sum(
-                    row["status"] == "DEFINED" for row in factors
-                ),
-                "factor_undefined_rows": sum(
-                    row["status"] == "UNDEFINED" for row in factors
-                ),
-                **tables,
-            }
-        except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
-            issues.append(
-                _issue(statistics_target, "FAILED", "statistics_reference_invalid")
-            )
-            statistics = _unavailable(issues, statistics_target)
+                tables = {
+                    name: table_records(artifact, name + ".parquet")
+                    for name in (
+                        "factor_diagnostics",
+                        "model_trials",
+                        "model_comparison",
+                        "model_group_comparison",
+                        "model_reality_checks",
+                        "robustness",
+                    )
+                }
+                factors = tables["factor_diagnostics"]
+                group_statistics = {
+                    "status": "DEFINED",
+                    "identity": statistics_ref.instance_identity,
+                    "factor_row_count": len(factors),
+                    "factor_defined_rows": sum(
+                        row["status"] == "DEFINED" for row in factors
+                    ),
+                    "factor_undefined_rows": sum(
+                        row["status"] == "UNDEFINED" for row in factors
+                    ),
+                    **tables,
+                }
+            except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
+                issues.append(
+                    _issue(statistics_target, "FAILED", "statistics_reference_invalid")
+                )
+                group_statistics = _unavailable(issues, statistics_target)
+
+        statistics[group] = group_statistics
 
     candidates = record.protocol.get("portfolio_candidates")
     if type(candidates) is not tuple or any(
@@ -433,7 +451,12 @@ def load_a_share_run_evidence(
             )
             summaries = {
                 name: table_records(artifact, "portfolio_" + name + ".parquet")
-                for name in ("performance", "capacity_summary", "robustness")
+                for name in (
+                    "performance",
+                    "capacity_summary",
+                    "robustness",
+                    "group_comparison",
+                )
             }
             with (
                 artifact.table("portfolio_attribution.parquet") as attribution,
@@ -507,6 +530,7 @@ def load_a_share_run_evidence(
                 "artifact_status": "DEFINED",
                 "identity": portfolio_ref.instance_identity,
                 "performance": summaries["performance"],
+                "group_comparison": summaries["group_comparison"],
                 "capacity": summaries["capacity_summary"],
                 "robustness": summaries["robustness"],
                 "attribution": attribution_summary,
@@ -549,11 +573,22 @@ def load_a_share_run_evidence(
                 expected_identity=ledger_ref.instance_identity,
                 expected_member_identities=captured[ledger_ref.target_id],
             )
+            ledger_operations = {}
+            read_semantic_artifact_record(
+                _instance_root(layout, ledger_ref),
+                expected_identity=ledger_ref.instance_identity,
+                expected_member_identities=captured[ledger_ref.target_id],
+                operational_metadata=ledger_operations,
+            )
             portfolios.append(
                 {
                     "candidate_id": candidate,
                     "status": "DEFINED",
                     "ledger_identity": ledger_ref.instance_identity,
+                    "final_calibration": ledger.final_alpha_calibration,
+                    "calibration_observations": ledger_operations.get(
+                        "final_alpha_observations"
+                    ),
                     "economics": summarize_portfolio_ledger(ledger),
                     "metrics": metrics,
                 }
@@ -568,9 +603,10 @@ def load_a_share_run_evidence(
         },
         "coverage": coverage,
         "factor_evaluation": factor_evaluation,
-        "quarterly_selections": quarterly_selections,
+        "selections": selections,
         "statistics": statistics,
         "portfolio_statistics": portfolio_statistics,
+        "model_costs": model_costs,
         "model_trials": {
             "status": trial_status,
             "attempt_count": sum(trial_counts.values()),
@@ -587,7 +623,7 @@ def produce_a_share_report(
     layout: StorageLayout,
     record: ResearchRunRecord,
     report_lease,
-    quarterly_selections,
+    selections,
     reference_member_identities=None,
 ) -> dict[str, object]:
     return build_a_share_report(
@@ -596,7 +632,7 @@ def produce_a_share_report(
             layout=layout,
             record=record,
             report_lease=report_lease,
-            quarterly_selections=quarterly_selections,
+            selections=selections,
             reference_member_identities=reference_member_identities,
         ),
     )

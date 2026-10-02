@@ -15,7 +15,6 @@ from quant_research_platform.markets.implementations.a_share.fundamentals import
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.sources.csmar.interim import (
     InterimImportResult,
-    interim_catalog,
     normalize_raw_frame,
 )
 from quant_research_platform.storage.datasets import read_dataset
@@ -45,7 +44,7 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
         data_ids = kwargs["data_ids"]
         assert isinstance(data_ids, tuple) and len(data_ids) == 1
         data_id = data_ids[0]
-        spec = interim_catalog().get(data_id)
+        spec = base.interim.get(data_id)
         output_root = kwargs["layout"].target_root(
             data_id,
             kwargs["layout"].interim_data_root(spec.source_id, data_id),
@@ -361,7 +360,9 @@ def _synthetic_interim_frames(sessions: pd.DatetimeIndex) -> dict[str, pd.DataFr
             "listing_state": "normal",
         }
     )
-    stock_changes = listing_changes.copy()
+    stock_changes = listing_changes.assign(
+        changed_item="P0207行业代码", value_after=industry["industry_level1_name"]
+    )
     no_limit = pd.DataFrame(
         {
             "source_asset_id": [assets[0]],
@@ -381,7 +382,23 @@ def _synthetic_interim_frames(sessions: pd.DatetimeIndex) -> dict[str, pd.DataFr
         ),
         "special_treatment_changes",
     )
+    snapshots = pd.DataFrame(
+        {
+            "source_asset_id": assets,
+            "timestamp": sessions[0],
+            "observation_date": sessions[0] - pd.Timedelta(days=2),
+            "publication_date": sessions[0] - pd.Timedelta(days=1),
+            "industry_standard_id": "CSRC2012",
+            "industry_category_code": "A",
+            "industry_major_code": "",
+            "industry_code": "01",
+            "company_name": "synthetic issuer",
+            "snapshot_id": "earlier-public-observation",
+            "source_locator": "page:1",
+        }
+    )
     return {
+        "a_share_industry_snapshots": snapshots,
         "market_bars_1d": market_bars,
         "stock_master": stock_master,
         "market_cap": market_cap,

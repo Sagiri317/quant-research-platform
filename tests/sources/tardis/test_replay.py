@@ -833,10 +833,18 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
                             )
                         )
                         assert len(repeated) == 1 and calls == 1
-                spools = [pair[0] for pair in source._spools.values()]
+                spools = [
+                    pair[0]
+                    for archive in source.archives
+                    for pair in archive._spools.values()
+                ]
         except KeyboardInterrupt as error:
             assert cancel and str(error) == "cancel_native_scan"
-            spools = [pair[0] for pair in source._spools.values()]
+            spools = [
+                pair[0]
+                for archive in source.archives
+                for pair in archive._spools.values()
+            ]
         assert all(spool.closed for spool in spools)
     assert policy.used_memory_bytes == 0
 
@@ -898,3 +906,215 @@ def test_tardis_spool_rechecks_disk_before_each_append(monkeypatch):
             spool.seek(0)
             assert spool.read() == b"x" * 128
     assert policy.used_memory_bytes == 0
+
+
+def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_path):
+    from functools import partial
+
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.markets.implementations.crypto.hft import (
+        iter_label_frames,
+    )
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        catalog as processed_catalog,
+    )
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer as processed_producer,
+    )
+    from quant_research_platform.sources.binance.replay import iter_agg_trades
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    dates = ("2026-07-01", "2026-08-01")
+    window = TimeWindow("2026-07-01T00:00:00", "2026-08-01T00:00:04")
+    paths = ("july", "august")
+    catalog = processed_catalog.hft_processed_catalog()
+    spec = catalog.get("binance_futures_l2_panel_100ms")
+    layout = StorageLayout(project_root=tmp_path / "processed")
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    opener = partial(open_market_source, archive_paths=paths, time_window=window)
+
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=128 * 1024**2)
+    ) as policy:
+        for date, path in zip(dates, paths, strict=True):
+            midnight = pd.Timestamp(date, tz="UTC").value // 1_000_000
+            native = _delta(1, 99, 101, 98) + _line(
+                2,
+                "depthSnapshot",
+                {
+                    "lastUpdateId": 100,
+                    "bids": [[str(100 - i), "2"] for i in range(12)],
+                    "asks": [[str(101 + i), "2"] for i in range(12)],
+                },
+            )
+            for second in (3, 4):
+                native += _delta(second, 99 + second, 99 + second, 98 + second)
+                native += _line(
+                    second,
+                    "aggTrade",
+                    {
+                        "e": "aggTrade",
+                        "E": 0,
+                        "T": 0,
+                        "s": "BTCUSDT",
+                        "st": 1,
+                        "a": second,
+                        "f": second,
+                        "l": second,
+                        "p": "100",
+                        "q": "1",
+                        "nq": "1",
+                        "m": False,
+                    },
+                )
+            converted = []
+            for line in native.decode().splitlines():
+                timestamp, body = line.split(" ", 1)
+                record = json.loads(body)
+                seconds = pd.Timestamp(timestamp).second
+                for key in ("E", "T"):
+                    if key in record["data"]:
+                        record["data"][key] = midnight + seconds * 1000
+                converted.append(
+                    timestamp.replace("2026-09-01", date)
+                    + " "
+                    + json.dumps(record)
+                    + "\n"
+                )
+            import_slices(
+                tmp_path / path,
+                date=date,
+                slices=_slices(
+                    tmp_path / ("native-" + path),
+                    "".join(converted).encode(),
+                    count=1,
+                ),
+                byte_budget=1024**2,
+                resource_policy=policy,
+            )
+        with opener(tmp_path, policy) as source:
+            identity = canonical_json_hash(source.source_identity)
+            rows = list(
+                source.iter_market_records(
+                    symbol="BTCUSDT",
+                    market_type=FUTURES_MARKET_TYPE,
+                    data_kinds=("agg_trades",),
+                )
+            )
+            assert [row["payload"]["a"] for row in rows] == [3, 4, 3, 4]
+            assert len({row["source_sequence"] for row in rows}) == 4
+            observation_ids = [row["observation_id"] for row in rows]
+            assert observation_ids[0] == observation_ids[1]
+            assert observation_ids[2] == observation_ids[3]
+            assert observation_ids[0] != observation_ids[2]
+            assert (
+                observation_ids[0].split(":", 1)[1]
+                == (observation_ids[2].split(":", 1)[1])
+            )
+
+        with processed_producer.produce_hft_processed_data(
+            spec,
+            layout=layout,
+            time_window=window,
+            processed_catalog=catalog,
+            source_catalog=None,
+            resource_policy=policy,
+            open_run=opener,
+            reconstruct_depth=iter_reconstructed_depth,
+            read_trades=iter_agg_trades,
+            make_stats=ReconstructionStats,
+            raw_root=tmp_path,
+            expected_source_identity=identity,
+            symbols=("BTCUSDT",),
+        ) as (data, metadata, verify):
+            write_dataset(
+                root,
+                data,
+                spec=spec,
+                instance_metadata=metadata,
+                staged_validator=verify,
+                resource_policy=policy,
+            )
+        panel = read_dataset(root, resource_policy=policy)
+        assert set(panel.timestamp.dt.strftime("%Y-%m-%d")) == set(dates)
+        assert panel.segment_id.nunique() == 2
+        assert panel.book_segment_id.nunique() == 2
+        assert panel.book_observation_id.nunique() == 2
+        assert panel.trade_observation_id.nunique() == 2
+        assert panel.book_source_sequence.is_monotonic_increasing
+        # The first trade starts observed coverage; its preceding bin is unknown.
+        counted = panel.loc[panel.trade_count_100ms.gt(0)]
+        assert counted.timestamp.tolist() == [
+            pd.Timestamp(day + "T00:00:04") for day in dates
+        ]
+        assert counted.trade_count_100ms.tolist() == [1, 1]
+        first = panel.loc[panel.timestamp.dt.month == 7]
+        second = panel.loc[panel.timestamp.dt.month == 8]
+        assert set(first.book_source_sequence).isdisjoint(second.book_source_sequence)
+        labels = pd.concat(
+            iter_label_frames((first, second), horizons_ms=(500,)), ignore_index=True
+        )
+        first_end = first.timestamp.max()
+        last_july = labels.loc[labels.timestamp == first_end].iloc[0]
+        assert pd.isna(last_july.future_mid_return_500ms)
+        assert pd.isna(last_july.future_mid_return_500ms_available_at)
+        before = {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+        manifest_path = tmp_path / paths[0] / "manifest.json"
+        manifest = json.loads(manifest_path.read_text())
+        member = manifest["files"][0]
+        member["line_count"] = 1
+        member["record_counts"] = {"btcusdt@depthSnapshot": 1}
+        member["disconnect_markers"] = 0
+        manifest_path.write_text(json.dumps(manifest))
+        seen = []
+        with opener(tmp_path, policy) as source:
+            bad_identity = canonical_json_hash(source.source_identity)
+            with pytest.raises(ValueError, match="tardis_native_line_count_mismatch"):
+                for row in source.iter_market_records(
+                    symbol="BTCUSDT",
+                    market_type=FUTURES_MARKET_TYPE,
+                    data_kinds=("agg_trades",),
+                ):
+                    seen.append(row["receive_time"])
+        assert seen and all(value.startswith(dates[0]) for value in seen)
+        candidate_root = StorageLayout(
+            project_root=tmp_path / "candidate"
+        ).processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        with pytest.raises(ValueError, match="tardis_native_line_count_mismatch"):
+            with processed_producer.produce_hft_processed_data(
+                spec,
+                layout=layout,
+                time_window=window,
+                processed_catalog=catalog,
+                source_catalog=None,
+                resource_policy=policy,
+                open_run=opener,
+                reconstruct_depth=iter_reconstructed_depth,
+                read_trades=iter_agg_trades,
+                make_stats=ReconstructionStats,
+                raw_root=tmp_path,
+                expected_source_identity=bad_identity,
+                symbols=("BTCUSDT",),
+            ) as (data, metadata, verify):
+                write_dataset(
+                    candidate_root,
+                    data,
+                    spec=spec,
+                    instance_metadata=metadata,
+                    staged_validator=verify,
+                    resource_policy=policy,
+                )
+        assert not candidate_root.exists()
+        assert {
+            path.relative_to(root): path.read_bytes()
+            for path in root.rglob("*")
+            if path.is_file()
+        } == before
+        assert policy.used_memory_bytes == 0

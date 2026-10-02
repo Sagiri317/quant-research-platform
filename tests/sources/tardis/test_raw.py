@@ -325,8 +325,12 @@ def test_approved_native_scopes_publish_and_reopen(
         assert result["symbols"] == [symbol]
         assert result["requested_channels"] == list(channels)
         with open_tardis_archive(root, resource_policy=policy) as source:
-            assert source.manifest == result
-            assert source.source_identity["manifest_hash"]
+            (archive,) = source.archives
+            assert archive.manifest == result
+            assert archive.source_identity["manifest_hash"]
+            assert source.source_identity["archives"] == [
+                {"date": result["date"], **archive.source_identity}
+            ]
         assert policy.used_memory_bytes == 0
 
 

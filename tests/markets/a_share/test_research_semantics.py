@@ -120,6 +120,7 @@ def test_insufficient_neutralization_is_missing_not_observed_zero() -> None:
         {
             "timestamp": pd.Timestamp("2024-01-02"),
             "eligible": True,
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
             "log_float_market_cap": [1.0, 2.0],
             "factor": [1.0, 2.0],
@@ -138,6 +139,7 @@ def test_missing_factor_in_other_industry_does_not_change_valid_neutralization()
         {
             "timestamp": pd.Timestamp("2024-01-02"),
             "eligible": True,
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A"] * 200 + ["B"],
             "log_float_market_cap": np.linspace(1.0, 3.0, 201),
             "factor": [*np.sin(np.arange(200)), np.nan],
@@ -298,6 +300,7 @@ def test_neutralization_constant_has_no_artificial_alpha_and_keeps_small_variati
         {
             "timestamp": pd.Timestamp("2020-01-02"),
             "eligible": True,
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A", "B"] * 60,
             "log_float_market_cap": np.linspace(15.17, 24.81, 120),
             "factor": 2.3 + variation * np.sin(axis),
@@ -332,6 +335,7 @@ def test_exact_industry_size_span_is_zero_but_one_ulp_signal_survives(
         {
             "timestamp": pd.Timestamp("2020-01-02"),
             "asset_id": [f"asset_{i}" for i in index],
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": industry.astype(str),
             "log_float_market_cap": size,
             "factor": 3.0 + 4.0 * industry + 2.0 * size,
@@ -383,6 +387,7 @@ def test_neutralization_preserves_single_ulp_projection(offset, changed):
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2020-01-02"),
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
             "log_float_market_cap": size,
             "factor": values,
@@ -405,6 +410,7 @@ def test_auxiliary_size_winsorization_matches_full_configuration():
         {
             "timestamp": pd.Timestamp("2024-01-02"),
             "eligible": True,
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
             "log_float_market_cap": size,
             "factor": np.sin(np.arange(120)),
@@ -432,6 +438,7 @@ def test_exact_nonzero_size_variation_is_not_svd_rank_failure():
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2024-01-02"),
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
             "log_float_market_cap": size,
             "factor": np.resize([1.0, 3.0], 120),
@@ -443,3 +450,22 @@ def test_exact_nonzero_size_variation_is_not_svd_rank_failure():
     assert (
         neutralize_cross_section(frame, factor_columns=("factor",)).factor.isna().all()
     )
+
+
+def test_canonical_industry_residuals_keep_same_code_standards_distinct():
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2023-06-01"),
+            "eligible": True,
+            "industry_standard_id": ["CSRC2012"] * 60 + ["CAPCO"] * 60,
+            "industry_level1_code": "A",
+            "factor": [10.0] * 60 + [20.0] * 60,
+            "log_float_market_cap": np.arange(120, dtype="float64"),
+        }
+    )
+    before = frame.copy(deep=True)
+    result = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    assert result["feature_factor"].eq(0.0).all()
+    assert result["feature_observed_factor"].eq(1.0).all()
+    pd.testing.assert_frame_equal(frame, before)
+    assert result["industry_level1_code"].eq("A").all()

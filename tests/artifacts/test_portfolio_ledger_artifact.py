@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 from contextlib import contextmanager
 from dataclasses import asdict, replace
 from pathlib import Path
@@ -27,7 +28,10 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioValuation,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    MemoryLease,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_iterdir,
@@ -586,8 +590,8 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
             yield batch
 
     def consume_first(batches):
-        assert next(batches).sequence == 0
-        batches.close()
+        with closing_iterator(batches):
+            assert next(batches).sequence == 0
 
     with monkeypatch.context() as patch:
         patch.setattr(ledger_artifact, "_iter_batches", counted_batches)
@@ -1180,7 +1184,7 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
         ("index_close", "keyboard"),
         ("identity", "close"),
         ("identity", "keyboard"),
-        ("index_close", "alpha_cutoff"),
+        ("index_close", "consumer_rejection"),
     ),
 )
 def test_portfolio_reader_early_close_reports_real_cleanup_failures(
@@ -1189,9 +1193,6 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
     import shutil
 
     from quant_research_platform.policy.lifecycle import closing_iterator
-    from quant_research_platform.research.portfolios.production import (
-        frozen_alpha_calibration,
-    )
 
     sessions = tuple(
         _session(
@@ -1245,13 +1246,11 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
                 patch.setattr(
                     ledger_artifact.ExactPrimaryKeyIndex, "close", fail_index_close
                 )
-            if consumer == "alpha_cutoff":
-                with pytest.raises(
-                    ValueError, match="holdout_alpha_source_after_cutoff"
-                ) as caught:
-                    frozen_alpha_calibration(
-                        artifact.iter_chunks(), cutoff=pd.Timestamp("2018-12-31")
-                    )
+            if consumer == "consumer_rejection":
+                with pytest.raises(ValueError, match="consumer_rejected") as caught:
+                    with closing_iterator(artifact.iter_chunks()) as chunks:
+                        next(chunks)
+                        raise ValueError("consumer_rejected")
             else:
                 chunks = artifact.iter_chunks()
                 error = (
@@ -1332,8 +1331,12 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
     frame.loc[cash, "alpha_coverage"] = calibration.coverage
     frame.loc[cash, "alpha_valid_dates"] = calibration.valid_rebalance_dates
     frame.loc[cash, "alpha_scheduled_dates"] = calibration.scheduled_rebalance_dates
+    envelope = _alpha_envelope("2023-12-31")
     root = write_test_sessions(
-        tmp_path / "undefined", envelope=_envelope(), ledger_chunks=(frame,)
+        tmp_path / "undefined",
+        envelope=envelope,
+        ledger_chunks=(frame,),
+        final_calibration=lambda: _alpha_payload(calibration, envelope),
     )
     artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
     summary = ledger_artifact.summarize_portfolio_ledger(artifact)
@@ -1347,7 +1350,9 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
         PortfolioTargetBlocked, match="holdout_alpha_calibration_undefined"
     ):
         frozen_alpha_calibration(
-            artifact.iter_chunks(), cutoff=pd.Timestamp("2023-12-31")
+            artifact.final_alpha_calibration,
+            cutoff=pd.Timestamp("2023-12-31"),
+            selection_group="global",
         )
 
 
@@ -1364,7 +1369,7 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         frozen_alpha_calibration,
     )
 
-    dates = pd.date_range("2018-07-01", periods=6, freq="MS")
+    dates = pd.date_range("2019-01-01", periods=6, freq="MS")
     inputs = pd.DataFrame(
         {"timestamp": dates.repeat(2), "alpha_score": [-0.5, 0.5] * 6}
     )
@@ -1379,7 +1384,7 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         }
     )
     calibration = calibrate_expected_alpha(
-        inputs, as_of=pd.Timestamp("2019-01-01"), scheduled_intervals=intervals
+        inputs, as_of=pd.Timestamp("2019-12-31"), scheduled_intervals=intervals
     )
     assert calibration.status == "DEFINED"
     assert calibration.slope == pytest.approx(slope / alpha_scale, rel=1e-12, abs=0)
@@ -1396,8 +1401,8 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
     if slope:
         assert calibration.weighted_r2 == 1.0
     frame = _session(
-        "2019-01-01",
-        "2019-01-02",
+        "2019-07-01",
+        "2019-07-02",
         pre_asset=0.0,
         target_asset=100.0,
         post_asset=100.0,
@@ -1408,12 +1413,18 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
     for column, field in _ALPHA_DIAGNOSTICS.items():
         frame[column] = pd.Series([None] * len(frame), dtype=object)
         frame.loc[frame.asset_id.eq("__cash__"), column] = getattr(calibration, field)
+    envelope = _alpha_envelope("2019-12-31")
     root = write_test_sessions(
-        tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
+        tmp_path / "portfolio",
+        envelope=envelope,
+        ledger_chunks=(frame,),
+        final_calibration=lambda: _alpha_payload(calibration, envelope),
     )
     artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
     frozen, _ = frozen_alpha_calibration(
-        artifact.iter_chunks(), cutoff=pd.Timestamp("2019-12-31")
+        artifact.final_alpha_calibration,
+        cutoff=pd.Timestamp("2019-12-31"),
+        selection_group="global",
     )
     assert frozen == calibration
     summary = ledger_artifact.summarize_portfolio_ledger(artifact)
@@ -1727,3 +1738,140 @@ def test_verified_member_identity_reaches_ledger_decoder(tmp_path, monkeypatch, 
             read_portfolio_ledger_artifact(root, expected_identity=root.name)
         else:
             tuple(artifact.iter_chunks())
+
+
+def _alpha_envelope(cutoff):
+    base = _envelope().payload()
+    return build_business_manifest_envelope(
+        logical_artifact_id=base["logical_artifact_id"],
+        schema_identity=base["schema_identity"],
+        protocol_or_spec_identity=base["protocol_or_spec_identity"],
+        software_identity=base["software_identity"],
+        research_window={**base["research_window"], "end": cutoff},
+        upstream_identities={"prediction": "d" * 64},
+        semantic_metadata={
+            **base["semantic_metadata"],
+            "target_contract": {
+                "protocol": {"protocol_id": "a_share_low_frequency"},
+                "portfolio_candidate": {
+                    "construction": "benchmark_enhanced",
+                    "selection_group": "global",
+                },
+            },
+        },
+    )
+
+
+def _alpha_payload(calibration, envelope):
+    from dataclasses import asdict
+
+    from quant_research_platform.contracts.targets import unmeasured_operation_evidence
+
+    return {
+        "schema_id": "qrp-final-alpha-calibration-v1",
+        "selection_group": "global",
+        "cutoff": envelope.research_window["end"],
+        "upstream_identities": dict(envelope.upstream_identities),
+        "calibration": asdict(calibration),
+        "observations": unmeasured_operation_evidence("test_calibration"),
+    }
+
+
+@pytest.mark.parametrize(
+    "entry", ("direct", "validation", "callback", "summary", "writer")
+)
+def test_portfolio_reader_releases_previous_transition_before_next_admission(
+    tmp_path, monkeypatch, entry
+):
+    capital = PortfolioCapital("transition", 100.0, "USDT", "linear_perpetual")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="transition",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "1970-01-01",
+            "end": "1970-01-02",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+
+    def produce(emit):
+        for sequence in range(2):
+            emit(
+                PortfolioLedgerBatch(
+                    sequence,
+                    (),
+                    (),
+                    tuple(
+                        PortfolioValuation(
+                            sequence * 3 + index, "__cash__", phase, 100.0, 100.0
+                        )
+                        for index, phase in enumerate(("before", "after", "end"))
+                    ),
+                    (),
+                )
+            )
+
+    def consume(rows):
+        for _batch in rows:
+            _batch = None
+
+    with runtime_resource_policy_scope() as policy:
+        root = ledger_artifact.write_portfolio_ledger_artifact(
+            tmp_path / "ledger",
+            envelope=envelope,
+            produce=produce,
+        )
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        original = _file_bytes(root)
+        original_grow = MemoryLease.grow
+        observed = []
+
+        def grow(lease, amount):
+            frame = sys._getframe(1)
+            if (
+                lease.owner == "artifacts.portfolio.transition"
+                and frame.f_code.co_name == "_iter_batches"
+                and frame.f_locals.get("sequence") == 1
+                and not observed
+            ):
+                stale = []
+                cursor = frame
+                try:
+                    while cursor is not None:
+                        stale.extend(
+                            (cursor.f_code.co_name, name)
+                            for name, value in cursor.f_locals.items()
+                            if isinstance(value, PortfolioLedgerBatch)
+                            and value.sequence == 0
+                        )
+                        cursor = cursor.f_back
+                finally:
+                    cursor = frame = None
+                observed.append(stale)
+            return original_grow(lease, amount)
+
+        monkeypatch.setattr(MemoryLease, "grow", grow)
+        if entry == "writer":
+            ledger_artifact.write_portfolio_ledger_artifact(
+                tmp_path / "again", envelope=envelope, produce=produce
+            )
+        elif entry == "direct":
+            with closing_iterator(artifact.iter_chunks()) as rows:
+                consume(rows)
+        elif entry == "summary":
+            assert ledger_artifact.summarize_portfolio_ledger(artifact)["nav"] == 100.0
+        else:
+            read_portfolio_ledger_artifact(
+                root,
+                expected_identity=envelope.instance_identity,
+                consume_batches=consume if entry == "callback" else None,
+            )
+        assert observed == [[]]
+        assert policy.used_memory_bytes == 0
+        assert _file_bytes(root) == original

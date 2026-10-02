@@ -827,6 +827,8 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
         ("MARKET_ID=synthetic\nordinary\nASSET_ID=synthetic", "row_sample"),
         ("market_id\n=synthetic\nordinary\nasset_id=synthetic", "row_sample"),
         ("asset_id\n=synthetic\nordinary\ntimestamp\n=synthetic", "row_sample"),
+        ("6" + "00000", "stock_sample"),
+        ("/private/synthetic/source.csv", "absolute_path"),
     ],
 )
 def test_evaluation_writer_rejects_unsafe_signal_before_publication(
@@ -891,3 +893,281 @@ def test_evaluation_writer_rejects_unsafe_signal_before_publication(
         assert policy.used_memory_bytes == 0
     assert not list(tmp_path.rglob("summary.md"))
     assert not list(tmp_path.rglob("manifest.json"))
+
+
+def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
+    from dataclasses import replace
+
+    from quant_research_platform.artifacts.outputs import validate_output_bundle
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.catalog.evaluations import EvaluationCatalog
+    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact,
+        write_semantic_artifact,
+    )
+    from quant_research_platform.storage.software_identity import (
+        production_software_identity,
+    )
+    from quant_research_platform.workflows.research import _target_envelope_for_spec
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "baseline")
+    config.update(
+        stage="evaluation", models=[], portfolios=[], comparison_model_id=None
+    )
+    factors = ["spread", "relative_spread", "ofi_500ms"]
+    label = "future_mid_return_500ms"
+    config["evaluation"] = {
+        "factors": factors,
+        "labels": [label],
+        "primary_label": label,
+    }
+    profile = bind_research_configuration(
+        research_profile(config["profile_id"]), config
+    )
+    (spec,) = profile.evaluations.list()
+    protocol = profile.protocol(config["scenario_id"])
+    target = next(
+        item
+        for item in protocol.target_specs("research run")
+        if item.target_id == spec.evaluation_id
+    )
+    old_spec = replace(
+        spec,
+        signals=tuple(
+            replace(signal, direction="higher_is_better") for signal in spec.signals
+        ),
+    )
+    old_profile = replace(profile, evaluations=EvaluationCatalog((old_spec,)))
+    layout = StorageLayout(tmp_path)
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2026-08-01T13:00:00"),
+            "asset_id": ["asset_a", "asset_b", "asset_c"],
+            "spread": [1.0, 2.0, 3.0],
+            "relative_spread": [0.01, 0.02, 0.03],
+            "ofi_500ms": [1.0, 2.0, 3.0],
+            label: [0.1, 0.2, 0.3],
+            "eligible": True,
+        }
+    )
+    roots = []
+    with runtime_resource_policy_scope() as policy:
+        software = production_software_identity()
+        for active in (old_profile, profile):
+            current = active.evaluations.get(spec.evaluation_id)
+            envelope = _target_envelope_for_spec(
+                profile=active,
+                protocol=protocol,
+                target_spec=target,
+                data_spec=None,
+                research_window={
+                    **config["windows"]["development"],
+                    "access": "development",
+                },
+                upstream_identities={config["scenario_id"]: "a" * 64},
+                software_identity=software,
+                raw_content_identity=None,
+            )
+
+            def write(staging, current=current):
+                with evaluation_engine.build_evaluation_result_from_frames(
+                    (frame,),
+                    spec=current,
+                    signal_columns=tuple(factors),
+                    label_columns=(label,),
+                    n_groups=current.n_groups,
+                    asset_column="asset_id",
+                    source_columns_by_kind={"factor": tuple(factors)},
+                    resource_policy=policy,
+                ) as result:
+                    write_evaluation_outputs_from_chunks(
+                        result.output_chunks,
+                        summary_factory=result.summaries,
+                        spec=current,
+                        output_spec=OutputSpec(
+                            output_id=current.evaluation_id,
+                            output_definition_id="evaluation_outputs",
+                            run_id="test_run",
+                            market_id=current.market_id,
+                            run_type="evaluation",
+                            scope=OutputScope.LOCAL_ONLY,
+                        ),
+                        layout=StorageLayout(staging),
+                        n_groups=current.n_groups,
+                    )
+
+            root = write_semantic_artifact(
+                layout.semantic_artifact_root("crypto", spec.evaluation_id),
+                envelope,
+                write,
+            )
+            roots.append(root)
+            restored = read_semantic_artifact(
+                root, expected_identity=envelope.instance_identity
+            )
+            persisted = restored["semantic_metadata"]["target_contract"][
+                "evaluation_spec"
+            ]
+            assert [item["direction"] for item in persisted["signals"]] == [
+                signal.direction for signal in current.signals
+            ]
+            bundle = root / "outputs" / spec.evaluation_id
+            validate_output_bundle(bundle)
+            metrics = pd.read_parquet(bundle / "metrics.parquet").set_index("signal")
+            expected = [1.0, 1.0, 1.0] if active is old_profile else [-1.0, -1.0, 1.0]
+            assert metrics.loc[factors, "ic"].tolist() == pytest.approx(expected)
+            assert metrics.loc[factors, "rankic"].tolist() == pytest.approx(expected)
+            summary = (bundle / "summary.md").read_text()
+            for factor, value in zip(factors, expected, strict=True):
+                row = next(
+                    line
+                    for line in summary.splitlines()
+                    if line.startswith(f"| {factor} | {label} |")
+                )
+                assert [float(cell) for cell in row.split("|")[3:5]] == pytest.approx(
+                    [value, value]
+                )
+            if active is old_profile:
+                old_bytes = {
+                    p.relative_to(root): p.read_bytes()
+                    for p in root.rglob("*")
+                    if p.is_file()
+                }
+            else:
+                groups = pd.read_parquet(bundle / "grouped_label_values.parquet")
+                top = groups.loc[groups.group.eq(3)].set_index("signal")
+                assert top.loc[factors, "mean_label_value"].tolist() == pytest.approx(
+                    [0.1, 0.1, 0.3]
+                )
+            assert policy.used_memory_bytes == 0
+        assert roots[0] != roots[1]
+        assert {
+            p.relative_to(roots[0]): p.read_bytes()
+            for p in roots[0].rglob("*")
+            if p.is_file()
+        } == old_bytes
+
+
+@pytest.mark.parametrize("count", [99999, 100000, 303767, 400000, 500000, 600000])
+def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
+    tmp_path, monkeypatch, count
+):
+    from dataclasses import replace
+
+    from quant_research_platform.artifacts.outputs import validate_output_bundle
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        write_evaluation_outputs_from_chunks,
+    )
+    from quant_research_platform.contracts.evaluations import (
+        EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
+        EVALUATION_METRICS_COLUMNS,
+    )
+    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.reports import evaluation as report
+    from quant_research_platform.storage.layout import StorageLayout
+
+    spec = EvaluationSpec(
+        evaluation_id="count_summary",
+        market_id=MarketId("crypto"),
+        research_dataset_id="hft_research",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+        evaluation_axis="single_asset_time_series",
+        n_groups=2,
+    )
+    output = OutputSpec(
+        output_id=spec.evaluation_id,
+        output_definition_id="evaluation_outputs",
+        run_id="test_run",
+        market_id=spec.market_id,
+        run_type="evaluation",
+        scope=OutputScope.LOCAL_ONLY,
+    )
+    metrics = pd.DataFrame(
+        [
+            [
+                pd.Timestamp("2023-01-02"),
+                "signal",
+                "label",
+                1.0,
+                None,
+                count,
+                None,
+                "not_applicable",
+            ]
+        ],
+        columns=EVALUATION_METRICS_COLUMNS,
+    )
+    grouped = pd.DataFrame(columns=EVALUATION_GROUPED_LABEL_VALUE_COLUMNS)
+    metadata = {
+        "rows_input": count,
+        "rows_after_filter_mode": count,
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "timestamp_count": count,
+        "min_timestamp": "2023-01-02T00:00:00",
+        "max_timestamp": "2023-01-03T00:00:00",
+        "skipped_timestamp_count": 0,
+    }
+    layout = StorageLayout(tmp_path)
+    with runtime_resource_policy_scope() as policy:
+        state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
+        try:
+            state.consume(metrics, grouped, metadata)
+
+            def summaries():
+                return (
+                    state.diagnostics(),
+                    state.ic_summary(),
+                    state.group_spread_summary(),
+                    state.coverage_summary(),
+                )
+
+            root = write_evaluation_outputs_from_chunks(
+                [(metrics, grouped, metadata)],
+                summary_factory=summaries,
+                spec=spec,
+                output_spec=output,
+                layout=layout,
+                n_groups=2,
+            )
+            manifest, _ = validate_output_bundle(root)
+            diagnostics = manifest["metadata"]["evaluation_diagnostics"]
+            for field in ("rows_input", "rows_after_filter_mode", "timestamp_count"):
+                assert type(diagnostics[field]) is int and diagnostics[field] == count
+            assert pd.read_parquet(root / "metrics.parquet").n_obs.tolist() == [count]
+            summary = (root / "summary.md").read_text()
+            for field in ("rows_input", "rows_after_filter", "timestamp_count"):
+                assert f"- {field}: " + chr(96) + f"{count:,}" + chr(96) in summary
+            assert f"| signal | label | {float(count):,} | {count:,} | 1 |" in summary
+            old_bytes = {p.name: p.read_bytes() for p in root.iterdir()}
+            primary = RuntimeError("injected_report_failure")
+
+            def fail_render(**_kwargs):
+                raise primary
+
+            monkeypatch.setattr(report, "render_evaluation_summary", fail_render)
+            with pytest.raises(RuntimeError) as caught:
+                write_evaluation_outputs_from_chunks(
+                    [(metrics, grouped, metadata)],
+                    summary_factory=summaries,
+                    spec=spec,
+                    output_spec=replace(output, output_id="failed_summary"),
+                    layout=layout,
+                    n_groups=2,
+                )
+            assert caught.value is primary
+            assert {p.name: p.read_bytes() for p in root.iterdir()} == old_bytes
+            assert not (root.parent / "failed_summary").exists()
+        finally:
+            state.close()
+        assert policy.used_memory_bytes == 0

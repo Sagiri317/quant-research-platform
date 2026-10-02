@@ -39,6 +39,7 @@ from quant_research_platform.research.protocols.crypto_hft import (
     CryptoMakerPlan,
     execution_windows,
     portfolio_candidates,
+    validation_windows,
 )
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -187,8 +188,16 @@ def _market_coverage_check(coverage, trade_coverage, bounds):
 def _funding_check(funding, expected_identity, bounds):
     if funding.identity != expected_identity:
         raise ValueError("crypto_execution_funding_identity_mismatch")
-    if not funding.coverage[0] <= bounds[0][0] <= bounds[-1][1] <= funding.coverage[1]:
-        raise PortfolioTargetBlocked("binance_funding_coverage_incomplete")
+    cursor, final = bounds[0][0], bounds[-1][1]
+    for start, end in funding.coverage:
+        if end < cursor:
+            continue
+        if start > cursor:
+            break
+        if end >= final:
+            return
+        cursor = end + 1
+    raise PortfolioTargetBlocked("binance_funding_coverage_incomplete")
 
 
 def _maker_config(plan, asset_id, *, calibration=False):
@@ -270,16 +279,30 @@ def _qualified_episodes(coverage, trade_coverage, funding, bounds):
     stop = final + 1
     book_intervals = iter(sorted(coverage.values()))
     trades = trade_coverage.intervals()
+
+    def funding_intervals():
+        left, right = funding.coverage[0]
+        for begin, end in funding.coverage[1:]:
+            if begin == right + 1:
+                right = end
+            else:
+                yield left, right + 1
+                left, right = begin, end
+        yield left, right + 1
+
+    funded_intervals = funding_intervals()
     bad_settlements = tuple(
         event.timestamp_ns
         for event in funding.events
         if event.rate is None or event.mark_price is None
     )
-    with closing_iterator(trades):
+    with closing_iterator(trades), closing_iterator(funded_intervals):
         book, trade = next(book_intervals, None), next(trades, None)
-        while book is not None and trade is not None:
-            left = max(start, book[0], trade[0], funding.coverage[0])
-            right = min(stop, book[1], trade[1], funding.coverage[1] + 1)
+        funded = next(funded_intervals, None)
+        while book is not None and trade is not None and funded is not None:
+            edge = min(book[1], trade[1], funded[1])
+            left = max(start, book[0], trade[0], funded[0])
+            right = min(stop, edge)
             if left < right:
                 cuts = (stamp for stamp in bad_settlements if left <= stamp < right)
                 for cut in cuts:
@@ -294,7 +317,7 @@ def _qualified_episodes(coverage, trade_coverage, funding, bounds):
                         reasons.append("book_coverage_end")
                     if right == trade[1]:
                         reasons.append("trade_coverage_end")
-                    if right == funding.coverage[1] + 1:
+                    if right == funded[1]:
                         reasons.append("funding_coverage_end")
                     yield (
                         left,
@@ -302,10 +325,12 @@ def _qualified_episodes(coverage, trade_coverage, funding, bounds):
                         "PLANNED_END" if right == stop else "TRUNCATED",
                         tuple(sorted(reasons)),
                     )
-            if book[1] <= trade[1]:
+            if book[1] == edge:
                 book = next(book_intervals, None)
-            else:
+            if trade[1] == edge:
                 trade = next(trades, None)
+            if funded[1] == edge:
+                funded = next(funded_intervals, None)
 
 
 def _execute_episodes(
@@ -477,7 +502,9 @@ def produce_taker_ledger(
     with (
         open_run(raw_root, resource_policy) as run,
         read_funding(
-            run.funding_root(symbol), symbol=symbol, resource_policy=resource_policy
+            run.funding_roots(symbol, time_window=output_window),
+            symbol=symbol,
+            resource_policy=resource_policy,
         ) as funding,
     ):
         if run.source_identity != panel["source_artifact_identity"]:
@@ -626,12 +653,7 @@ def produce_maker_calibration(
         expected_identity=upstream_identities[model_target],
         trial_layout=layout,
     )
-    selected_folds = {
-        fold
-        for fold, _window in execution_windows(
-            plan, time_window, access_window=protocol_manifest["access_window"]
-        )
-    }
+    selected_folds = {fold for fold, _window in validation_windows(plan, time_window)}
     sample_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"]
     event_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_events.parquet"]
     integers = {
@@ -929,17 +951,16 @@ def produce_maker_ledger(
                     raise PortfolioTargetBlocked(
                         "maker_calibration_insufficient_samples"
                     )
+            resources.callback(artifact._verify)
             calibrations = {}
             for fold_id, _window in windows:
-                calibrations[fold_id] = {}
-                for side in ("buy", "sell"):
-                    calibration = MakerCalibration(
-                        partial(_calibration_samples, artifact, fold_id, side),
-                        partial(_calibration_events, artifact, fold_id),
-                        resource_policy=resource_policy,
-                    )
-                    resources.callback(calibration.close)
-                    calibrations[fold_id][side] = calibration
+                calibration = MakerCalibration(
+                    partial(_calibration_samples, artifact, fold_id),
+                    partial(_calibration_events, artifact, fold_id),
+                    resource_policy=resource_policy,
+                )
+                resources.callback(calibration.close)
+                calibrations[fold_id] = calibration
 
         def quotes():
             if candidate.calibrated:
@@ -1019,7 +1040,9 @@ def produce_maker_ledger(
         with (
             open_run(raw_root, resource_policy) as run,
             read_funding(
-                run.funding_root(symbol), symbol=symbol, resource_policy=resource_policy
+                run.funding_roots(symbol, time_window=output_window),
+                symbol=symbol,
+                resource_policy=resource_policy,
             ) as funding,
         ):
             if run.source_identity != panel["source_artifact_identity"]:
@@ -1064,8 +1087,6 @@ def produce_maker_ledger(
                 on_ledger=on_ledger,
                 on_episode=on_episode,
             )
-            if candidate.calibrated:
-                artifact._verify()
             return result
 
 
@@ -1075,34 +1096,29 @@ def _calibration_rows(artifact, member, filters=()):
             yield from frame.itertuples(index=False)
 
 
-def _calibration_samples(artifact, fold_id, side):
+def _calibration_samples(artifact, fold_id):
     with closing_iterator(
         _calibration_rows(
             artifact,
             "crypto_maker_samples.parquet",
-            (("fold_id", "==", fold_id), ("side", "==", side)),
+            (("fold_id", "==", fold_id),),
         )
     ) as rows:
         for row in rows:
             sample = row._asdict()
-            sample["decision_at"] = row.decision_at.value
+            for column in ("decision_at", "prediction_end", "label_available_at"):
+                sample[column] = getattr(row, column).value
             yield sample
 
 
-def _calibration_events(artifact, fold_id, start, stop):
-    if start == stop:
-        return
+def _calibration_events(artifact, fold_id):
     policy = current_runtime_resource_policy()
     active = previous = lease = event = bids = asks = None
     with closing_iterator(
         _calibration_rows(
             artifact,
             "crypto_maker_events.parquet",
-            (
-                ("fold_id", "==", fold_id),
-                ("event_id", ">=", start),
-                ("event_id", "<", stop),
-            ),
+            (("fold_id", "==", fold_id),),
         )
     ) as rows:
         try:
@@ -1256,10 +1272,8 @@ def validate_maker_calibration(artifact, envelope):
     folds = {
         fold["fold_id"]: fold
         for fold in plan["folds"]
-        if pd.Timestamp(fold["development_test"]["start"])
-        <= pd.Timestamp(output["end"])
-        and pd.Timestamp(fold["development_test"]["end"])
-        >= pd.Timestamp(output["start"])
+        if pd.Timestamp(fold["validation"]["start"]) <= pd.Timestamp(output["end"])
+        and pd.Timestamp(fold["validation"]["end"]) >= pd.Timestamp(output["start"])
     }
     candidates = portfolio_candidates(protocol["portfolio_candidates"])
     if (
@@ -1315,15 +1329,12 @@ def validate_maker_calibration(artifact, envelope):
                 )
                 for side in ("buy", "sell")
             ]
-            calibrations = {}
-            for side in ("buy", "sell"):
-                model = MakerCalibration(
-                    partial(_calibration_samples, artifact, fold_id, side),
-                    partial(_calibration_events, artifact, fold_id),
-                    resource_policy=policy,
-                )
-                reads.callback(model.close)
-                calibrations[side] = model
+            model = MakerCalibration(
+                partial(_calibration_samples, artifact, fold_id),
+                partial(_calibration_events, artifact, fold_id),
+                resource_policy=policy,
+            )
+            reads.callback(model.close)
             start_header = next(starts, None)
             end_header = next(ends, None)
             previous_start = previous_end = latest_state = None
@@ -1410,7 +1421,6 @@ def validate_maker_calibration(artifact, envelope):
                     raise ValueError("crypto_calibration_event_coordinates_invalid")
                 covered = max(covered, stop)
                 for row in pair:
-                    model = calibrations[row.side]
                     sample = row._asdict()
                     sample["decision_at"] = decision
                     with model._book(initial) as state:

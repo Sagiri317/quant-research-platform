@@ -212,6 +212,7 @@ def _memory_filesystem(path: Path) -> bool:
     if not sys.platform.startswith("linux"):
         return False
     resolved = path.resolve()
+    ancestors = {resolved, *resolved.parents}
     selected = None
     with Path("/proc/self/mountinfo").open(encoding="utf-8") as mounts:
         for line in mounts:
@@ -223,7 +224,7 @@ def _memory_filesystem(path: Path) -> bool:
                     fields.split()[4],
                 )
             )
-            if resolved.is_relative_to(mount) and (
+            if mount in ancestors and (
                 selected is None or len(mount.parts) >= selected[0]
             ):
                 selected = (

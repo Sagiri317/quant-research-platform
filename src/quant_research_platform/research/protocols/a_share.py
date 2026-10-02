@@ -112,7 +112,7 @@ class AShareProtocol:
     access_window: str = "development"
     root_seed: int = ROOT_SEED
     frozen_development: dict[str, object] | None = None
-    frozen_alpha: AlphaCalibration | None = None
+    frozen_alpha: tuple[tuple[str, AlphaCalibration], ...] = ()
     configuration_json: str | None = None
     risk_config: FactorRiskConfig = FactorRiskConfig()
     optimizer_config: OptimizerConfig = OptimizerConfig()
@@ -203,7 +203,29 @@ class AShareProtocol:
                 "start": HOLDOUT_START.isoformat(),
                 "end": HOLDOUT_END.isoformat(),
             },
-            "model_chronology": {"validation_months": 12},
+            "model_chronology": {
+                "scoring_lookback_months": 12,
+                "warmup_window": {
+                    "start": (
+                        pd.Timestamp(DEVELOPMENT_START) - pd.DateOffset(months=12)
+                    )
+                    .date()
+                    .isoformat(),
+                    "end": (pd.Timestamp(DEVELOPMENT_START) - pd.Timedelta(days=1))
+                    .date()
+                    .isoformat(),
+                },
+            },
+            "selection_groups": {
+                "global": {
+                    "scoring": "all_formal_validation",
+                    "development_curve": "retrospective",
+                },
+                "quarterly": {
+                    "scoring": "past_12_months",
+                    "development_curve": "causal",
+                },
+            },
             "root_seed": self.root_seed,
             "benchmark_total_return_indices": {
                 benchmark: BENCHMARK_TOTAL_RETURN_INDICES[benchmark]
@@ -230,6 +252,25 @@ class AShareProtocol:
                 "fdr_primary": "BH_5pct",
                 "fdr_robustness": "BY_5pct",
                 "cscv_blocks": 10,
+                "group_comparison": {
+                    "direction": "quarterly_minus_global",
+                    "metric": "net_return",
+                    "primary_portfolio_id": (
+                        self.configuration()["primary_portfolio_id"]
+                        if self.configuration_json is not None
+                        else None
+                    ),
+                    "portfolio_ids": [
+                        item["candidate_id"]
+                        for item in self.configuration()["portfolios"]
+                    ]
+                    if self.configuration_json is not None
+                    else [],
+                    "fdr_method": "BY",
+                    "alpha": 0.05,
+                    "confidence": 0.95,
+                    "seed": self.root_seed,
+                },
                 "factor_fdr_families": self.factor_fdr_families,
                 "fama_macbeth_core_factors": [
                     item.output_column
@@ -260,13 +301,14 @@ class AShareProtocol:
                         "development_window",
                         "holdout_window",
                         "model_chronology",
+                        "selection_groups",
                         "root_seed",
                     )
                 }
             )
             base["research_configuration"] = {"models": self.configuration()["models"]}
         elif producer_kind == "PREDICTION":
-            pass
+            base["selection_group"] = self.selection_group_for_target(target_id)
         elif producer_kind == "EVALUATION":
             base.update(
                 {
@@ -278,10 +320,7 @@ class AShareProtocol:
                     )
                 }
             )
-        elif (
-            producer_kind == "STATISTIC"
-            and target_id == f"{self.scenario_id}_statistics"
-        ):
+        elif producer_kind == "STATISTIC" and target_id in self.statistics_target_ids:
             base.update(
                 {
                     key: full[key]
@@ -298,6 +337,7 @@ class AShareProtocol:
                 key: self.configuration()[key]
                 for key in ("evaluation", "comparison_model_id")
             }
+            base["selection_group"] = self.selection_group_for_target(target_id)
         else:
             base.update(
                 {
@@ -332,20 +372,30 @@ class AShareProtocol:
         if action != "research run":
             return window
         if isinstance(data_spec, (InterimDataSpec, ProcessedDataSpec)):
-            return self.data_window
+            return TimeWindow(
+                DATA_START,
+                DEVELOPMENT_END if self.access_window == "development" else DATA_END,
+            )
         if isinstance(data_spec, ResearchDatasetSpec):
-            return self.formal_dataset_window
+            return TimeWindow(
+                FORMAL_DATASET_START
+                if self.access_window == "development"
+                else HOLDOUT_START,
+                DEVELOPMENT_END if self.access_window == "development" else HOLDOUT_END,
+            )
         if self.access_window == "holdout":
             return window
         if target_id in {
             f"{self.scenario_id}_evaluation",
-            f"{self.scenario_id}_statistics",
+            *self.statistics_target_ids,
         }:
             return analysis_windows(self.manifest(), window)[0]
-        if target_id in {
-            self.model_selection_target_id,
-            self.persisted_prediction_target_id,
-        }:
+        if target_id == self.model_selection_target_id:
+            return TimeWindow(
+                self.manifest()["model_chronology"]["warmup_window"]["start"],
+                pd.Timestamp(window.end).date(),
+            )
+        if target_id in self.prediction_target_ids:
             return TimeWindow(
                 max(
                     pd.Timestamp(self.manifest()["development_window"]["start"]),
@@ -365,43 +415,63 @@ class AShareProtocol:
         )
 
         persisted = artifacts[self.model_selection_target_id]
-        if max(persisted.quarterly_selections) != str(
-            pd.Period(self.manifest()["development_window"]["end"], freq="Q")
-        ):
-            raise ValueError("holdout_development_model_quarter_invalid")
-        calibration = calibration_date = blocker = None
-        sources = []
-        for candidate in self.portfolio_candidates():
-            if candidate.construction != "benchmark_enhanced":
-                continue
-            source = references[f"{self.scenario_id}_{candidate.candidate_id}_ledger"]
-            calibration_result = []
-
-            def consume(batches, *, calibration_result=calibration_result):
-                calibration_result.append(
-                    frozen_alpha_calibration(
-                        batches, cutoff=pd.Timestamp(record.research_window["end"])
+        expected = {
+            (group, family)
+            for group in ("global", "quarterly")
+            for family in self.model_ids_for_target(self.model_selection_target_id)
+        }
+        if {
+            (entry["selection_group"], entry["family_id"])
+            for entry in persisted.final_models
+        } != expected:
+            raise ValueError("holdout_development_final_models_incomplete")
+        calibrations = []
+        sources = {}
+        blocker = None
+        for group in ("global", "quarterly"):
+            calibration = calibration_date = None
+            sources[group] = []
+            for candidate in self.portfolio_candidates():
+                if (
+                    candidate.selection_group != group
+                    or candidate.construction != "benchmark_enhanced"
+                ):
+                    continue
+                source = references[
+                    f"{self.scenario_id}_{candidate.candidate_id}_ledger"
+                ]
+                try:
+                    ledger = artifacts[source.target_id]()
+                    current, observed_at = frozen_alpha_calibration(
+                        ledger.final_alpha_calibration,
+                        cutoff=pd.Timestamp(record.research_window["end"]),
+                        selection_group=group,
                     )
+                except PortfolioTargetBlocked as exc:
+                    blocker = str(exc)
+                    break
+                if calibration is not None and (
+                    current != calibration or observed_at != calibration_date
+                ):
+                    raise ValueError("holdout_alpha_sources_disagree")
+                calibration, calibration_date = current, observed_at
+                sources[group].append(
+                    {
+                        "selection_group": group,
+                        "reference": source.payload(),
+                        "observed_at": observed_at,
+                    }
                 )
-
-            try:
-                artifacts[source.target_id](consume_batches=consume)
-                ((current, observed_at),) = calibration_result
-            except PortfolioTargetBlocked as exc:
-                blocker = str(exc)
+            if calibration is not None:
+                calibrations.append((group, calibration))
+            if blocker is not None:
                 break
-            if calibration is not None and (
-                current != calibration or observed_at != calibration_date
-            ):
-                raise ValueError("holdout_alpha_sources_disagree")
-            calibration, calibration_date = current, observed_at
-            sources.append({"reference": source.payload(), "observed_at": observed_at})
         frozen["alpha_sources"] = sources
         return replace(
             self,
             access_window="holdout",
             frozen_development=frozen,
-            frozen_alpha=calibration,
+            frozen_alpha=tuple(calibrations),
         ), blocker
 
     def target_specs(self, action: str) -> tuple[TargetSpec, ...]:
@@ -410,8 +480,6 @@ class AShareProtocol:
         dataset = self.scenario_id
         evaluation = f"{dataset}_evaluation"
         model_selection = self.model_selection_target_id
-        predictions = self.persisted_prediction_target_id
-        statistics = f"{dataset}_statistics"
         portfolio_candidates = self.portfolio_candidates()
         portfolios = tuple(
             TargetSpec(
@@ -445,15 +513,32 @@ class AShareProtocol:
                 dependencies=() if self.access_window == "holdout" else (dataset,),
                 producer_id=model_selection,
             ),
-            TargetSpec(
-                predictions,
-                dependencies=(dataset, model_selection),
-                producer_id=predictions,
+            *(
+                TargetSpec(
+                    predictions,
+                    dependencies=(dataset, model_selection),
+                    producer_id=predictions,
+                )
+                for predictions in self.prediction_target_ids
             ),
-            TargetSpec(
-                statistics,
-                dependencies=(predictions, model_selection, dataset),
-                producer_id=statistics,
+            *(
+                TargetSpec(
+                    statistics,
+                    dependencies=(
+                        predictions,
+                        model_selection,
+                        dataset,
+                        *(
+                            (self.statistics_target_ids[0],)
+                            if statistics == self.statistics_target_ids[1]
+                            else ()
+                        ),
+                    ),
+                    producer_id=statistics,
+                )
+                for predictions, statistics in zip(
+                    self.prediction_target_ids, self.statistics_target_ids, strict=True
+                )
             ),
             *portfolios,
             TargetSpec(
@@ -490,8 +575,29 @@ class AShareProtocol:
         return f"{self.scenario_id}_model_selection_refit"
 
     @property
-    def persisted_prediction_target_id(self) -> str:
-        return f"{self.scenario_id}_persisted_predictions"
+    def prediction_target_ids(self):
+        return tuple(
+            f"{self.scenario_id}_{group}_persisted_predictions"
+            for group in ("global", "quarterly")
+        )
+
+    @property
+    def statistics_target_ids(self):
+        return tuple(
+            f"{self.scenario_id}_{group}_statistics"
+            for group in ("global", "quarterly")
+        )
+
+    def selection_group_for_target(self, target_id):
+        for group, prediction, statistics in zip(
+            ("global", "quarterly"),
+            self.prediction_target_ids,
+            self.statistics_target_ids,
+            strict=True,
+        ):
+            if target_id in (prediction, statistics):
+                return group
+        raise ValueError("a_share_group_target_invalid")
 
     def model_ids_for_target(self, target_id: str) -> tuple[str, ...]:
         if target_id == self.model_selection_target_id:
@@ -525,30 +631,34 @@ class AShareProtocol:
             enhanced = item["construction"] == "benchmark_enhanced"
             if enhanced and item["benchmark_id"] not in BENCHMARK_TOTAL_RETURN_INDICES:
                 raise ValueError("a_share_benchmark_not_supported")
-            result.append(
-                PortfolioCandidateSpec(
-                    **item,
-                    prediction_target_id=self.persisted_prediction_target_id,
-                    benchmark_weights_target_id="benchmark_weights"
-                    if enhanced
-                    else None,
-                    risk_style_columns=RISK_STYLE_COLUMNS
-                    if enhanced
-                    else RISK_STYLE_COLUMNS[:-1],
-                    risk_context_target_ids=(
-                        market_ids.PRICE_VOLUME_DATA_ID,
-                        "market_model_factors",
-                        "fundamental_factors",
+            for group, prediction_target in zip(
+                ("global", "quarterly"), self.prediction_target_ids, strict=True
+            ):
+                result.append(
+                    PortfolioCandidateSpec(
+                        **{**item, "candidate_id": f"{group}_{item['candidate_id']}"},
+                        selection_group=group,
+                        prediction_target_id=prediction_target,
+                        benchmark_weights_target_id="benchmark_weights"
+                        if enhanced
+                        else None,
+                        risk_style_columns=RISK_STYLE_COLUMNS
+                        if enhanced
+                        else RISK_STYLE_COLUMNS[:-1],
+                        risk_context_target_ids=(
+                            market_ids.PRICE_VOLUME_DATA_ID,
+                            "market_model_factors",
+                            "fundamental_factors",
+                        )
+                        if enhanced
+                        else (market_ids.PRICE_VOLUME_DATA_ID,),
+                        research_dataset_id=self.scenario_id,
+                        market_panel_target_id=market_ids.MARKET_PANEL_ID,
+                        execution_mask_target_id="execution_mask",
+                        trading_calendar_target_id="trading_calendar",
+                        fee_schedule_target_id="a_share_fee_schedule",
                     )
-                    if enhanced
-                    else (market_ids.PRICE_VOLUME_DATA_ID,),
-                    research_dataset_id=self.scenario_id,
-                    market_panel_target_id=market_ids.MARKET_PANEL_ID,
-                    execution_mask_target_id="execution_mask",
-                    trading_calendar_target_id="trading_calendar",
-                    fee_schedule_target_id="a_share_fee_schedule",
                 )
-            )
         return tuple(result)
 
     def portfolio_candidate_for_target(
@@ -569,7 +679,7 @@ class AShareProtocol:
                     return (f"{self.scenario_id}_evaluation",)
                 return (
                     f"{self.scenario_id}_evaluation",
-                    f"{self.scenario_id}_statistics",
+                    *self.statistics_target_ids,
                     *(
                         f"{self.scenario_id}_{candidate.candidate_id}_ledger"
                         for candidate in self.portfolio_candidates()
@@ -582,7 +692,7 @@ class AShareProtocol:
                 )
             return (
                 f"{self.scenario_id}_evaluation",
-                f"{self.scenario_id}_statistics",
+                *self.statistics_target_ids,
                 f"{self.scenario_id}_portfolio_statistics",
                 *(
                     f"{self.scenario_id}_{candidate.candidate_id}_ledger"
@@ -601,41 +711,39 @@ def model_folds(
     formal_dataset_window: Mapping[str, object],
     development_window: Mapping[str, object],
 ) -> tuple[ExperimentFold, ...]:
-    if type(chronology) is not dict or set(chronology) != {"validation_months"}:
+    if type(chronology) is not dict or set(chronology) != {
+        "scoring_lookback_months",
+        "warmup_window",
+    }:
         raise ValueError("model_chronology_missing")
     history_start = pd.Timestamp(formal_dataset_window["start"])
     development_start = pd.Timestamp(development_window["start"])
     development_end = pd.Timestamp(development_window["end"])
-    validation_months = chronology["validation_months"]
-    if type(validation_months) is not int or validation_months <= 0:
-        raise ValueError("model_chronology_validation_months_invalid")
+    months = chronology["scoring_lookback_months"]
+    if type(months) is not int or months != 12:
+        raise ValueError("model_chronology_scoring_months_invalid")
+    warmup_start = development_start - pd.DateOffset(months=months)
+    if chronology["warmup_window"] != {
+        "start": warmup_start.date().isoformat(),
+        "end": (development_start - pd.Timedelta(days=1)).date().isoformat(),
+    }:
+        raise ValueError("model_chronology_warmup_invalid")
     axis = pd.DatetimeIndex(sessions).normalize().drop_duplicates().sort_values()
     if axis.empty or axis.min() < history_start or axis.max() > development_end:
         raise ValueError("model_chronology_sessions_outside_development")
     if axis.min().year != history_start.year:
         raise ValueError("model_chronology_formal_history_missing")
-    folds: list[ExperimentFold] = []
-    for period in pd.PeriodIndex(axis.to_period("Q")).unique():
-        if period < pd.Period(development_start, freq="Q"):
-            continue
-        test = axis[axis.to_period("Q") == period]
-        validation = axis[
-            (axis >= period.start_time - pd.DateOffset(months=validation_months))
-            & (axis < period.start_time)
-        ]
-        training = (
-            axis[axis < validation.min()]
-            if not validation.empty
-            else axis[axis < test.min()]
-        )
-        if training.empty or validation.empty or test.empty:
+    folds = []
+    for period in pd.period_range(warmup_start, development_end, freq="Q"):
+        validation = axis[axis.to_period("Q") == period]
+        training = axis[axis < period.start_time]
+        if training.empty or validation.empty:
             raise ValueError("a_share_walk_forward_window_incomplete")
         folds.append(
             ExperimentFold(
                 fold_id=f"{period.year:04d}-q{period.quarter}",
                 train=TimeWindow(training[0], training[-1]),
                 validation=TimeWindow(validation[0], validation[-1]),
-                development_test=TimeWindow(test[0], test[-1]),
             )
         )
     return tuple(folds)

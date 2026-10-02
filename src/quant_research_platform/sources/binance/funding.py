@@ -1,6 +1,7 @@
 """Immutable per-symbol funding observations with separate known forecasts."""
 
 import hashlib
+import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -47,7 +48,7 @@ FUNDING_SCHEMA_ID = "qrp-binance-funding-observations"
 @dataclass(frozen=True)
 class FundingObservations:
     identity: str
-    coverage: tuple[int, int]
+    coverage: tuple[tuple[int, int], ...]
     events: tuple[FundingEvent, ...]
     forecasts: Iterator[FundingForecast]
 
@@ -189,58 +190,94 @@ def _records(root, manifest):
 
 
 @contextmanager
-def read_funding_observations(funding_root, *, symbol, resource_policy=None):
-    """Empty events mean no settlements only with explicit complete source coverage."""
+def read_funding_observations(funding_roots, *, symbol, resource_policy=None):
+    """Read ordered immutable sources without inventing coverage between them."""
     if symbol not in RESEARCH_SYMBOLS:
         raise ValueError("binance_funding_symbol_invalid")
-    root = Path(funding_root)
+    if type(funding_roots) is not tuple:
+        raise ValueError("binance_funding_roots_invalid")
+    if not funding_roots:
+        raise PortfolioTargetBlocked("binance_funding_input_missing")
     with (
         runtime_resource_policy_scope(resource_policy) as policy,
         policy.lease(
             "binance.funding.read", json_record_working_set_bytes(MAX_RECORD_BYTES)
         ),
-        policy.lease("binance.funding.settlements", 1) as retained,
+        policy.lease("binance.funding.retained", 1) as retained,
     ):
-        manifest = _manifest(root, symbol)
-        identity = canonical_json_hash(manifest)
+        sources = []
+        coverage = []
+        for value in funding_roots:
+            retained.grow(4096 + len(str(value)) * 16)
+            root = Path(value)
+            manifest = _manifest(root, symbol)
+            interval = manifest["metadata"]["coverage"]
+            start, end = interval["start_ns"], interval["end_ns"]
+            if coverage and start <= coverage[-1][1]:
+                raise ValueError("binance_funding_source_intervals_invalid")
+            coverage.append((start, end))
+            sources.append((root, canonical_json_hash(manifest)))
+            del manifest, interval
+        identity = canonical_json_hash({"sources": [item[1] for item in sources]})
+
+        def records():
+            previous = {FundingEvent: -1, FundingForecast: -1}
+            for root, expected in sources:
+                manifest = _manifest(root, symbol)
+                if canonical_json_hash(manifest) != expected:
+                    raise ValueError("binance_funding_identity_changed")
+                rows = _records(root, manifest)
+                with closing_iterator(rows):
+                    for item in rows:
+                        kind = type(item)
+                        stamp = (
+                            item.timestamp_ns
+                            if kind is FundingEvent
+                            else item.available_at_ns
+                        )
+                        if stamp <= previous[kind]:
+                            raise ValueError("binance_funding_record_order_invalid")
+                        previous[kind] = stamp
+                        yield item
+                if canonical_json_hash(_manifest(root, symbol)) != expected:
+                    raise ValueError("binance_funding_identity_changed")
+
         events = []
-        records = _records(root, manifest)
-        with closing_iterator(records):
-            for item in records:
+        with closing_iterator(records()) as rows:
+            for item in rows:
                 if type(item) is FundingEvent:
                     retained.grow(256)
                     events.append(item)
 
         def forecasts():
-            records = _records(root, manifest)
-            with closing_iterator(records):
-                for item in records:
+            with closing_iterator(records()) as rows:
+                for item in rows:
                     if type(item) is FundingForecast:
                         yield item
 
-        source = forecasts()
-        with closing_iterator(source):
-            yield FundingObservations(
-                identity,
-                (
-                    manifest["metadata"]["coverage"]["start_ns"],
-                    manifest["metadata"]["coverage"]["end_ns"],
-                ),
-                tuple(events),
-                source,
-            )
-            # Verify all bytes/fields without feeding unused future data to decisions.
-            records = _records(root, manifest)
-            with closing_iterator(records):
-                for _item in records:
-                    pass
-            if canonical_json_hash(_manifest(root, symbol)) != identity:
-                raise ValueError("binance_funding_identity_changed")
+        try:
+            with closing_iterator(forecasts()) as source:
+                yield FundingObservations(
+                    identity, tuple(coverage), tuple(events), source
+                )
+        finally:
+            primary = sys.exception()
+            try:
+                # Revalidate each source even if forecasts were only partly consumed.
+                with closing_iterator(records()) as rows:
+                    for _item in rows:
+                        pass
+            except BaseException as error:
+                if primary is None or isinstance(primary, GeneratorExit):
+                    raise
+                primary.add_note(
+                    "Funding source verification also failed: " + type(error).__name__
+                )
 
 
-def funding_source_identity(funding_root, _target_id, *, symbol):
+def funding_source_identity(funding_roots, _target_id, *, symbol):
     try:
-        with read_funding_observations(funding_root, symbol=symbol) as observations:
+        with read_funding_observations(funding_roots, symbol=symbol) as observations:
             return observations.identity
     except PortfolioTargetBlocked:
         raise

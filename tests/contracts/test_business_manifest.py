@@ -137,3 +137,23 @@ def test_validator_rejects_operational_fields_instead_of_hashing_them() -> None:
     payload["created_at"] = "2026-09-01T00:00:00Z"
     with pytest.raises(ValueError, match="business_manifest_envelope_fields_invalid"):
         validate_business_manifest_envelope(payload)
+
+
+def test_typed_envelope_admission_precedes_plain_container_projection() -> None:
+    envelope = _envelope(semantic_metadata={"counts": [{} for _ in range(2000)]})
+    original_identity = envelope.instance_identity
+    sizes: list[int] = []
+    assert (
+        validate_business_manifest_envelope(envelope, _admit=sizes.append)
+        == envelope.payload()
+    )
+    assert sizes and all(size > 0 for size in sizes)
+
+    def reject(_size: int) -> None:
+        raise MemoryError("envelope_projection_not_admitted")
+
+    with pytest.raises(MemoryError, match="envelope_projection_not_admitted"):
+        validate_business_manifest_envelope(envelope, _admit=reject)
+    assert envelope.instance_identity == original_identity
+    assert len(envelope.semantic_metadata["counts"]) == 2000
+    assert validate_business_manifest_envelope(envelope) == envelope.payload()

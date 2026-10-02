@@ -390,7 +390,7 @@ def portfolio_candidates(selection):
 @dataclass(frozen=True)
 class _CryptoResearchPlan:
     folds: tuple[ExperimentFold, ...]
-    final_holdout: TimeWindow
+    test: TimeWindow
     initial_capital: float
     valuation_currency: str
     exposure_limits: tuple[tuple[str, float, float], ...]
@@ -409,11 +409,10 @@ class _CryptoResearchPlan:
                     "fold_id": fold.fold_id,
                     "train": window(fold.train),
                     "validation": window(fold.validation),
-                    "development_test": window(fold.development_test),
                 }
                 for fold in self.folds
             ],
-            "final_holdout": window(self.final_holdout),
+            "test": window(self.test),
             "initial_capital": self.initial_capital,
             "valuation_currency": self.valuation_currency,
             "exposure_limits": {
@@ -433,7 +432,7 @@ class _CryptoResearchPlan:
 def research_chronology(value):
     """Decode the chronology shared by model artifacts and execution plans."""
     snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=1024 * 1024)
-    if set(snapshot) != {"folds", "final_holdout"}:
+    if set(snapshot) != {"folds", "test"}:
         raise ValueError("crypto_research_chronology_fields_invalid")
 
     def window(value):
@@ -453,22 +452,20 @@ def research_chronology(value):
             "fold_id",
             "train",
             "validation",
-            "development_test",
         }:
             raise ValueError("crypto_research_plan_fold_invalid")
         fold = ExperimentFold(
             fold_id=item["fold_id"],
             train=window(item["train"]),
             validation=window(item["validation"]),
-            development_test=window(item["development_test"]),
         )
-        if folds and folds[-1].development_test.end >= fold.development_test.start:
-            raise ValueError("crypto_research_plan_oos_windows_overlap")
+        if folds and folds[-1].validation.end >= fold.validation.start:
+            raise ValueError("crypto_research_plan_validation_windows_overlap")
         folds.append(fold)
     if len({fold.fold_id for fold in folds}) != len(folds):
         raise ValueError("crypto_research_plan_duplicate_fold")
-    holdout = window(snapshot["final_holdout"])
-    if folds[-1].development_test.end >= holdout.start:
+    holdout = window(snapshot["test"])
+    if any(fold.validation.end >= holdout.start for fold in folds):
         raise ValueError("crypto_research_plan_holdout_overlap")
     return tuple(folds), holdout
 
@@ -477,7 +474,7 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
     snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=1024 * 1024)
     if set(snapshot) - {"execution"} != {
         "folds",
-        "final_holdout",
+        "test",
         "initial_capital",
         "valuation_currency",
         "exposure_limits",
@@ -485,7 +482,7 @@ def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
         raise ValueError("crypto_research_plan_fields_invalid")
 
     folds, holdout = research_chronology(
-        {key: snapshot[key] for key in ("folds", "final_holdout")}
+        {key: snapshot[key] for key in ("folds", "test")}
     )
     capital = PortfolioCapital(
         "crypto_plan",
@@ -661,10 +658,10 @@ class CryptoProtocol:
             result.update(
                 research_plan=payload,
                 development_window={
-                    "start": payload["folds"][0]["development_test"]["start"],
-                    "end": payload["folds"][-1]["development_test"]["end"],
+                    "start": payload["folds"][0]["validation"]["start"],
+                    "end": payload["folds"][-1]["validation"]["end"],
                 },
-                holdout_window=payload["final_holdout"],
+                holdout_window=payload["test"],
             )
         return result
 
@@ -679,7 +676,7 @@ class CryptoProtocol:
         if self.research_plan is None:
             return result
         plan = self.research_plan.payload()
-        selected_plan = {key: plan[key] for key in ("folds", "final_holdout")}
+        selected_plan = {key: plan[key] for key in ("folds", "test")}
         result["research_plan"] = selected_plan
         if producer_kind == "MODEL":
             result["research_configuration"] = {
@@ -876,7 +873,9 @@ class CryptoProtocol:
         persisted = artifacts[reference.target_id]
         final_fold = self.research_plan.folds[-1]
         entries = [
-            item for item in persisted.models if item["fold_id"] == final_fold.fold_id
+            item
+            for item in persisted.final_models
+            if item["fold_id"] == final_fold.fold_id
         ]
         if {item["model_id"] for item in entries} != set(
             self.model_ids_for_target(reference.target_id)
@@ -967,6 +966,17 @@ class CryptoProtocol:
                 and self.configuration()["stage"] == "evaluation"
             ):
                 return (f"{self.scenario_id}_evaluation",)
+            if self.access_window == "development":
+                return (
+                    f"{self.scenario_id}_models",
+                    f"{self.scenario_id}_evaluation",
+                    *(
+                        candidate.calibration_target_id
+                        for candidate in self.portfolio_candidates()
+                        if isinstance(candidate, CryptoMakerCandidate)
+                        and candidate.calibrated
+                    ),
+                )
             if self.configuration_json is not None:
                 selected = self.configuration()
                 return (
@@ -1011,41 +1021,38 @@ class CryptoProtocol:
         raise ValueError("unknown_crypto_action")
 
 
-def execution_windows(plan, output_window, *, access_window="development"):
-    if access_window == "holdout":
-        boundary = plan["final_holdout"]
-        return (
-            (
-                plan["folds"][-1]["fold_id"],
-                TimeWindow(
-                    max(
-                        pd.Timestamp(boundary["start"]),
-                        pd.Timestamp(output_window.start),
-                    ),
-                    min(pd.Timestamp(boundary["end"]), pd.Timestamp(output_window.end)),
-                ),
-            ),
-        )
+def validation_windows(plan, output_window):
+    """Return only declared validation intervals intersecting the request."""
     return tuple(
         (
             fold["fold_id"],
             TimeWindow(
                 max(
-                    pd.Timestamp(fold["development_test"]["start"]),
+                    pd.Timestamp(fold["validation"]["start"]),
                     pd.Timestamp(output_window.start),
                 ),
                 min(
-                    pd.Timestamp(fold["development_test"]["end"]),
+                    pd.Timestamp(fold["validation"]["end"]),
                     pd.Timestamp(output_window.end),
                 ),
             ),
         )
         for fold in plan["folds"]
-        if pd.Timestamp(fold["development_test"]["end"])
-        >= pd.Timestamp(output_window.start)
-        and pd.Timestamp(fold["development_test"]["start"])
-        <= pd.Timestamp(output_window.end)
+        if pd.Timestamp(fold["validation"]["end"]) >= pd.Timestamp(output_window.start)
+        and pd.Timestamp(fold["validation"]["start"]) <= pd.Timestamp(output_window.end)
     )
+
+
+def execution_windows(plan, output_window, *, access_window):
+    """Execution consumes the frozen final test and never validation."""
+    if access_window != "holdout":
+        raise PermissionError("crypto_execution_requires_frozen_test")
+    boundary = TimeWindow(**plan["test"])
+    if pd.Timestamp(output_window.start) < pd.Timestamp(boundary.start) or pd.Timestamp(
+        output_window.end
+    ) > pd.Timestamp(boundary.end):
+        raise PermissionError("crypto_execution_test_window_invalid")
+    return ((plan["folds"][-1]["fold_id"], output_window),)
 
 
 def protocol(
@@ -1099,16 +1106,23 @@ def build_hft_prediction_catalog(
 
 
 def build_crypto_evaluation_catalog(*, configuration=None) -> EvaluationCatalog:
+    columns = (
+        HFT_FACTOR_COLUMNS
+        if configuration is None
+        else tuple(configuration["evaluation"]["factors"])
+    )
+    labels = (
+        tuple(item.output_column for item in label_catalog().list())
+        if configuration is None
+        else tuple(configuration["evaluation"]["labels"])
+    )
     factor = EvaluationSpec(
         evaluation_id=f"{market_ids.HFT_RESEARCH_DATASET_ID}_evaluation",
         market_id=market_ids.MARKET_ID,
         research_dataset_id=market_ids.HFT_RESEARCH_DATASET_ID,
-        signals=build_signal_specs(columns=HFT_FACTOR_COLUMNS),
-        label_columns=tuple(item.output_column for item in label_catalog().list()),
-        label_availability_columns={
-            label: f"{label}_available_at"
-            for label in tuple(item.output_column for item in label_catalog().list())
-        },
+        signals=build_signal_specs(columns=columns),
+        label_columns=labels,
+        label_availability_columns={label: f"{label}_available_at" for label in labels},
     )
     models = build_hft_model_catalog(configuration=configuration).list()
     comparisons = []

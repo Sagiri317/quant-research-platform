@@ -33,6 +33,7 @@ _MODEL_ARTIFACT_LINEAGE_KEYS = frozenset(
         "model_artifact_schema",
         "quarterly_models",
         "champion_by_quarter",
+        "selection_group",
     }
 )
 _PREDICTION_METADATA_KEYS = frozenset(
@@ -120,6 +121,9 @@ def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, o
         raise ValueError("invalid_model_metadata")
     models = metadata["quarterly_models"]
     champions = metadata["champion_by_quarter"]
+    group = metadata["selection_group"]
+    if group not in {"global", "quarterly"}:
+        raise ValueError("invalid_model_metadata")
     if type(models) is not list or not models or type(champions) is not dict:
         raise ValueError("invalid_model_metadata")
     seen = set()
@@ -127,20 +131,22 @@ def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, o
     for model in models:
         if type(model) is not dict or set(model) != {
             "quarter_id",
-            "source_quarter",
+            "decision_id",
+            "prediction_source",
             "family_id",
             "model_id",
             "prediction_window",
         }:
             raise ValueError("invalid_model_metadata")
         quarter, family = model["quarter_id"], model["family_id"]
-        source_quarter = model["source_quarter"]
+        source = model["prediction_source"]
+        decision_id = model["decision_id"]
         if (
             type(quarter) is not str
             or str(pd.Period(quarter, freq="Q")) != quarter
-            or type(source_quarter) is not str
-            or str(pd.Period(source_quarter, freq="Q")) != source_quarter
-            or pd.Period(source_quarter, freq="Q") > pd.Period(quarter, freq="Q")
+            or source not in {"validation", "final"}
+            or decision_id
+            != ("final" if source == "final" or group == "global" else quarter)
             or (quarter, family) in seen
         ):
             raise ValueError("invalid_model_metadata")
@@ -159,7 +165,8 @@ def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, o
         seen.add((quarter, family))
         families.setdefault(quarter, []).append(family)
     if (
-        set(champions) != set(families)
+        len({item["prediction_source"] for item in models}) != 1
+        or set(champions) != set(families)
         or any(
             champions[quarter] not in members for quarter, members in families.items()
         )
@@ -278,25 +285,9 @@ def validate_prediction_output_metadata_shape(
     ):
         raise ValueError("output_manifest_metadata_invalid")
     try:
-        model_selection = model_metadata.get("model_selection")
-        candidate_model_ids: tuple[str, ...] = ()
-        model_selection_metric = "validation_rankic"
-        model_selection_validation_start = None
-        model_selection_validation_end = None
-        if type(model_selection) is dict:
-            persisted_candidates = model_selection["candidate_model_ids"]
-            candidate_model_ids = tuple(persisted_candidates[1:])
-            model_selection_metric = model_selection["selection_metric"]
-            model_selection_validation_start = model_selection["validation_start"]
-            model_selection_validation_end = model_selection["validation_end"]
-        persisted_model_id = (
-            model_selection["selected_model_id"]
-            if type(model_selection) is dict
-            else metadata["model_id"]
-        )
         if "model_artifact_id" not in model_metadata:
             ModelSpec(
-                model_id=persisted_model_id,
+                model_id=metadata["model_id"],
                 model_algorithm=model_metadata["model_algorithm"],
                 input_factor_columns=tuple(model_metadata["input_factor_columns"]),
                 input_feature_columns=tuple(model_metadata["input_feature_columns"]),
@@ -326,10 +317,6 @@ def validate_prediction_output_metadata_shape(
             sample_filter_mode=metadata["sample_filter_mode"],
             is_oos=metadata["is_oos"],
             is_final_oos_window=metadata["is_final_oos_window"],
-            candidate_model_ids=candidate_model_ids,
-            model_selection_metric=model_selection_metric,
-            model_selection_validation_start=model_selection_validation_start,
-            model_selection_validation_end=model_selection_validation_end,
             training_asset_ids=tuple(metadata["training_asset_ids"]),
             evaluation_asset_ids=tuple(metadata["evaluation_asset_ids"]),
         )
@@ -495,43 +482,6 @@ def validate_model_metadata_consistency(
         or metadata["oos_start"] != spec.test_start
     ):
         raise ValueError("model_metadata_inconsistent")
-    validate_model_selection_metadata_consistency(metadata, spec=spec)
-
-
-def validate_model_selection_metadata_consistency(
-    metadata: dict[str, object],
-    *,
-    spec: PredictionSpec,
-) -> None:
-    model_selection = metadata.get("model_selection")
-    if not spec.candidate_model_ids:
-        if model_selection is not None:
-            raise ValueError("model_metadata_inconsistent")
-        return
-    if type(model_selection) is not dict:
-        raise ValueError("model_metadata_inconsistent")
-    candidate_model_ids = [spec.model_id, *spec.candidate_model_ids]
-    if model_selection["configured_model_id"] != spec.model_id:
-        raise ValueError("model_metadata_inconsistent")
-    if model_selection["candidate_model_ids"] != candidate_model_ids:
-        raise ValueError("model_metadata_inconsistent")
-    if model_selection["selected_model_id"] not in candidate_model_ids:
-        raise ValueError("model_metadata_inconsistent")
-    if model_selection["selection_metric"] != spec.model_selection_metric:
-        raise ValueError("model_metadata_inconsistent")
-    if (
-        model_selection["validation_start"] != spec.model_selection_validation_start
-        or model_selection["validation_end"] != spec.model_selection_validation_end
-    ):
-        raise ValueError("model_metadata_inconsistent")
-    if len(model_selection["trial_metrics"]) != model_selection["candidate_count"]:
-        raise ValueError("model_metadata_inconsistent")
-    if [
-        trial["model_id"] for trial in model_selection["trial_metrics"]
-    ] != candidate_model_ids:
-        raise ValueError("model_metadata_inconsistent")
-    if model_selection["selected_model_input_columns"] != metadata["input_columns"]:
-        raise ValueError("model_metadata_inconsistent")
 
 
 def validate_prediction_metadata_consistency_from_summary(
@@ -642,7 +592,7 @@ def _validate_crypto_lineage(metadata):
         raise ValueError("invalid_model_metadata")
     require_metadata_string_list(metadata, "asset_ids", "invalid_model_metadata")
     folds = metadata["fold_models"]
-    if type(folds) is not list or not folds:
+    if type(folds) is not list or len(folds) != 1:
         raise ValueError("invalid_model_metadata")
     seen = set()
     previous = None
@@ -650,6 +600,8 @@ def _validate_crypto_lineage(metadata):
         if type(fold) is not dict or set(fold) != {
             "fold_id",
             "prediction_window",
+            "fit_windows",
+            "fit_cutoff",
             "training_asset_ids",
             "evaluation_asset_ids",
         }:
@@ -664,6 +616,27 @@ def _validate_crypto_lineage(metadata):
         if start > end or (previous is not None and start <= previous):
             raise ValueError("invalid_model_metadata")
         previous = end
+        windows = fold["fit_windows"]
+        if type(windows) is not list or len(windows) != 2:
+            raise ValueError("invalid_model_metadata")
+        if any(
+            type(window) is not dict or set(window) != {"start", "end"}
+            for window in windows
+        ):
+            raise ValueError("invalid_model_metadata")
+        bounds = tuple(
+            (pd.Timestamp(window["start"]), pd.Timestamp(window["end"]))
+            for window in windows
+        )
+        cutoff = pd.Timestamp(fold["fit_cutoff"])
+        if (
+            any(pd.isna(value) for pair in bounds for value in pair)
+            or any(left > right for left, right in bounds)
+            or not bounds[0][1] < bounds[1][0]
+            or bounds[-1][1] != cutoff
+            or cutoff >= start
+        ):
+            raise ValueError("invalid_model_metadata")
         for key in ("training_asset_ids", "evaluation_asset_ids"):
             require_metadata_string_list(
                 fold, key, "invalid_model_metadata", allow_empty=True

@@ -2961,3 +2961,99 @@ def test_nullable_index_source_numeric_values_still_reject_invalid_facts(
     rows[0][raw_column] = bad_value
     with pytest.raises(ValueError, match=reason):
         interim.normalize_raw_frame(pd.DataFrame(rows), data_id)
+
+
+@pytest.mark.parametrize("cap", (512 * 1024, 8 * 1024**2))
+@pytest.mark.parametrize(
+    "payload,expected",
+    (
+        (b'"1",2\r\n', [["1", "2"]]),
+        (b'\xef\xbb\xbf"a""b",2\r\n', [['a"b', "2"]]),
+        (b'"line\r\nbreak",2\r\n', [["line\r\nbreak", "2"]]),
+        (b'"1"\r"2"\n"3"', [["1"], ["2"], ["3"]]),
+        (b'"",', [["", ""]]),
+        (
+            b'"' + b"x" * 8190 + b'""y",2\r\n',
+            [["x" * 8190 + '"y', "2"]],
+        ),
+        (b'"1"0,2\n', None),
+        (b'"1" ,2\n', None),
+        (b'"1"\t,2\n', None),
+        (b'"unterminated,2\n', None),
+        (b'"' + b"x" * 8190 + b'"0,2\n', None),
+    ),
+)
+def test_csv_strict_grammar_matches_across_memory_budgets(
+    tmp_path, cap, payload, expected
+):
+    import io
+
+    path = tmp_path / "grammar.csv"
+    filesystem_write_bytes(path, payload)
+    oracle = csv.reader(
+        io.StringIO(payload.decode("utf-8-sig"), newline=""), strict=True
+    )
+    if expected is None:
+        with pytest.raises(csv.Error):
+            list(oracle)
+    else:
+        assert list(oracle) == expected
+
+    with runtime_resource_policy_scope(
+        capture_test_policy(available_memory_bytes=64 * 1024**2, explicit_cap_bytes=cap)
+    ) as policy:
+        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
+        actual, modes = [], []
+        try:
+            if expected is None:
+                with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
+                    next(records)
+            else:
+                for record, _ in records:
+                    modes.append(record._owner._decoded_fields is not None)
+                    actual.append(record.materialize())
+                assert actual == expected
+                if cap == 512 * 1024:
+                    assert modes and not any(modes)
+                elif payload == b'"1",2\r\n':
+                    assert modes == [True]
+        finally:
+            records.close()
+        assert policy.used_memory_bytes == 0
+
+
+def test_malformed_quoted_numeric_cannot_publish_over_old_good(tmp_path):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw, parents=True)
+    _write_csmar(raw, "analyst_forecast", _analyst_rows()[:1])
+    with runtime_resource_policy_scope() as policy:
+        result = interim.materialize_interim_data(
+            layout=layout, data_ids=("analyst_forecast",), resource_policy=policy
+        )
+        root = result.artifact_roots["analyst_forecast"]
+        old_good = _file_bytes(root)
+        before = read_dataset(root, resource_policy=policy)
+        path = next(filesystem_glob(raw, "*.csv"))
+        payload = filesystem_read_bytes(path)
+        assert payload.count(b",18,10") == 1
+        malformed = payload.replace(b",18,10", b',"1"0,10')
+        filesystem_write_bytes(path, malformed)
+        candidate = layout.instance_root(root, "f" * 64)
+        with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
+            interim.materialize_interim_data(
+                layout=layout.with_target_roots({"analyst_forecast": candidate}),
+                data_ids=("analyst_forecast",),
+                resource_policy=policy,
+            )
+        assert not filesystem_exists(candidate)
+        assert _file_bytes(root) == old_good
+        pd.testing.assert_frame_equal(
+            before, read_dataset(root, resource_policy=policy)
+        )
+        assert filesystem_read_bytes(path) == malformed
+        assert policy.used_memory_bytes == 0

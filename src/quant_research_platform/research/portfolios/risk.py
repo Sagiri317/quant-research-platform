@@ -11,7 +11,10 @@ import pandas as pd
 from quant_research_platform.contracts.validation import (
     strict_real_numeric_series,
 )
-from quant_research_platform.research.features.transforms import _mad_winsorize
+from quant_research_platform.research.features.transforms import (
+    _industry_group_codes,
+    _mad_winsorize,
+)
 from quant_research_platform.research.models.scaler import ModelMatrixScaler
 
 
@@ -281,6 +284,7 @@ class FactorRiskState:
             "timestamp",
             "asset_id",
             "industry_level1_code",
+            "industry_standard_id",
             self.config.weight_column,
             *self.style_columns,
         }
@@ -336,16 +340,17 @@ class FactorRiskState:
         if frame.empty:
             return
         frame = preprocess_risk_styles(frame, style_columns=self.style_columns)
-        current_industries = sorted(set(frame["industry_level1_code"].astype(str)))
+        group_codes = _industry_group_codes(frame)
+        current_industries = sorted(set(group_codes))
         self._industry_codes.update(current_industries)
         industry_columns = tuple(f"industry_{code}" for code in current_industries)
         exposure_columns = (*industry_columns, *self.style_columns)
         design = np.column_stack(
             (
-                frame["industry_level1_code"].astype(str).eq(current_industries[0])
+                group_codes.eq(current_industries[0])
                 if len(current_industries) == 1
                 else pd.get_dummies(
-                    frame["industry_level1_code"].astype(str),
+                    group_codes,
                     dtype="float64",
                 ).reindex(columns=sorted(current_industries), fill_value=0.0),
                 frame.loc[:, list(self.style_columns)].to_numpy(dtype="float64"),
@@ -426,12 +431,19 @@ class FactorRiskState:
             )
 
     def current_exposures(self, cross: pd.DataFrame) -> pd.DataFrame:
-        required = {"asset_id", "industry_level1_code", *self.style_columns}
+        required = {
+            "asset_id",
+            "industry_standard_id",
+            "industry_level1_code",
+            *self.style_columns,
+        }
         if not isinstance(cross, pd.DataFrame) or not required.issubset(cross.columns):
             raise ValueError("factor_risk_exposure_columns_invalid")
         frame = cross.loc[:, list(required)].copy()
         frame["asset_id"] = frame["asset_id"].astype("string")
-        codes = frame["industry_level1_code"].astype(str)
+        codes = _industry_group_codes(frame)
+        frame = frame.loc[codes.notna()].copy()
+        codes = codes.loc[codes.notna()]
         self._industry_codes = set(codes)
         industries = pd.get_dummies(codes, dtype="float64").reindex(
             columns=sorted(self._industry_codes),
@@ -440,9 +452,9 @@ class FactorRiskState:
         industries.columns = tuple(f"industry_{code}" for code in industries.columns)
         result = pd.concat(
             (
-                frame.loc[:, ("asset_id", "industry_level1_code")].reset_index(
-                    drop=True
-                ),
+                frame.loc[
+                    :, ("asset_id", "industry_standard_id", "industry_level1_code")
+                ].reset_index(drop=True),
                 industries.reset_index(drop=True),
                 frame.loc[:, list(self.style_columns)].reset_index(drop=True),
             ),

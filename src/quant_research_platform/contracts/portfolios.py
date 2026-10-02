@@ -590,6 +590,7 @@ class PortfolioCandidateSpec:
     """One protocol-owned portfolio candidate composition."""
 
     candidate_id: str
+    selection_group: Literal["global", "quarterly"]
     construction: Literal[
         "top20_equal_weight",
         "top20_float_cap",
@@ -610,6 +611,8 @@ class PortfolioCandidateSpec:
     risk_context_target_ids: tuple[str, ...] = ()
 
     def __post_init__(self) -> None:
+        if self.selection_group not in {"global", "quarterly"}:
+            raise ValueError("portfolio_selection_group_invalid")
         for value in (
             self.candidate_id,
             self.prediction_target_id,

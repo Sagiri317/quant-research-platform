@@ -146,6 +146,8 @@ def processed_catalog() -> ProcessedDataCatalog:
                     "industry_classification",
                     "industry_classification_sets",
                     "industry_classification_versions",
+                    "stock_info_changes",
+                    "a_share_industry_snapshots",
                     "trading_no_limit",
                     "special_treatment_changes",
                 ),

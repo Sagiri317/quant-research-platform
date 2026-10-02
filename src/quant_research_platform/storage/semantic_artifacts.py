@@ -21,8 +21,12 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.json_codec import (
     MAX_QRP_JSON_BYTES,
     bounded_qrp_json_object_snapshot,
+    bounded_rendered_qrp_json_object_size,
+    json_record_working_set_bytes,
     render_qrp_json_object,
 )
+from quant_research_platform.contracts.targets import _operation_evidence
+from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
@@ -279,25 +283,49 @@ def write_semantic_artifact(
     | None = None,
 ) -> Path:
     final_root = Path(logical_root) / "instances" / envelope.instance_identity
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("storage.semantic.write.metadata", 0) as metadata_lease,
+    ):
 
-    def write(staging: Path) -> None:
-        writer(staging)
-        members = _member_inventory(staging)
-        if staged_validator is not None:
-            staged_validator(staging, members)
-        write_manifest(
-            staging / "manifest.json",
-            {
-                "schema_id": SEMANTIC_ARTIFACT_SCHEMA_ID,
-                "common_manifest": envelope.payload(),
-                "members": list(members),
-                "operational_metadata": _operational_metadata(
-                    dict(operational_metadata or {})
-                ),
-            },
-        )
+        def admit(size: int) -> None:
+            cap = policy.explicit_memory_cap_bytes
+            if cap is None or policy.used_memory_bytes + size <= cap:
+                policy.require_working_set(
+                    size, error="semantic_artifact_metadata_exceeds_memory_capacity"
+                )
+            metadata_lease.grow(size)
 
-    atomic_write_directory(final_root, write)
+        def write(staging: Path) -> None:
+            try:
+                writer(staging)
+                members = _member_inventory(staging, _admit=admit)
+                if staged_validator is not None:
+                    staged_validator(staging, members)
+                admit(
+                    json_record_working_set_bytes(
+                        2 + 2 * len(operational_metadata or {})
+                    )
+                )
+                payload = {
+                    "schema_id": SEMANTIC_ARTIFACT_SCHEMA_ID,
+                    "common_manifest": envelope.payload(_admit=admit),
+                    "members": list(members),
+                    "operational_metadata": _operational_metadata(
+                        dict(operational_metadata or {}),
+                        _admit=admit,
+                    ),
+                }
+                write_manifest(staging / "manifest.json", payload, _admit=admit)
+            finally:
+                members = payload = None
+                del members, payload
+
+        try:
+            atomic_write_directory(final_root, write)
+        except BaseException as error:
+            clear_exception_frames(error)
+            raise
     return final_root
 
 
@@ -415,15 +443,85 @@ def read_semantic_artifact_operational_metadata(
     return metadata
 
 
-def _operational_metadata(value: object) -> dict[str, object]:
-    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=MAX_QRP_JSON_BYTES)
-    if set(snapshot) - {"model_trial_ledgers"}:
+def _operational_metadata(
+    value: object, *, _admit: Callable[[int], None] | None = None
+) -> dict[str, object]:
+    snapshot = bounded_qrp_json_object_snapshot(
+        value, max_bytes=MAX_QRP_JSON_BYTES, _admit=_admit
+    )
+    if set(snapshot) - {
+        "model_trial_ledgers",
+        "model_phase_observations",
+        "final_alpha_observations",
+    }:
         raise ValueError("semantic_artifact_operational_metadata_invalid")
     if "model_trial_ledgers" in snapshot:
         if type(snapshot["model_trial_ledgers"]) is not list:
             raise ValueError("semantic_artifact_operational_metadata_invalid")
         for reference in snapshot["model_trial_ledgers"]:
             validate_trial_ledger_reference(reference)
+    if "model_phase_observations" in snapshot:
+        costs = snapshot["model_phase_observations"]
+        if (
+            type(costs) is not dict
+            or set(costs) != {"environments", "phases"}
+            or type(costs["environments"]) is not list
+            or type(costs["phases"]) is not list
+            or not costs["phases"]
+        ):
+            raise ValueError("semantic_artifact_operational_metadata_invalid")
+        for context in costs["environments"]:
+            if type(context) is not dict or set(context) != {
+                "platform",
+                "host_id",
+                "native_thread_env",
+            }:
+                raise ValueError("semantic_artifact_operational_metadata_invalid")
+        used_contexts = set()
+        for phase in costs["phases"]:
+            if (
+                type(phase) is not dict
+                or set(phase)
+                != {
+                    "phase",
+                    "selection_group",
+                    "family_id",
+                    "quarter_id",
+                    "fit_count",
+                    "observations",
+                }
+                or phase["phase"]
+                not in {"shared_candidate_fit", "group_scoring", "final_refit"}
+                or phase["selection_group"] not in {None, "global", "quarterly"}
+                or type(phase["fit_count"]) is not int
+                or phase["fit_count"] < 0
+                or type(phase["observations"]) is not dict
+            ):
+                raise ValueError("semantic_artifact_operational_metadata_invalid")
+            for key in ("family_id", "quarter_id"):
+                if phase[key] is not None and (
+                    type(phase[key]) is not str or not phase[key]
+                ):
+                    raise ValueError("semantic_artifact_operational_metadata_invalid")
+            observation = dict(phase["observations"])
+            environment = observation.get("environment")
+            if (
+                type(environment) is not dict
+                or set(environment) != {"context", "created_at_utc"}
+                or type(environment["context"]) is not int
+                or not 0 <= environment["context"] < len(costs["environments"])
+            ):
+                raise ValueError("semantic_artifact_operational_metadata_invalid")
+            used_contexts.add(environment["context"])
+            observation["environment"] = {
+                **costs["environments"][environment["context"]],
+                "created_at_utc": environment["created_at_utc"],
+            }
+            _operation_evidence(observation)
+        if used_contexts != set(range(len(costs["environments"]))):
+            raise ValueError("semantic_artifact_operational_metadata_invalid")
+    if "final_alpha_observations" in snapshot:
+        _operation_evidence(snapshot["final_alpha_observations"])
     assert_internal_artifact_metadata_safe(snapshot)
     return snapshot
 
@@ -495,6 +593,7 @@ def _member_inventory(
     expected_paths: set[str] | None = None,
     verified_identities: dict[str, DatasetFileIdentity] | None = None,
     expected_identities: Mapping[str, DatasetFileIdentity] | None = None,
+    _admit: Callable[[int], None] | None = None,
 ) -> tuple[dict[str, object], ...]:
     members: list[dict[str, object]] = []
     identities: dict[str, DatasetFileIdentity] = {}
@@ -505,12 +604,20 @@ def _member_inventory(
         nonlocal encoded_bytes
         if expected_paths is not None and relative not in expected_paths:
             raise ValueError("semantic_artifact_member_integrity_invalid")
-        identities[relative] = (
+        identity = (
             _member_identity(child)
             if expected_identities is None
             else expected_identities[relative]
         )
-        member = _member_record(relative, child, identity=identities[relative])
+        if _admit is not None:
+            size = bounded_rendered_qrp_json_object_size(
+                {"path": relative, "size": identity.size, "sha256": "0" * 64},
+                lazy_arrays={},
+                max_bytes=MAX_QRP_JSON_BYTES,
+            )
+            _admit(json_record_working_set_bytes(size))
+        identities[relative] = identity
+        member = _member_record(relative, child, identity=identity)
         encoded_bytes += len(render_qrp_json_object(member).encode("utf-8"))
         if encoded_bytes > MAX_QRP_JSON_BYTES:
             raise ValueError("semantic_artifact_member_limit_exceeded")

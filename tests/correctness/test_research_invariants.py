@@ -755,6 +755,7 @@ def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
                 "timestamp": timestamp,
                 "asset_id": assets,
                 "asset_return": returns,
+                "industry_standard_id": "CSRC2012",
                 "industry_level1_code": ["A01"] * len(assets),
                 "float_market_cap": [1_000.0 + index for index in range(len(assets))],
                 "eligible": [True] * len(assets),
@@ -801,6 +802,7 @@ def test_factor_risk_projects_history_to_current_industry_domain() -> None:
         {
             "timestamp": pd.Timestamp("2020-01-01"),
             "asset_id": [f"a{index}" for index in range(20)],
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A"] * 10 + ["B"] * 10,
             "float_market_cap": 100 + x,
             "style": x,
@@ -815,14 +817,14 @@ def test_factor_risk_projects_history_to_current_industry_domain() -> None:
             current["industry_level1_code"] = "A"
         state.observe_return_session(current)
     exposures = state.current_exposures(current)
-    assert "industry_B" not in exposures
+    assert "industry_CSRC2012:B" not in exposures
     estimate = state.estimate()
-    assert tuple(estimate.factor_covariance.columns) == ("industry_A", "style")
+    assert tuple(estimate.factor_covariance.columns) == ("industry_CSRC2012:A", "style")
     assert len(estimate.factor_returns) == 6
     held = current.assign(eligible=True)
     held.loc[held.index[-1], ["industry_level1_code", "eligible"]] = ["B", False]
-    assert "industry_B" in state.current_exposures(held)
-    assert "industry_B" in state.estimate().factor_covariance
+    assert "industry_CSRC2012:B" in state.current_exposures(held)
+    assert "industry_CSRC2012:B" in state.estimate().factor_covariance
     current["industry_level1_code"] = "C"
     state.current_exposures(current)
     with pytest.raises(ValueError, match="factor_risk_factor_history_insufficient"):
@@ -879,6 +881,7 @@ def test_factor_risk_windows_and_decay_follow_observed_sessions() -> None:
             {
                 "timestamp": dates[position],
                 "asset_id": [f"a{index}" for index in range(12)],
+                "industry_standard_id": "CSRC2012",
                 "industry_level1_code": "A",
                 "float_market_cap": 100 + x,
                 "style": x,
@@ -1293,6 +1296,7 @@ def test_factor_return_wls_uses_sqrt_cap_statistical_weight():
         {
             "timestamp": pd.Timestamp("2023-01-03"),
             "asset_id": [f"asset_{i:03d}" for i in range(count)],
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A01"] * 50 + ["B01"] * 50,
             "float_market_cap": np.geomspace(100.0, 1e8, count),
             "asset_return": rng.normal(scale=0.03, size=count),

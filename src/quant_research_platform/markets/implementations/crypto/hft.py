@@ -114,7 +114,11 @@ def iter_panel_frames(
         try:
             next_book = next(active_books, None)
             next_trade = next(active_trades, None)
-            for grid_time in range(start_ms, end_ms + 1, interval_ms):
+            interval_ns = interval_ms * _NANOSECONDS_PER_MILLISECOND
+            last_grid_ms = start_ms + (end_ms - start_ms) // interval_ms * interval_ms
+            grid_time = start_ms - interval_ms
+            while grid_time < last_grid_ms:
+                grid_time += interval_ms
                 interval_start = max(0, grid_time - HFT_GRID_MS)
                 grid_time_ns = grid_time * _NANOSECONDS_PER_MILLISECOND
                 interval_start_ns = interval_start * _NANOSECONDS_PER_MILLISECOND
@@ -225,14 +229,28 @@ def iter_panel_frames(
                         else:
                             signed_trade_volume += quantity
                             taker_buy_volume += quantity
-                if current_state is None:
-                    continue
-                book_bounds = book_coverage.get(current_state.segment_id)
+                book_bounds = (
+                    None
+                    if current_state is None
+                    else book_coverage.get(current_state.segment_id)
+                )
                 if (
                     book_bounds is None
                     or book_bounds[0] > interval_start_ns
                     or book_bounds[1] <= grid_time_ns
                 ):
+                    # No row can appear before a stream event or book coverage opens.
+                    next_time_ns = last_grid_ms * _NANOSECONDS_PER_MILLISECOND
+                    if next_book is not None:
+                        next_time_ns = min(next_time_ns, _book_observed_time(next_book))
+                    if next_trade is not None:
+                        next_time_ns = min(next_time_ns, next_trade.observed_time_ns)
+                    if book_bounds is not None and book_bounds[0] > interval_start_ns:
+                        next_time_ns = min(next_time_ns, book_bounds[0] + interval_ns)
+                    grid_time += (
+                        max(0, (next_time_ns - grid_time_ns - 1) // interval_ns)
+                        * interval_ms
+                    )
                     continue
                 if len(trade_connections) != 1:
                     continue
@@ -283,12 +301,15 @@ def _book_observed_time(
 
 def _panel_frame(buffers):
     for column in (
+        "transaction_time_ms",
         "book_receive_monotonic_ns",
         "trade_source_sequence_min",
         "trade_source_sequence_max",
     ):
         buffers[column] = pd.array(buffers[column], dtype="Int64")
-    return pd.DataFrame(buffers)
+    frame = pd.DataFrame(buffers)
+    buffers.clear()
+    return frame
 
 
 def _panel_column_buffers() -> dict[str, list[Any]]:

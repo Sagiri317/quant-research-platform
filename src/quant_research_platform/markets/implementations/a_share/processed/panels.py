@@ -36,6 +36,8 @@ def compute_market_panel(
     industry_history: pd.DataFrame | None = None,
     industry_sets: pd.DataFrame | None = None,
     industry_versions: pd.DataFrame | None = None,
+    industry_changes: pd.DataFrame | None = None,
+    industry_snapshots: pd.DataFrame | None = None,
     no_limit_history: pd.DataFrame | None = None,
     special_treatment_history: pd.DataFrame | None = None,
     session_window: pd.DatetimeIndex | None = None,
@@ -80,6 +82,9 @@ def compute_market_panel(
         industry_history,
         industry_sets=industry_sets,
         industry_versions=industry_versions,
+        industry_changes=industry_changes,
+        industry_snapshots=industry_snapshots,
+        stock_master=stocks,
     )
     dense = _apply_no_limit_exceptions(dense, no_limit_history)
     dense = _apply_special_treatment(dense, special_treatment_history)
@@ -435,9 +440,37 @@ def _asof_industry(
     *,
     industry_sets: pd.DataFrame | None,
     industry_versions: pd.DataFrame | None,
+    industry_changes: pd.DataFrame | None = None,
+    industry_snapshots: pd.DataFrame | None = None,
+    stock_master: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    if history is None or history.empty:
+    if industry_versions is None or (
+        (history is None or history.empty)
+        and (industry_snapshots is None or industry_snapshots.empty)
+    ):
         return panel
+    if history is None:
+        history = pd.DataFrame(
+            columns=(
+                "source_asset_id",
+                "timestamp",
+                "industry_standard_id",
+                "industry_level1_code",
+                "industry_level1_name",
+            )
+        )
+    if industry_changes is None:
+        if not history.empty:
+            return panel
+        industry_changes = pd.DataFrame(
+            columns=(
+                "source_asset_id",
+                "changed_item",
+                "effective_date",
+                "announcement_date",
+                "value_after",
+            )
+        )
     panel = panel.copy()
     panel["asset_id"] = strict_string_series(
         panel["asset_id"], error="invalid_industry_asset_id"
@@ -464,6 +497,7 @@ def _asof_industry(
     history["industry_level1_code"] = strict_string_series(
         history["industry_level1_code"], error="invalid_industry_code"
     )
+    history["_industry_classification_code"] = history["industry_level1_code"]
     history["industry_level1_name"] = strict_string_series(
         history["industry_level1_name"],
         error="invalid_industry_name",
@@ -472,28 +506,116 @@ def _asof_industry(
     history["is_nonfinancial_industry"] = pd.Series(
         pd.NA, index=history.index, dtype="boolean"
     )
-    expected_standard = history["timestamp"].map(
-        lambda value: "CSRC2012" if value < pd.Timestamp("2023-01-01") else "CAPCO"
+    history = history.loc[
+        _industry_version_active_mask(
+            history["industry_standard_id"], history["timestamp"], industry_versions
+        )
+    ].copy()
+    if history.duplicated(
+        ["asset_id", "timestamp", "industry_standard_id"], keep=False
+    ).any():
+        raise ValueError("industry_history_key_duplicate")
+    change_standards = {
+        f"{provider}行业代码": standard
+        for provider, standard in INDUSTRY_STANDARD_BY_PROVIDER_ID.items()
+    }
+    changes = industry_changes.loc[
+        industry_changes["changed_item"].isin(change_standards),
+        [
+            "source_asset_id",
+            "changed_item",
+            "effective_date",
+            "announcement_date",
+            "value_after",
+        ],
+    ].rename(columns={"source_asset_id": "asset_id", "effective_date": "timestamp"})
+    changes["asset_id"] = strict_string_series(
+        changes["asset_id"], error="invalid_industry_asset_id"
     )
-    history = history.loc[history["industry_standard_id"].eq(expected_standard)].copy()
+    changes["industry_standard_id"] = changes.pop("changed_item").map(change_standards)
+    changes["timestamp"] = strict_timestamp_series(
+        changes["timestamp"], error="invalid_industry_timestamp"
+    ).dt.normalize()
+    changes["announcement_date"] = strict_timestamp_series(
+        changes["announcement_date"],
+        error="invalid_industry_announcement_date",
+        allow_null=True,
+    ).dt.normalize()
+    changes["value_after"] = strict_string_series(
+        changes["value_after"], error="invalid_industry_name", allow_null=True
+    )
+    history = history.merge(
+        changes,
+        on=["asset_id", "industry_standard_id", "timestamp"],
+        how="left",
+        validate="one_to_one",
+    )
+    history["_industry_known"] = history["announcement_date"].notna() & (
+        history["value_after"] == history["industry_level1_name"]
+    )
+    history["_industry_event_timestamp"] = history["timestamp"]
+    # Date-only announcements become usable after their calendar date.
+    publication = (history["announcement_date"] + pd.Timedelta(days=1)).where(
+        history["_industry_known"]
+    )
+    history["timestamp"] = history["timestamp"].where(
+        publication.isna() | history["timestamp"].ge(publication), publication
+    )
+    if industry_sets is not None:
+        known = history["_industry_known"]
+        resolved = _resolve_industry_hierarchy(history.loc[known], industry_sets)
+        for column in (
+            "industry_level1_code",
+            "industry_level1_name",
+            "is_nonfinancial_industry",
+        ):
+            history.loc[known, column] = resolved[column]
+    if industry_snapshots is not None:
+        snapshots = industry_snapshots.loc[
+            industry_snapshots["source_asset_id"].isin(panel["asset_id"])
+        ]
+        if not snapshots.empty:
+            snapshots = _snapshot_industry_history(
+                snapshots,
+                industry_sets=industry_sets,
+                industry_versions=industry_versions,
+                stock_master=stock_master,
+            )
+            history = pd.concat([history, snapshots], ignore_index=True)
+    history = history.loc[history["timestamp"].le(panel["timestamp"].max())].copy()
     if history.empty:
         return panel
-    if industry_versions is not None:
-        history = history.loc[
-            _industry_version_active_mask(
-                history["industry_standard_id"], history["timestamp"], industry_versions
-            )
-        ].copy()
-        if history.empty:
-            return panel
-    if industry_sets is not None:
-        history = _resolve_industry_hierarchy(history, industry_sets)
-    history["_industry_event_timestamp"] = history["timestamp"]
+    known = history.loc[history["_industry_known"]]
+    event_key = ["asset_id", "_industry_event_timestamp", "industry_standard_id"]
+    if known.groupby(event_key)["_industry_classification_code"].nunique().gt(1).any():
+        raise ValueError("industry_history_conflict")
+    simultaneous = known.drop_duplicates(
+        ["asset_id", "timestamp", "_industry_event_timestamp", "industry_standard_id"]
+    )
+    if simultaneous.duplicated(
+        ["asset_id", "timestamp", "_industry_event_timestamp"], keep=False
+    ).any():
+        raise ValueError("industry_history_standard_conflict")
+    # Unknown publication blocks unproved coverage from its effective date.
+    # A late older event cannot replace a newer state or cross that barrier.
+    history = history.sort_values(
+        ["timestamp", "_industry_event_timestamp", "asset_id", "_industry_known"],
+        kind="mergesort",
+    )
+    latest_effective = history.groupby("asset_id", sort=False)[
+        "_industry_event_timestamp"
+    ].cummax()
+    history = history.loc[history["_industry_event_timestamp"].eq(latest_effective)]
+    history = history.drop_duplicates(["asset_id", "timestamp"], keep="last")
     right = history.loc[
-        :, [*required, "is_nonfinancial_industry", "_industry_event_timestamp"]
+        :,
+        [
+            *required,
+            "is_nonfinancial_industry",
+            "_industry_event_timestamp",
+            "_industry_known",
+        ],
     ].sort_values(["asset_id", "timestamp"], kind="mergesort")
-    if right.duplicated(["asset_id", "timestamp"], keep=False).any():
-        raise ValueError("industry_history_key_duplicate")
     output: list[pd.DataFrame] = []
     history_groups = right.groupby("asset_id", sort=False).indices
     for asset_id, group in panel.groupby("asset_id", sort=False):
@@ -506,19 +628,13 @@ def _asof_industry(
             allow_exact_matches=True,
             suffixes=("", "_industry"),
         )
-        expected = current["timestamp"].map(
-            lambda value: "CSRC2012" if value < pd.Timestamp("2023-01-01") else "CAPCO"
+        valid_standard = current["_industry_known"].fillna(False)
+        valid_standard &= _industry_version_active_mask(
+            current["industry_standard_id_industry"],
+            current["timestamp"],
+            industry_versions,
+            event_timestamps=current["_industry_event_timestamp"],
         )
-        valid_standard = (
-            current["industry_standard_id_industry"].eq(expected).fillna(False)
-        )
-        if industry_versions is not None:
-            valid_standard &= _industry_version_active_mask(
-                current["industry_standard_id_industry"],
-                current["timestamp"],
-                industry_versions,
-                event_timestamps=current["_industry_event_timestamp"],
-            )
         for column in (
             "industry_standard_id",
             "industry_level1_code",
@@ -530,7 +646,9 @@ def _asof_industry(
             )
             current.loc[~valid_standard, column] = pd.NA
             current.drop(columns=f"{column}_industry", inplace=True)
-        current.drop(columns="_industry_event_timestamp", inplace=True)
+        current.drop(
+            columns=["_industry_event_timestamp", "_industry_known"], inplace=True
+        )
         output.append(current)
     result = pd.concat(output, ignore_index=True)
     for column in (
@@ -543,6 +661,95 @@ def _asof_industry(
         "boolean"
     )
     return result
+
+
+def _snapshot_industry_history(
+    snapshots, *, industry_sets, industry_versions, stock_master
+):
+    """Qualify public observations without inventing publication or issuer history."""
+    if industry_sets is None or stock_master is None:
+        raise ValueError("industry_snapshot_context_missing")
+    result = snapshots.rename(columns={"source_asset_id": "asset_id"}).copy()
+    result["asset_id"] = strict_string_series(
+        result["asset_id"], error="invalid_industry_asset_id"
+    )
+    result["industry_standard_id"] = _canonical_industry_standard(
+        result["industry_standard_id"]
+    )
+    result["_industry_event_timestamp"] = strict_timestamp_series(
+        result["observation_date"], error="invalid_industry_timestamp"
+    ).dt.normalize()
+    result["timestamp"] = strict_timestamp_series(
+        result["timestamp"], error="invalid_industry_timestamp"
+    ).dt.normalize()
+    result["_snapshot_available_at"] = result["timestamp"]
+    result["timestamp"] = result["_industry_event_timestamp"]
+    result = _asof_join_stock_master(result, stock_master)
+    result["timestamp"] = result.pop("_snapshot_available_at")
+    observed = result["_industry_event_timestamp"]
+    result["_industry_known"] = (
+        observed.ge(result["listing_date"])
+        & observed.le(result["delisting_date"])
+        & _industry_version_active_mask(
+            result["industry_standard_id"], observed, industry_versions
+        )
+    )
+    lookup = _industry_dictionary(industry_sets)
+    result["industry_level1_code"] = (
+        result["industry_category_code"] + result["industry_code"]
+    ).astype("string")
+    result["_industry_classification_code"] = result["industry_level1_code"]
+    valid_paths = []
+    for row in result.itertuples(index=False):
+        category = (row.industry_standard_id, row.industry_category_code)
+        leaf = (row.industry_standard_id, row.industry_level1_code)
+        major = row.industry_major_code
+        category_entry = lookup.get(category)
+        leaf_entry = lookup.get(leaf)
+        valid = (
+            category_entry is not None
+            and leaf_entry is not None
+            and str(category_entry.industry_level) == "1"
+            and leaf_entry.parent_industry_code == (major or row.industry_category_code)
+        )
+        if major:
+            major_entry = lookup.get((row.industry_standard_id, major))
+            valid = (
+                valid
+                and major_entry is not None
+                and major_entry.parent_industry_code == row.industry_category_code
+            )
+        valid_paths.append(valid)
+    result["_industry_known"] &= pd.Series(valid_paths, index=result.index)
+    result["industry_level1_name"] = pd.Series(
+        pd.NA, index=result.index, dtype="string"
+    )
+    result["is_nonfinancial_industry"] = pd.Series(
+        pd.NA, index=result.index, dtype="boolean"
+    )
+    known = result["_industry_known"]
+    if known.any():
+        resolved = _resolve_industry_hierarchy(result.loc[known], industry_sets)
+        for column in (
+            "industry_level1_code",
+            "industry_level1_name",
+            "is_nonfinancial_industry",
+        ):
+            result.loc[known, column] = resolved[column]
+    return result.loc[
+        :,
+        [
+            "asset_id",
+            "timestamp",
+            "industry_standard_id",
+            "industry_level1_code",
+            "industry_level1_name",
+            "is_nonfinancial_industry",
+            "_industry_event_timestamp",
+            "_industry_known",
+            "_industry_classification_code",
+        ],
+    ]
 
 
 def _canonical_industry_standard(values: pd.Series) -> pd.Series:
@@ -630,10 +837,7 @@ def _industry_version_active_mask(
     )
 
 
-def _resolve_industry_hierarchy(
-    history: pd.DataFrame,
-    sets: pd.DataFrame,
-) -> pd.DataFrame:
+def _industry_dictionary(sets: pd.DataFrame):
     required = {
         "industry_code",
         "industry_standard_id",
@@ -660,10 +864,17 @@ def _resolve_industry_hierarchy(
         if duplicate.drop_duplicates().duplicated(key, keep=False).any():
             raise ValueError("industry_dictionary_key_duplicate")
         dictionary = dictionary.drop_duplicates(key, keep="first")
-    lookup = {
+    return {
         (row.industry_standard_id, row.industry_code): row
         for row in dictionary.itertuples(index=False)
     }
+
+
+def _resolve_industry_hierarchy(
+    history: pd.DataFrame,
+    sets: pd.DataFrame,
+) -> pd.DataFrame:
+    lookup = _industry_dictionary(sets)
     result = history.copy()
     resolved_codes: list[str | None] = []
     resolved_names: list[str | None] = []

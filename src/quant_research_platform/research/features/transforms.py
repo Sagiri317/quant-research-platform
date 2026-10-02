@@ -425,6 +425,17 @@ def canonical_feature_input_factors(
     )
 
 
+def _industry_group_codes(
+    frame: pd.DataFrame, industry_column: str = "industry_level1_code"
+) -> pd.Series:
+    """Keep industry categories from different standards distinct."""
+    return (
+        frame["industry_standard_id"]
+        .astype("string")
+        .str.cat(frame[industry_column].astype("string"), sep=":")
+    )
+
+
 def canonical_feature_pipeline(
     frame: pd.DataFrame,
     *,
@@ -457,6 +468,7 @@ def canonical_feature_pipeline(
             values,
             values.groupby(winsorized["timestamp"], sort=False),
         )
+    winsorized[industry_column] = _industry_group_codes(winsorized, industry_column)
     residualized = neutralize_cross_section(
         winsorized,
         factor_columns=factor_columns,

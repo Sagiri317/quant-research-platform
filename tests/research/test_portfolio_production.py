@@ -87,6 +87,7 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
         {
             "timestamp": pd.Timestamp("2020-01-01"),
             "asset_id": [f"a{index}" for index in range(20)],
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A",
             "float_market_cap": 100 + x,
             "style": x,
@@ -98,7 +99,7 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
             cross.assign(timestamp=pd.Timestamp("2020-01-01") + pd.Timedelta(days=day))
         )
     previous = state.estimate()
-    assert tuple(previous.factor_covariance.columns) == ("industry_A", "style")
+    assert tuple(previous.factor_covariance.columns) == ("industry_CSRC2012:A", "style")
     cross.loc[cross.index >= 10, "industry_level1_code"] = "B"
     scheduled = pd.DataFrame(
         {
@@ -127,12 +128,12 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
     current = decision()
     assert current.risk is not None
     assert tuple(current.risk.factor_covariance.columns) == (
-        "industry_A",
-        "industry_B",
+        "industry_CSRC2012:A",
+        "industry_CSRC2012:B",
         "style",
     )
     assert current.risk.factor_returns.timestamp.min() == pd.Timestamp("2020-01-04")
-    assert tuple(previous.factor_covariance.columns) == ("industry_A", "style")
+    assert tuple(previous.factor_covariance.columns) == ("industry_CSRC2012:A", "style")
 
 
 class _PredictionLookup:
@@ -282,19 +283,28 @@ def _build_producer(
     prediction_window: TimeWindow | None = None,
     model_inputs: tuple[str, ...] = (),
     model_algorithm: str = "equal_weight_rank_ensemble",
+    final_calibrations=None,
+    access_window: str = "development",
+    frozen_calibration: production.AlphaCalibration | None = None,
 ):
+    final_calibrations = [] if final_calibrations is None else final_calibrations
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
     if enhanced:
         risk_columns = list(RISK_STYLE_COLUMNS)
         frames = {
             **frames,
-            "risk_context": frames["dataset"].reindex(
-                columns=["asset_id", "timestamp", *risk_columns]
+            "risk_context": (
+                frames["risk_context"]
+                if "risk_context" in frames
+                else frames["dataset"].reindex(
+                    columns=["asset_id", "timestamp", *risk_columns]
+                )
             ),
             "dataset": frames["dataset"].drop(columns=risk_columns, errors="ignore"),
         }
     if candidate is None:
         candidate = PortfolioCandidateSpec(
+            selection_group="global",
             prediction_selector="champion",
             candidate_id="synthetic_top20_equal_weight",
             construction="top20_equal_weight",
@@ -461,11 +471,8 @@ def _build_producer(
                 prediction_window=prediction_window,
                 prediction_lookup=prediction_lookup or _PredictionLookup(),
                 persisted_model=SimpleNamespace(
-                    quarterly_selections={
-                        str(quarter): {"selected_family_id": "family"}
-                        for quarter in pd.period_range(
-                            "2000-01-01", "2030-12-31", freq="Q"
-                        )
+                    selection=lambda _group, _quarter, **_kwargs: {
+                        "selected_family_id": "family"
                     },
                     prediction_models=lambda window, **_kwargs: tuple(
                         {
@@ -484,7 +491,8 @@ def _build_producer(
                         )
                     ),
                 ),
-                access_window="development",
+                access_window=access_window,
+                frozen_calibration=frozen_calibration,
                 assumptions=assumptions,
                 resource_policy=bound_policy,
                 fee_schedule_from_frame=fee_schedule_from_frame,
@@ -492,6 +500,7 @@ def _build_producer(
                 prepare_trade_cost=prepare_trade_cost,
                 market_name_for_type=lambda _value: "shanghai",
                 unified_trading_sessions=unified_trading_sessions,
+                on_final_calibration=final_calibrations.append,
             )
             for batch in chunks:
                 yield session_frame(batch)
@@ -700,6 +709,7 @@ def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
     frames["panel"]["float_market_cap"] = frames["panel"]["asset_id"].map(
         {"a": 1_000.0, "b": 2_000.0}
     )
+    frames["panel"]["industry_standard_id"] = "CSRC2012"
     frames["panel"]["industry_level1_code"] = "A01"
     frames["panel"]["is_nonfinancial_industry"] = True
     dates = pd.DatetimeIndex(frames["calendar"]["calendar_date"]).normalize()
@@ -720,6 +730,7 @@ def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
         ]
     )
     candidate = PortfolioCandidateSpec(
+        selection_group="global",
         prediction_selector="champion",
         candidate_id="synthetic_csi500_enhanced",
         construction="benchmark_enhanced",
@@ -761,6 +772,136 @@ def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
     ] == pytest.approx(0.0)
 
 
+@pytest.mark.parametrize("missing_session", [None, "2023-01-03", "2023-01-04"])
+def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
+    tmp_path, monkeypatch, missing_session
+):
+    frames, fee_frame, output_window = _inputs()
+    frames["panel"]["period_return"] = 0.001
+    frames["panel"]["float_market_cap"] = frames["panel"].asset_id.map(
+        {"a": 1000.0, "b": 2000.0}
+    )
+    frames["panel"]["industry_standard_id"] = "CSRC2012"
+    frames["panel"]["industry_level1_code"] = "A01"
+    frames["panel"]["is_nonfinancial_industry"] = True
+    frames["risk_context"] = frames["dataset"].loc[:, ["asset_id", "timestamp"]].copy()
+    for column in RISK_STYLE_COLUMNS:
+        frames["risk_context"][column] = frames["risk_context"].asset_id.map(
+            {"a": -0.2, "b": 0.2}
+        )
+    frames["dataset"] = (
+        frames["dataset"]
+        .loc[
+            frames["dataset"].timestamp.between(
+                pd.Timestamp(output_window.start), pd.Timestamp(output_window.end)
+            )
+        ]
+        .copy()
+    )
+    if missing_session is not None:
+        frames["dataset"] = (
+            frames["dataset"]
+            .loc[frames["dataset"].timestamp.ne(pd.Timestamp(missing_session))]
+            .copy()
+        )
+    frames["benchmark"] = pd.DataFrame(
+        [
+            {
+                "benchmark_id": "csi500",
+                "asset_id": asset,
+                "timestamp": timestamp,
+                "weight": 0.5,
+            }
+            for timestamp in pd.bdate_range(output_window.start, output_window.end)
+            for asset in ("a", "b")
+        ]
+    )
+    candidate = PortfolioCandidateSpec(
+        selection_group="global",
+        prediction_selector="champion",
+        candidate_id="synthetic_csi500_enhanced",
+        construction="benchmark_enhanced",
+        prediction_target_id="prediction",
+        rebalance_schedule="daily",
+        top_quantile=None,
+        benchmark_id="csi500",
+        benchmark_weights_target_id="benchmark",
+        risk_style_columns=RISK_STYLE_COLUMNS,
+        risk_context_target_ids=("risk_context",),
+        research_dataset_id="dataset",
+        market_panel_target_id="panel",
+        execution_mask_target_id="execution",
+        trading_calendar_target_id="calendar",
+        fee_schedule_target_id="fee",
+    )
+    calibration = production.AlphaCalibration(
+        slope=1.0,
+        intercept=0.0,
+        slope_standard_error=1.0,
+        slope_t_statistic=1.0,
+        slope_pvalue=0.5,
+        slope_ci_low=-1.0,
+        slope_ci_high=3.0,
+        weighted_r2=0.0,
+        coverage=1.0,
+        valid_rebalance_dates=6,
+        scheduled_rebalance_dates=6,
+        undefined_reason=None,
+    )
+    risk_dates = []
+    observe_return_session = production.FactorRiskState.observe_return_session
+
+    def observe(state, frame):
+        risk_dates.append(pd.Timestamp(frame.timestamp.iloc[0]))
+        return observe_return_session(state, frame)
+
+    def reject_recalibration(*args, **kwargs):
+        pytest.fail("holdout must retain its frozen alpha calibration")
+
+    monkeypatch.setattr(production.FactorRiskState, "observe_return_session", observe)
+    monkeypatch.setattr(production, "calibrate_expected_alpha", reject_recalibration)
+    lookup = _PredictionLookup()
+    final_calibrations = []
+    chunks, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=output_window,
+        formal_dataset_window=output_window,
+        prediction_window=output_window,
+        candidate=candidate,
+        prediction_lookup=lookup,
+        access_window="holdout",
+        frozen_calibration=calibration,
+        final_calibrations=final_calibrations,
+    )
+    if missing_session is not None:
+        with pytest.raises(
+            PortfolioTargetBlocked, match="^portfolio_research_dataset_session_missing$"
+        ):
+            list(chunks)
+        assert min(risk_dates) < pd.Timestamp(output_window.start)
+        assert max(risk_dates) == pd.Timestamp(missing_session)
+        return
+    result = list(chunks)
+    assert result
+    assert min(risk_dates) == pd.Timestamp("2022-12-02")
+    assert max(risk_dates) == pd.Timestamp(output_window.end)
+    assert set(lookup.matched) == {
+        (timestamp, asset)
+        for timestamp in pd.bdate_range(output_window.start, output_window.end)
+        for asset in ("a", "b")
+    }
+    assert all(
+        frame.loc[frame.asset_id.eq("__cash__"), "alpha_slope"]
+        .eq(calibration.slope)
+        .all()
+        for frame in result
+    )
+    assert final_calibrations == []
+
+
 @pytest.mark.parametrize("can_sell_removed", [False, True])
 def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
     tmp_path: Path,
@@ -776,6 +917,7 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         adj_close=100.0,
         period_return=0.0,
         float_market_cap=1_000.0,
+        industry_standard_id="CSRC2012",
         industry_level1_code="A01",
         is_nonfinancial_industry=True,
     )
@@ -805,6 +947,7 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         "can_exit",
     ] = can_sell_removed
     candidate = PortfolioCandidateSpec(
+        selection_group="global",
         prediction_selector="champion",
         candidate_id="maintenance",
         construction="benchmark_enhanced",
@@ -942,6 +1085,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     frames["panel"]["float_market_cap"] = frames["panel"]["asset_id"].map(
         {"a": 1_000.0, "b": 2_000.0}
     )
+    frames["panel"]["industry_standard_id"] = "CSRC2012"
     frames["panel"]["industry_level1_code"] = "A01"
     frames["panel"]["is_nonfinancial_industry"] = True
     style_values = {"a": -0.2, "b": 0.2}
@@ -963,7 +1107,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
             for asset in ("a", "b")
         ]
     )
-    exposure_columns = ("industry_A01", *RISK_STYLE_COLUMNS)
+    exposure_columns = ("industry_CSRC2012:A01", *RISK_STYLE_COLUMNS)
     covariance = pd.DataFrame(
         np.eye(len(exposure_columns)) * 0.01,
         index=exposure_columns,
@@ -987,6 +1131,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         lambda self: risk,
     )
     candidate = PortfolioCandidateSpec(
+        selection_group="global",
         prediction_selector="champion",
         candidate_id="synthetic_csi500_enhanced",
         construction="benchmark_enhanced",
@@ -1138,7 +1283,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         )
 
         original_calibrate = production.calibrate_expected_alpha
-        calibrations = []
+        calibrations = {}
 
         def bounded_calibrate(frame, **kwargs):
             assert (
@@ -1147,7 +1292,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
                 .all()
             )
             calibrated = original_calibrate(frame, **kwargs)
-            calibrations.append(calibrated)
+            calibrations[pd.Timestamp(kwargs["as_of"])] = calibrated
             return calibrated
 
         patch.setattr(production, "calibrate_expected_alpha", bounded_calibrate)
@@ -1170,8 +1315,14 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         with runtime_resource_policy_scope(short_policy):
             list(short)
             assert short_policy.used_memory_bytes == 0
-        assert calibrations and calibrations[-1].scheduled_rebalance_dates == 4
-        assert calibrations[-1].coverage == 1.0 and calibrations[-1].benchmark_only
+        decision_calibration = calibrations[pd.Timestamp("2023-01-06")]
+        final_calibration = calibrations[pd.Timestamp(output_window.end)]
+        assert decision_calibration.scheduled_rebalance_dates == 4
+        assert decision_calibration.coverage == 1.0
+        assert decision_calibration.benchmark_only
+        assert final_calibration.scheduled_rebalance_dates == 5
+        assert final_calibration.coverage == 1.0
+        assert final_calibration.benchmark_only
         assert min(timestamp for timestamp, _asset in lookup.matched) >= pd.Timestamp(
             "2022-12-01"
         )
@@ -1237,6 +1388,7 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
     exposures = pd.DataFrame(
         {
             "asset_id": assets,
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": "A01",
             **{
                 column: np.linspace(0.1, -0.1, len(assets))
@@ -1311,6 +1463,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         adj_close=100.0,
         period_return=0.0,
         float_market_cap=1000.0,
+        industry_standard_id="CSRC2012",
         industry_level1_code="A01",
         is_nonfinancial_industry=True,
     )
@@ -1323,8 +1476,8 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         pd.DataFrame(),
         pd.DataFrame(
             np.zeros((2, 2)),
-            index=("industry_A01", "style"),
-            columns=("industry_A01", "style"),
+            index=("industry_CSRC2012:A01", "style"),
+            columns=("industry_CSRC2012:A01", "style"),
         ),
         pd.Series({"a": 0.01, "b": 0.01}),
         126.0,
@@ -1336,7 +1489,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         pd.Series({"a": 0.5, "b": 0.5}),
         alpha,
         pd.DataFrame(
-            {"asset_id": ["a", "b"], "industry_A01": 1.0, "style": [0.1, -0.1]}
+            {"asset_id": ["a", "b"], "industry_CSRC2012:A01": 1.0, "style": [0.1, -0.1]}
         ),
         risk,
         production.AlphaCalibration(
@@ -1344,6 +1497,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         ),
     )
     candidate = PortfolioCandidateSpec(
+        selection_group="global",
         candidate_id="cash_mapping",
         construction="benchmark_enhanced",
         prediction_target_id="prediction",
@@ -1787,6 +1941,7 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
         {
             "timestamp": pd.Timestamp("2020-01-02"),
             "asset_id": assets,
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A", "B"] * 60 + ["A"],
             "float_market_cap": 10000 + axis,
             "eligible": [True] * 120 + [False],
@@ -1857,6 +2012,7 @@ def test_zero_mad_risk_style_preserves_identifiable_factor_return():
         {
             "asset_id": [f"synthetic_{i}" for i in range(100)],
             "timestamp": pd.Timestamp("2023-01-03"),
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": "I",
             "float_market_cap": 1.0,
             "style": values,
@@ -1878,6 +2034,7 @@ def test_risk_cross_uses_all_a_facts_and_persisted_styles():
             "timestamp": pd.Timestamp("2024-01-02"),
             "period_return": [0.01, -0.01],
             "float_market_cap": [100.0, 200.0],
+            "industry_standard_id": "CSRC2012",
             "industry_level1_code": ["A", "B"],
             "is_a_share_scope": True,
             "is_trading": True,
@@ -1966,3 +2123,231 @@ def test_structurally_invalid_held_asset_exits_under_existing_execution_rules(
         assert session.executed_delta_notional.sum() + session[
             list(PORTFOLIO_LEDGER_COST_COLUMNS)
         ].to_numpy().sum() == pytest.approx(0.0, abs=1e-10)
+
+
+def test_risk_exposures_separate_same_code_in_different_standards():
+    state = FactorRiskState(style_columns=("style",))
+    cross = pd.DataFrame(
+        {
+            "asset_id": ["old", "new"],
+            "industry_standard_id": ["CSRC2012", "CAPCO"],
+            "industry_level1_code": ["A", "A"],
+            "style": [0.0, 0.0],
+        }
+    )
+    before = cross.copy(deep=True)
+    exposures = state.current_exposures(cross)
+    assert exposures["industry_CSRC2012:A"].tolist() == [1.0, 0.0]
+    assert exposures["industry_CAPCO:A"].tolist() == [0.0, 1.0]
+    assert exposures["industry_level1_code"].tolist() == ["A", "A"]
+    assert exposures["industry_standard_id"].tolist() == ["CSRC2012", "CAPCO"]
+    pd.testing.assert_frame_equal(cross, before)
+
+
+def test_risk_exposures_leave_unknown_industry_assets_unavailable():
+    state = FactorRiskState(style_columns=("style",))
+    cross = pd.DataFrame(
+        {
+            "asset_id": ["known", "missing_standard", "missing_code"],
+            "industry_standard_id": pd.Series(
+                ["CSRC2012", pd.NA, "CAPCO"], dtype="string"
+            ),
+            "industry_level1_code": pd.Series(["A", "A", pd.NA], dtype="string"),
+            "style": [0.0, 1.0, 2.0],
+        }
+    )
+    before = cross.copy(deep=True)
+    exposures = state.current_exposures(cross).set_index("asset_id")
+    assert exposures.index.tolist() == ["known"]
+    assert exposures.loc["known", "industry_CSRC2012:A"] == 1.0
+    required = exposures.reindex(cross["asset_id"])
+    assert required.loc[["missing_standard", "missing_code"]].isna().all().all()
+    assert state.current_exposures(cross.iloc[1:]).empty
+    pd.testing.assert_frame_equal(cross, before)
+
+
+@pytest.mark.parametrize("unknown_asset", ("a", "b"))
+def test_enhanced_producer_blocks_only_required_unknown_industry(
+    tmp_path, monkeypatch, unknown_asset
+):
+    frames, fee_frame, output_window = _inputs()
+    frames["panel"] = frames["panel"].assign(
+        period_return=0.001,
+        float_market_cap=frames["panel"].asset_id.map({"a": 1000.0, "b": 2000.0}),
+        industry_standard_id="CSRC2012",
+        industry_level1_code="A01",
+        is_nonfinancial_industry=True,
+    )
+    frames["panel"].loc[
+        frames["panel"].asset_id.eq(unknown_asset), "industry_standard_id"
+    ] = pd.NA
+    dates = pd.DatetimeIndex(frames["calendar"]["calendar_date"]).normalize()
+    frames["benchmark"] = pd.DataFrame(
+        {
+            "benchmark_id": "csi500",
+            "asset_id": "a",
+            "timestamp": dates[
+                (dates >= pd.Timestamp(output_window.start))
+                & (dates <= pd.Timestamp(output_window.end))
+            ],
+            "weight": 1.0,
+        }
+    )
+    candidate = PortfolioCandidateSpec(
+        selection_group="global",
+        prediction_selector="champion",
+        candidate_id="unknown_industry",
+        construction="benchmark_enhanced",
+        prediction_target_id="prediction",
+        rebalance_schedule="weekly-last-trading-day",
+        top_quantile=None,
+        benchmark_id="csi500",
+        benchmark_weights_target_id="benchmark",
+        risk_style_columns=RISK_STYLE_COLUMNS,
+        risk_context_target_ids=("risk_context",),
+        research_dataset_id="dataset",
+        market_panel_target_id="panel",
+        execution_mask_target_id="execution",
+        trading_calendar_target_id="calendar",
+        fee_schedule_target_id="fee",
+    )
+    chunks, _calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=output_window,
+        candidate=candidate,
+    )
+    if unknown_asset == "a":
+        with pytest.raises(
+            PortfolioTargetBlocked, match="portfolio_industry_context_missing"
+        ):
+            list(chunks)
+    else:
+        result = pd.concat(list(chunks), ignore_index=True)
+        assert set(result.asset_id) == {"a", "__cash__"}
+        assert result.loc[result.asset_id.eq("a"), "benchmark_weight"].eq(1.0).all()
+
+
+def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trade(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.research.portfolios.accounting import AlphaCalibration
+    from quant_research_platform.workflows.research import _window_payload
+
+    frames, fee_frame, _ = _inputs()
+    window = TimeWindow("2023-01-03", "2023-01-10")
+    frames["panel"]["period_return"] = 0.001
+    frames["panel"]["float_market_cap"] = frames["panel"].asset_id.map(
+        {"a": 1000.0, "b": 2000.0}
+    )
+    frames["panel"]["industry_standard_id"] = "CSRC2012"
+    frames["panel"]["industry_level1_code"] = "A01"
+    frames["panel"]["is_nonfinancial_industry"] = True
+    frames["benchmark"] = pd.DataFrame(
+        [
+            {
+                "benchmark_id": "csi500",
+                "asset_id": asset,
+                "timestamp": date,
+                "weight": 0.5,
+            }
+            for date in pd.bdate_range(window.start, window.end)
+            for asset in ("a", "b")
+        ]
+    )
+    candidate = PortfolioCandidateSpec(
+        selection_group="global",
+        prediction_selector="champion",
+        candidate_id="synthetic_csi500_enhanced",
+        construction="benchmark_enhanced",
+        prediction_target_id="prediction",
+        rebalance_schedule="daily",
+        top_quantile=None,
+        benchmark_id="csi500",
+        benchmark_weights_target_id="benchmark",
+        risk_style_columns=RISK_STYLE_COLUMNS,
+        risk_context_target_ids=("risk_context",),
+        research_dataset_id="dataset",
+        market_panel_target_id="panel",
+        execution_mask_target_id="execution",
+        trading_calendar_target_id="calendar",
+        fee_schedule_target_id="fee",
+    )
+    observed = []
+    original = production.calibrate_expected_alpha
+
+    def calibrate(frame, **kwargs):
+        result = original(frame, **kwargs)
+        observed.append((pd.Timestamp(kwargs["as_of"]), result))
+        return result
+
+    monkeypatch.setattr(production, "calibrate_expected_alpha", calibrate)
+    final = []
+    with runtime_resource_policy_scope() as policy:
+        chunks, _ = _build_producer(
+            tmp_path,
+            monkeypatch,
+            frames=frames,
+            fee_frame=fee_frame,
+            output_window=window,
+            candidate=candidate,
+            final_calibrations=final,
+            resource_policy=policy,
+        )
+        batches = list(chunks)
+        assert len(final) == 1
+        final_state = AlphaCalibration(**final[0]["calibration"])
+        assert observed[-1][0] == pd.Timestamp(window.end)
+        assert final_state.status == "DEFINED"
+        assert final_state.valid_rebalance_dates > observed[-2][1].valid_rebalance_dates
+        assert max(frame.decision_timestamp.max() for frame in batches) < pd.Timestamp(
+            window.end
+        )
+        envelope = build_business_manifest_envelope(
+            logical_artifact_id="final-alpha-ledger",
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity="c" * 64,
+            research_window=_window_payload(window, access="development"),
+            upstream_identities=final[0]["upstream_identities"],
+            semantic_metadata={
+                "portfolio_capital": {
+                    "candidate_id": candidate.candidate_id,
+                    "initial_capital": 100.0,
+                    "valuation_currency": "CNY",
+                    "valuation_method": "adjusted_notional",
+                },
+                "target_contract": {
+                    "protocol": {"protocol_id": "a_share_low_frequency"},
+                    "portfolio_candidate": {
+                        "construction": candidate.construction,
+                        "selection_group": candidate.selection_group,
+                    },
+                },
+            },
+        )
+        root = write_test_sessions(
+            tmp_path / "final-alpha",
+            envelope=envelope,
+            ledger_chunks=batches,
+            final_calibration=lambda: final[0],
+        )
+        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        restored, cutoff = production.frozen_alpha_calibration(
+            artifact.final_alpha_calibration,
+            cutoff=window.end,
+            selection_group=candidate.selection_group,
+        )
+        assert restored == final_state
+        assert cutoff == pd.Timestamp(window.end).date().isoformat()
+        with pytest.raises(
+            ValueError, match="holdout_alpha_calibration_binding_invalid"
+        ):
+            production.frozen_alpha_calibration(
+                artifact.final_alpha_calibration,
+                cutoff="2023-01-09",
+                selection_group=candidate.selection_group,
+            )
+        assert policy.used_memory_bytes == 0

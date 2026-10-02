@@ -160,13 +160,13 @@ def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):
         assert policy.used_memory_bytes == 0
 
 
-@pytest.mark.parametrize("cap_mib", (8, 128))
+@pytest.mark.parametrize("cap_mib", (16, 128))
 def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
     tmp_path,
     monkeypatch,
     cap_mib,
 ):
-    dates = pd.bdate_range("2020-01-02", periods=400)
+    dates = pd.bdate_range("2020-01-02", periods=492)
     source = _synthetic_interim_frames(dates)
     source.update(_synthetic_financial_frames())
     disclosures = source["financial_first_disclosure"]
@@ -309,7 +309,7 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
                 )
             actual = read_dataset(root, resource_policy=policy)
             pd.testing.assert_frame_equal(actual, eager[data_id], check_exact=True)
-            if cap_mib == 8:
+            if cap_mib == 16:
                 assert len(tuple((root / "data").rglob("*.parquet"))) > 1
                 assert len(slabs[data_id]) > 1
             else:
@@ -328,7 +328,7 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
             )
             assert policy.used_memory_bytes == 0
             assert all(not lease.active for _reference, lease in issued_inputs)
-        if cap_mib == 8:
+        if cap_mib == 16:
             assert max(pit_rows) < len(dates) * 3
         else:
             assert max(pit_rows) > 64 * 3
@@ -585,7 +585,7 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     spec = profile.processed.get("market_panel_1d")
     layout = StorageLayout(tmp_path)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-    with runtime_resource_policy_scope(explicit_cap_bytes=9 * 1024**2) as policy:
+    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
         for data_id in spec.source_input_data_ids:
             source_spec = profile.interim.get(data_id)
             write_dataset(

@@ -55,20 +55,22 @@ def test_funding_missing_and_explicit_zero_have_distinct_evidence(tmp_path):
     raw = tmp_path / "raw"
     with pytest.raises(PortfolioTargetBlocked, match="binance_funding_input_missing"):
         funding_source_identity(
-            raw.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+            (raw.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
         )
     _write(raw, rows=(("forecast", 0, 100, None, None, []),))
     with runtime_resource_policy_scope() as policy:
         with read_funding_observations(
-            raw.parent / "funding" / "BTCUSDT", symbol="BTCUSDT", resource_policy=policy
+            (raw.parent / "funding" / "BTCUSDT",),
+            symbol="BTCUSDT",
+            resource_policy=policy,
         ) as source:
-            assert source.events == () and source.coverage == (0, 100)
+            assert source.events == () and source.coverage == ((0, 100),)
             forecasts = tuple(source.forecasts)
             assert len(forecasts) == 1 and forecasts[0].cashflows == ()
             original = source.identity
         assert (
             funding_source_identity(
-                raw.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+                (raw.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
             )
             == original
         )
@@ -76,14 +78,14 @@ def test_funding_missing_and_explicit_zero_have_distinct_evidence(tmp_path):
             PortfolioTargetBlocked, match="binance_funding_input_missing"
         ):
             funding_source_identity(
-                raw.parent / "funding" / "ETHUSDT", "ledger", symbol="ETHUSDT"
+                (raw.parent / "funding" / "ETHUSDT",), "ledger", symbol="ETHUSDT"
             )
         assert policy.used_memory_bytes == 0
     changed = tmp_path / "changed" / "raw"
     _write(changed, rows=(("forecast", 0, 100, None, None, [[50, -1.0]]),))
     assert (
         funding_source_identity(
-            changed.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+            (changed.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
         )
         != original
     )
@@ -103,7 +105,7 @@ def test_funding_unproven_coverage_never_becomes_zero(tmp_path, changes):
         PortfolioTargetBlocked, match="binance_funding_coverage_unproven"
     ):
         funding_source_identity(
-            raw.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+            (raw.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
         )
 
 
@@ -124,7 +126,7 @@ def test_funding_malformed_calendar_rejected_with_resources_released(tmp_path, r
     with runtime_resource_policy_scope() as policy:
         with pytest.raises(ValueError, match="binance_funding_input_invalid"):
             funding_source_identity(
-                raw.parent / "funding" / "BTCUSDT", "ledger", symbol="BTCUSDT"
+                (raw.parent / "funding" / "BTCUSDT",), "ledger", symbol="BTCUSDT"
             )
         assert policy.used_memory_bytes == 0
 
@@ -136,9 +138,9 @@ def test_funding_changed_during_consumption_is_rejected_and_primary_preserved(tm
     changed = tmp_path / "changed" / "raw"
     _write(changed, rows=(("forecast", 0, 100, None, None, [[50, 1.0]]),))
     with runtime_resource_policy_scope() as policy:
-        with pytest.raises(ValueError, match="raw_csv_metadata_invalid"):
+        with pytest.raises(ValueError, match="binance_funding_identity_changed"):
             with read_funding_observations(
-                raw.parent / "funding" / "BTCUSDT", symbol="BTCUSDT"
+                (raw.parent / "funding" / "BTCUSDT",), symbol="BTCUSDT"
             ) as source:
                 assert tuple(source.forecasts)
                 for name in ("response.csv", "response.metadata.json"):
@@ -148,7 +150,7 @@ def test_funding_changed_during_consumption_is_rejected_and_primary_preserved(tm
         primary = KeyboardInterrupt("primary")
         with pytest.raises(KeyboardInterrupt) as raised:
             with read_funding_observations(
-                raw.parent / "funding" / "BTCUSDT", symbol="BTCUSDT"
+                (raw.parent / "funding" / "BTCUSDT",), symbol="BTCUSDT"
             ):
                 raise primary
         assert raised.value is primary
@@ -180,6 +182,201 @@ def test_funding_identity_preserves_fatal_file_failure(tmp_path, monkeypatch, fa
     with runtime_resource_policy_scope() as policy:
         monkeypatch.setattr(identity, "filesystem_stat", fail)
         with pytest.raises(type(primary)) as caught:
-            funding_source_identity(root, "ledger", symbol="BTCUSDT")
+            funding_source_identity((root,), "ledger", symbol="BTCUSDT")
         assert caught.value is primary
+        assert policy.used_memory_bytes == 0
+
+
+def test_funding_sources_preserve_gaps_and_ordered_pit_forecasts(tmp_path):
+    roots = []
+    for number, start in enumerate((0, 200, 400)):
+        raw = tmp_path / str(number) / "raw"
+        _write(
+            raw,
+            rows=(
+                ("settlement", start + 50, None, 0.1, 200.0, None),
+                ("forecast", start, start + 100, None, None, [[start + 50, -5.0]]),
+            ),
+            metadata_changes={
+                "coverage": {
+                    "start_ns": start,
+                    "end_ns": start + 100,
+                    "status": "COMPLETE",
+                }
+            },
+        )
+        roots.append(raw.parent / "funding" / "BTCUSDT")
+    roots = tuple(roots)
+    with runtime_resource_policy_scope() as policy:
+        with read_funding_observations(roots, symbol="BTCUSDT") as source:
+            assert source.coverage == ((0, 100), (200, 300), (400, 500))
+            assert [event.timestamp_ns for event in source.events] == [50, 250, 450]
+            assert all(event.rate * event.mark_price == 20.0 for event in source.events)
+            forecasts = tuple(source.forecasts)
+            assert [item.available_at_ns for item in forecasts] == [0, 200, 400]
+            assert [item.cashflows for item in forecasts] == [
+                ((50, -5.0),),
+                ((250, -5.0),),
+                ((450, -5.0),),
+            ]
+            identity = source.identity
+        assert funding_source_identity(roots, "ledger", symbol="BTCUSDT") == identity
+        assert (
+            funding_source_identity((roots[1],), "ledger", symbol="BTCUSDT") != identity
+        )
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("second_start", (0, 50, 100))
+def test_funding_overlapping_closed_intervals_are_rejected(tmp_path, second_start):
+    roots = []
+    for number, start in enumerate((0, second_start)):
+        raw = tmp_path / str(number) / "raw"
+        _write(
+            raw,
+            metadata_changes={
+                "coverage": {
+                    "start_ns": start,
+                    "end_ns": start + 100,
+                    "status": "COMPLETE",
+                }
+            },
+        )
+        roots.append(raw.parent / "funding" / "BTCUSDT")
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(
+            ValueError, match="binance_funding_source_intervals_invalid"
+        ):
+            with read_funding_observations(tuple(roots), symbol="BTCUSDT"):
+                pytest.fail("overlap cannot be silently merged")
+        assert policy.used_memory_bytes == 0
+
+
+def test_funding_adjacent_sources_require_declared_order_and_all_roots(tmp_path):
+    roots = []
+    for number, start in enumerate((0, 101)):
+        raw = tmp_path / str(number) / "raw"
+        _write(
+            raw,
+            metadata_changes={
+                "coverage": {
+                    "start_ns": start,
+                    "end_ns": start + 100,
+                    "status": "COMPLETE",
+                }
+            },
+        )
+        roots.append(raw.parent / "funding" / "BTCUSDT")
+    with runtime_resource_policy_scope() as policy:
+        with read_funding_observations(tuple(roots), symbol="BTCUSDT") as source:
+            assert source.coverage == ((0, 100), (101, 201))
+        for selected in (tuple(reversed(roots)), (roots[0], roots[0])):
+            with pytest.raises(
+                ValueError, match="binance_funding_source_intervals_invalid"
+            ):
+                with read_funding_observations(selected, symbol="BTCUSDT"):
+                    pytest.fail("unordered or repeated sources")
+        for selected in ((), (roots[0], tmp_path / "missing")):
+            with pytest.raises(
+                PortfolioTargetBlocked, match="binance_funding_input_missing"
+            ):
+                with read_funding_observations(selected, symbol="BTCUSDT"):
+                    pytest.fail("missing funding is not zero")
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("interrupt", (False, True))
+def test_funding_unconsumed_later_source_is_verified_at_exit(
+    tmp_path, monkeypatch, interrupt
+):
+    import quant_research_platform.storage.raw_snapshots as snapshots
+
+    handles = []
+    original_open = snapshots.open_filesystem_file
+
+    def tracked_open(*args, **kwargs):
+        handle = original_open(*args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(snapshots, "open_filesystem_file", tracked_open)
+    roots = []
+    for number, start in enumerate((0, 200)):
+        raw = tmp_path / str(number) / "raw"
+        _write(
+            raw,
+            rows=(("forecast", start, start + 100, None, None, []),),
+            metadata_changes={
+                "coverage": {
+                    "start_ns": start,
+                    "end_ns": start + 100,
+                    "status": "COMPLETE",
+                }
+            },
+        )
+        roots.append(raw.parent / "funding" / "BTCUSDT")
+    primary = KeyboardInterrupt("controlled_primary")
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(KeyboardInterrupt if interrupt else ValueError) as caught:
+            with read_funding_observations(tuple(roots), symbol="BTCUSDT") as source:
+                assert next(source.forecasts).available_at_ns == 0
+                path = roots[1] / "response.csv"
+                path.write_bytes(path.read_bytes().replace(b"200", b"201"))
+                if interrupt:
+                    raise primary
+        if interrupt:
+            assert caught.value is primary
+            assert primary.__notes__ == [
+                "Raw CSV consumed-content verification also failed: ValueError"
+            ]
+        else:
+            assert str(caught.value) == "raw_csv_content_invalid"
+        assert handles and all(handle.closed for handle in handles)
+        assert policy.used_memory_bytes == 0
+
+
+def test_funding_forecast_order_is_checked_across_sources(tmp_path):
+    roots = []
+    for number, start in enumerate((0, 200)):
+        raw = tmp_path / str(number) / "raw"
+        _write(
+            raw,
+            rows=(("forecast", 0, 500, None, None, []),),
+            metadata_changes={
+                "coverage": {
+                    "start_ns": start,
+                    "end_ns": start + 100,
+                    "status": "COMPLETE",
+                }
+            },
+        )
+        roots.append(raw.parent / "funding" / "BTCUSDT")
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError, match="binance_funding_record_order_invalid"):
+            with read_funding_observations(tuple(roots), symbol="BTCUSDT"):
+                pytest.fail("cross-source forecasts must remain strictly ordered")
+        assert policy.used_memory_bytes == 0
+
+
+def test_funding_tail_io_error_retains_original_exception(tmp_path, monkeypatch):
+    import errno
+
+    import quant_research_platform.storage.identity as identity
+
+    raw = tmp_path / "raw"
+    _write(raw, rows=(("forecast", 0, 100, None, None, []),))
+    root = raw.parent / "funding" / "BTCUSDT"
+    failure = OSError(errno.EIO, "controlled_tail_io_failure")
+    original_stat = identity.filesystem_stat
+
+    def failed_stat(path, *args, **kwargs):
+        if path == root / "response.metadata.json":
+            raise failure
+        return original_stat(path, *args, **kwargs)
+
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(OSError) as caught:
+            with read_funding_observations((root,), symbol="BTCUSDT"):
+                monkeypatch.setattr(identity, "filesystem_stat", failed_stat)
+        assert caught.value is failure
         assert policy.used_memory_bytes == 0

@@ -84,6 +84,23 @@ class PredictionResult:
             )
 
 
+def _add_a_share_scores(output, raw_prediction):
+    """Apply the same cross-sectional alpha scaling to saved and new predictions."""
+    output[RAW_PREDICTION_COLUMN] = raw_prediction
+    timestamps = strict_timestamp_series(
+        output["timestamp"], error="invalid_prediction_timestamp_values"
+    )
+    ranks = (
+        pd.Series(raw_prediction, index=output.index, dtype="float64")
+        .groupby([timestamps, output["family_id"]], sort=False)
+        .rank(method="average")
+    )
+    counts = timestamps.groupby(
+        [timestamps, output["family_id"]], sort=False
+    ).transform("size")
+    output[ALPHA_SCORE_COLUMN] = (ranks - (counts + 1.0) / 2.0) / counts
+
+
 def build_prediction_result_from_frames(
     frames: Iterable[pd.DataFrame],
     spec: PredictionSpec,
@@ -368,26 +385,7 @@ def _iter_prediction_output_frames(
                     if spec.prediction_mode == "a_share_oos":
                         output["quarter_id"] = test_frame["quarter_id"]
                         output["model_id"] = spec.model_id
-                        output[RAW_PREDICTION_COLUMN] = raw_prediction
-                        timestamps = strict_timestamp_series(
-                            output["timestamp"],
-                            error="invalid_prediction_timestamp_values",
-                        )
-                        ranks = (
-                            pd.Series(
-                                raw_prediction,
-                                index=output.index,
-                                dtype="float64",
-                            )
-                            .groupby([timestamps, output["family_id"]], sort=False)
-                            .rank(method="average")
-                        )
-                        counts = timestamps.groupby(
-                            [timestamps, output["family_id"]], sort=False
-                        ).transform("size")
-                        output[ALPHA_SCORE_COLUMN] = (
-                            ranks - (counts + 1.0) / 2.0
-                        ) / counts
+                        _add_a_share_scores(output, raw_prediction)
                     else:
                         output[spec.prediction_column] = raw_prediction
                     if tuple(output.columns) != prediction_output_columns(
@@ -416,7 +414,7 @@ def _iter_prediction_output_frames(
                         ).all():
                             raise ValueError("invalid_prediction_alpha_scores")
                     build_state.record_prediction_output(output, spec=spec)
-                    raw_prediction = timestamps = ranks = counts = None
+                    raw_prediction = None
                     test_frame = usable_mask = None
                     retained_bytes = pandas_frame_payload_bytes(output)
                     if working_lease is not None:
@@ -456,7 +454,7 @@ def _iter_prediction_output_frames(
                             )
                     raise
                 finally:
-                    raw_prediction = timestamps = ranks = counts = None
+                    raw_prediction = None
                     chunk = None
 
 

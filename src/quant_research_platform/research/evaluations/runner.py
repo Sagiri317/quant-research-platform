@@ -47,17 +47,27 @@ def build_crypto_evaluation_result(
     protocol_manifest,
     read_prediction_bundle,
 ):
-    """Evaluate frozen development folds against labels mature within each fold."""
+    """Evaluate declared validation or frozen test with their maturity cutoff."""
     spec = evaluation_catalog.get(evaluation_id)
     dataset = dataset_catalog.get(spec.research_dataset_id)
-    from quant_research_platform.research.protocols.crypto_hft import execution_windows
+    from quant_research_platform.research.protocols.crypto_hft import (
+        execution_windows,
+        validation_windows,
+    )
 
+    access = protocol_manifest["access_window"]
+    if access == "development" and spec.signals[0].source_kind == "prediction":
+        raise PermissionError("crypto_prediction_evaluation_requires_frozen_test")
     windows = tuple(
         window
-        for _fold, window in execution_windows(
-            protocol_manifest["research_plan"],
-            time_window,
-            access_window=protocol_manifest["access_window"],
+        for _fold, window in (
+            validation_windows(protocol_manifest["research_plan"], time_window)
+            if access == "development"
+            else execution_windows(
+                protocol_manifest["research_plan"],
+                time_window,
+                access_window=access,
+            )
         )
     )
     operation = ExitStack()

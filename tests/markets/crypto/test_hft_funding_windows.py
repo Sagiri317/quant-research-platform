@@ -257,7 +257,7 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
 
         funding = SimpleNamespace(
             identity="d" * 64,
-            coverage=(0, 70_000_000),
+            coverage=((0, 70_000_000),),
             events=events,
             forecasts=iter((FundingForecast(0, 1_000_000_000, ()),)),
         )
@@ -523,7 +523,7 @@ def test_funding_cut_between_books_carries_only_information_not_account_or_lease
         coverage = {"s1": (0, 61_000_000)}
         funding = SimpleNamespace(
             identity="a" * 64,
-            coverage=(0, 70_000_000),
+            coverage=((0, 70_000_000),),
             events=(
                 FundingEvent(30_000_000, None, None),
                 FundingEvent(40_000_000, 0.01, 100.0),
@@ -625,7 +625,7 @@ def test_episode_qualification_does_not_split_fold_or_day_and_empty_is_blocked()
     bounds = ((0, day // 2), (day, day * 2))
     coverage = {"s1": (0, day * 2 + 1)}
     trade = SimpleNamespace(intervals=lambda: iter(coverage.values()))
-    funding = SimpleNamespace(coverage=(0, day * 2), events=())
+    funding = SimpleNamespace(coverage=((0, day * 2),), events=())
     assert list(_qualified_episodes(coverage, trade, funding, bounds)) == [
         (
             0,
@@ -639,7 +639,7 @@ def test_episode_qualification_does_not_split_fold_or_day_and_empty_is_blocked()
             ),
         )
     ]
-    funding.coverage = (0, 2**63 - 1)
+    funding.coverage = ((0, 2**63 - 1),)
     longer_calendar = list(_qualified_episodes(coverage, trade, funding, bounds))
     assert longer_calendar[0][:3] == (0, day * 2 + 1, "PLANNED_END")
     assert "funding_coverage_end" not in longer_calendar[0][3]
@@ -662,3 +662,80 @@ def test_episode_qualification_does_not_split_fold_or_day_and_empty_is_blocked()
                     "must not publish empty episode"
                 ),
             )
+
+
+def test_persisted_funding_days_intersect_market_coverage_without_bridging(tmp_path):
+    from types import SimpleNamespace
+
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _funding_check,
+        _qualified_episodes,
+    )
+    from quant_research_platform.sources.binance.funding import (
+        read_funding_observations,
+    )
+    from tests.sources.test_binance_funding import _write
+
+    roots = []
+    for number, start in enumerate((0, 20, 40)):
+        raw = tmp_path / str(number) / "raw"
+        _write(
+            raw,
+            metadata_changes={
+                "coverage": {
+                    "start_ns": start,
+                    "end_ns": start + 9,
+                    "status": "COMPLETE",
+                }
+            },
+        )
+        roots.append(raw.parent / "funding" / "BTCUSDT")
+    books = {"first": (0, 25), "second": (27, 60)}
+    trades = SimpleNamespace(intervals=lambda: iter(((5, 22), (24, 45))))
+    bounds = ((0, 49),)
+    with runtime_resource_policy_scope() as policy:
+        with read_funding_observations(tuple(roots), symbol="BTCUSDT") as source:
+            with pytest.raises(
+                PortfolioTargetBlocked, match="binance_funding_coverage_incomplete"
+            ):
+                _funding_check(source, source.identity, bounds)
+            episodes = list(_qualified_episodes(books, trades, source, bounds))
+            assert [(row[0], row[1]) for row in episodes] == [
+                (5, 10),
+                (20, 22),
+                (24, 25),
+                (27, 30),
+                (40, 45),
+            ]
+            assert all(row[2] == "TRUNCATED" for row in episodes)
+            assert episodes[0][3] == ("funding_coverage_end",)
+            assert episodes[-1][3] == ("trade_coverage_end",)
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("next_start,continuous", ((10, True), (11, False)))
+def test_funding_nanosecond_adjacency_keeps_maximal_episode(next_start, continuous):
+    from types import SimpleNamespace
+
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _funding_check,
+        _qualified_episodes,
+    )
+
+    source = SimpleNamespace(
+        identity="a" * 64, coverage=((0, 9), (next_start, 20)), events=()
+    )
+    books = {"whole": (0, 21)}
+    trades = SimpleNamespace(intervals=lambda: iter(((0, 21),)))
+    bounds = ((0, 20),)
+    if continuous:
+        _funding_check(source, source.identity, bounds)
+    else:
+        with pytest.raises(
+            PortfolioTargetBlocked, match="binance_funding_coverage_incomplete"
+        ):
+            _funding_check(source, source.identity, bounds)
+    episodes = list(_qualified_episodes(books, trades, source, bounds))
+    assert [(row[0], row[1]) for row in episodes] == (
+        [(0, 21)] if continuous else [(0, 10), (11, 21)]
+    )

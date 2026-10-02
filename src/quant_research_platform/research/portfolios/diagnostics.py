@@ -3,12 +3,12 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
-from itertools import zip_longest
 from math import comb
 
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.contracts.experiments import _model_inference_blocker
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
 from quant_research_platform.contracts.validation import (
     clear_exception_frames,
@@ -31,6 +31,8 @@ from quant_research_platform.research.statistics import (
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
     return_standard_deviation,
+    stationary_bootstrap_mean_ci,
+    time_series_inference_summary,
 )
 from quant_research_platform.runtime.resources import (
     OwnedValue,
@@ -127,65 +129,70 @@ def _crypto_ledger_observations(ledger, windows, limit, *, observation_window_ns
     drawdown = 0.0
     with closing_iterator(ledger.iter_chunks()) as chunks:
         for batch in chunks:
-            endings = [row for row in batch.valuations if row.phase == "end"]
-            timestamp = endings[0].timestamp_ns
-            nav = sum(row.value for row in endings)
-            position = sum(
-                row.quantity
-                for row in endings
-                if row.asset_id != PORTFOLIO_CASH_ASSET_ID
-            )
-            duration = max(0, timestamp - previous_timestamp)
-            oos_duration = sum(
-                max(0, min(timestamp, end) - max(previous_timestamp, start))
-                for _fold, start, end in bounds
-            )
-            for scope, weight in (
-                ("oos", oos_duration),
-                ("gap", duration - oos_duration),
-            ):
-                if not weight:
-                    continue
+            try:
+                endings = [row for row in batch.valuations if row.phase == "end"]
+                timestamp = endings[0].timestamp_ns
+                nav = sum(row.value for row in endings)
+                position = sum(
+                    row.quantity
+                    for row in endings
+                    if row.asset_id != PORTFOLIO_CASH_ASSET_ID
+                )
+                duration = max(0, timestamp - previous_timestamp)
+                oos_duration = sum(
+                    max(0, min(timestamp, end) - max(previous_timestamp, start))
+                    for _fold, start, end in bounds
+                )
+                for scope, weight in (
+                    ("oos", oos_duration),
+                    ("gap", duration - oos_duration),
+                ):
+                    if not weight:
+                        continue
+                    state = inventory[scope]
+                    new_duration = state["duration"] + weight
+                    delta = previous_position - state["mean"]
+                    state["mean"] += delta * weight / new_duration
+                    state["m2"] += weight * delta * (previous_position - state["mean"])
+                    state["duration"] = new_duration
+                    state["at_limit"] += weight * int(abs(previous_position) >= limit)
+                    state["max_abs"] = max(state["max_abs"], abs(previous_position))
+                for diagnostic in batch.diagnostics:
+                    if diagnostic.name == "utc_day_boundary":
+                        if timestamp % day_ns or timestamp == previous_utc_timestamp:
+                            raise ValueError("crypto_utc_day_boundary_invalid")
+                        previous_utc_timestamp = timestamp
+                        if any(
+                            start <= timestamp <= end for _fold, start, end in bounds
+                        ):
+                            utc[timestamp] = nav
+                    elif diagnostic.name == "oos_window_start":
+                        endpoints[(int(diagnostic.number), "start")] = nav
+                    elif diagnostic.name == "oos_window_end":
+                        endpoints[(int(diagnostic.number), "end")] = nav
+                peak = max(peak, nav)
+                drawdown = min(drawdown, nav / peak - 1.0)
+                scope = (
+                    "oos"
+                    if any(start <= timestamp <= end for _fold, start, end in bounds)
+                    else "gap"
+                )
                 state = inventory[scope]
-                new_duration = state["duration"] + weight
-                delta = previous_position - state["mean"]
-                state["mean"] += delta * weight / new_duration
-                state["m2"] += weight * delta * (previous_position - state["mean"])
-                state["duration"] = new_duration
-                state["at_limit"] += weight * int(abs(previous_position) >= limit)
-                state["max_abs"] = max(state["max_abs"], abs(previous_position))
-            for diagnostic in batch.diagnostics:
-                if diagnostic.name == "utc_day_boundary":
-                    if timestamp % day_ns or timestamp == previous_utc_timestamp:
-                        raise ValueError("crypto_utc_day_boundary_invalid")
-                    previous_utc_timestamp = timestamp
-                    if any(start <= timestamp <= end for _fold, start, end in bounds):
-                        utc[timestamp] = nav
-                elif diagnostic.name == "oos_window_start":
-                    endpoints[(int(diagnostic.number), "start")] = nav
-                elif diagnostic.name == "oos_window_end":
-                    endpoints[(int(diagnostic.number), "end")] = nav
-            peak = max(peak, nav)
-            drawdown = min(drawdown, nav / peak - 1.0)
-            scope = (
-                "oos"
-                if any(start <= timestamp <= end for _fold, start, end in bounds)
-                else "gap"
-            )
-            state = inventory[scope]
-            running_position = sum(
-                row.quantity
-                for row in batch.valuations
-                if row.phase == "before" and row.asset_id != PORTFOLIO_CASH_ASSET_ID
-            )
-            state["max_abs"] = max(
-                state["max_abs"], abs(running_position), abs(position)
-            )
-            for trade in batch.trades:
-                running_position += trade.quantity
-                state["max_abs"] = max(state["max_abs"], abs(running_position))
-            state["observations"] += 1
-            previous_timestamp, previous_position = timestamp, position
+                running_position = sum(
+                    row.quantity
+                    for row in batch.valuations
+                    if row.phase == "before" and row.asset_id != PORTFOLIO_CASH_ASSET_ID
+                )
+                state["max_abs"] = max(
+                    state["max_abs"], abs(running_position), abs(position)
+                )
+                for trade in batch.trades:
+                    running_position += trade.quantity
+                    state["max_abs"] = max(state["max_abs"], abs(running_position))
+                state["observations"] += 1
+                previous_timestamp, previous_position = timestamp, position
+            finally:
+                batch = endings = diagnostic = trade = None
     daily = []
     for index, (fold, start, end) in enumerate(bounds):
         observed_start, observed_end = (
@@ -1094,9 +1101,12 @@ def _portfolio_statistics_tables(
             sentinel = object()
             group = batch_group = holding_input = batch = None
             try:
-                for interval_index, group in enumerate(
-                    zip_longest(*streams, fit_stream, fillvalue=sentinel)
-                ):
+                for interval_index in range(len(expected_intervals) + 1):
+                    group = tuple(
+                        next(stream, sentinel) for stream in (*streams, fit_stream)
+                    )
+                    if all(value is sentinel for value in group):
+                        break
                     if any(value is sentinel for value in group):
                         raise ValueError(
                             "portfolio_statistics_candidate_dates_misaligned"
@@ -1505,38 +1515,60 @@ def _portfolio_statistics_tables(
             raise ValueError("portfolio_statistics_window_incomplete")
         if matrix.isna().any().any():
             raise ValueError("portfolio_statistics_candidate_dates_misaligned")
+        paired_comparison = _group_portfolio_comparison(matrix, protocol_manifest)
         if access == "development":
+            blockers = {
+                candidate.candidate_id: _model_inference_blocker(
+                    access_window=access,
+                    selection_groups=(candidate.selection_group,),
+                )
+                for candidate in candidates
+            }
+            inference_ids = tuple(
+                candidate_id for candidate_id in ids if blockers[candidate_id] is None
+            )
+            inference_matrix = matrix.loc[:, list(inference_ids)]
             before = daily.pivot(
                 index=["entry_at", "end_at"],
                 columns="candidate_id",
                 values="nav_before",
-            ).reindex(columns=ids)
+            ).reindex(columns=inference_ids)
             after = daily.pivot(
                 index=["entry_at", "end_at"], columns="candidate_id", values="nav_end"
-            ).reindex(columns=ids)
-            roundoff = _nav_return_roundoff(before, after, matrix)
-            deviations = return_standard_deviation(matrix, roundoff=roundoff)
-            trial_sharpes = matrix.mean() / np.where(deviations > 0, deviations, np.nan)
+            ).reindex(columns=inference_ids)
+            roundoff = _nav_return_roundoff(before, after, inference_matrix)
+            deviations = return_standard_deviation(inference_matrix, roundoff=roundoff)
+            trial_sharpes = inference_matrix.mean() / np.where(
+                deviations > 0, deviations, np.nan
+            )
             for candidate_id in ids:
-                try:
-                    result = probabilistic_and_deflated_sharpe(
-                        matrix[candidate_id],
-                        benchmark_sharpe=0.0,
-                        trial_sharpes=trial_sharpes,
-                        return_roundoff=roundoff[:, ids.index(candidate_id)],
-                    )
+                if blockers[candidate_id] is not None:
                     outputs = (
-                        ("psr", result.psr, ""),
-                        ("dsr", result.dsr, result.dsr_reason or ""),
+                        ("psr", None, blockers[candidate_id]),
+                        ("dsr", None, blockers[candidate_id]),
                     )
-                except ValueError as error:
-                    if str(error) not in {
-                        "finite_vector_required",
-                        "sharpe_zero_variance",
-                        "sharpe_variance_invalid",
-                    }:
-                        raise
-                    outputs = (("psr", None, str(error)), ("dsr", None, str(error)))
+                else:
+                    try:
+                        result = probabilistic_and_deflated_sharpe(
+                            inference_matrix[candidate_id],
+                            benchmark_sharpe=0.0,
+                            trial_sharpes=trial_sharpes,
+                            return_roundoff=roundoff[
+                                :, inference_ids.index(candidate_id)
+                            ],
+                        )
+                        outputs = (
+                            ("psr", result.psr, ""),
+                            ("dsr", result.dsr, result.dsr_reason or ""),
+                        )
+                    except ValueError as error:
+                        if str(error) not in {
+                            "finite_vector_required",
+                            "sharpe_zero_variance",
+                            "sharpe_variance_invalid",
+                        }:
+                            raise
+                        outputs = (("psr", None, str(error)), ("dsr", None, str(error)))
                 for test, value, reason in outputs:
                     robustness_rows.append(
                         dict(
@@ -1546,14 +1578,20 @@ def _portfolio_statistics_tables(
                             status="UNDEFINED" if value is None else "DEFINED",
                             reason=reason,
                             observation_count=len(matrix),
-                            candidate_count=len(ids),
+                            candidate_count=len(inference_ids),
                             access_window=access,
                         )
                     )
             blocks = protocol_manifest["statistics"]["cscv_blocks"]
-            if len(matrix) >= blocks:
+            if not inference_ids:
+                value, status, reason = (
+                    np.nan,
+                    "UNDEFINED",
+                    next(iter(blockers.values())),
+                )
+            elif len(matrix) >= blocks:
                 result = cscv_pbo(
-                    matrix,
+                    inference_matrix,
                     slice_count=blocks,
                     max_combinations=comb(blocks, blocks // 2),
                     return_roundoff=roundoff,
@@ -1569,7 +1607,7 @@ def _portfolio_statistics_tables(
                     status=status,
                     reason=reason,
                     observation_count=len(matrix),
-                    candidate_count=len(ids),
+                    candidate_count=len(inference_ids),
                     access_window=access,
                 )
             )
@@ -1656,6 +1694,7 @@ def _portfolio_statistics_tables(
                         )
         tables = {
             "portfolio_daily": daily,
+            "portfolio_group_comparison": paired_comparison,
             "portfolio_performance": pd.DataFrame(summary_rows),
             "portfolio_capacity": capacity,
             "portfolio_capacity_summary": pd.DataFrame(capacity_summary),
@@ -1708,3 +1747,161 @@ def _portfolio_statistics_tables(
         daily = selected = matrix = capacity = tables = batch = facts = None
         _close_lease_preserving_primary(lease, owner="research.portfolio.statistics")
         raise
+
+
+def _group_portfolio_comparison(matrix, protocol_manifest):
+    """Compare both frozen groups on the complete, already validated daily grid."""
+    statistics = protocol_manifest["statistics"]
+    declaration = statistics["group_comparison"]
+    candidate_ids = declaration["portfolio_ids"]
+    columns = [
+        f"{group}_{candidate}"
+        for candidate in candidate_ids
+        for group in ("global", "quarterly")
+    ]
+    if (
+        set(columns) != set(matrix.columns)
+        or not np.isfinite(matrix.loc[:, columns].to_numpy(dtype="float64")).all()
+    ):
+        raise ValueError("portfolio_group_comparison_coverage_invalid")
+    differences = pd.DataFrame(
+        {
+            "timestamp": matrix.index.get_level_values("end_at"),
+            **{
+                candidate: (
+                    matrix[f"quarterly_{candidate}"] - matrix[f"global_{candidate}"]
+                ).to_numpy()
+                for candidate in candidate_ids
+            },
+        }
+    )
+    access = protocol_manifest["access_window"]
+    inference_blocker = _model_inference_blocker(
+        access_window=access, selection_groups=("global", "quarterly")
+    )
+    inference = (
+        time_series_inference_summary(
+            differences,
+            identity_column="timestamp",
+            max_lags=statistics["hac_lag"],
+            fdr_method=declaration["fdr_method"],
+            fdr_alpha=declaration["alpha"],
+            fdr_family_size=len(candidate_ids),
+        ).set_index("timestamp")
+        if inference_blocker is None
+        else None
+    )
+    rows = []
+    for candidate in candidate_ids:
+        values = differences[candidate].to_numpy(dtype="float64")
+        row = {
+            "portfolio_id": candidate,
+            "comparison_role": "primary"
+            if candidate == declaration["primary_portfolio_id"]
+            else "secondary",
+            "access_window": access,
+            "observation_count": len(values),
+            "global_mean": float(matrix[f"global_{candidate}"].mean()),
+            "quarterly_mean": float(matrix[f"quarterly_{candidate}"].mean()),
+            "mean_difference": float(values.mean()),
+            "global_terminal_wealth": float((1 + matrix[f"global_{candidate}"]).prod()),
+            "quarterly_terminal_wealth": float(
+                (1 + matrix[f"quarterly_{candidate}"]).prod()
+            ),
+            "hac_lag": statistics["hac_lag"],
+            "bootstrap_block_size": statistics["bootstrap_block"],
+            "bootstrap_repetitions": statistics["bootstrap_repetitions"],
+            "bootstrap_seed": declaration["seed"],
+            "confidence": declaration["confidence"],
+            "fdr_family_size": len(candidate_ids),
+            "fdr_method": declaration["fdr_method"],
+            "fdr_alpha": declaration["alpha"],
+            **dict.fromkeys(
+                (
+                    "standard_error",
+                    "t_statistic",
+                    "p_value",
+                    "ci_lower",
+                    "ci_upper",
+                    "fdr_adjusted_p_value",
+                    "bootstrap_lower",
+                    "bootstrap_upper",
+                ),
+                np.nan,
+            ),
+            "status": "UNDEFINED",
+            "reason": inference_blocker,
+            "bootstrap_status": "UNDEFINED",
+            "bootstrap_reason": inference_blocker,
+        }
+        if inference is not None:
+            estimate = inference.loc[candidate]
+            for key in (
+                "status",
+                "reason",
+                "standard_error",
+                "t_statistic",
+                "p_value",
+                "ci_lower",
+                "ci_upper",
+                "fdr_adjusted_p_value",
+            ):
+                row[key] = estimate[key]
+            if (
+                estimate["status"] == "DEFINED"
+                and len(values) > statistics["bootstrap_block"]
+            ):
+                interval = stationary_bootstrap_mean_ci(
+                    values,
+                    block_size=statistics["bootstrap_block"],
+                    repetitions=statistics["bootstrap_repetitions"],
+                    seed=declaration["seed"],
+                    confidence=declaration["confidence"],
+                )
+                row.update(
+                    bootstrap_lower=interval.lower,
+                    bootstrap_upper=interval.upper,
+                    bootstrap_status="DEFINED",
+                    bootstrap_reason=None,
+                )
+            else:
+                row["bootstrap_reason"] = (
+                    estimate["reason"]
+                    if estimate["status"] != "DEFINED"
+                    else "bootstrap_block_exceeds_observations"
+                )
+        rows.append(row)
+    return pd.DataFrame.from_records(
+        rows,
+        columns=(
+            "portfolio_id",
+            "comparison_role",
+            "access_window",
+            "status",
+            "reason",
+            "bootstrap_status",
+            "bootstrap_reason",
+            "fdr_method",
+            "observation_count",
+            "hac_lag",
+            "bootstrap_block_size",
+            "bootstrap_repetitions",
+            "bootstrap_seed",
+            "fdr_family_size",
+            "global_mean",
+            "quarterly_mean",
+            "mean_difference",
+            "global_terminal_wealth",
+            "quarterly_terminal_wealth",
+            "standard_error",
+            "t_statistic",
+            "p_value",
+            "ci_lower",
+            "ci_upper",
+            "bootstrap_lower",
+            "bootstrap_upper",
+            "confidence",
+            "fdr_alpha",
+            "fdr_adjusted_p_value",
+        ),
+    )

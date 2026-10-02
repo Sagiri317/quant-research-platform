@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import json
+import pickle
 import warnings
 from contextlib import contextmanager
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,51 +12,30 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.artifacts.outputs.bundle_validation import (
-    read_prediction_output_bundle,
-)
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
-from quant_research_platform.contracts.business_manifest import (
-    build_business_manifest_envelope,
-)
-from quant_research_platform.contracts.datasets import ResearchDatasetSpec
-from quant_research_platform.contracts.models import (
-    A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-    ModelSpec,
-    model_spec_payload,
-    validate_model_selection_metadata,
-)
+from quant_research_platform.contracts.models import ModelSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.contracts.targets import (
-    ProducerBinding,
-    ProducerKind,
-    TargetSpec,
-)
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.research.models import fitting
+from quant_research_platform.research.models import fitting, persisted
 from quant_research_platform.research.models.fitting import (
     ModelFitResult,
     training_scope_chunks,
 )
 from quant_research_platform.research.models.persisted import (
-    _validated_quarterly_payload,
     read_quarterly_model_artifact,
-    write_quarterly_model_artifact,
+    read_quarterly_predictor,
 )
 from quant_research_platform.research.models.production import (
     _fit_selected_model_result,
     _refit_model_spec,
 )
-from quant_research_platform.research.models.rank_ensemble import (
-    ICWeightedRankEnsemble,
-    RankEnsemblePredictor,
-)
+from quant_research_platform.research.models.rank_ensemble import RankEnsemblePredictor
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
+    preflight_model_specs,
 )
 from quant_research_platform.research.models.trial_selection import (
     select_best_validation_trial,
-    select_prediction_model_spec,
 )
 from quant_research_platform.research.predictions import runner
 from quant_research_platform.research.protocols import a_share
@@ -63,37 +44,31 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.storage.experiments import (
+    read_model_trial_ledger_reference,
+)
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_glob,
-    filesystem_iterdir,
     filesystem_mkdir,
     filesystem_read_bytes,
-    filesystem_read_text,
-    filesystem_replace,
-    filesystem_stat,
     filesystem_walk,
     filesystem_write_bytes,
-    filesystem_write_text,
-    native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research as research_workflow
-from tests.helpers.research_configuration import configured_models
+from quant_research_platform.storage.semantic_artifacts import (
+    read_semantic_artifact_operational_metadata,
+    write_semantic_artifact,
+)
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.helpers.runtime_resources import capture_test_policy
 from tests.research.prediction_output_helpers import write_prediction_result
 from tests.research.workflow_test_support import (
-    QUARTERLY_FIXTURE_PROTOCOL,
     _column_predictor,
-    _fold,
     _metadata,
-    _quarterly_result,
-    _selection_metadata,
-    _trial_reference,
-    fixture_quarterly_results,
-    fixture_refit_reference,
-    fixture_validation_coverage,
+    shared_model_case,
+    shared_model_protocol,
+    shared_model_rows,
 )
 
 
@@ -137,952 +112,6 @@ def _mock_prediction_dataset(monkeypatch, frame):
     )
 
 
-def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limit(
-    tmp_path: Path,
-):
-    from quant_research_platform.contracts.models import (
-        A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-    )
-    from quant_research_platform.research.models.production import QuarterlyModelResult
-    from quant_research_platform.research.models.supervised import preflight_model_specs
-    from quant_research_platform.storage.manifests import read_qrp_json
-
-    protocol = a_share.protocol("fusion_nf_expectations")
-    specs = tuple(
-        replace(spec, label_column="label")
-        for spec in configured_models(protocol.scenario_id, factor_scope="full")
-    )
-    protocol_payload = {
-        **protocol.manifest(),
-        "research_configuration": {
-            "models": [
-                {
-                    "model_id": spec.model_id,
-                    "hyperparameters": dict(spec.hyperparameters),
-                }
-                for spec in specs
-            ]
-        },
-    }
-    preflight_model_specs(specs)
-    inputs = tuple(
-        dict.fromkeys(column for spec in specs for column in spec.input_columns)
-    )
-    rng = np.random.default_rng(17)
-    frame = pd.DataFrame(rng.normal(size=(192, len(inputs))), columns=inputs)
-    frame["timestamp"] = pd.bdate_range("2018-01-02", periods=32).repeat(6)
-    frame["asset_id"] = [f"asset_{i}" for _ in range(32) for i in range(6)]
-    frame["market_id"] = "a_share"
-    frame["eligible"] = True
-    frame["label"] = frame[inputs[0]] * 0.3 + rng.normal(scale=0.01, size=len(frame))
-    frame["label_available_at"] = frame["timestamp"]
-    dataset = replace(
-        a_share.research_dataset_catalog().get(protocol.scenario_id), data_id="fixture"
-    )
-    layout = StorageLayout(tmp_path)
-    references = tuple(
-        _trial_reference(
-            layout,
-            _fold(1),
-            family_id=spec.model_id,
-            model_id=spec.model_id,
-            protocol=protocol_payload,
-            model_spec=spec,
-            root_seed=42,
-            validation_specs=specs,
-        )
-        for spec in specs
-    )
-    selection = _selection_metadata(
-        family_id=specs[0].model_id, model_id=specs[0].model_id, columns=inputs
-    )
-    selection["candidate_family_ids"] = selection["tie_break_order"] = [
-        spec.model_id for spec in specs
-    ]
-    selection["common_validation_coverage"] = fixture_validation_coverage(
-        _fold(1), specs
-    )
-    selection["families"] = [
-        {
-            "family_id": spec.model_id,
-            "config_tie_break_order": [spec.model_id],
-            "selected_config_id": spec.model_id,
-            "trial_ledger_semantic_identity": reference["semantic_identity"],
-        }
-        for spec, reference in zip(specs, references, strict=True)
-    ]
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="model-artifact",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2019-01-01",
-            "end": "2019-03-31",
-            "access": "development",
-        },
-        upstream_identities={"fixture": "d" * 64},
-        semantic_metadata={
-            "target_contract": {
-                "protocol": protocol_payload,
-                "model_specs": [model_spec_payload(spec) for spec in specs],
-            }
-        },
-    )
-
-    def chunks(columns, **_kwargs):
-        yield frame.loc[:, list(columns)]
-
-    def fitted():
-        for spec, reference in zip(specs, references, strict=True):
-            result, lease = _fit_selected_model_result(
-                training_counts={},
-                dataset_spec=dataset,
-                selected_spec=spec,
-                candidate_parameters=dict(spec.hyperparameters),
-                chunks=chunks,
-                fitting_cutoff="2018-12-31",
-                quarter_id="2019Q1",
-                root_seed=42,
-            )
-            item = QuarterlyModelResult(
-                _fold(1),
-                spec.model_id,
-                result,
-                spec.model_id,
-                selection,
-                (
-                    reference,
-                    fixture_refit_reference(layout, reference, result.metadata),
-                ),
-            )
-            owned = OwnedValue(item, lease)
-            item = result = None
-            try:
-                yield owned
-            finally:
-                item = result = None
-                if isinstance(owned, OwnedValue) and owned.lease.active:
-                    owned.release(owner="research.model.artifact")
-                owned = None
-
-    with runtime_resource_policy_scope() as policy:
-        root = write_quarterly_model_artifact(
-            tmp_path / "full_models",
-            model_id="model-artifact",
-            envelope=envelope,
-            quarterly_results=fixture_quarterly_results(fitted()),
-            trial_layout=layout,
-        )
-        artifact = read_quarterly_model_artifact(root, trial_layout=layout)
-        assert len(artifact.quarterly_models) == 8
-        shard = root / "models" / "2019Q1" / "metadata.json"
-        payload = read_qrp_json(
-            shard,
-            expected_schema_id=A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-            error="invalid_full_metadata",
-        )
-        assert len(payload["models"]) == 8
-        assert filesystem_stat(shard).st_size < 1024**2
-        assert any(
-            item["model_metadata"]["scaler"] is not None for item in payload["models"]
-        )
-        from quant_research_platform.research.models import supervised
-        from quant_research_platform.research.models.persisted import (
-            read_quarterly_predictor,
-        )
-
-        for entry in artifact.quarterly_models:
-            algorithm = entry["model_metadata"]["model_algorithm"]
-            with read_quarterly_predictor(
-                artifact, "2019Q1", entry["family_id"], resource_policy=policy
-            ) as actual:
-                if algorithm in {
-                    "equal_weight_rank_ensemble",
-                    "ic_weighted_rank_ensemble",
-                }:
-                    changed = (
-                        replace(
-                            actual,
-                            directions=tuple(-value for value in actual.directions),
-                        )
-                        if algorithm == "equal_weight_rank_ensemble"
-                        else replace(
-                            actual, weights=tuple(-value for value in actual.weights)
-                        )
-                    )
-                    with pytest.raises(
-                        ValueError, match="model_state_metadata_mismatch"
-                    ):
-                        fitting.validate_model_state(changed, entry["model_metadata"])
-                    changed = None
-                elif algorithm == "random_forest_regressor":
-                    with pytest.MonkeyPatch.context() as patch:
-                        patch.setattr(
-                            supervised,
-                            "model_cpu_capacity",
-                            lambda: pytest.fail(
-                                "persisted model validation rediscovered host capacity"
-                            ),
-                        )
-                        fitting.validate_model_state(actual, entry["model_metadata"])
-                    assert (
-                        actual.n_jobs
-                        == entry["model_metadata"]["resolved_hyperparameters"]["n_jobs"]
-                    )
-        assert policy.used_memory_bytes == 0
-    development = len(
-        pd.period_range(a_share.DEVELOPMENT_START, a_share.DEVELOPMENT_END, freq="Q")
-    )
-    total = len(
-        pd.period_range(a_share.DEVELOPMENT_START, a_share.HOLDOUT_END, freq="Q")
-    )
-    assert (development, total) == (20, 28)
-    per_quarter_members = len(specs) + 2
-    assert (1 + development * per_quarter_members, 1 + total * per_quarter_members) == (
-        201,
-        281,
-    )
-
-
-def _fixture_protocol(specs):
-    return {
-        "fixture": True,
-        "research_configuration": {
-            "models": [
-                {
-                    "model_id": spec.model_id,
-                    "hyperparameters": dict(spec.hyperparameters),
-                }
-                for spec in specs
-            ]
-        },
-    }
-
-
-def _envelope(*, software_identity="c" * 64, specs=None) -> object:
-    if specs is None:
-        specs = tuple(
-            ModelSpec(
-                model_id=item["model_id"],
-                model_algorithm=item["model_id"],
-                input_factor_columns=("x",),
-                label_column="label",
-            )
-            for item in QUARTERLY_FIXTURE_PROTOCOL["research_configuration"]["models"]
-        )
-    protocol = _fixture_protocol(specs)
-    return build_business_manifest_envelope(
-        logical_artifact_id="model-artifact",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity=software_identity,
-        research_window={
-            "start": "2019-01-01",
-            "end": "2019-06-30",
-            "access": "development",
-        },
-        upstream_identities={"fixture": "d" * 64},
-        semantic_metadata={
-            "target_contract": {
-                "protocol": protocol,
-                "model_specs": [model_spec_payload(spec) for spec in specs],
-            }
-        },
-    )
-
-
-def _dataset_spec() -> ResearchDatasetSpec:
-    return make_demo_research_dataset_spec(
-        data_id="research_demo",
-        input_data_ids=("processed_demo",),
-        base_input_data_id="processed_demo",
-        factor_columns=("x", "y"),
-        label_columns=("label",),
-        filter_columns=("eligible",),
-        context_columns=(),
-    )
-
-
-def test_persisted_quarter_consumption_uses_active_columns_and_actual_model_ids(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    specs = tuple(
-        ModelSpec(
-            model_id="linear_" + column,
-            model_algorithm="linear_regression",
-            input_factor_columns=(column,),
-            label_column="label",
-        )
-        for column in ("x", "y")
-    )
-    protocol = _fixture_protocol(specs)
-
-    def results():
-        for quarter in (1, 2):
-            members = [
-                _quarterly_result(
-                    quarter,
-                    trial_layout=StorageLayout(tmp_path),
-                    model_spec=spec,
-                    protocol=protocol,
-                    validation_specs=specs,
-                    validation_rankic=0.3 if index == quarter - 1 else 0.1,
-                    predictor=_column_predictor(spec.input_columns[0], float(quarter)),
-                )
-                for index, spec in enumerate(specs)
-            ]
-            selection = members[quarter - 1].selection_metadata
-            selection.update(
-                candidate_family_ids=[spec.model_id for spec in specs],
-                tie_break_order=[spec.model_id for spec in specs],
-                families=[
-                    member.selection_metadata["families"][0] for member in members
-                ],
-            )
-            for member in members:
-                yield OwnedValue(
-                    replace(member, selection_metadata=selection),
-                    policy.lease(
-                        "test.model",
-                        fitting._linear_model_state_upper_bound_bytes(specs[0]),
-                    ),
-                )
-
-    with runtime_resource_policy_scope() as policy:
-        root = write_quarterly_model_artifact(
-            tmp_path / "model",
-            model_id="model-artifact",
-            trial_layout=StorageLayout(tmp_path),
-            envelope=_envelope(specs=specs),
-            quarterly_results=fixture_quarterly_results(results()),
-        )
-    artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
-    from quant_research_platform.research.statistics_production import _model_trials
-    from quant_research_platform.runtime.resources import RuntimeResourcePolicy
-
-    active_readers = []
-    reader_peaks = []
-    original_lease = RuntimeResourcePolicy.lease
-
-    def observe_reader(self, owner, size):
-        lease = original_lease(self, owner, size)
-        if owner == "storage.trial.ledger":
-            active_readers.append(lease)
-            reader_peaks.append(sum(item.active for item in active_readers))
-        return lease
-
-    monkeypatch.setattr(RuntimeResourcePolicy, "lease", observe_reader)
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.trial_output", 0) as trial_output,
-    ):
-        trials = _model_trials(
-            artifact, StorageLayout(tmp_path), output_lease=trial_output
-        )
-        assert len(artifact.trial_ledgers) == 8
-        assert len(trials) == 4
-        assert set(trials.config_id) == {"linear_x", "linear_y"}
-        assert trials.observation_count.tolist() == [2, 2, 2, 2]
-        reordered = replace(
-            artifact, trial_ledgers=tuple(reversed(artifact.trial_ledgers))
-        )
-        pd.testing.assert_frame_equal(
-            trials,
-            _model_trials(
-                reordered, StorageLayout(tmp_path), output_lease=trial_output
-            ),
-        )
-        for references in (
-            artifact.trial_ledgers[1:],
-            (*artifact.trial_ledgers, artifact.trial_ledgers[0]),
-        ):
-            changed = replace(artifact, trial_ledgers=references)
-            with pytest.raises(ValueError, match="statistics_trial_reference_mismatch"):
-                _model_trials(
-                    changed, StorageLayout(tmp_path), output_lease=trial_output
-                )
-    assert max(reader_peaks) == 1
-    assert all(not lease.active for lease in active_readers)
-    assert policy.used_memory_bytes == 0
-    spec = _dataset_spec()
-    frame = pd.DataFrame(
-        {
-            "market_id": ["a_share"] * 4,
-            "asset_id": ["a", "b", "a", "b"],
-            "timestamp": pd.to_datetime(["2019-02-01"] * 2 + ["2019-05-01"] * 2),
-            "x": [3.0, 5.0, np.nan, 7.0],
-            "y": [np.nan, 6.0, 4.0, 8.0],
-            "eligible": [True] * 4,
-        }
-    )
-    _mock_prediction_dataset(monkeypatch, frame)
-    prediction_spec = PredictionSpec(
-        prediction_id="prediction",
-        model_id="model-artifact",
-        research_dataset_id="research_demo",
-        train_end=None,
-        test_start="2019-01-01",
-        test_end="2019-06-30",
-        prediction_mode="a_share_oos",
-        prediction_column="raw_prediction",
-    )
-    result = runner.build_prediction_result_from_persisted_model(
-        layout=StorageLayout(project_root=tmp_path),
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
-        prediction_spec=prediction_spec,
-        persisted_model=artifact,
-        resource_policy=None,
-    )
-    try:
-        frames = []
-        for item in result.output_chunks:
-            frames.append(item.value.copy() if isinstance(item, OwnedValue) else item)
-        output = pd.concat(frames, ignore_index=True)
-    finally:
-        result.close()
-    assert len(output) == 6
-    assert output["model_id"].tolist() == [
-        "linear_x",
-        "linear_x",
-        "linear_y",
-        "linear_x",
-        "linear_y",
-        "linear_y",
-    ]
-    assert output["raw_prediction"].tolist() == pytest.approx(
-        [4.0, 6.0, 7.0, 9.0, 6.0, 10.0]
-    )
-    assert output.iloc[[2, 3]]["alpha_score"].tolist() == pytest.approx([0.0, 0.0])
-    active_only = output.loc[output.asset_id.eq("a")]
-    assert active_only.model_id.tolist() == ["linear_x", "linear_y"]
-    assert active_only.raw_prediction.tolist() == [4.0, 6.0]
-    assert [
-        selection["selected_family_id"]
-        for selection in artifact.quarterly_selections.values()
-    ] == ["linear_x", "linear_y"]
-    assert policy.used_memory_bytes == 0
-
-
-def test_persisted_prediction_alpha_is_permutation_invariant_and_reader_uses_alpha(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with runtime_resource_policy_scope() as policy:
-        root = write_quarterly_model_artifact(
-            tmp_path / "model",
-            model_id="model-artifact",
-            trial_layout=StorageLayout(tmp_path),
-            envelope=_envelope(),
-            quarterly_results=fixture_quarterly_results(
-                OwnedValue(
-                    item,
-                    policy.lease(
-                        "test.model",
-                        fitting._linear_model_state_upper_bound_bytes(
-                            ModelSpec(
-                                model_id=item.model_id,
-                                model_algorithm=item.model_result.metadata[
-                                    "model_algorithm"
-                                ],
-                                input_factor_columns=tuple(
-                                    item.model_result.metadata["input_columns"]
-                                ),
-                                label_column="label",
-                            )
-                        ),
-                    ),
-                )
-                for item in (
-                    _quarterly_result(
-                        1,
-                        trial_layout=StorageLayout(tmp_path),
-                        model_spec=ModelSpec(
-                            model_id="linear_regression",
-                            model_algorithm="linear_regression",
-                            input_factor_columns=("x",),
-                            label_column="label",
-                        ),
-                    ),
-                )
-            ),
-        )
-    artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
-    spec = _dataset_spec()
-    frame = pd.DataFrame(
-        {
-            "market_id": ["a_share"] * 3,
-            "asset_id": ["000001", "000002", "000003"],
-            "timestamp": pd.to_datetime(["2019-02-01"] * 3),
-            "x": [1.0, 2.0, 3.0],
-            "y": [np.nan] * 3,
-            "eligible": [True] * 3,
-        }
-    )
-    _mock_prediction_dataset(monkeypatch, frame)
-    prediction_spec = PredictionSpec(
-        prediction_id="prediction",
-        model_id="model-artifact",
-        research_dataset_id="research_demo",
-        train_end=None,
-        test_start="2019-01-01",
-        test_end="2019-03-31",
-        prediction_mode="a_share_oos",
-        prediction_column="raw_prediction",
-    )
-    result = runner.build_prediction_result_from_persisted_model(
-        layout=StorageLayout(project_root=tmp_path),
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
-        prediction_spec=prediction_spec,
-        persisted_model=artifact,
-        resource_policy=None,
-    )
-    bundle = write_prediction_result(StorageLayout(project_root=tmp_path), result)
-    table = pd.read_parquet(
-        native_filesystem_path(bundle / "prediction.parquet")
-    ).sort_values("asset_id", kind="mergesort")
-    assert table["alpha_score"].tolist() == pytest.approx([-1.0 / 3.0, 0.0, 1.0 / 3.0])
-    assert float(table["alpha_score"].mean()) == pytest.approx(0.0)
-
-    from quant_research_platform.research.predictions.alignment import (
-        _iter_prediction_joined_chunks,
-    )
-
-    requested = frame.iloc[[2, 0, 1]].reset_index(drop=True)
-    with runtime_resource_policy_scope(None):
-        for mutation in (None, "asset", "timestamp"):
-            selected = requested.copy()
-            if mutation == "asset":
-                selected.loc[selected.asset_id.eq("000001"), "asset_id"] = "1"
-            if mutation == "timestamp":
-                selected.loc[0, "timestamp"] += pd.Timedelta(days=1)
-            with read_prediction_output_bundle(
-                bundle,
-                expected_output_id="prediction",
-                expected_run_id="test_run",
-                family_selection="champion",
-            ) as (_manifest, lookup):
-                assert lookup.prediction_column == "alpha_score"
-                joined = _iter_prediction_joined_chunks(
-                    (selected.iloc[:1], selected.iloc[1:]),
-                    prediction_lookup=lookup,
-                    input_columns=("x",),
-                    model_algorithm="linear_regression",
-                    sample_filter_mode=prediction_spec.sample_filter_mode,
-                    test_start=prediction_spec.test_start,
-                    test_end=prediction_spec.test_end,
-                )
-                if mutation is None:
-                    matched = pd.concat(joined, ignore_index=True)
-                    assert matched.asset_id.tolist() == ["000003", "000001", "000002"]
-                    assert matched.alpha_score.tolist() == pytest.approx(
-                        [1.0 / 3.0, -1.0 / 3.0, 0.0]
-                    )
-                    assert lookup.coverage_counts() == (0, 0)
-                else:
-                    with pytest.raises(
-                        ValueError, match="misaligned_persisted_prediction_keys"
-                    ):
-                        list(joined)
-
-    shuffled = frame.iloc[[2, 0, 1]].reset_index(drop=True)
-    _mock_prediction_dataset(monkeypatch, shuffled)
-    second = runner.build_prediction_result_from_persisted_model(
-        layout=StorageLayout(project_root=tmp_path),
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
-        prediction_spec=prediction_spec,
-        persisted_model=artifact,
-        resource_policy=None,
-    )
-    try:
-        second_table = pd.concat(
-            [
-                item.value if isinstance(item, OwnedValue) else item
-                for item in second.output_chunks
-            ],
-            ignore_index=True,
-        ).sort_values("asset_id", kind="mergesort")
-    finally:
-        second.close()
-    pd.testing.assert_frame_equal(
-        table.reset_index(drop=True),
-        second_table.reset_index(drop=True),
-        check_dtype=True,
-    )
-    assert policy.used_memory_bytes == 0
-
-
-def test_persisted_quarter_request_is_clipped_to_requested_window(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    with runtime_resource_policy_scope() as policy:
-        root = write_quarterly_model_artifact(
-            tmp_path / "model",
-            model_id="model-artifact",
-            trial_layout=StorageLayout(tmp_path),
-            envelope=_envelope(),
-            quarterly_results=fixture_quarterly_results(
-                OwnedValue(
-                    item,
-                    policy.lease(
-                        "test.model",
-                        fitting._linear_model_state_upper_bound_bytes(
-                            ModelSpec(
-                                model_id=item.model_id,
-                                model_algorithm=item.model_result.metadata[
-                                    "model_algorithm"
-                                ],
-                                input_factor_columns=tuple(
-                                    item.model_result.metadata["input_columns"]
-                                ),
-                                label_column="label",
-                            )
-                        ),
-                    ),
-                )
-                for item in (
-                    _quarterly_result(
-                        1,
-                        trial_layout=StorageLayout(tmp_path),
-                        model_spec=ModelSpec(
-                            model_id="linear_regression",
-                            model_algorithm="linear_regression",
-                            input_factor_columns=("x",),
-                            label_column="label",
-                        ),
-                    ),
-                )
-            ),
-        )
-    artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
-    spec = _dataset_spec()
-    frame = pd.DataFrame(
-        {
-            "market_id": "a_share",
-            "asset_id": ["a", "a", "a"],
-            "timestamp": pd.to_datetime(["2019-01-02", "2019-02-15", "2019-03-30"]),
-            "x": [1.0, 2.0, 3.0],
-            "y": np.nan,
-            "eligible": True,
-        }
-    )
-    _mock_prediction_dataset(monkeypatch, frame)
-    prediction_spec = PredictionSpec(
-        prediction_id="prediction",
-        model_id="model-artifact",
-        research_dataset_id="research_demo",
-        train_end=None,
-        test_start="2019-02-01",
-        test_end="2019-03-15",
-        prediction_mode="a_share_oos",
-        prediction_column="raw_prediction",
-    )
-    result = runner.build_prediction_result_from_persisted_model(
-        layout=StorageLayout(project_root=tmp_path),
-        dataset_catalog=ResearchDatasetCatalog((spec,)),
-        prediction_spec=prediction_spec,
-        persisted_model=artifact,
-        resource_policy=None,
-    )
-    try:
-        frames = []
-        for item in result.output_chunks:
-            frames.append(item.value.copy() if isinstance(item, OwnedValue) else item)
-        output = pd.concat(frames, ignore_index=True)
-    finally:
-        result.close()
-    assert output["timestamp"].min() >= pd.Timestamp("2019-02-01")
-    assert output["timestamp"].max() <= pd.Timestamp("2019-03-15")
-    assert len(output) == 1
-    assert policy.used_memory_bytes == 0
-
-
-def test_persisted_quarter_route_rejects_uncovered_first_quarter(
-    tmp_path: Path,
-) -> None:
-    with runtime_resource_policy_scope() as policy:
-        root = write_quarterly_model_artifact(
-            tmp_path / "model",
-            model_id="model-artifact",
-            trial_layout=StorageLayout(tmp_path),
-            envelope=_envelope(),
-            quarterly_results=fixture_quarterly_results(
-                OwnedValue(
-                    item,
-                    policy.lease(
-                        "test.model",
-                        fitting._linear_model_state_upper_bound_bytes(
-                            ModelSpec(
-                                model_id=item.model_id,
-                                model_algorithm=item.model_result.metadata[
-                                    "model_algorithm"
-                                ],
-                                input_factor_columns=tuple(
-                                    item.model_result.metadata["input_columns"]
-                                ),
-                                label_column="label",
-                            )
-                        ),
-                    ),
-                )
-                for item in (
-                    _quarterly_result(
-                        2,
-                        trial_layout=StorageLayout(tmp_path),
-                        model_spec=ModelSpec(
-                            model_id="linear_regression",
-                            model_algorithm="linear_regression",
-                            input_factor_columns=("x",),
-                            label_column="label",
-                        ),
-                    ),
-                )
-            ),
-        )
-    artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
-    prediction_spec = PredictionSpec(
-        prediction_id="prediction",
-        model_id="model-artifact",
-        research_dataset_id="research_demo",
-        train_end=None,
-        test_start="2019-01-01",
-        test_end="2019-06-30",
-        prediction_mode="a_share_oos",
-        prediction_column="raw_prediction",
-    )
-    with pytest.raises(
-        ValueError,
-        match="persisted_model_prediction_window_uncovered",
-    ):
-        runner.build_prediction_result_from_persisted_model(
-            layout=StorageLayout(project_root=tmp_path),
-            dataset_catalog=ResearchDatasetCatalog((_dataset_spec(),)),
-            prediction_spec=prediction_spec,
-            persisted_model=artifact,
-            resource_policy=None,
-        )
-    assert policy.used_memory_bytes == 0
-
-
-def test_quarter_id_must_match_prediction_window_and_repeated_champion_is_valid() -> (
-    None
-):
-    metadata = _metadata(("x",))
-    valid = {
-        "quarter_id": "2019Q1",
-        "family_id": "linear_regression",
-        "model_id": "champion",
-        "training_window": {"start": "2014-01-01", "end": "2017-12-31"},
-        "validation_window": {"start": "2018-01-01", "end": "2018-12-31"},
-        "prediction_window": {"start": "2019-01-01", "end": "2019-03-31"},
-        "model_metadata": metadata,
-    }
-    selections = {
-        "2019Q1": _selection_metadata(
-            family_id="linear_regression", model_id="champion", columns=("x",)
-        )
-    }
-    assert (
-        _validated_quarterly_payload([valid], selections)[0]["model_id"] == "champion"
-    )
-    invalid = {
-        **valid,
-        "prediction_window": {"start": "2020-01-01", "end": "2020-03-31"},
-    }
-    with pytest.raises(ValueError, match="model_artifact_quarter_window_mismatch"):
-        _validated_quarterly_payload([invalid], selections)
-
-
-def test_same_champion_and_ic_columns_are_canonicalized(tmp_path: Path) -> None:
-    with runtime_resource_policy_scope() as policy:
-        root = write_quarterly_model_artifact(
-            tmp_path / "model",
-            model_id="model-artifact",
-            trial_layout=StorageLayout(tmp_path),
-            envelope=_envelope(),
-            quarterly_results=fixture_quarterly_results(
-                OwnedValue(
-                    item,
-                    policy.lease(
-                        "test.model",
-                        fitting._linear_model_state_upper_bound_bytes(
-                            ModelSpec(
-                                model_id=item.model_id,
-                                model_algorithm=item.model_result.metadata[
-                                    "model_algorithm"
-                                ],
-                                input_factor_columns=tuple(
-                                    item.model_result.metadata["input_columns"]
-                                ),
-                                label_column="label",
-                            )
-                        ),
-                    ),
-                )
-                for item in (
-                    _quarterly_result(
-                        1,
-                        trial_layout=StorageLayout(tmp_path),
-                        model_spec=ModelSpec(
-                            model_id="linear_regression",
-                            model_algorithm="linear_regression",
-                            input_factor_columns=("x",),
-                            label_column="label",
-                        ),
-                    ),
-                    _quarterly_result(
-                        2,
-                        trial_layout=StorageLayout(tmp_path),
-                        model_spec=ModelSpec(
-                            model_id="linear_regression",
-                            model_algorithm="linear_regression",
-                            input_factor_columns=("x",),
-                            label_column="label",
-                        ),
-                    ),
-                )
-            ),
-        )
-    artifact = read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
-    assert [item["model_id"] for item in artifact.quarterly_models] == [
-        "linear_regression",
-        "linear_regression",
-    ]
-
-    ic_spec = ModelSpec(
-        model_id="ic_weighted_rank_ensemble",
-        model_algorithm="ic_weighted_rank_ensemble",
-        input_factor_columns=("x", "y"),
-        label_column="label",
-    )
-    ic_protocol = _fixture_protocol((ic_spec,))
-    ic_result = _quarterly_result(
-        1,
-        trial_layout=StorageLayout(tmp_path),
-        model_spec=ic_spec,
-        protocol=ic_protocol,
-        predictor=ICWeightedRankEnsemble(
-            columns=("x",),
-            weights=(1.0,),
-        ),
-    )
-    with runtime_resource_policy_scope() as policy:
-        ic_root = write_quarterly_model_artifact(
-            tmp_path / "ic-model",
-            model_id="model-artifact",
-            trial_layout=StorageLayout(tmp_path),
-            envelope=_envelope(specs=(ic_spec,)),
-            quarterly_results=fixture_quarterly_results(
-                OwnedValue(
-                    item,
-                    policy.lease(
-                        "test.model",
-                        fitting._linear_model_state_upper_bound_bytes(
-                            ModelSpec(
-                                model_id=item.model_id,
-                                model_algorithm=item.model_result.metadata[
-                                    "model_algorithm"
-                                ],
-                                input_factor_columns=tuple(
-                                    item.model_result.metadata["input_columns"]
-                                ),
-                                label_column="label",
-                            )
-                        ),
-                    ),
-                )
-                for item in (ic_result,)
-            ),
-        )
-    ic_artifact = read_quarterly_model_artifact(
-        ic_root, trial_layout=StorageLayout(tmp_path)
-    )
-    assert ic_artifact.quarterly_models[0]["model_metadata"]["rank_parameters"] == {
-        "columns": ["x"],
-        "weights": [1.0],
-    }
-    assert policy.used_memory_bytes == 0
-
-
-def test_model_member_mutation_is_rejected_before_loading_predictor(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    artifact, layout = _small_common_coverage_case(tmp_path)
-    from quant_research_platform.research.models import persisted
-
-    root = artifact.instance_root
-    path = root / "models" / "2019Q1" / "linear_x.pkl"
-    replacement = path.with_suffix(".replacement")
-    filesystem_write_bytes(replacement, filesystem_read_bytes(path))
-    filesystem_replace(replacement, path)
-    with monkeypatch.context() as patch:
-        patch.setattr(
-            persisted.pickle,
-            "load",
-            lambda *_args: pytest.fail("replaced physical member reached decoder"),
-        )
-        with pytest.raises(ValueError, match="model_artifact_model_invalid"):
-            with persisted.read_quarterly_predictor(artifact, "2019Q1", "linear_x"):
-                pytest.fail("replaced physical member reached consumer")
-    filesystem_write_bytes(path, b"mutated")
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        read_quarterly_model_artifact(root, trial_layout=StorageLayout(tmp_path))
-
-
-@pytest.mark.parametrize(
-    ("field", "value"),
-    (
-        (
-            "dependency_status",
-            {"status": "available", "package": "sklearn", "version": "test"},
-        ),
-        ("rows_input", 1),
-        ("filter_columns_used", []),
-    ),
-)
-def test_quarterly_model_core_rejects_contract_drift(
-    field: str,
-    value: object,
-) -> None:
-    metadata = _metadata(("x",))
-    metadata[field] = value
-    payload = {
-        "quarter_id": "2019Q1",
-        "family_id": "linear_regression",
-        "model_id": "champion",
-        "training_window": {"start": "2014-01-01", "end": "2017-12-31"},
-        "validation_window": {"start": "2018-01-01", "end": "2018-12-31"},
-        "prediction_window": {"start": "2019-01-01", "end": "2019-03-31"},
-        "model_metadata": metadata,
-    }
-    with pytest.raises(ValueError, match="invalid_model_metadata"):
-        _validated_quarterly_payload(
-            [payload],
-            {
-                "2019Q1": _selection_metadata(
-                    family_id="linear_regression", model_id="champion", columns=("x",)
-                )
-            },
-        )
-
-
-def test_quarterly_model_requires_two_level_selection() -> None:
-    metadata = _metadata(("x",))
-    payload = {
-        "quarter_id": "2019Q1",
-        "model_id": "champion",
-        "training_window": {"start": "2014-01-01", "end": "2017-12-31"},
-        "validation_window": {"start": "2018-01-01", "end": "2018-12-31"},
-        "prediction_window": {"start": "2019-01-01", "end": "2019-03-31"},
-        "model_metadata": metadata,
-    }
-    with pytest.raises(ValueError, match="model_artifact_quarterly_invalid"):
-        _validated_quarterly_payload([payload], {})
-
-
 def test_a_share_model_folds_require_formal_history_start_year() -> None:
     protocol = a_share.protocol(scenario_id="pv_all", access_window="development")
     manifest = protocol.manifest()
@@ -1094,99 +123,6 @@ def test_a_share_model_folds_require_formal_history_start_year() -> None:
             formal_dataset_window=manifest["formal_dataset_window"],
             development_window=manifest["development_window"],
         )
-
-
-def test_mixed_rank_and_supervised_trials_share_validation_keys(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from quant_research_platform.catalog.models import ModelCatalog
-    from quant_research_platform.research.models import trial_selection
-
-    frame = pd.DataFrame(
-        {
-            "market_id": ["a_share"] * 9,
-            "timestamp": pd.to_datetime(
-                ["2018-12-31"] * 3 + ["2019-01-01"] * 3 + ["2019-01-02"] * 3
-            ),
-            "asset_id": ["a", "b", "c"] * 3,
-            "x": [1.0, 2.0, 3.0, 1.0, np.nan, 3.0, 2.0, 3.0, 4.0],
-            "y": [1.0, 2.0, 3.0, 1.0, 2.0, np.nan, 2.0, 3.0, 4.0],
-            "label": [1.0, 2.0, 3.0, 2.0, 3.0, 4.0, 2.0, 3.0, 4.0],
-            "label_available_at": pd.to_datetime(
-                ["2018-12-31"] * 3 + ["2019-01-01"] * 3 + ["2019-01-02"] * 3
-            ),
-            "eligible": [True] * 9,
-        }
-    )
-    catalog = ModelCatalog(
-        (
-            ModelSpec(
-                model_id="linear",
-                model_algorithm="linear_regression",
-                input_factor_columns=("x",),
-                label_column="label",
-            ),
-            ModelSpec(
-                model_id="rank",
-                model_algorithm="equal_weight_rank_ensemble",
-                input_factor_columns=("x", "y"),
-                label_column="label",
-            ),
-        )
-    )
-    prediction_spec = PredictionSpec(
-        prediction_id="prediction",
-        model_id="linear",
-        research_dataset_id="research_demo",
-        train_end="2018-12-31",
-        test_start="2019-01-03",
-        candidate_model_ids=("rank",),
-        model_selection_validation_start="2019-01-01",
-        model_selection_validation_end="2019-01-02",
-    )
-    keys: list[tuple[tuple[pd.Timestamp, str], ...]] = []
-    original_evaluate = trial_selection.evaluate_model_trial_metrics_from_chunks
-
-    def capture(chunks, **kwargs):  # noqa: ANN001, ANN003
-        observed: list[tuple[pd.Timestamp, str]] = []
-
-        def replay():
-            for chunk in chunks:
-                frame_value = chunk.value if isinstance(chunk, OwnedValue) else chunk
-                observed.extend(
-                    frame_value[["timestamp", "asset_id"]].itertuples(
-                        index=False,
-                        name=None,
-                    )
-                )
-                yield chunk
-
-        result = original_evaluate(replay(), **kwargs)
-        keys.append(tuple(observed))
-        return result
-
-    monkeypatch.setattr(
-        trial_selection,
-        "evaluate_model_trial_metrics_from_chunks",
-        capture,
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024**2,
-        explicit_cap_bytes=64 * 1024**2,
-    )
-    with runtime_resource_policy_scope(policy):
-        selected, _metadata_value = select_prediction_model_spec(
-            prediction_spec=prediction_spec,
-            dataset_spec=_dataset_spec(),
-            model_catalog=catalog,
-            chunks=lambda columns, *, input_columns, start, end: (
-                frame.loc[:, list(columns)],
-            ),
-        )
-    assert selected.model_id in {"linear", "rank"}
-    assert len(keys) == 2
-    assert keys[0] == keys[1]
-    assert len(keys[0]) == 5
 
 
 def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
@@ -1270,176 +206,6 @@ def test_training_asset_scope_preserves_consumer_primary_on_early_close() -> Non
             scoped.throw(primary)
         assert raised.value is primary
         assert policy.used_memory_bytes == 0
-
-
-def test_prediction_lineage_requires_exact_model_dependency_identity(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model_identity = "a" * 64
-    profile = SimpleNamespace(
-        producer_bindings={
-            "prediction": ProducerBinding(ProducerKind.PREDICTION, lambda: None),
-            "model": ProducerBinding(ProducerKind.MODEL, lambda: None),
-        }
-    )
-    target = TargetSpec(
-        target_id="prediction",
-        dependencies=("model",),
-        producer_id="prediction",
-    )
-    protocol = SimpleNamespace(protocol_id="a_share_low_frequency")
-    envelope = {
-        "logical_artifact_id": "prediction",
-        "upstream_identities": {"model": model_identity},
-    }
-    manifest = {
-        "metadata": {
-            "model_metadata": {
-                "model_artifact_id": "model",
-                "model_artifact_identity": "b" * 64,
-                "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-            }
-        }
-    }
-
-    monkeypatch.setattr(
-        research_workflow,
-        "read_semantic_artifact_record",
-        lambda *_args, **_kwargs: (envelope, {}),
-    )
-    monkeypatch.setattr(
-        research_workflow,
-        "validate_prediction_output_metadata_shape",
-        lambda _metadata: None,
-    )
-
-    @contextmanager
-    def bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        yield manifest, object()
-
-    monkeypatch.setattr(research_workflow, "read_prediction_output_bundle", bundle)
-    with pytest.raises(ValueError, match="prediction_inner_artifact_invalid"):
-        research_workflow._validate_semantic_target_root(  # noqa: SLF001
-            profile,
-            protocol,
-            target,
-            Path("prediction-root"),
-            "c" * 64,
-        )
-
-
-def test_model_selection_rejects_protocol_family_mismatch(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    model_target = "model-target"
-    expected_model_id = "scenario_linear_regression"
-    profile = SimpleNamespace(
-        producer_bindings={
-            model_target: ProducerBinding(ProducerKind.MODEL, lambda: None),
-        },
-        models=SimpleNamespace(
-            get=lambda _model_id: SimpleNamespace(input_columns=()),
-        ),
-    )
-    protocol = SimpleNamespace(
-        protocol_id="a_share_low_frequency",
-        scenario_id="scenario",
-        manifest=lambda: {"selection_tie_break": ["linear_regression"]},
-        model_ids_for_target=lambda _target_id: (expected_model_id,),
-    )
-    target = TargetSpec(model_target, producer_id=model_target)
-    selection = {
-        "candidate_family_ids": [expected_model_id],
-        "tie_break_order": [expected_model_id],
-        "selected_family_id": "different_family",
-    }
-    persisted = SimpleNamespace(
-        quarterly_selections={"2019Q1": selection},
-        quarterly_models=(
-            {
-                "quarter_id": "2019Q1",
-                "family_id": "different_family",
-                "model_metadata": {
-                    "model_algorithm": "linear_regression",
-                    "input_columns": [],
-                },
-            },
-        ),
-    )
-    monkeypatch.setattr(
-        research_workflow,
-        "read_semantic_artifact_record",
-        lambda *_args, **_kwargs: ({"logical_artifact_id": model_target}, {}),
-    )
-    monkeypatch.setattr(
-        research_workflow,
-        "read_quarterly_model_artifact",
-        lambda *_args, **_kwargs: persisted,
-    )
-    with pytest.raises(ValueError, match="model_selection_family_mismatch"):
-        research_workflow._validate_semantic_target_root(  # noqa: SLF001
-            profile,
-            protocol,
-            target,
-            Path("model-root"),
-            "a" * 64,
-        )
-
-
-def test_quarterly_writer_releases_owned_member_on_primary_failure(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    from quant_research_platform.research.models import persisted
-
-    def fail_dump(*_args, **_kwargs):
-        raise RuntimeError("predictor_serialization_failed")
-
-    monkeypatch.setattr(persisted.pickle, "dump", fail_dump)
-    policy = capture_test_policy(
-        available_memory_bytes=256 * 1024 * 1024,
-        explicit_cap_bytes=64 * 1024 * 1024,
-    )
-    quarter = _quarterly_result(
-        1,
-        trial_layout=StorageLayout(tmp_path),
-        model_spec=ModelSpec(
-            model_id="linear_regression",
-            model_algorithm="linear_regression",
-            input_factor_columns=("x",),
-            label_column="label",
-        ),
-    )
-
-    def yielded() -> object:
-        lease = policy.lease(
-            "research.test.quarter",
-            fitting._linear_model_state_upper_bound_bytes(
-                ModelSpec(
-                    model_id="champion",
-                    model_algorithm="linear_regression",
-                    input_factor_columns=("x",),
-                    label_column="label",
-                )
-            ),
-        )
-        owned = OwnedValue(quarter, lease)
-        try:
-            yield owned
-        finally:
-            if owned.lease.active:
-                owned.release(owner="research.test.quarter")
-
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(RuntimeError, match="predictor_serialization_failed"):
-            write_quarterly_model_artifact(
-                tmp_path / "model",
-                model_id="model-artifact",
-                trial_layout=StorageLayout(tmp_path),
-                envelope=_envelope(),
-                quarterly_results=fixture_quarterly_results(yielded()),
-            )
-    assert policy.used_memory_bytes == 0
 
 
 def test_rank_missing_contributes_neutral_without_renormalization() -> None:
@@ -1598,598 +364,6 @@ def test_convergence_warning_is_a_model_fit_failure() -> None:
             estimator=WarningEstimator(),
             threads=1,
         )
-
-
-def test_two_level_selection_mutations_are_rejected() -> None:
-    family = {
-        "family_id": "ridge",
-        "config_tie_break_order": ["ridge_config_0"],
-        "selected_config_id": "ridge_config_0",
-        "trial_ledger_semantic_identity": "a" * 64,
-    }
-    payload = {
-        "status": "selected",
-        "selection_metric": "validation_rankic",
-        "selection_direction": "maximize",
-        "validation_start": "2018-01-01",
-        "validation_end": "2018-12-31",
-        "candidate_family_ids": ["ridge"],
-        "tie_break_order": ["ridge"],
-        "selected_family_id": "ridge",
-        "selected_model_id": "ridge_config_0",
-        "families": [family],
-        "common_validation_coverage": {
-            "path": "models/2019Q1/validation-coverage.parquet",
-            "semantic_identity": "b" * 64,
-            "row_count": 2,
-        },
-    }
-    validate_model_selection_metadata(payload)
-    for mutation in (
-        {**payload, "selected_model_id": "other"},
-        {
-            **payload,
-            "families": [{**family, "selection_metric_value": 0.3}],
-        },
-        {
-            **payload,
-            "families": [
-                {
-                    **family,
-                    "trial_ledger_semantic_identity": "invalid",
-                }
-            ],
-        },
-    ):
-        with pytest.raises(ValueError, match="invalid_model_metadata"):
-            validate_model_selection_metadata(mutation)
-
-
-@pytest.mark.parametrize(
-    "max_train_rows,train_rows,refit_rows,trial_alpha,refit_alpha",
-    ((None, 3, 6, 30.0, 60.0), (2, 2, 2, 20.0, 20.0), (3, 3, 3, 30.0, 30.0)),
-)
-def test_selected_protocol_strength_is_resolved_on_real_refit_rows_and_persisted(
-    tmp_path: Path,
-    max_train_rows,
-    train_rows,
-    refit_rows,
-    trial_alpha,
-    refit_alpha,
-) -> None:
-    import json
-    from dataclasses import replace
-
-    from quant_research_platform.catalog.models import ModelCatalog
-    from quant_research_platform.contracts.filtering import filter_definition
-    from quant_research_platform.contracts.json_codec import canonical_json_hash
-    from quant_research_platform.research.models import persisted
-    from quant_research_platform.research.models.persisted import (
-        read_quarterly_predictor,
-    )
-    from quant_research_platform.research.models.production import (
-        QuarterlyModelResult,
-        _select_model_family_winners,
-    )
-    from quant_research_platform.research.models.supervised import preflight_model_specs
-    from quant_research_platform.research.models.trial_selection import (
-        ModelSampleCoverage,
-        model_validation_coverage_scope,
-    )
-    from quant_research_platform.storage.experiments import read_trial_ledger_reference
-    from quant_research_platform.storage.semantic_artifacts import (
-        write_semantic_artifact,
-    )
-    from tests.research.workflow_test_support import _fold
-
-    layout = StorageLayout(tmp_path).with_target_roots(
-        {"fixture": tmp_path / ("d" * 64)}
-    )
-    dataset = replace(_dataset_spec(), data_id="fixture")
-    base = ModelSpec(
-        model_id="ridge",
-        model_algorithm="ridge_regression",
-        input_factor_columns=("x",),
-        label_column="label",
-        random_seed=42,
-        max_train_rows=max_train_rows,
-    )
-    preflight_model_specs((base,))
-    frame = pd.DataFrame(
-        [
-            {
-                "timestamp": pd.Timestamp(day),
-                "asset_id": asset,
-                "market_id": "a_share",
-                "x": float(i),
-                "label": float(i * 2),
-                "label_available_at": pd.Timestamp(day),
-                "eligible": True,
-            }
-            for day in ("2017-12-29", "2018-12-28", "2019-01-02")
-            for i, asset in enumerate(("a", "b", "c"), start=1)
-        ]
-    )
-
-    def chunks(columns, **_kwargs):
-        return (frame.loc[:, list(columns)],)
-
-    prediction = PredictionSpec(
-        prediction_id="selection",
-        model_id="ridge",
-        research_dataset_id="fixture",
-        train_end="2017-12-31",
-        test_start="2019-01-01",
-        test_end="2019-03-31",
-        model_selection_validation_start="2018-01-01",
-        model_selection_validation_end="2018-12-31",
-    )
-    from tests.helpers.research_configuration import research_configuration
-
-    declared_ridge = next(
-        item
-        for item in research_configuration()["models"]
-        if item["model_algorithm"] == "ridge_regression"
-    )
-    configuration = {
-        "models": [
-            {
-                "model_id": "ridge",
-                "hyperparameters": dict(base.hyperparameters),
-                "parameter_candidates": declared_ridge["parameter_candidates"],
-            }
-        ]
-    }
-    protocol = {"fixture": True, "research_configuration": configuration}
-    validation_coverage = ModelSampleCoverage(
-        model_validation_coverage_scope("d" * 64, _fold(1), (base,))
-    )
-    validation_keys = frame.loc[
-        frame["timestamp"].eq(pd.Timestamp("2018-12-28")),
-        ["timestamp", "asset_id"],
-    ]
-    validation_coverage.add(validation_keys)
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="model-artifact",
-        schema_identity=canonical_json_hash(
-            {"model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID}
-        ),
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2019-01-01",
-            "end": "2019-03-31",
-            "access": "development",
-        },
-        upstream_identities={"fixture": "d" * 64},
-        semantic_metadata={
-            "target_contract": {
-                "protocol": protocol,
-                "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-                "model_specs": [model_spec_payload(base)],
-            }
-        },
-    )
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.trial_references", 0) as trial_reference_lease,
-    ):
-        winners, metadata, refs, indices = _select_model_family_winners(
-            trial_reference_lease=trial_reference_lease,
-            training_counts={},
-            validation_coverage=validation_coverage,
-            validation_input_columns=("x",),
-            selection_spec=prediction,
-            dataset_spec=dataset,
-            model_catalog=ModelCatalog((base,)),
-            chunks=chunks,
-            model_ids=("ridge",),
-            tie_break_order=("ridge",),
-            quarter_id="2019Q1",
-            root_seed=42,
-            layout=layout,
-            run_id="run_refit",
-            model_target_id="model-artifact",
-            research_protocol_identity=canonical_json_hash(protocol),
-            quarter=_fold(1),
-            holdout_window={"start": "2020-01-01", "end": "2020-12-31"},
-            backend_versions={"sklearn": "test"},
-            research_configuration=configuration,
-        )
-        metadata["common_validation_coverage"] = {
-            "path": "models/2019Q1/validation-coverage.parquet",
-            "semantic_identity": validation_coverage.semantic_identity,
-            "row_count": validation_coverage.row_count,
-        }
-        selected, index = winners["ridge"], indices["ridge"]
-        assert (
-            index == 0 and selected.hyperparameters["alpha"] == trial_alpha
-        )  # Retained training rows times the selected lambda 10.
-        result, lease = _fit_selected_model_result(
-            training_counts={},
-            dataset_spec=dataset,
-            selected_spec=selected,
-            candidate_parameters=configuration["models"][0]["parameter_candidates"][
-                index
-            ],
-            chunks=chunks,
-            fitting_cutoff="2018-12-31",
-            quarter_id="2019Q1",
-            root_seed=42,
-        )
-        try:
-            assert result.prediction_model.estimator.alpha == refit_alpha
-            fit_keys = frame.loc[
-                frame["timestamp"].le(pd.Timestamp("2018-12-31")),
-                ["timestamp", "asset_id"],
-            ]
-            if max_train_rows is not None:
-                fit_keys = fit_keys.tail(max_train_rows)
-            assert len(fit_keys) == refit_rows
-            refit_reference = fixture_refit_reference(
-                layout,
-                refs[0],
-                result.metadata,
-                candidate_parameters=configuration["models"][0]["parameter_candidates"][
-                    index
-                ],
-                fit_keys=fit_keys,
-            )
-            quarterly = QuarterlyModelResult(
-                _fold(1),
-                selected.model_id,
-                result,
-                "ridge",
-                metadata,
-                (*refs, refit_reference),
-            )
-            root = write_quarterly_model_artifact(
-                tmp_path / "model",
-                model_id="model-artifact",
-                envelope=envelope,
-                quarterly_results=fixture_quarterly_results(
-                    (OwnedValue(quarterly, lease),),
-                    validation_keys=validation_keys,
-                ),
-                trial_layout=layout,
-            )
-        finally:
-            if lease is not None and lease.active:
-                lease.close()
-        artifact = read_quarterly_model_artifact(root, trial_layout=layout)
-        saved = artifact.quarterly_models[0]["model_metadata"]
-        assert pd.Timestamp(saved["train_start"]) > pd.Timestamp(
-            artifact.quarterly_models[0]["training_window"]["start"]
-        )
-        assert saved["rows_after_input_label_dropna"] == refit_rows
-        assert saved["resolved_hyperparameters"]["alpha"] == refit_alpha
-        with read_trial_ledger_reference(layout, artifact.trial_ledgers[0]) as (
-            plan,
-            trials,
-        ):
-            ledger_baseline = policy.used_memory_bytes
-            assert plan.candidate_ids[index] == selected.model_id
-            assert (
-                next(
-                    record
-                    for record in trials
-                    if record.candidate_id == selected.model_id
-                ).normalized_parameters["hyperparameters"]["alpha"]
-                == trial_alpha
-            )
-            assert all(record.metrics["n_train"] == train_rows for record in trials)
-            with read_quarterly_predictor(
-                artifact, "2019Q1", "ridge", resource_policy=policy
-            ) as predictor:
-                assert predictor.estimator.alpha == refit_alpha
-                probe = pd.DataFrame({"x": [1.0, 2.0, 3.0]})
-                before = predictor.predict(probe).copy()
-            original_bytes = _file_bytes(root)
-            for mutation in (
-                "none_start",
-                "early_start",
-                "nat_end",
-                "cutoff",
-                "algorithm",
-                "inputs",
-                "label",
-                "filter",
-                "seed",
-                "refit_count",
-                "refit_strength",
-                "winner",
-                "backend",
-                "scaler",
-            ):
-
-                def changed(staging, mutation=mutation):
-                    for relative, content in original_bytes.items():
-                        if relative == Path("manifest.json"):
-                            continue
-                        destination = staging / relative
-                        filesystem_mkdir(
-                            destination.parent, parents=True, exist_ok=True
-                        )
-                        filesystem_write_bytes(destination, content)
-                    metadata_path = staging / "models/2019Q1/metadata.json"
-                    payload = json.loads(
-                        filesystem_read_text(metadata_path, encoding="utf-8")
-                    )
-                    entry = payload["models"][0]
-                    altered = entry["model_metadata"]
-                    if mutation == "none_start":
-                        altered["train_start"] = None
-                    elif mutation == "early_start":
-                        altered["train_start"] = (
-                            pd.Timestamp(entry["training_window"]["start"])
-                            - pd.Timedelta(days=1)
-                        ).isoformat()
-                    elif mutation == "nat_end":
-                        altered["train_end"] = "NaT"
-                    elif mutation == "cutoff":
-                        altered["fit_cutoff"] = "NaT"
-                    elif mutation == "algorithm":
-                        altered["model_algorithm"] = "lasso_regression"
-                    elif mutation == "inputs":
-                        altered["input_factor_columns"] = altered["input_columns"] = [
-                            "other"
-                        ]
-                        altered["scaler"]["columns"] = ["other"]
-                        altered["feature_importance"] = {
-                            "other": altered["feature_importance"]["x"]
-                        }
-                    elif mutation == "label":
-                        altered["label_column"] = "other_label"
-                    elif mutation == "filter":
-                        altered["sample_filter_mode"] = "unfiltered"
-                        altered["filter_columns_used"] = []
-                        altered["filter_definition"] = filter_definition("unfiltered")
-                    elif mutation == "seed":
-                        altered["random_seed"] += 1
-                    elif mutation == "refit_count":
-                        for key in (
-                            "rows_input",
-                            "rows_after_filter_mode",
-                            "rows_after_input_label_dropna",
-                        ):
-                            altered[key] += 1
-                    elif mutation == "refit_strength":
-                        altered["hyperparameters"]["alpha"] *= 2
-                        altered["resolved_hyperparameters"]["alpha"] *= 2
-                    elif mutation == "winner":
-                        loser = next(
-                            candidate
-                            for candidate in plan.candidate_ids
-                            if candidate != selected.model_id
-                        )
-                        entry["model_id"] = loser
-                        payload["selection"]["selected_model_id"] = loser
-                        payload["selection"]["families"][0]["selected_config_id"] = (
-                            loser
-                        )
-                    if mutation in {"backend", "scaler", "refit_strength"}:
-                        relative = "models/2019Q1/ridge.pkl"
-                        with persisted._read_model_member(
-                            root,
-                            artifact.member_records,
-                            relative,
-                            resource_policy=policy,
-                        ) as owned:
-                            model = owned.value
-                            if mutation == "scaler":
-                                model.scaler = replace(
-                                    model.scaler, mean_=(model.scaler.mean_[0] + 1.0,)
-                                )
-                            else:
-                                model.estimator.set_params(
-                                    alpha=model.estimator.alpha * 2
-                                )
-                            persisted._write_model_member(
-                                staging / relative,
-                                model,
-                                state_bytes=owned.lease.reserved_bytes,
-                            )
-                            model = None
-                    filesystem_write_text(
-                        metadata_path, json.dumps(payload), encoding="utf-8"
-                    )
-
-                altered_root = write_semantic_artifact(
-                    tmp_path / mutation,
-                    envelope,
-                    changed,
-                    operational_metadata={
-                        "model_trial_ledgers": list(artifact.trial_ledgers)
-                    },
-                )
-                with pytest.raises(
-                    ValueError,
-                    match=(
-                        "invalid_model_metadata|model_trial_|model_state_metadata_mismatch"
-                        "|model_artifact_training_range_invalid"
-                    ),
-                ):
-                    corrupted = read_quarterly_model_artifact(
-                        altered_root, trial_layout=layout
-                    )
-                    with read_quarterly_predictor(
-                        corrupted, "2019Q1", "ridge", resource_policy=policy
-                    ):
-                        pass
-                assert policy.used_memory_bytes == ledger_baseline
-        assert _file_bytes(root) == original_bytes
-        with persisted._read_model_member(
-            root,
-            artifact.member_records,
-            "models/2019Q1/ridge.pkl",
-            resource_policy=policy,
-        ) as owned:
-            altered_metadata = {**saved, "label_column": "other_label"}
-            altered = QuarterlyModelResult(
-                _fold(1),
-                selected.model_id,
-                ModelFitResult(
-                    altered_metadata,
-                    owned.value,
-                ),
-                "ridge",
-                metadata,
-                quarterly.trial_ledgers,
-            )
-            owned.value = altered
-            altered = None
-            with pytest.raises(ValueError, match="model_trial_parameters_misaligned"):
-                write_quarterly_model_artifact(
-                    tmp_path / "writer_reject",
-                    model_id="model-artifact",
-                    envelope=envelope,
-                    quarterly_results=fixture_quarterly_results(
-                        (owned,), validation_keys=validation_keys
-                    ),
-                    trial_layout=layout,
-                )
-        assert policy.used_memory_bytes == trial_reference_lease.reserved_bytes
-        frame.loc[frame.timestamp.ge("2019-01-01"), ["x", "label"]] *= 1000000.0
-        later_winners, later_selection, later_refs, later_indices = (
-            _select_model_family_winners(
-                trial_reference_lease=trial_reference_lease,
-                training_counts={},
-                validation_coverage=validation_coverage,
-                validation_input_columns=("x",),
-                selection_spec=prediction,
-                dataset_spec=dataset,
-                model_catalog=ModelCatalog((base,)),
-                chunks=chunks,
-                model_ids=("ridge",),
-                tie_break_order=("ridge",),
-                quarter_id="2019Q1",
-                root_seed=42,
-                layout=layout,
-                run_id="run_future_variant",
-                model_target_id="model-artifact",
-                research_protocol_identity=canonical_json_hash(protocol),
-                quarter=_fold(1),
-                holdout_window={"start": "2020-01-01", "end": "2020-12-31"},
-                backend_versions={"sklearn": "test"},
-                research_configuration=configuration,
-            )
-        )
-        assert later_indices == indices
-        assert later_selection == {
-            key: value
-            for key, value in metadata.items()
-            if key != "common_validation_coverage"
-        }
-        assert later_refs != refs
-        later, later_lease = _fit_selected_model_result(
-            training_counts={},
-            dataset_spec=dataset,
-            selected_spec=later_winners["ridge"],
-            candidate_parameters=configuration["models"][0]["parameter_candidates"][
-                later_indices["ridge"]
-            ],
-            chunks=chunks,
-            fitting_cutoff="2018-12-31",
-            quarter_id="2019Q1",
-            root_seed=42,
-        )
-        try:
-            np.testing.assert_array_equal(before, later.prediction_model.predict(probe))
-        finally:
-            later = None
-            if later_lease is not None:
-                later_lease.close()
-        assert policy.used_memory_bytes == trial_reference_lease.reserved_bytes
-
-
-def test_model_publication_rejects_self_consistent_wrong_trial_provenance(
-    tmp_path: Path,
-) -> None:
-    from copy import deepcopy
-    from dataclasses import replace
-
-    from tests.research.workflow_test_support import _fold, _trial_reference
-
-    layout = StorageLayout(tmp_path)
-    model_spec = ModelSpec(
-        model_id="linear_regression",
-        model_algorithm="linear_regression",
-        input_factor_columns=("x",),
-        label_column="label",
-    )
-    original = _quarterly_result(1, trial_layout=layout, model_spec=model_spec)
-    for index, (fold, arguments, expected_error) in enumerate(
-        (
-            (
-                _fold(1),
-                {"dataset_id": "other", "data_identity": "e" * 64},
-                "model_validation_coverage_mismatch",
-            ),
-            (
-                _fold(1),
-                {"target_id": "other_model"},
-                "model_trial_artifact_binding_invalid",
-            ),
-            (
-                _fold(1),
-                {"protocol": {"different_protocol": True}},
-                "model_trial_artifact_binding_invalid",
-            ),
-            (_fold(2), {}, "model_trial_references_missing"),
-            (_fold(1), {"family_id": "other_family"}, "model_trial_references_missing"),
-        )
-    ):
-        reference = _trial_reference(
-            layout,
-            fold,
-            model_id=original.model_id,
-            model_spec=model_spec,
-            validation_specs=(model_spec,),
-            **({"family_id": "linear_regression"} | arguments),
-        )
-        metadata = deepcopy(original.selection_metadata)
-        metadata["families"][0]["trial_ledger_semantic_identity"] = reference[
-            "semantic_identity"
-        ]
-        wrong = replace(
-            original,
-            selection_metadata=metadata,
-            trial_ledgers=(reference, original.trial_ledgers[1]),
-        )
-        logical_root = tmp_path / f"wrong_{index}"
-        with pytest.raises(ValueError, match=expected_error):
-            with runtime_resource_policy_scope() as policy:
-                write_quarterly_model_artifact(
-                    logical_root,
-                    model_id="model-artifact",
-                    envelope=_envelope(),
-                    quarterly_results=fixture_quarterly_results(
-                        OwnedValue(
-                            item,
-                            policy.lease(
-                                "test.model",
-                                fitting._linear_model_state_upper_bound_bytes(
-                                    ModelSpec(
-                                        model_id=item.model_id,
-                                        model_algorithm=item.model_result.metadata[
-                                            "model_algorithm"
-                                        ],
-                                        input_factor_columns=tuple(
-                                            item.model_result.metadata["input_columns"]
-                                        ),
-                                        label_column="label",
-                                    )
-                                ),
-                            ),
-                        )
-                        for item in (wrong,)
-                    ),
-                    trial_layout=layout,
-                )
-        assert not filesystem_exists(
-            logical_root / "instances" / _envelope().instance_identity
-        )
-    assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("max_train_rows", (None, 4))
@@ -2358,165 +532,6 @@ def test_estimator_admission_uses_capacity_not_soft_thread_planning(
         assert policy.used_memory_bytes == 0
 
 
-@pytest.mark.parametrize("max_train_rows", (None, 400))
-def test_model_disk_admission_precedes_pickle_and_keeps_full_linear_state(
-    tmp_path, monkeypatch, max_train_rows
-):
-    from quant_research_platform.research.models import persisted
-    from quant_research_platform.research.models.persisted import (
-        read_quarterly_predictor,
-    )
-    from quant_research_platform.runtime import resources
-
-    layout = StorageLayout(tmp_path)
-    template = _quarterly_result(
-        1,
-        trial_layout=layout,
-        model_spec=ModelSpec(
-            model_id="linear_regression",
-            model_algorithm="linear_regression",
-            input_factor_columns=("x",),
-            label_column="label",
-        ),
-    )
-    spec = ModelSpec(
-        model_id="linear_regression",
-        model_algorithm="linear_regression",
-        input_factor_columns=("x",),
-        label_column="label",
-        max_train_rows=max_train_rows,
-        random_seed=template.model_result.metadata["random_seed"],
-    )
-    reference = _trial_reference(
-        layout,
-        _fold(1),
-        family_id="linear_regression",
-        model_id="linear_regression",
-        model_spec=spec,
-        protocol=_fixture_protocol((spec,)),
-    )
-    selection = {
-        **template.selection_metadata,
-        "families": [
-            {
-                **template.selection_metadata["families"][0],
-                "trial_ledger_semantic_identity": reference["semantic_identity"],
-            }
-        ],
-    }
-    template = replace(
-        template, selection_metadata=selection, trial_ledgers=(reference,)
-    )
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2017-01-02"] * 400 + ["2017-01-03"] * 400)
-            + pd.to_timedelta(list(range(400)) * 2, unit="ns"),
-            "label_available_at": pd.to_datetime(
-                ["2017-01-02"] * 400 + ["2017-01-03"] * 400
-            ),
-            "x": np.arange(800.0),
-            "label": np.arange(800.0) * 2.0 + 1.0,
-            "eligible": True,
-        }
-    )
-    logical = tmp_path / "model"
-    with runtime_resource_policy_scope() as policy:
-        actual_collect = fitting._collect_training_frame_owned
-        actual_lstsq = fitting.np.linalg.lstsq
-        training_bytes = []
-        solver_calls = []
-
-        def collect(*args, **kwargs):
-            value = actual_collect(*args, **kwargs)
-            training_bytes.append(value.lease.reserved_bytes)
-            return value
-
-        def solve(design, labels, **kwargs):
-            assert (
-                policy.used_memory_bytes
-                >= training_bytes[-1] + design.nbytes + labels.nbytes
-            )
-            solver_calls.append(design.shape[0])
-            return actual_lstsq(design, labels, **kwargs)
-
-        monkeypatch.setattr(fitting, "_collect_training_frame_owned", collect)
-        monkeypatch.setattr(fitting.np.linalg, "lstsq", solve)
-
-        def members():
-            owned = fitting._fit_linear_model_result_owned_from_frames(
-                (frame,), spec, fitting_cutoff="2018-12-31"
-            )
-            try:
-                assert (
-                    owned.lease.reserved_bytes
-                    == fitting._linear_model_state_upper_bound_bytes(spec)
-                )
-                result = replace(
-                    template,
-                    model_result=owned.value,
-                    trial_ledgers=(
-                        reference,
-                        fixture_refit_reference(
-                            layout, reference, owned.value.metadata
-                        ),
-                    ),
-                )
-                owned.value = result
-                result = None
-                yield owned
-            finally:
-                if owned.lease.active:
-                    owned.release(owner="test.model")
-
-        root = write_quarterly_model_artifact(
-            logical,
-            model_id="model-artifact",
-            envelope=_envelope(specs=(spec,)),
-            quarterly_results=fixture_quarterly_results(members()),
-            trial_layout=layout,
-        )
-        assert solver_calls == [800 if max_train_rows is None else max_train_rows]
-        artifact = read_quarterly_model_artifact(root, trial_layout=layout)
-        with read_quarterly_predictor(
-            artifact, "2019Q1", "linear_regression", resource_policy=policy
-        ) as predictor:
-            np.testing.assert_allclose(
-                predictor.predict(pd.DataFrame({"x": [1.0, 2.0]})), [3.0, 5.0]
-            )
-        old_good = _file_bytes(root)
-        previous = set(filesystem_iterdir(root.parent))
-        dump = persisted.pickle.dump
-        calls = []
-
-        def traced_dump(*args, **kwargs):
-            calls.append(True)
-            return dump(*args, **kwargs)
-
-        monkeypatch.setattr(persisted.pickle, "dump", traced_dump)
-        paths = []
-
-        def no_space(path):
-            paths.append(Path(path))
-            return SimpleNamespace(free=1)
-
-        monkeypatch.setattr(resources.shutil, "disk_usage", no_space)
-        with pytest.raises(RuntimeError, match="insufficient_free_disk"):
-            write_quarterly_model_artifact(
-                logical,
-                model_id="model-artifact",
-                envelope=_envelope(software_identity="e" * 64, specs=(spec,)),
-                quarterly_results=fixture_quarterly_results(members()),
-                trial_layout=layout,
-            )
-        assert calls == []
-        assert paths and all(
-            path.is_relative_to(native_filesystem_path(logical)) for path in paths
-        )
-        assert set(filesystem_iterdir(root.parent)) == previous
-        assert _file_bytes(root) == old_good
-        assert policy.used_memory_bytes == 0
-
-
 @pytest.mark.parametrize("cap", (None, 13))
 @pytest.mark.parametrize("chunk_rows", (5, 17))
 def test_training_retention_preserves_trailing_rows_and_same_day_order(cap, chunk_rows):
@@ -2565,208 +580,6 @@ def test_training_retention_preserves_trailing_rows_and_same_day_order(cap, chun
         finally:
             owned.lease.close()
     assert policy.used_memory_bytes == 0
-
-
-@pytest.mark.parametrize(
-    "mutation",
-    ("part", "spec", "manifest", "unselected_year", "cancel", "exception", "staged"),
-)
-def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
-):
-    from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.research.datasets.io import (
-        _research_dataset_access_window,
-    )
-    from quant_research_platform.research.models import production
-    from quant_research_platform.storage.datasets.reading import open_dataset_session
-    from quant_research_platform.storage.datasets.writing import write_dataset
-
-    dataset = make_demo_research_dataset_spec(
-        data_id="snapshot",
-        factor_columns=("x",),
-        label_columns=("label",),
-        filter_columns=("eligible",),
-        context_columns=("label_available_at",),
-    )
-    frame = pd.DataFrame(
-        {
-            "market_id": ["a_share"] * 3,
-            "asset_id": ["a"] * 3,
-            "timestamp": pd.to_datetime(["2014-01-02", "2018-01-02", "2024-01-02"]),
-            "label_available_at": pd.to_datetime(
-                ["2014-02-03", "2018-02-02", "2024-02-02"]
-            ),
-            "x": [1.0, 2.0, 3.0],
-            "label": [0.1, 0.2, 0.3],
-            "eligible": True,
-        }
-    )
-    frame = frame.astype(
-        {"timestamp": "datetime64[ns]", "label_available_at": "datetime64[ns]"}
-    )
-    layout = StorageLayout(tmp_path)
-    root = layout.research_dataset_root(dataset.market_id, dataset.data_id)
-    with runtime_resource_policy_scope() as policy:
-        write_dataset(
-            root, frame, spec=dataset, resource_policy=policy, borrowed_input=True
-        )
-        with open_dataset_session(
-            root,
-            columns=None,
-            time_window=_research_dataset_access_window(dataset.market_id, None),
-            resource_policy=policy,
-        ) as session:
-            scratch = session.inventory.scratch_path
-            baseline = policy.used_memory_bytes
-            observed = []
-
-            def exercise(**kwargs):
-                assert list(kwargs["sessions"]) == list(frame["timestamp"][:2])
-
-                def read():
-                    return kwargs["chunks"](
-                        tuple(frame.columns),
-                        input_columns=("x",),
-                        start=None,
-                        end="2018-12-31",
-                    )
-
-                first = pd.concat(read(), ignore_index=True)
-                pd.testing.assert_frame_equal(
-                    first, frame.iloc[:2].reset_index(drop=True)
-                )
-                observed.append(True)
-                if mutation == "staged":
-                    item = _quarterly_result(
-                        1,
-                        trial_layout=layout,
-                        model_spec=ModelSpec(
-                            model_id="linear_regression",
-                            model_algorithm="linear_regression",
-                            input_factor_columns=("x",),
-                            label_column="label",
-                        ),
-                    )
-                    state_bytes = fitting._linear_model_state_upper_bound_bytes(
-                        ModelSpec(
-                            model_id="champion",
-                            model_algorithm="linear_regression",
-                            input_factor_columns=("x",),
-                            label_column="label",
-                        )
-                    )
-
-                    def members(change):
-                        owned = OwnedValue(
-                            item, policy.lease("test.model", state_bytes)
-                        )
-                        try:
-                            yield owned
-                            if change:
-                                path = root / "spec.json"
-                                filesystem_write_bytes(
-                                    path, filesystem_read_bytes(path) + b" "
-                                )
-                        finally:
-                            if owned.lease.active:
-                                owned.release(owner="test.model")
-
-                    logical = tmp_path / "models"
-                    good = write_quarterly_model_artifact(
-                        logical,
-                        model_id="model-artifact",
-                        envelope=_envelope(),
-                        quarterly_results=fixture_quarterly_results(members(False)),
-                        trial_layout=layout,
-                        verify_source=session.verify,
-                    )
-                    old_good = _file_bytes(good)
-                    previous = set(filesystem_iterdir(good.parent))
-                    with pytest.raises(
-                        ValueError, match="dataset_spec_identity_changed"
-                    ):
-                        write_quarterly_model_artifact(
-                            logical,
-                            model_id="model-artifact",
-                            envelope=_envelope(software_identity="e" * 64),
-                            quarterly_results=fixture_quarterly_results(members(True)),
-                            trial_layout=layout,
-                            verify_source=session.verify,
-                        )
-                    assert set(filesystem_iterdir(good.parent)) == previous
-                    assert _file_bytes(good) == old_good
-                    return ()
-                if mutation in {"cancel", "exception"}:
-                    iterator = iter(read())
-                    try:
-                        next(iterator)
-                        if mutation == "exception":
-                            raise RuntimeError("consumer_failure")
-                    finally:
-                        iterator.close()
-                    return ()
-                if mutation == "part":
-                    part = session.read_paths[0]
-                    filesystem_write_bytes(part, filesystem_read_bytes(part) + b" ")
-                elif mutation in {"spec", "manifest"}:
-                    path = (
-                        root / "spec.json"
-                        if mutation == "spec"
-                        else root / "_manifest" / "manifest.json"
-                    )
-                    filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
-                else:
-                    path = root / "data" / "year=2025" / "part-00000.parquet"
-                    filesystem_mkdir(path.parent)
-                    filesystem_write_bytes(
-                        path, filesystem_read_bytes(session.all_paths[0])
-                    )
-                return tuple(read())
-
-            monkeypatch.setattr(production, "_build_a_share_quarterly_models", exercise)
-
-            def run():
-                return production.build_model_selection_result(
-                    layout=layout,
-                    dataset_catalog=ResearchDatasetCatalog((dataset,)),
-                    model_catalog=research_profile().models,
-                    dataset_id=dataset.data_id,
-                    model_ids=("linear",),
-                    tie_break_order=("linear",),
-                    time_window=TimeWindow("2019-01-01", "2019-03-31"),
-                    resource_policy=policy,
-                    protocol_manifest={
-                        **a_share.protocol("pv_all").manifest(),
-                        "research_configuration": {
-                            "models": [{"model_id": "linear", "hyperparameters": {}}]
-                        },
-                    },
-                    run_id="snapshot",
-                    research_protocol_identity="a" * 64,
-                    model_target_id="snapshot_model",
-                    backend_versions={},
-                    dataset_session=session,
-                    on_validation_coverage=lambda *_args: pytest.fail(
-                        "coverage must not run before snapshot validation"
-                    ),
-                )
-
-            if mutation in {"cancel", "staged"}:
-                assert run() == ()
-            elif mutation == "exception":
-                with pytest.raises(RuntimeError, match="^consumer_failure$"):
-                    run()
-            else:
-                with pytest.raises(
-                    ValueError,
-                    match="dataset_(file_identity|spec_identity|manifest_identity|inventory)_changed",
-                ):
-                    run()
-            assert observed == [True]
-            assert policy.used_memory_bytes == baseline
-        assert not filesystem_exists(scratch)
-        assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize(
@@ -2886,247 +699,6 @@ def test_training_admits_materialized_filter_index_without_changing_rows(
     assert policy.used_memory_bytes == 0
 
 
-@pytest.mark.parametrize("consumer", ("quarterly", "crypto", "staged"))
-@pytest.mark.parametrize(
-    "failure", ("open", "load", "close", "missing", "notdir", "corrupt")
-)
-def test_model_member_io_preserves_failure_class(
-    tmp_path, monkeypatch, consumer, failure
-):
-    import pickle
-
-    from quant_research_platform.research.models import persisted
-    from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_record,
-        write_semantic_artifact,
-    )
-
-    layout = StorageLayout(tmp_path)
-    bound = fitting._linear_model_state_upper_bound_bytes(
-        ModelSpec(
-            model_id="linear",
-            model_algorithm="linear_regression",
-            input_factor_columns=("x",),
-            label_column="label",
-        )
-    )
-    with runtime_resource_policy_scope() as policy:
-        item = _quarterly_result(
-            1,
-            trial_layout=layout,
-            model_spec=ModelSpec(
-                model_id="linear_regression",
-                model_algorithm="linear_regression",
-                input_factor_columns=("x",),
-                label_column="label",
-            ),
-        )
-        root = write_quarterly_model_artifact(
-            tmp_path / "model",
-            model_id="model-artifact",
-            trial_layout=layout,
-            envelope=_envelope(),
-            quarterly_results=fixture_quarterly_results(
-                (OwnedValue(item, policy.lease("test.model", bound)),)
-            ),
-        )
-        item = None
-        artifact = read_quarterly_model_artifact(root, trial_layout=layout)
-        metadata = artifact.quarterly_models[0]["model_metadata"]
-        if consumer == "crypto":
-
-            def write_crypto_member(stage):
-                directory = stage / "models/fold_1"
-                filesystem_mkdir(directory, parents=True)
-                with persisted.read_quarterly_predictor(
-                    artifact, "2019Q1", "linear_regression", resource_policy=policy
-                ) as model:
-                    persisted._write_model_member(
-                        directory / "linear.pkl", model, state_bytes=bound
-                    )
-
-            crypto_root = write_semantic_artifact(
-                tmp_path / "crypto", _envelope(), write_crypto_member
-            )
-            identities = {}
-            _, members = read_semantic_artifact_record(
-                crypto_root, member_identities=identities
-            )
-            crypto_artifact = SimpleNamespace(
-                instance_root=crypto_root,
-                member_records=members,
-                member_identities=identities,
-            )
-            entry = dict(fold_id="fold_1", model_id="linear", model_metadata=metadata)
-        staged_layout = StorageLayout(tmp_path / "staged-trials")
-        staged_item = (
-            _quarterly_result(
-                1,
-                trial_layout=staged_layout,
-                model_spec=ModelSpec(
-                    model_id="linear_regression",
-                    model_algorithm="linear_regression",
-                    input_factor_columns=("x",),
-                    label_column="label",
-                ),
-            )
-            if consumer == "staged"
-            else None
-        )
-        original_bytes = _file_bytes(root)
-        primary = (
-            FileNotFoundError("model_missing")
-            if failure == "missing"
-            else NotADirectoryError("model_not_directory")
-            if failure == "notdir"
-            else pickle.UnpicklingError("model_corrupt")
-            if failure == "corrupt"
-            else OSError(5, "model_system_io")
-        )
-        native_open = persisted.open_filesystem_file
-        native_load = persisted.pickle.load
-        handles = []
-
-        class CloseFailure:
-            def __init__(self, handle):
-                self.handle = handle
-
-            def __getattr__(self, name):
-                return getattr(self.handle, name)
-
-            def close(self):
-                self.handle.close()
-                raise primary
-
-        def open_member(path, mode="rb", **kwargs):
-            if Path(path).suffix != ".pkl" or mode != "rb":
-                return native_open(path, mode, **kwargs)
-            if failure in {"open", "missing", "notdir"}:
-                raise primary
-            handle = native_open(path, mode, **kwargs)
-            handles.append(handle)
-            return CloseFailure(handle) if failure == "close" else handle
-
-        def load_member(handle):
-            if failure in {"load", "corrupt"}:
-                raise primary
-            return native_load(handle)
-
-        monkeypatch.setattr(persisted, "open_filesystem_file", open_member)
-        monkeypatch.setattr(persisted.pickle, "load", load_member)
-        invalid = failure in {"missing", "notdir", "corrupt"}
-        with pytest.raises(ValueError if invalid else OSError) as caught:
-            if consumer == "staged":
-                write_quarterly_model_artifact(
-                    tmp_path / "staged",
-                    model_id="model-artifact",
-                    trial_layout=staged_layout,
-                    envelope=_envelope(),
-                    quarterly_results=fixture_quarterly_results(
-                        (OwnedValue(staged_item, policy.lease("test.model", bound)),)
-                    ),
-                )
-            else:
-                context = (
-                    persisted.read_crypto_model_member(
-                        crypto_artifact, entry, resource_policy=policy
-                    )
-                    if consumer == "crypto"
-                    else persisted.read_quarterly_predictor(
-                        artifact, "2019Q1", "linear_regression", resource_policy=policy
-                    )
-                )
-                with context:
-                    pytest.fail("model I/O failure was swallowed")
-        staged_item = None
-        if invalid:
-            assert str(caught.value) == "model_artifact_model_invalid"
-            assert caught.value.__cause__ is primary
-        else:
-            assert caught.value is primary
-        assert all(handle.closed for handle in handles)
-        assert policy.used_memory_bytes == 0
-        assert _file_bytes(root) == original_bytes
-        if consumer == "staged":
-            assert not filesystem_exists(
-                tmp_path / "staged/instances" / _envelope().instance_identity
-            )
-            assert not tuple(filesystem_glob(tmp_path / "staged", "**/.a-*"))
-
-
-@pytest.mark.parametrize(
-    "failure_type", (FileNotFoundError, NotADirectoryError, OSError)
-)
-def test_quarterly_model_final_stat_preserves_system_error(
-    tmp_path, monkeypatch, failure_type
-):
-    from quant_research_platform.research.models import persisted
-
-    layout = StorageLayout(tmp_path)
-    with runtime_resource_policy_scope() as policy:
-        item = _quarterly_result(
-            1,
-            trial_layout=layout,
-            model_spec=ModelSpec(
-                model_id="linear_regression",
-                model_algorithm="linear_regression",
-                input_factor_columns=("x",),
-                label_column="label",
-            ),
-        )
-        bound = fitting._linear_model_state_upper_bound_bytes(
-            ModelSpec(
-                model_id="linear",
-                model_algorithm="linear_regression",
-                input_factor_columns=("x",),
-                label_column="label",
-            )
-        )
-        root = write_quarterly_model_artifact(
-            tmp_path / "model",
-            model_id="model-artifact",
-            trial_layout=layout,
-            envelope=_envelope(),
-            quarterly_results=fixture_quarterly_results(
-                (OwnedValue(item, policy.lease("test.model", bound)),)
-            ),
-        )
-        item = None
-        primary = failure_type("model_stat_failure")
-        native_stat = persisted.os.stat
-        native_validate = persisted._validate_trial_references
-        armed = False
-
-        def validate_then_arm(*args, **kwargs):
-            nonlocal armed
-            result = native_validate(*args, **kwargs)
-            armed = True
-            return result
-
-        def fail_stat(path, *args, **kwargs):
-            if armed and not isinstance(path, int) and Path(path).suffix == ".pkl":
-                raise primary
-            return native_stat(path, *args, **kwargs)
-
-        with monkeypatch.context() as patch:
-            patch.setattr(persisted, "_validate_trial_references", validate_then_arm)
-            patch.setattr(persisted.os, "stat", fail_stat)
-            missing = failure_type in (FileNotFoundError, NotADirectoryError)
-            with pytest.raises(ValueError if missing else OSError) as caught:
-                read_quarterly_model_artifact(root, trial_layout=layout)
-            assert armed
-            if missing:
-                assert str(caught.value) == "model_artifact_quarterly_invalid"
-                assert caught.value.__cause__ is primary
-            else:
-                assert caught.value is primary
-        assert policy.used_memory_bytes == 0
-        assert (
-            read_quarterly_model_artifact(root, trial_layout=layout).model_id
-            == "model-artifact"
-        )
-
-
 def test_equal_rank_single_undefined_direction_names_required_input():
     from quant_research_platform.research.models.rank_ensemble import (
         EqualWeightRankEnsembleFactory,
@@ -3153,260 +725,6 @@ def test_equal_rank_single_undefined_direction_names_required_input():
     fitted = estimator.fit(frame, frame.label.to_numpy())
     assert fitted.columns == ("valid", "constant")
     assert fitted.directions == (1.0, -1.0)
-
-
-def _small_common_coverage_case(tmp_path, *, fail_refit_scaler=False, monkeypatch=None):
-    from functools import partial
-
-    from quant_research_platform.catalog.models import ModelCatalog
-    from quant_research_platform.contracts.features import FeatureTransformSpec
-    from quant_research_platform.contracts.json_codec import canonical_json_hash
-    from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.research.experiments import TrialRecorder
-    from quant_research_platform.research.models.production import (
-        _build_a_share_quarterly_models,
-    )
-    from quant_research_platform.storage.experiments import (
-        read_model_trial_ledger_reference,
-    )
-
-    dates = pd.to_datetime(
-        [
-            "2014-01-02",
-            "2016-01-04",
-            "2017-12-29",
-            "2018-01-02",
-            "2018-06-01",
-            "2018-12-31",
-            "2019-01-02",
-        ]
-    )
-    frame = pd.DataFrame(
-        [
-            {
-                "timestamp": date,
-                "market_id": "a_share",
-                "asset_id": f"asset_{asset}",
-                "eligible": True,
-                "x": np.nan if asset == 0 else float(asset),
-                "y": np.nan if asset == 1 else float(asset * 2),
-                "raw": np.nan if asset == 7 else float(asset),
-                "feature_f": np.nan
-                if asset == 6
-                else 0.0
-                if asset == 7
-                else float(asset),
-                "feature_missing_f": 1 if asset >= 6 else 0,
-                "feature_observed_f": 0 if asset >= 6 else 1,
-                "f": float(asset),
-                "label": asset * 0.03 + index * 0.01,
-                "label_available_at": date,
-            }
-            for index, date in enumerate(dates)
-            for asset in range(8)
-        ]
-    )
-    specs = (
-        ModelSpec(
-            model_id="linear_x",
-            model_algorithm="linear_regression",
-            input_factor_columns=("x",),
-            label_column="label",
-            max_train_rows=12,
-        ),
-        ModelSpec(
-            model_id="linear_y",
-            model_algorithm="linear_regression",
-            input_factor_columns=("y",),
-            label_column="label",
-            max_train_rows=12,
-        ),
-        ModelSpec(
-            model_id="rank_raw",
-            model_algorithm="equal_weight_rank_ensemble",
-            input_factor_columns=("raw",),
-            label_column="label",
-            max_train_rows=12,
-        ),
-    )
-    specs = (
-        *specs,
-        ModelSpec(
-            model_id="rank_flag",
-            model_algorithm="equal_weight_rank_ensemble",
-            input_feature_columns=("feature_missing_f",),
-            label_column="label",
-            max_train_rows=12,
-        ),
-    )
-    dataset = make_demo_research_dataset_spec(
-        data_id="fixture",
-        input_data_ids=("processed_demo",),
-        base_input_data_id="processed_demo",
-        factor_columns=("x", "y", "raw", "f"),
-        feature_columns=("feature_f", "feature_missing_f", "feature_observed_f"),
-        feature_transforms=(
-            FeatureTransformSpec(
-                transform_id="canonical",
-                source_columns=("f",),
-                transform="a_share_canonical",
-                output_columns=("feature_f", "feature_missing_f", "feature_observed_f"),
-            ),
-        ),
-        label_columns=("label",),
-        filter_columns=("eligible",),
-        context_columns=(),
-    )
-    configuration = {
-        "models": [{"model_id": spec.model_id, "hyperparameters": {}} for spec in specs]
-    }
-    protocol = {"research_configuration": configuration}
-    layout = StorageLayout(tmp_path).with_target_roots(
-        {"fixture": tmp_path / ("d" * 64)}
-    )
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="model-artifact",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity=canonical_json_hash(protocol),
-        software_identity="c" * 64,
-        research_window={
-            "start": "2019-01-02",
-            "end": "2019-01-02",
-            "access": "development",
-        },
-        upstream_identities={"fixture": "d" * 64},
-        semantic_metadata={
-            "target_contract": {
-                "protocol": protocol,
-                "model_specs": [model_spec_payload(spec) for spec in specs],
-            }
-        },
-    )
-
-    def chunks(columns, *, input_columns, start, end):
-        selected = frame.loc[frame.timestamp.le(pd.Timestamp(end))]
-        if start is not None:
-            selected = selected.loc[selected.timestamp.ge(pd.Timestamp(start))]
-        for start_index in range(0, len(selected), 5):
-            yield selected.iloc[start_index : start_index + 5].loc[:, list(columns)]
-
-    attempts = []
-    if fail_refit_scaler:
-        original_begin = TrialRecorder.begin
-        original_fit = fitting.ModelMatrixScaler.fit
-
-        def begin(recorder, *args, **kwargs):
-            record = original_begin(recorder, *args, **kwargs)
-            attempts.append((recorder, record))
-            return record
-
-        def fit(matrix, *args, **kwargs):
-            if attempts and attempts[-1][0].plan.stage == "refit":
-                raise (
-                    KeyboardInterrupt if fail_refit_scaler == "cancel" else RuntimeError
-                )("refit_scaler_oracle")
-            return original_fit(matrix, *args, **kwargs)
-
-        monkeypatch.setattr(TrialRecorder, "begin", begin)
-        monkeypatch.setattr(fitting.ModelMatrixScaler, "fit", fit)
-    results = partial(
-        _build_a_share_quarterly_models,
-        layout=layout,
-        dataset_spec=dataset,
-        model_catalog=ModelCatalog(specs),
-        dataset_id="fixture",
-        model_ids=tuple(spec.model_id for spec in specs),
-        tie_break_order=tuple(spec.model_id for spec in specs),
-        time_window=TimeWindow("2019-01-02", "2019-01-02"),
-        chunks=chunks,
-        sessions=pd.DatetimeIndex(dates),
-        chronology={"validation_months": 12},
-        formal_dataset_window={"start": "2014-01-01", "end": "2019-01-02"},
-        development_window={"start": "2019-01-01", "end": "2019-01-02"},
-        root_seed=42,
-        run_id="run_small",
-        research_protocol_identity=canonical_json_hash(protocol),
-        model_target_id="model-artifact",
-        backend_versions={"internal": "test"},
-        holdout_window={"start": "2020-01-01", "end": "2020-12-31"},
-        research_configuration=configuration,
-    )
-    with runtime_resource_policy_scope() as policy:
-        if fail_refit_scaler:
-            with pytest.raises(
-                KeyboardInterrupt if fail_refit_scaler == "cancel" else RuntimeError,
-                match="refit_scaler_oracle",
-            ):
-                write_quarterly_model_artifact(
-                    tmp_path / "models",
-                    model_id="model-artifact",
-                    envelope=envelope,
-                    quarterly_results=results,
-                    trial_layout=layout,
-                )
-            recorder, record = attempts[-1]
-            assert recorder.plan.stage == "refit"
-            from quant_research_platform.storage.experiments import read_trial_ledger
-
-            with read_trial_ledger(recorder.root, recorder.plan) as (
-                _saved_plan,
-                events,
-            ):
-                assert events[-1].status == (
-                    "abandoned" if fail_refit_scaler == "cancel" else "failed"
-                )
-                assert events[-1].metrics == {}
-                assert events[-1].undefined_reasons == {
-                    "failure": "KeyboardInterrupt"
-                    if fail_refit_scaler == "cancel"
-                    else "RuntimeError"
-                }
-            assert not tuple(filesystem_glob(tmp_path / "models", ".*staging*"))
-            assert policy.used_memory_bytes == 0
-            return
-        root = write_quarterly_model_artifact(
-            tmp_path / "models",
-            model_id="model-artifact",
-            envelope=envelope,
-            quarterly_results=results,
-            trial_layout=layout,
-        )
-        saved = read_quarterly_model_artifact(
-            root, expected_identity=envelope.instance_identity, trial_layout=layout
-        )
-        coverage = saved.quarterly_selections["2019Q1"]["common_validation_coverage"]
-        keys = pd.read_parquet(native_filesystem_path(root / coverage["path"]))
-        assert coverage["row_count"] == 15
-        assert set(keys.asset_id) == {f"asset_{i}" for i in (2, 3, 4, 5, 7)}
-        assert len(saved.trial_ledgers) == 8
-        for reference in saved.trial_ledgers:
-            with read_model_trial_ledger_reference(layout, reference) as (
-                plan,
-                records,
-            ):
-                if plan.stage == "selection":
-                    assert (
-                        records[0].common_coverage_id == coverage["semantic_identity"]
-                    )
-                    assert records[0].metrics["validation_rows"] == 15
-                else:
-                    assert dict(records[0].metrics) == {"n_train": 12}
-                    assert plan.selection_metric is None
-                    assert (
-                        records[0].common_coverage_id != coverage["semantic_identity"]
-                    )
-        assert policy.used_memory_bytes == 0
-        return saved, layout
-
-
-def test_common_pk_and_refit_use_real_small_model_write_read_chain(tmp_path):
-    _small_common_coverage_case(tmp_path)
-
-
-def test_refit_scaler_failure_is_recorded_before_any_learning(tmp_path, monkeypatch):
-    _small_common_coverage_case(
-        tmp_path, fail_refit_scaler=True, monkeypatch=monkeypatch
-    )
 
 
 def test_common_pk_identity_distinguishes_equal_count_and_ignores_chunking():
@@ -3438,125 +756,1109 @@ def test_common_pk_identity_distinguishes_equal_count_and_ignores_chunking():
         invalid.add(asset_major.assign(asset_id=["a", "a", None, "b"]))
 
 
-def test_validation_coverage_readback_ignores_physical_key_interleaving(tmp_path):
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    from quant_research_platform.research.models.persisted import (
-        _validate_validation_coverage,
+def _prediction_result(
+    case,
+    policy,
+    *,
+    group="global",
+    start="2019-01-01",
+    end="2019-06-30",
+    access="development",
+):
+    return runner.build_prediction_result_from_persisted_model(
+        layout=case.layout,
+        dataset_catalog=ResearchDatasetCatalog((case.dataset,)),
+        prediction_spec=PredictionSpec(
+            prediction_id=f"prediction_{group}",
+            model_id="model-artifact",
+            research_dataset_id=case.dataset.data_id,
+            train_end=None,
+            test_start=start,
+            test_end=end,
+            prediction_mode="a_share_oos",
+            prediction_column="raw_prediction",
+        ),
+        persisted_model=case.artifact,
+        resource_policy=policy,
+        selection_group=group,
+        access_window=access,
     )
-    from quant_research_platform.research.models.trial_selection import (
-        ModelSampleCoverage,
+
+
+def _republish(case, logical, *, mutate, operational=None):
+    def write(stage):
+        for member in case.artifact.member_records:
+            relative = member["path"]
+            destination = stage / relative
+            filesystem_mkdir(destination.parent, parents=True, exist_ok=True)
+            payload = filesystem_read_bytes(case.root / relative)
+            if relative.endswith(".json"):
+                document = json.loads(payload)
+                mutate(relative, document)
+                payload = json.dumps(document).encode()
+            filesystem_write_bytes(destination, payload)
+
+    return write_semantic_artifact(
+        logical,
+        case.envelope,
+        write,
+        operational_metadata=operational
+        or read_semantic_artifact_operational_metadata(case.root),
     )
 
-    scope = {
-        "validation_start": "2019-01-01",
-        "validation_end": "2019-01-02",
-    }
-    asset_major = pd.DataFrame(
+
+def test_candidates_fit_once_and_both_groups_have_real_final_models(
+    tmp_path, monkeypatch
+):
+    specs = (
+        ModelSpec(
+            model_id="linear_x",
+            model_algorithm="linear_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+        ),
+        ModelSpec(
+            model_id="ridge_y",
+            model_algorithm="ridge_regression",
+            input_factor_columns=("y",),
+            label_column="label",
+        ),
+    )
+    configurations = [
+        {"model_id": specs[0].model_id, "hyperparameters": {}},
         {
-            "timestamp": pd.to_datetime(["2019-01-01", "2019-01-02"] * 2),
-            "asset_id": ["a", "a", "b", "b"],
+            "model_id": specs[1].model_id,
+            "hyperparameters": {},
+            "parameter_candidates": [
+                {"regularization_strength": 0.01},
+                {"regularization_strength": 0.1},
+            ],
+        },
+    ]
+    calls = []
+    original = fitting._fit_model_result_owned_from_frames
+
+    def fit(frames, spec, **kwargs):
+        calls.append((spec.model_id, kwargs["fitting_cutoff"]))
+        return original(frames, spec, **kwargs)
+
+    monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", fit)
+    preflight_model_specs(specs)
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(
+            tmp_path,
+            specs=specs,
+            protocol=shared_model_protocol(specs, configurations=configurations),
+        )
+        assert len(calls) == 6 * 3 + 2 * 2
+        assert len(case.artifact.candidate_models) == 18
+        assert len(case.artifact.final_models) == 4
+        assert set(case.artifact.selections["global"]) == {"final"}
+        assert set(case.artifact.selections["quarterly"]) == {
+            "2019Q1",
+            "2019Q2",
+            "final",
+        }
+        assert {entry["quarter_id"] for entry in case.artifact.candidate_models} == {
+            "2018Q1",
+            "2018Q2",
+            "2018Q3",
+            "2018Q4",
+            "2019Q1",
+            "2019Q2",
+        }
+        for family in specs:
+            entries = [
+                entry
+                for entry in case.artifact.final_models
+                if entry["family_id"] == family.model_id
+            ]
+            assert (
+                entries[0]["fit_windows"]
+                == entries[1]["fit_windows"]
+                == [{"start": "2014-01-01", "end": "2019-06-30"}]
+            )
+            assert entries[0]["model_metadata"] == entries[1]["model_metadata"]
+            with read_quarterly_predictor(
+                case.artifact, "global", family.model_id, resource_policy=policy
+            ) as g:
+                with read_quarterly_predictor(
+                    case.artifact, "quarterly", family.model_id, resource_policy=policy
+                ) as q:
+                    np.testing.assert_array_equal(
+                        g.predict(case.frame.loc[:, list(family.input_columns)]),
+                        q.predict(case.frame.loc[:, list(family.input_columns)]),
+                    )
+        for reference in case.artifact.trial_ledgers:
+            with read_model_trial_ledger_reference(case.layout, reference) as (
+                plan,
+                records,
+            ):
+                if plan.stage == "refit":
+                    assert plan.folds == ()
+                    assert plan.selection_group in {"global", "quarterly"}
+                    assert plan.selection_metric is None
+                    assert set(records[0].metrics) == {"n_train"}
+        assert policy.used_memory_bytes == 0
+
+
+def test_candidate_own_prediction_rows_survive_shared_scoring_domain(tmp_path):
+    specs = tuple(
+        ModelSpec(
+            model_id=f"linear_{column}",
+            model_algorithm="linear_regression",
+            input_factor_columns=(column,),
+            label_column="label",
+        )
+        for column in ("x", "y")
+    )
+    frame = shared_model_rows(specs)
+    frame.loc[frame.asset_id.eq("asset_0"), "y"] = np.nan
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(tmp_path, specs=specs, frame=frame)
+        for family, count in (("linear_x", 8), ("linear_y", 7)):
+            entry = next(
+                e
+                for e in case.artifact.candidate_models
+                if e["quarter_id"] == "2019Q1" and e["family_id"] == family
+            )
+            saved = pd.concat(case.artifact.validation_chunks(entry), ignore_index=True)
+            assert saved.groupby("timestamp").size().tolist() == [count, count]
+            assert saved.groupby("timestamp").score_eligible.sum().tolist() == [7, 7]
+        for group in ("global", "quarterly"):
+            result = _prediction_result(case, policy, group=group)
+            bundle = write_prediction_result(case.layout, result)
+            prediction = pd.read_parquet(bundle / "prediction.parquet")
+            assert (
+                prediction.groupby(["timestamp", "family_id"])
+                .size()
+                .unstack()["linear_x"]
+                .tolist()
+                == [8] * 4
+            )
+            assert (
+                prediction.groupby(["timestamp", "family_id"])
+                .size()
+                .unstack()["linear_y"]
+                .tolist()
+                == [7] * 4
+            )
+        for reference in case.artifact.trial_ledgers:
+            with read_model_trial_ledger_reference(case.layout, reference) as (
+                plan,
+                records,
+            ):
+                if plan.stage == "selection":
+                    # Only the first fixture session matures by each fold's last day.
+                    assert records[0].metrics["validation_rows"] == 7
+        assert policy.used_memory_bytes == 0
+
+
+def test_common_pk_readback_is_independent_of_chunking(tmp_path):
+    with runtime_resource_policy_scope() as policy:
+        first = shared_model_case(tmp_path / "single", chunk_size=1)
+        second = shared_model_case(tmp_path / "whole", chunk_size=1024)
+        for group in ("global", "quarterly"):
+            for key, decision in first.artifact.selections[group].items():
+                other = second.artifact.selections[group][key]
+                assert (
+                    decision["common_validation_coverage"]
+                    == other["common_validation_coverage"]
+                )
+                assert decision["families"] == other["families"]
+        assert policy.used_memory_bytes == 0
+
+
+def test_future_validation_changes_do_not_change_prior_quarter_selection(tmp_path):
+    specs = (
+        ModelSpec(
+            model_id="positive",
+            model_algorithm="linear_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+        ),
+        ModelSpec(
+            model_id="negative",
+            model_algorithm="linear_regression",
+            input_factor_columns=("y",),
+            label_column="label",
+        ),
+    )
+    original = shared_model_rows(specs)
+    original["y"] = np.where(
+        original.timestamp.lt("2019-01-01"), original.x, -original.x
+    )
+    changed = original.copy()
+    changed.loc[changed.timestamp.ge("2019-04-01"), "label"] *= -13.0
+    with runtime_resource_policy_scope() as policy:
+        before = shared_model_case(tmp_path / "before", specs=specs, frame=original)
+        after = shared_model_case(tmp_path / "after", specs=specs, frame=changed)
+        for quarter in ("2019Q1", "2019Q2"):
+            assert (
+                before.artifact.selections["quarterly"][quarter]
+                == after.artifact.selections["quarterly"][quarter]
+            )
+        assert (
+            before.artifact.selections["global"]["final"]
+            != after.artifact.selections["global"]["final"]
+        )
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("group", ["global", "quarterly"])
+def test_prediction_request_clips_saved_rows_without_retraining(
+    tmp_path, monkeypatch, group
+):
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(tmp_path)
+
+        def forbidden(*args, **kwargs):
+            raise AssertionError("development_prediction_refit")
+
+        monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", forbidden)
+        result = _prediction_result(
+            case, policy, group=group, start="2019-01-03", end="2019-04-02"
+        )
+        bundle = write_prediction_result(case.layout, result)
+        frame = pd.read_parquet(bundle / "prediction.parquet")
+        assert frame.timestamp.min() >= pd.Timestamp("2019-01-03")
+        assert frame.timestamp.max() <= pd.Timestamp("2019-04-02")
+        assert frame.model_id.eq("linear_regression").all()
+        assert policy.used_memory_bytes == 0
+
+
+def test_prediction_rejects_uncovered_quarter(tmp_path):
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(tmp_path)
+        with pytest.raises(PermissionError, match="a_share_prediction_window_invalid"):
+            _prediction_result(case, policy, start="2018-10-01")
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    [
+        "candidate_seed",
+        "candidate_columns",
+        "candidate_rows",
+        "candidate_trial",
+        "quarter_coordinate",
+        "quarter_matrix",
+        "selection_winner",
+        "selection_score",
+        "selection_cutoff",
+        "selection_coverage",
+        "final_group",
+        "final_cutoff",
+        "final_seed",
+        "final_fit_window",
+        "final_trial",
+        "unknown_member",
+    ],
+)
+def test_reader_rejects_self_consistent_publication_drift(tmp_path, mutation):
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(tmp_path / "good")
+        old_good = _file_bytes(case.root)
+
+        def change(relative, payload):
+            if relative == "models/2019Q1/metadata.json":
+                entry = payload["candidate_models"][0]
+                if mutation == "candidate_seed":
+                    entry["model_metadata"]["random_seed"] += 1
+                elif mutation == "candidate_columns":
+                    entry["model_metadata"]["input_columns"] = ["other"]
+                elif mutation == "candidate_rows":
+                    entry["model_metadata"]["rows_after_input_label_dropna"] -= 1
+                elif mutation == "candidate_trial":
+                    entry["trial_semantic_identity"] = "e" * 64
+                elif mutation == "quarter_coordinate":
+                    entry["quarter_id"] = "2019Q2"
+                elif mutation == "quarter_matrix":
+                    payload["candidate_models"] = []
+            if relative == "selections/global/final.json":
+                decision = payload["selection"]
+                if mutation == "selection_winner":
+                    decision["selected_model_id"] = "other"
+                elif mutation == "selection_score":
+                    decision["families"][0]["trial_metrics"][0][
+                        "validation_rankic"
+                    ] = -0.75
+                elif mutation == "selection_cutoff":
+                    decision["cutoff"] = "2024-01-01"
+                elif mutation == "selection_coverage":
+                    decision["common_validation_coverage"]["row_count"] += 1
+            if relative == "models/final/global/metadata.json":
+                entry = payload["final_models"][0]
+                if mutation == "final_group":
+                    entry["selection_group"] = "quarterly"
+                elif mutation == "final_cutoff":
+                    entry["fit_cutoff"] = "2024-01-01"
+                elif mutation == "final_seed":
+                    entry["model_metadata"]["random_seed"] += 1
+                elif mutation == "final_fit_window":
+                    entry["fit_windows"][0]["start"] = "2015-01-01"
+                elif mutation == "final_trial":
+                    entry["refit_trial_semantic_identity"] = "e" * 64
+            if relative == "model.json" and mutation == "unknown_member":
+                payload["extra"] = True
+
+        root = _republish(case, tmp_path / "corrupt", mutate=change)
+        with pytest.raises(ValueError):
+            read_quarterly_model_artifact(root, trial_layout=case.layout)
+        assert _file_bytes(case.root) == old_good
+        assert policy.used_memory_bytes == 0
+
+
+def test_model_member_mutation_is_rejected_before_loading_predictor(
+    tmp_path, monkeypatch
+):
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(tmp_path)
+        path = case.root / "models/final/global/linear_regression.pkl"
+        filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
+        monkeypatch.setattr(
+            persisted.pickle, "load", lambda *_: pytest.fail("load before identity")
+        )
+        with pytest.raises(ValueError, match="model_artifact_model_invalid"):
+            with read_quarterly_predictor(
+                case.artifact, "global", "linear_regression", resource_policy=policy
+            ):
+                pytest.fail("mutated member accepted")
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("consumer", ["staged", "persisted", "crypto"])
+@pytest.mark.parametrize(
+    "failure", ["open", "load", "close", "missing", "notdir", "corrupt"]
+)
+def test_model_member_io_preserves_failure_class(
+    tmp_path, monkeypatch, consumer, failure
+):
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(tmp_path / "good")
+        original_bytes = _file_bytes(case.root)
+        metadata = case.artifact.final_models[0]["model_metadata"]
+        if consumer == "crypto":
+
+            def write(stage):
+                target = stage / "models/final/linear.pkl"
+                filesystem_mkdir(target.parent, parents=True)
+                filesystem_write_bytes(
+                    target,
+                    filesystem_read_bytes(
+                        case.root / "models/final/global/linear_regression.pkl"
+                    ),
+                )
+
+            crypto_root = write_semantic_artifact(
+                tmp_path / "crypto", case.envelope, write
+            )
+            from quant_research_platform.storage.semantic_artifacts import (
+                read_semantic_artifact_record,
+            )
+
+            identities = {}
+            _, members = read_semantic_artifact_record(
+                crypto_root, member_identities=identities
+            )
+            crypto = SimpleNamespace(
+                instance_root=crypto_root,
+                member_records=members,
+                member_identities=identities,
+            )
+            entry = {"model_id": "linear", "model_metadata": metadata}
+        primary = (
+            FileNotFoundError("model_missing")
+            if failure == "missing"
+            else NotADirectoryError("model_not_directory")
+            if failure == "notdir"
+            else pickle.UnpicklingError("model_corrupt")
+            if failure == "corrupt"
+            else OSError(5, "model_system_io")
+        )
+        actual_open, actual_load = persisted.open_filesystem_file, persisted.pickle.load
+        handles = []
+
+        class CloseFailure:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+            def close(self):
+                self.handle.close()
+                raise primary
+
+        def open_member(path, mode="rb", **kwargs):
+            if Path(path).suffix != ".pkl" or mode != "rb":
+                return actual_open(path, mode, **kwargs)
+            if failure in {"open", "missing", "notdir"}:
+                raise primary
+            handle = actual_open(path, mode, **kwargs)
+            handles.append(handle)
+            return CloseFailure(handle) if failure == "close" else handle
+
+        def load_member(handle):
+            if failure in {"load", "corrupt"}:
+                raise primary
+            return actual_load(handle)
+
+        monkeypatch.setattr(persisted, "open_filesystem_file", open_member)
+        monkeypatch.setattr(persisted.pickle, "load", load_member)
+        invalid = failure in {"missing", "notdir", "corrupt"}
+        with pytest.raises(ValueError if invalid else OSError) as caught:
+            if consumer == "staged":
+                shared_model_case(tmp_path / "staged")
+            else:
+                context = (
+                    persisted.read_crypto_model_member(
+                        crypto, entry, resource_policy=policy
+                    )
+                    if consumer == "crypto"
+                    else read_quarterly_predictor(
+                        case.artifact,
+                        "global",
+                        "linear_regression",
+                        resource_policy=policy,
+                    )
+                )
+                with context:
+                    pytest.fail("model I/O failure swallowed")
+        assert caught.value.__cause__ is primary if invalid else caught.value is primary
+        assert all(handle.closed for handle in handles)
+        assert _file_bytes(case.root) == original_bytes
+        assert not tuple(filesystem_glob(tmp_path / "staged", "**/.a-*"))
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("cancellation", [False, True])
+def test_refit_scaler_failure_is_recorded_before_learning(
+    tmp_path, monkeypatch, cancellation
+):
+    from quant_research_platform.research.experiments import TrialRecorder
+    from quant_research_platform.storage.experiments import read_trial_ledger
+
+    attempts = []
+    original_begin, original_fit = TrialRecorder.begin, fitting.ModelMatrixScaler.fit
+
+    def begin(recorder, *args, **kwargs):
+        record = original_begin(recorder, *args, **kwargs)
+        attempts.append((recorder, record))
+        return record
+
+    primary = (
+        KeyboardInterrupt("refit_scaler_oracle")
+        if cancellation
+        else RuntimeError("refit_scaler_oracle")
+    )
+
+    def fit(*args, **kwargs):
+        if attempts and attempts[-1][0].plan.stage == "refit":
+            raise primary
+        return original_fit(*args, **kwargs)
+
+    monkeypatch.setattr(TrialRecorder, "begin", begin)
+    monkeypatch.setattr(fitting.ModelMatrixScaler, "fit", fit)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(type(primary)) as caught:
+            shared_model_case(tmp_path)
+        assert caught.value is primary
+        recorder, _ = attempts[-1]
+        with read_trial_ledger(recorder.root, recorder.plan) as (_, events):
+            assert events[-1].status == ("abandoned" if cancellation else "failed")
+            assert events[-1].metrics == {}
+            assert events[-1].undefined_reasons == {"failure": type(primary).__name__}
+        assert not tuple(filesystem_glob(tmp_path / "models", "**/.a-*"))
+        assert policy.used_memory_bytes == 0
+
+
+def test_failed_source_verification_preserves_published_model_and_releases_state(
+    tmp_path,
+):
+    with runtime_resource_policy_scope() as policy:
+        good = shared_model_case(tmp_path / "good")
+        before = _file_bytes(good.root)
+        primary = RuntimeError("source_identity_changed")
+
+        def verify():
+            raise primary
+
+        with pytest.raises(RuntimeError) as caught:
+            shared_model_case(tmp_path / "failed", verify_source=verify)
+        assert caught.value is primary
+        assert _file_bytes(good.root) == before
+        assert not tuple(filesystem_glob(tmp_path / "failed/models", "**/.a-*"))
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("max_train_rows", [None, 12])
+def test_final_refit_strength_and_state_follow_actual_rows(tmp_path, max_train_rows):
+    spec = ModelSpec(
+        model_id="ridge",
+        model_algorithm="ridge_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+        max_train_rows=max_train_rows,
+    )
+    configuration = [
+        {
+            "model_id": "ridge",
+            "hyperparameters": {},
+            "parameter_candidates": [{"regularization_strength": 0.1}],
+        }
+    ]
+    preflight_model_specs((spec,))
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(
+            tmp_path,
+            specs=(spec,),
+            protocol=shared_model_protocol((spec,), configurations=configuration),
+        )
+        for entry in case.artifact.final_models:
+            count = entry["model_metadata"]["rows_after_input_label_dropna"]
+            assert count == (
+                len(case.frame) if max_train_rows is None else max_train_rows
+            )
+            assert entry["model_metadata"]["hyperparameters"]["alpha"] == pytest.approx(
+                count * 0.1
+            )
+            with read_quarterly_predictor(
+                case.artifact, entry["selection_group"], "ridge", resource_policy=policy
+            ) as predictor:
+                assert np.isfinite(
+                    predictor.predict(case.frame.loc[:, list(spec.input_columns)])
+                ).all()
+        assert policy.used_memory_bytes == 0
+
+
+def test_disk_admission_precedes_pickle_and_preserves_old_good(tmp_path, monkeypatch):
+    from quant_research_platform.runtime import resources
+
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(tmp_path / "good")
+        before = _file_bytes(case.root)
+        calls = []
+        monkeypatch.setattr(
+            persisted.pickle, "dump", lambda *_args, **_kwargs: calls.append(True)
+        )
+        monkeypatch.setattr(
+            resources.shutil, "disk_usage", lambda _path: SimpleNamespace(free=1)
+        )
+        with pytest.raises(RuntimeError, match="insufficient_free_disk"):
+            shared_model_case(tmp_path / "failed")
+        assert calls == []
+        assert _file_bytes(case.root) == before
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "failure_type", [FileNotFoundError, NotADirectoryError, OSError]
+)
+def test_final_model_post_load_stat_preserves_system_error(
+    tmp_path, monkeypatch, failure_type
+):
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(tmp_path)
+        primary = failure_type("model_stat_failure")
+        actual_load, actual_stat = persisted.pickle.load, persisted.os.stat
+        armed = False
+
+        def load(handle):
+            nonlocal armed
+            value = actual_load(handle)
+            armed = True
+            return value
+
+        def stat(path, *args, **kwargs):
+            if armed and not isinstance(path, int) and Path(path).suffix == ".pkl":
+                raise primary
+            return actual_stat(path, *args, **kwargs)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(persisted.pickle, "load", load)
+            patch.setattr(persisted.os, "stat", stat)
+            with pytest.raises(
+                ValueError if failure_type is not OSError else OSError
+            ) as caught:
+                with read_quarterly_predictor(
+                    case.artifact, "global", "linear_regression", resource_policy=policy
+                ):
+                    pass
+            assert armed
+            if failure_type is OSError:
+                assert caught.value is primary
+            else:
+                assert caught.value.__cause__ is primary
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "mutation",
+    ("part", "spec", "manifest", "unselected_year", "cancel", "exception", "staged"),
+)
+def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
+):
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.datasets.io import (
+        _research_dataset_access_window,
+    )
+    from quant_research_platform.research.models import production
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from quant_research_platform.storage.datasets.writing import write_dataset
+
+    dataset = make_demo_research_dataset_spec(
+        data_id="snapshot",
+        factor_columns=("x",),
+        label_columns=("label",),
+        filter_columns=("eligible",),
+        context_columns=("label_available_at",),
+    )
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 3,
+            "asset_id": ["a"] * 3,
+            "timestamp": pd.to_datetime(["2014-01-02", "2018-01-02", "2024-01-02"]),
+            "label_available_at": pd.to_datetime(
+                ["2014-02-03", "2018-02-02", "2024-02-02"]
+            ),
+            "x": [1.0, 2.0, 3.0],
+            "label": [0.1, 0.2, 0.3],
+            "eligible": True,
         }
     )
-    time_major = asset_major.iloc[[0, 2, 1, 3]]
-    coverage = ModelSampleCoverage(scope)
-    coverage.add(asset_major)
-    metadata = {
-        "path": "models/2019Q1/validation-coverage.parquet",
-        "row_count": coverage.row_count,
-        "semantic_identity": coverage.semantic_identity,
-    }
-    for name, physical_rows in (
-        ("asset_major", asset_major),
-        ("time_major", time_major),
-    ):
-        root = tmp_path / name
-        path = root / metadata["path"]
-        filesystem_mkdir(path.parent, parents=True)
-        pq.write_table(
-            pa.Table.from_pandas(physical_rows, preserve_index=False),
-            native_filesystem_path(path),
-        )
-        _validate_validation_coverage(
-            root, "2019Q1", metadata, scope, member_identities=None
-        )
-
-
-def test_refit_scaler_cancellation_is_recorded_before_any_learning(
-    tmp_path, monkeypatch
-):
-    _small_common_coverage_case(
-        tmp_path, fail_refit_scaler="cancel", monkeypatch=monkeypatch
+    frame = frame.astype(
+        {"timestamp": "datetime64[ns]", "label_available_at": "datetime64[ns]"}
     )
+    layout = StorageLayout(tmp_path)
+    root = layout.research_dataset_root(dataset.market_id, dataset.data_id)
+    with runtime_resource_policy_scope() as policy:
+        write_dataset(
+            root, frame, spec=dataset, resource_policy=policy, borrowed_input=True
+        )
+        with open_dataset_session(
+            root,
+            columns=None,
+            time_window=_research_dataset_access_window(dataset.market_id, None),
+            resource_policy=policy,
+        ) as session:
+            scratch = session.inventory.scratch_path
+            baseline = policy.used_memory_bytes
+            observed = []
+
+            def exercise(**kwargs):
+                assert list(kwargs["sessions"]) == list(frame["timestamp"][:2])
+
+                def read():
+                    return kwargs["chunks"](
+                        tuple(frame.columns),
+                        input_columns=("x",),
+                        start=None,
+                        end="2018-12-31",
+                    )
+
+                first = pd.concat(read(), ignore_index=True)
+                pd.testing.assert_frame_equal(
+                    first, frame.iloc[:2].reset_index(drop=True)
+                )
+                observed.append(True)
+                if mutation == "staged":
+                    good = shared_model_case(
+                        tmp_path / "good-model", verify_source=session.verify
+                    )
+                    old_good = _file_bytes(good.root)
+
+                    def mutate_after_fit(actual):
+                        def results(**callbacks):
+                            yield from actual(**callbacks)
+                            path = root / "spec.json"
+                            filesystem_write_bytes(
+                                path, filesystem_read_bytes(path) + b" "
+                            )
+
+                        return results
+
+                    with pytest.raises(
+                        ValueError, match="dataset_spec_identity_changed"
+                    ):
+                        shared_model_case(
+                            tmp_path / "failed-model",
+                            verify_source=session.verify,
+                            model_results_wrapper=mutate_after_fit,
+                        )
+                    assert _file_bytes(good.root) == old_good
+                    return ()
+                if mutation in {"cancel", "exception"}:
+                    iterator = iter(read())
+                    try:
+                        next(iterator)
+                        if mutation == "exception":
+                            raise RuntimeError("consumer_failure")
+                    finally:
+                        iterator.close()
+                    return ()
+                if mutation == "part":
+                    part = session.read_paths[0]
+                    filesystem_write_bytes(part, filesystem_read_bytes(part) + b" ")
+                elif mutation in {"spec", "manifest"}:
+                    path = (
+                        root / "spec.json"
+                        if mutation == "spec"
+                        else root / "_manifest" / "manifest.json"
+                    )
+                    filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
+                else:
+                    path = root / "data" / "year=2025" / "part-00000.parquet"
+                    filesystem_mkdir(path.parent)
+                    filesystem_write_bytes(
+                        path, filesystem_read_bytes(session.all_paths[0])
+                    )
+                return tuple(read())
+
+            monkeypatch.setattr(production, "_build_a_share_models", exercise)
+
+            def run():
+                return production.build_model_selection_result(
+                    layout=layout,
+                    dataset_catalog=ResearchDatasetCatalog((dataset,)),
+                    model_catalog=research_profile().models,
+                    dataset_id=dataset.data_id,
+                    model_ids=("linear",),
+                    tie_break_order=("linear",),
+                    time_window=TimeWindow("2019-01-01", "2019-03-31"),
+                    resource_policy=policy,
+                    protocol_manifest={
+                        **a_share.protocol("pv_all").manifest(),
+                        "research_configuration": {
+                            "models": [{"model_id": "linear", "hyperparameters": {}}]
+                        },
+                    },
+                    run_id="snapshot",
+                    research_protocol_identity="a" * 64,
+                    model_target_id="snapshot_model",
+                    backend_versions={},
+                    dataset_session=session,
+                    on_validation=lambda *_args: pytest.fail("unexpected_validation"),
+                    on_candidate=lambda *_args: pytest.fail("unexpected_candidate"),
+                    on_trial=lambda *_args: pytest.fail("unexpected_trial"),
+                    select_models=lambda *_args: pytest.fail("unexpected_selection"),
+                    on_observation=lambda *_args: pytest.fail("unexpected_observation"),
+                )
+
+            if mutation in {"cancel", "staged"}:
+                assert run() == ()
+            elif mutation == "exception":
+                with pytest.raises(RuntimeError, match="^consumer_failure$"):
+                    run()
+            else:
+                with pytest.raises(
+                    ValueError,
+                    match="dataset_(file_identity|spec_identity|manifest_identity|inventory)_changed",
+                ):
+                    run()
+            assert observed == [True]
+            assert policy.used_memory_bytes == baseline
+        assert not filesystem_exists(scratch)
+        assert policy.used_memory_bytes == 0
 
 
-def test_reader_binds_formal_model_basis_and_actual_coverage_count(
+@pytest.mark.parametrize(
+    "mutation", ["dataset", "target", "protocol", "fold", "family"]
+)
+def test_publication_rejects_valid_ledger_from_wrong_artifact_scope(tmp_path, mutation):
+    from dataclasses import replace
+    from uuid import uuid4
+
+    from quant_research_platform.contracts.experiments import ExperimentFold
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.experiments import TrialRecorder
+
+    bad_layout = StorageLayout(tmp_path / "bad")
+    substituted = []
+
+    def wrap(builder):
+        def run(**callbacks):
+            on_candidate, on_trial = callbacks["on_candidate"], callbacks["on_trial"]
+            metadata = {}
+
+            def candidate(fold, family, spec, result):
+                metadata.clear()
+                metadata.update(result.metadata)
+                on_candidate(fold, family, spec, result)
+
+            def trial(fold, family, reference):
+                if substituted:
+                    on_trial(fold, family, reference)
+                    return
+                with read_model_trial_ledger_reference(bad_layout, reference) as (
+                    plan,
+                    records,
+                ):
+                    record = records[0]
+                changes = {"experiment_id": "experiment_" + uuid4().hex}
+                if mutation == "dataset":
+                    changes.update(
+                        research_dataset_id="other_dataset",
+                        data_snapshot_id="e" * 64,
+                        input_lineage=("e" * 64,),
+                    )
+                elif mutation == "target":
+                    changes["target_id"] = "other_model"
+                elif mutation == "protocol":
+                    changes["research_protocol_identity"] = "e" * 64
+                elif mutation == "family":
+                    changes["candidate_family_id"] = "other_family"
+                else:
+                    changes["folds"] = (
+                        ExperimentFold(
+                            fold_id="2018-q2",
+                            train=fold.train,
+                            validation=TimeWindow(
+                                pd.Timestamp("2018-04-02"), pd.Timestamp("2018-04-03")
+                            ),
+                        ),
+                    )
+                wrong = replace(plan, **changes)
+                payload = record.payload()["normalized_parameters"]
+                for key in ("input_factor_columns", "input_feature_columns"):
+                    payload[key] = tuple(payload[key])
+                actual_spec = ModelSpec(**payload)
+                recorder = TrialRecorder(bad_layout, "run_wrong_scope", wrong)
+                attempt = recorder.begin(
+                    actual_spec, common_coverage_id=record.common_coverage_id
+                )
+                recorder.finish(
+                    attempt, metrics=dict(record.metrics), model_metadata=metadata
+                )
+                invalid_reference = recorder.reference()
+                with read_model_trial_ledger_reference(
+                    bad_layout, invalid_reference
+                ) as (restored, completed):
+                    assert restored == wrong
+                    assert completed[0].status == "completed"
+                substituted.append(invalid_reference)
+                on_trial(fold, family, invalid_reference)
+
+            callbacks.update(on_candidate=candidate, on_trial=trial)
+            yield from builder(**callbacks)
+
+        return run
+
+    with runtime_resource_policy_scope() as policy:
+        good = shared_model_case(tmp_path / "good")
+        old_good = _file_bytes(good.root)
+        expected = (
+            "model_trial_fold_binding_invalid"
+            if mutation == "fold"
+            else "model_trial_artifact_binding_invalid"
+        )
+        with pytest.raises(ValueError, match=expected):
+            shared_model_case(tmp_path / "bad", model_results_wrapper=wrap)
+        assert len(substituted) == 1
+        assert _file_bytes(good.root) == old_good
+        assert not tuple(filesystem_glob(tmp_path / "bad/models", "**/model.json"))
+        assert policy.used_memory_bytes == 0
+
+
+def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limit(
+    tmp_path,
+):
+    from dataclasses import replace
+
+    from quant_research_platform.research.features.transforms import (
+        model_input_validity_columns,
+    )
+    from quant_research_platform.research.models import supervised
+    from quant_research_platform.storage.identity import filesystem_stat
+    from tests.helpers.research_configuration import research_configuration
+
+    configuration = research_configuration(
+        name="fusion_nf_expectations", small_models=True
+    )
+    specs = tuple(
+        ModelSpec(
+            model_id=item["model_id"],
+            model_algorithm=item["model_algorithm"],
+            input_factor_columns=tuple(item["input_factor_columns"]),
+            input_feature_columns=tuple(item["input_feature_columns"]),
+            label_column=item["label_column"],
+            hyperparameters=item["hyperparameters"],
+        )
+        for item in configuration["models"]
+    )
+    preflight_model_specs(specs)
+    frame = shared_model_rows(specs, development_end="2019-03-31")
+    for column in frame:
+        if column.startswith("feature_missing_"):
+            frame[column] = 0.0
+    validity = tuple(
+        dict.fromkeys(
+            column
+            for spec in specs
+            for column in model_input_validity_columns(
+                spec.input_columns, spec.model_algorithm
+            )
+            if column not in frame.columns
+        )
+    )
+    for column in validity:
+        frame[column] = True
+    dataset = a_share.research_dataset_catalog().get("fusion_nf_expectations")
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(
+            tmp_path,
+            specs=specs,
+            frame=frame,
+            dataset=dataset,
+            development_end="2019-03-31",
+        )
+        assert len(case.artifact.candidate_models) == 5 * 8
+        assert len(case.artifact.final_models) == 2 * 8
+        for member in case.artifact.member_records:
+            if member["path"].endswith(".json"):
+                assert filesystem_stat(case.root / member["path"]).st_size < 1024**2
+        shard = json.loads(
+            filesystem_read_bytes(case.root / "models/2019Q1/metadata.json")
+        )
+        assert len(shard["candidate_models"]) == 8
+        assert any(
+            item["model_metadata"]["scaler"] is not None
+            for item in shard["candidate_models"]
+        )
+        for entry in case.artifact.final_models:
+            metadata = entry["model_metadata"]
+            algorithm = metadata["model_algorithm"]
+            with read_quarterly_predictor(
+                case.artifact,
+                entry["selection_group"],
+                entry["family_id"],
+                resource_policy=policy,
+            ) as actual:
+                if algorithm in {
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                }:
+                    changed = (
+                        replace(
+                            actual,
+                            directions=tuple(-value for value in actual.directions),
+                        )
+                        if algorithm == "equal_weight_rank_ensemble"
+                        else replace(
+                            actual, weights=tuple(-value for value in actual.weights)
+                        )
+                    )
+                    with pytest.raises(
+                        ValueError, match="model_state_metadata_mismatch"
+                    ):
+                        fitting.validate_model_state(changed, metadata)
+                    changed = None
+                elif algorithm == "random_forest_regressor":
+                    with pytest.MonkeyPatch.context() as patch:
+                        patch.setattr(
+                            supervised,
+                            "model_cpu_capacity",
+                            lambda: pytest.fail(
+                                "persisted model validation rediscovered host capacity"
+                            ),
+                        )
+                        fitting.validate_model_state(actual, metadata)
+                    assert (
+                        actual.n_jobs == metadata["resolved_hyperparameters"]["n_jobs"]
+                    )
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "field,value",
+    (
+        (
+            "dependency_status",
+            {"status": "available", "package": "sklearn", "version": "test"},
+        ),
+        ("rows_input", 1),
+        ("filter_columns_used", []),
+    ),
+)
+def test_quarterly_model_core_rejects_contract_drift(tmp_path, field, value):
+    with runtime_resource_policy_scope() as policy:
+        case = shared_model_case(tmp_path / "good")
+        before = _file_bytes(case.root)
+
+        def mutate(relative, payload):
+            if relative == "models/2019Q1/metadata.json":
+                payload["candidate_models"][0]["model_metadata"][field] = value
+
+        root = _republish(case, tmp_path / "bad", mutate=mutate)
+        with pytest.raises(ValueError, match="invalid_model_metadata"):
+            read_quarterly_model_artifact(root, trial_layout=case.layout)
+        assert _file_bytes(case.root) == before
+        assert policy.used_memory_bytes == 0
+
+
+def test_model_metadata_failure_releases_copies_and_preserves_old_good(
     tmp_path, monkeypatch
 ):
-    from copy import deepcopy
+    policy = capture_test_policy(
+        available_memory_bytes=256 * 1024**2,
+        explicit_cap_bytes=128 * 1024**2,
+    )
+    with runtime_resource_policy_scope(policy):
+        good = shared_model_case(tmp_path)
+        before = _file_bytes(good.root)
+        instances = set(good.root.parent.iterdir())
+        primary = RuntimeError("model_metadata_boundary_primary")
+        copied_metadata_ids = set()
+        metadata_validations = 0
+        original_validate = persisted.validate_model_metadata_core
+        original_write = persisted.write_internal_artifact_manifest
 
-    from quant_research_platform.research.models import persisted
+        def admitted_validate(value, **kwargs):
+            nonlocal metadata_validations
+            metadata_validations += 1
+            assert any(
+                lease.owner == "research.model.artifact.metadata"
+                and lease.reserved_bytes > 0
+                for lease in policy._leases
+            )
+            return original_validate(value, **kwargs)
 
-    saved, layout = _small_common_coverage_case(tmp_path)
-    envelope = deepcopy(saved.envelope)
-    # The common domain stays unchanged: the next family already requires y.
-    # All published model metadata and trial parameters still agree on x alone.
-    envelope["semantic_metadata"]["target_contract"]["model_specs"][0][
-        "input_factor_columns"
-    ] = ["x", "y"]
-    with pytest.raises(ValueError, match="model_trial_parameters_misaligned"):
-        persisted._validate_trial_references(
-            saved.quarterly_models,
-            saved.quarterly_selections,
-            saved.trial_ledgers,
-            layout,
-            envelope,
-            root=saved.instance_root,
-            member_identities=saved.member_identities,
+        def fail_metadata(path, payload, **kwargs):
+            if path.name == "metadata.json":
+                for entry in payload["candidate_models"]:
+                    copied_metadata_ids.add(id(entry["model_metadata"]))
+                assert kwargs["_admit"] is not None
+                raise primary
+            return original_write(path, payload, **kwargs)
+
+        monkeypatch.setattr(
+            persisted, "validate_model_metadata_core", admitted_validate
         )
-    reduced = deepcopy(saved.quarterly_selections)
-    for selection in reduced.values():
-        selection["candidate_family_ids"].remove("rank_flag")
-        selection["tie_break_order"].remove("rank_flag")
-        selection["families"] = [
-            item for item in selection["families"] if item["family_id"] != "rank_flag"
-        ]
-        selection["selected_family_id"] = "linear_x"
-        selection["selected_model_id"] = "linear_x"
-    references = []
-    for ref in saved.trial_ledgers:
-        with persisted.read_model_trial_ledger_reference(layout, ref) as (plan, _):
-            if plan.candidate_family_id != "rank_flag":
-                references.append(ref)
-    with pytest.raises(ValueError, match="model_trial_family_coverage_mismatch"):
-        persisted._validate_trial_references(
-            tuple(
-                entry
-                for entry in saved.quarterly_models
-                if entry["family_id"] != "rank_flag"
-            ),
-            reduced,
-            references,
-            layout,
-            saved.envelope,
-            root=saved.instance_root,
-            member_identities=saved.member_identities,
+        monkeypatch.setattr(
+            persisted, "write_internal_artifact_manifest", fail_metadata
         )
-    read = persisted.read_model_trial_ledger_reference
-
-    from contextlib import contextmanager
-
-    @contextmanager
-    def altered(layout, reference):
-        with read(layout, reference) as (plan, records):
-            if plan.stage == "selection":
-                records = tuple(
-                    replace(record, metrics={**record.metrics, "validation_rows": 16})
-                    for record in records
-                )
-            yield plan, records
-
-    monkeypatch.setattr(persisted, "read_model_trial_ledger_reference", altered)
-    with pytest.raises(ValueError, match="model_trial_common_coverage_mismatch"):
-        read_quarterly_model_artifact(saved.instance_root, trial_layout=layout)
+        with pytest.raises(RuntimeError) as captured:
+            shared_model_case(tmp_path, software_identity="e" * 64)
+        assert captured.value is primary
+        assert metadata_validations > 0 and copied_metadata_ids
+        traceback = primary.__traceback__
+        failed_frame_cleared = False
+        while traceback is not None:
+            values = traceback.tb_frame.f_locals
+            if traceback.tb_frame.f_code.co_name == "fail_metadata":
+                failed_frame_cleared = not values
+            assert not any(
+                id(value) in copied_metadata_ids for value in values.values()
+            )
+            if traceback.tb_frame.f_code.co_name == "write":
+                assert not values.get("candidate_models")
+                assert not values.get("final_models")
+                assert not values.get("selections")
+            traceback = traceback.tb_next
+        assert failed_frame_cleared
+        assert policy.to_payload()["used_memory_bytes"] == 0
+        with policy.lease("test.after_model_metadata_failure", 64 * 1024**2):
+            assert _file_bytes(good.root) == before
+        assert set(good.root.parent.iterdir()) == instances

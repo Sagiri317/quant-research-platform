@@ -288,11 +288,13 @@ def _archive_manifest(root):
     return manifest
 
 
-def iter_records(root, *, resource_policy):
+def _iter_records(root, *, resource_policy, expected_manifest_hash):
     """Verify manifest and compressed identity throughout bounded row consumption."""
     root = Path(root)
     manifest = _archive_manifest(root)
     identity = canonical_json_hash(manifest)
+    if identity != expected_manifest_hash:
+        raise ValueError("tardis_normalized_selection_identity_changed")
     path = root / "data.csv.gz"
     try:
         with closing_iterator(
@@ -332,21 +334,60 @@ def iter_records(root, *, resource_policy):
             )
 
 
-def source_identity(root, _target_id, *, exchange, archives):
-    """Bind exact normalized archives by instrument and data type."""
+def _selected_archives(root, archive_paths, time_window):
+    selected = []
+    dates = []
+    for relative in archive_paths:
+        path = Path(root) / relative
+        manifest = _archive_manifest(path)
+        dates.append(manifest["date"])
+        if time_window is None or (
+            str(time_window.start)[:10] <= manifest["date"] <= str(time_window.end)[:10]
+        ):
+            selected.append((path, manifest))
+    if not dates or dates != sorted(set(dates)):
+        raise ValueError("tardis_normalized_archive_dates_invalid")
+    if not selected:
+        raise ValueError("tardis_normalized_archive_window_empty")
+    return selected
+
+
+def iter_records(root, *, archive_paths, time_window, resource_policy):
+    """Consume the declared dated observations without manufacturing gap coverage."""
+    selected = _selected_archives(root, archive_paths, time_window)
+    first = selected[0][1]
+    for path, manifest in selected:
+        if any(
+            manifest[key] != first[key]
+            for key in ("exchange", "symbol", "dataset_type")
+        ):
+            raise ValueError("tardis_normalized_scope_invalid")
+        with closing_iterator(
+            _iter_records(
+                path,
+                resource_policy=resource_policy,
+                expected_manifest_hash=canonical_json_hash(manifest),
+            )
+        ) as records:
+            yield from records
+
+
+def source_identity(root, _target_id, *, exchange, archives, time_window=None):
+    """Bind every exact normalized archive by instrument, data type and date."""
     identities = {}
     try:
         for symbol, kinds in archives.items():
             identities[symbol] = {}
-            for kind, relative in kinds.items():
-                manifest = _archive_manifest(Path(root) / relative)
-                if (
-                    manifest["exchange"] != exchange
-                    or manifest["symbol"] != symbol
-                    or manifest["dataset_type"] != kind
-                ):
-                    raise ValueError("tardis_normalized_scope_invalid")
-                identities[symbol][kind] = canonical_json_hash(manifest)
+            for kind, paths in kinds.items():
+                identities[symbol][kind] = []
+                for _path, manifest in _selected_archives(root, paths, time_window):
+                    if (
+                        manifest["exchange"] != exchange
+                        or manifest["symbol"] != symbol
+                        or manifest["dataset_type"] != kind
+                    ):
+                        raise ValueError("tardis_normalized_scope_invalid")
+                    identities[symbol][kind].append(canonical_json_hash(manifest))
     except FileNotFoundError:
         return None
     return canonical_json_hash(identities)

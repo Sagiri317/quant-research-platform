@@ -38,6 +38,7 @@ from quant_research_platform.contracts.json_codec import (
     bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
+    json_record_working_set_bytes,
     parse_qrp_json_object,
     render_qrp_json_object,
 )
@@ -177,7 +178,10 @@ def merge_dataset_instance_metadata(
     instance_metadata: Mapping[str, Any] | None,
     *,
     spec: Mapping[str, Any] | None = None,
+    _admit: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
+    if _admit is not None:
+        _admit(json_record_working_set_bytes(2 + 2 * len(payload)))
     result = dict(payload)
     if instance_metadata is None:
         return result
@@ -192,24 +196,30 @@ def merge_dataset_instance_metadata(
         if key not in _DATASET_INSTANCE_METADATA_ALLOWED_KEYS:
             raise ValueError(f"unsupported_dataset_instance_metadata_key: {key}")
         if key == "input_dataset_identities":
-            metadata[key] = _validate_input_dataset_identities_metadata(value)
+            metadata[key] = _validate_input_dataset_identities_metadata(
+                value, _admit=_admit
+            )
         elif key == "source_artifact_identity":
-            metadata[key] = _validate_source_artifact_identity(value)
+            metadata[key] = _validate_source_artifact_identity(value, _admit=_admit)
         elif key == "producer_diagnostics":
             metadata[key] = bounded_qrp_json_object_snapshot(
-                value, max_bytes=1024 * 1024
+                value, max_bytes=1024 * 1024, _admit=_admit
             )
         elif key == COMMON_MANIFEST_METADATA_KEY:
-            metadata[key] = validate_business_manifest_envelope(value)
+            metadata[key] = validate_business_manifest_envelope(value, _admit=_admit)
     result.update(metadata)
     if spec is not None and COMMON_MANIFEST_METADATA_KEY in result:
         _validate_common_manifest_binding(result[COMMON_MANIFEST_METADATA_KEY], spec)
     return result
 
 
-def _validate_input_dataset_identities_metadata(value: Any) -> dict[str, Any]:
+def _validate_input_dataset_identities_metadata(
+    value: Any, *, _admit: Callable[[int], None] | None = None
+) -> dict[str, Any]:
     if not isinstance(value, Mapping) or not value:
         raise ValueError("invalid_input_dataset_identities_metadata")
+    if _admit is not None:
+        _admit(json_record_working_set_bytes(2 + 2 * len(value)))
     identities: dict[str, Any] = {}
     for data_id, identity in value.items():
         if not isinstance(data_id, str) or not data_id:
@@ -217,6 +227,7 @@ def _validate_input_dataset_identities_metadata(value: Any) -> dict[str, Any]:
         identities[data_id] = _validate_input_dataset_identity_payload(
             identity,
             expected_data_id=data_id,
+            _admit=_admit,
         )
     return identities
 
@@ -225,24 +236,69 @@ def _validate_input_dataset_identity_payload(
     value: Any,
     *,
     expected_data_id: str,
+    _admit: Callable[[int], None] | None = None,
 ) -> dict[str, str]:
     if not isinstance(value, Mapping) or set(value) != _DATASET_INPUT_IDENTITY_KEYS:
         raise ValueError("invalid_input_dataset_identities_metadata")
     data_id = value["data_id"]
     if data_id != expected_data_id:
         raise ValueError("invalid_input_dataset_identities_metadata")
+    spec_hash = _require_identity_hash(
+        value["spec_hash"], error="invalid_input_dataset_identities_metadata"
+    )
+    manifest_hash = _require_identity_hash(
+        value["manifest_hash"], error="invalid_input_dataset_identities_metadata"
+    )
+    if _admit is not None:
+        _admit(json_record_working_set_bytes(2 + 2 * len(value)))
     return {
         "data_id": expected_data_id,
-        "spec_hash": _require_identity_hash(
-            value["spec_hash"], error="invalid_input_dataset_identities_metadata"
-        ),
-        "manifest_hash": _require_identity_hash(
-            value["manifest_hash"], error="invalid_input_dataset_identities_metadata"
-        ),
+        "spec_hash": spec_hash,
+        "manifest_hash": manifest_hash,
     }
 
 
-def _validate_source_artifact_identity(value: Any) -> dict[str, str]:
+def _validate_source_artifact_identity(
+    value: Any, *, _admit: Callable[[int], None] | None = None
+) -> dict[str, Any]:
+    if isinstance(value, Mapping) and set(value) == {"schema_id", "archives"}:
+        members = value["archives"]
+        if type(members) is not list or not members:
+            raise ValueError("invalid_source_artifact_identity")
+        if _admit is not None:
+            _admit(json_record_working_set_bytes(2 + 2 * len(members)))
+        archives = []
+        previous_date = None
+        identities = set()
+        for member in members:
+            if not isinstance(member, Mapping) or set(member) != (
+                _SOURCE_ARTIFACT_IDENTITY_KEYS | {"date"}
+            ):
+                raise ValueError("invalid_source_artifact_identity")
+            day = member["date"]
+            try:
+                valid_date = (
+                    type(day) is str and date.fromisoformat(day).isoformat() == day
+                )
+            except ValueError:
+                valid_date = False
+            if not valid_date or (previous_date is not None and day <= previous_date):
+                raise ValueError("invalid_source_artifact_identity")
+            if _admit is not None:
+                _admit(json_record_working_set_bytes(2 + 2 * len(member)))
+            identity = _validate_source_artifact_identity(
+                {key: member[key] for key in _SOURCE_ARTIFACT_IDENTITY_KEYS},
+                _admit=_admit,
+            )
+            key = identity["artifact_id"], identity["manifest_hash"]
+            if identity["schema_id"] != value["schema_id"] or key in identities:
+                raise ValueError("invalid_source_artifact_identity")
+            identities.add(key)
+            if _admit is not None:
+                _admit(json_record_working_set_bytes(2 + 2 * len(member)))
+            archives.append({"date": day, **identity})
+            previous_date = day
+        return {"schema_id": value["schema_id"], "archives": archives}
     if not isinstance(value, Mapping) or set(value) != _SOURCE_ARTIFACT_IDENTITY_KEYS:
         raise ValueError("invalid_source_artifact_identity")
     schema_id = value["schema_id"]
@@ -255,12 +311,15 @@ def _validate_source_artifact_identity(value: Any) -> dict[str, str]:
         or not artifact_id
     ):
         raise ValueError("invalid_source_artifact_identity")
+    manifest_hash = _require_identity_hash(
+        value["manifest_hash"], error="invalid_source_artifact_identity"
+    )
+    if _admit is not None:
+        _admit(json_record_working_set_bytes(2 + 2 * len(value)))
     return {
         "schema_id": schema_id,
         "artifact_id": artifact_id,
-        "manifest_hash": _require_identity_hash(
-            value["manifest_hash"], error="invalid_source_artifact_identity"
-        ),
+        "manifest_hash": manifest_hash,
     }
 
 
@@ -330,7 +389,9 @@ def _validate_common_manifest_binding(
         raise ValueError("dataset_manifest_common_schema_identity_mismatch")
 
 
-def validate_dataset_spec(spec: DataSpec) -> str | None:
+def validate_dataset_spec(
+    spec: DataSpec, *, _admit: Callable[[int], None] | None = None
+) -> str | None:
     if type(spec) not in {
         DataSpec,
         InterimDataSpec,
@@ -349,11 +410,13 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
         spec.primary_key,
         "dataset_primary_key_invalid",
         allow_empty=False,
+        _admit=_admit,
     )
     _require_runtime_string_tuple(
         spec.partition_columns,
         "dataset_partition_columns_invalid",
         allow_empty=True,
+        _admit=_admit,
     )
     column_roles_are_valid_mapping = type(spec.column_roles) is MappingProxyType
     if not column_roles_are_valid_mapping or not spec.column_roles:
@@ -363,6 +426,8 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
         for column, role in spec.column_roles.items()
     ):
         raise ValueError("dataset_column_roles_invalid")
+    if _admit is not None:
+        _admit(json_record_working_set_bytes(2 + 2 * len(spec.column_roles)))
     if type(spec.required_columns) is not tuple or spec.required_columns != tuple(
         spec.column_roles
     ):
@@ -371,7 +436,7 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
         raise ValueError("dataset_primary_key_invalid")
     if spec.partition_columns not in {("year",), ()}:
         raise ValueError("unsupported_partitioning")
-    _validate_dataset_spec_variant(spec)
+    _validate_dataset_spec_variant(spec, _admit=_admit)
     invalid_key_roles = [
         column
         for column in primary_key
@@ -393,7 +458,9 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
     return timestamp_columns[0]
 
 
-def _validate_dataset_spec_variant(spec: DataSpec) -> None:
+def _validate_dataset_spec_variant(
+    spec: DataSpec, *, _admit: Callable[[int], None] | None = None
+) -> None:
     if type(spec) is DataSpec:
         return
     if type(spec) is InterimDataSpec:
@@ -407,11 +474,13 @@ def _validate_dataset_spec_variant(spec: DataSpec) -> None:
             spec.source_input_data_ids,
             "dataset_source_input_data_ids_invalid",
             allow_empty=True,
+            _admit=_admit,
         )
         _require_runtime_string_tuple(
             spec.processed_input_data_ids,
             "dataset_processed_input_data_ids_invalid",
             allow_empty=True,
+            _admit=_admit,
         )
         return
     _require_runtime_string(spec.market_id, "dataset_market_id_invalid")
@@ -419,6 +488,7 @@ def _validate_dataset_spec_variant(spec: DataSpec) -> None:
         spec.input_data_ids,
         "dataset_input_data_ids_invalid",
         allow_empty=False,
+        _admit=_admit,
     )
     _require_runtime_string(
         spec.base_input_data_id,
@@ -431,11 +501,15 @@ def _validate_dataset_spec_variant(spec: DataSpec) -> None:
         (spec.filter_columns, "dataset_filter_columns_invalid", True),
         (spec.context_columns, "dataset_context_columns_invalid", True),
     ):
-        _require_runtime_string_tuple(value, error, allow_empty=allow_empty)
+        _require_runtime_string_tuple(
+            value, error, allow_empty=allow_empty, _admit=_admit
+        )
     if type(spec.feature_transforms) is not tuple:
         raise ValueError("dataset_feature_transforms_invalid")
     for transform in spec.feature_transforms:
-        _validate_runtime_feature_transform(transform)
+        _validate_runtime_feature_transform(transform, _admit=_admit)
+    if type(spec.key_coverage) is MappingProxyType and _admit is not None:
+        _admit(json_record_working_set_bytes(2 + 2 * len(spec.key_coverage)))
     if (
         type(spec.key_coverage) is not MappingProxyType
         or set(spec.key_coverage) != set(input_data_ids)
@@ -448,6 +522,20 @@ def _validate_dataset_spec_variant(spec: DataSpec) -> None:
         )
     ):
         raise ValueError("dataset_key_coverage_invalid")
+    if _admit is not None:
+        _admit(
+            json_record_working_set_bytes(
+                2
+                + 4 * len(spec.column_roles)
+                + 4 * len(spec.key_coverage)
+                + 2 * len(spec.input_data_ids)
+                + 2 * len(spec.factor_columns)
+                + 2 * len(spec.feature_columns)
+                + 2 * len(spec.label_columns)
+                + 2 * len(spec.filter_columns)
+                + 2 * len(spec.context_columns)
+            )
+        )
     try:
         ResearchDatasetSpec(
             data_id=spec.data_id,
@@ -472,7 +560,9 @@ def _validate_dataset_spec_variant(spec: DataSpec) -> None:
         raise ValueError("dataset_research_spec_invalid") from exc
 
 
-def _validate_runtime_feature_transform(value: object) -> None:
+def _validate_runtime_feature_transform(
+    value: object, *, _admit: Callable[[int], None] | None = None
+) -> None:
     if type(value) is not FeatureTransformSpec:
         raise ValueError("dataset_feature_transforms_invalid")
     if type(value.contract_version) is not str or value.contract_version != "0.1":
@@ -482,11 +572,13 @@ def _validate_runtime_feature_transform(value: object) -> None:
         value.source_columns,
         "dataset_feature_transforms_invalid",
         allow_empty=False,
+        _admit=_admit,
     )
     _require_runtime_string_tuple(
         value.output_columns,
         "dataset_feature_transforms_invalid",
         allow_empty=False,
+        _admit=_admit,
     )
     if type(value.transform) is not str or value.transform not in FEATURE_TRANSFORMS:
         raise ValueError("dataset_feature_transforms_invalid")
@@ -525,13 +617,17 @@ def _require_runtime_string_tuple(
     error: str,
     *,
     allow_empty: bool,
+    _admit: Callable[[int], None] | None = None,
 ) -> tuple[str, ...]:
     if (
         type(value) is not tuple
         or (not value and not allow_empty)
         or any(type(item) is not str or not item for item in value)
-        or len(value) != len(set(value))
     ):
+        raise ValueError(error)
+    if _admit is not None:
+        _admit(json_record_working_set_bytes(2 + 2 * len(value)))
+    if len(value) != len(set(value)):
         raise ValueError(error)
     return value
 
@@ -1141,8 +1237,21 @@ def _physical_type_payload(data_type: pa.DataType) -> dict[str, Any]:
     raise ValueError("unsupported_dataset_arrow_type")
 
 
-def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
-    validate_dataset_spec(spec)
+def data_spec_payload(
+    spec: DataSpec, *, _admit: Callable[[int], None] | None = None
+) -> dict[str, Any]:
+    validate_dataset_spec(spec, _admit=_admit)
+    if _admit is not None:
+        # Scalars are borrowed; reserve the new containers and sorting workspace.
+        _admit(
+            json_record_working_set_bytes(
+                2
+                + len(spec.primary_key)
+                + len(spec.partition_columns)
+                + len(spec.required_columns)
+                + 2 * len(spec.column_roles)
+            )
+        )
     payload: dict[str, Any] = {
         "schema_id": "qrp-dataset-spec",
         "data_id": spec.data_id,
@@ -1158,6 +1267,15 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
     if isinstance(spec, InterimDataSpec):
         payload.update({"source_id": spec.source_id})
     if isinstance(spec, ProcessedDataSpec):
+        if _admit is not None:
+            _admit(
+                json_record_working_set_bytes(
+                    2
+                    + len(spec.source_input_data_ids)
+                    + len(spec.processed_input_data_ids)
+                )
+            )
+            _admit(json_record_working_set_bytes(4 * len(spec.parameters_json)))
         payload.update(
             {
                 "market_id": spec.market_id,
@@ -1170,6 +1288,20 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
             }
         )
     if isinstance(spec, ResearchDatasetSpec):
+        if _admit is not None:
+            _admit(
+                json_record_working_set_bytes(
+                    2
+                    + len(spec.input_data_ids)
+                    + len(spec.factor_columns)
+                    + len(spec.feature_columns)
+                    + len(spec.feature_transforms)
+                    + len(spec.label_columns)
+                    + len(spec.filter_columns)
+                    + len(spec.context_columns)
+                    + 2 * len(spec.key_coverage)
+                )
+            )
         payload.update(
             {
                 "market_id": spec.market_id,
@@ -1178,7 +1310,7 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
                 "factor_columns": list(spec.factor_columns),
                 "feature_columns": list(spec.feature_columns),
                 "feature_transforms": [
-                    _feature_transform_payload(transform)
+                    _feature_transform_payload(transform, _admit=_admit)
                     for transform in spec.feature_transforms
                 ],
                 "label_columns": list(spec.label_columns),
@@ -1190,7 +1322,22 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
     return payload
 
 
-def _feature_transform_payload(transform: FeatureTransformSpec) -> dict[str, Any]:
+def _feature_transform_payload(
+    transform: FeatureTransformSpec, *, _admit: Callable[[int], None] | None = None
+) -> dict[str, Any]:
+    if _admit is not None:
+        _admit(
+            json_record_working_set_bytes(
+                2
+                + len(transform.source_columns)
+                + len(transform.output_columns)
+                + (
+                    0
+                    if transform.winsorize_quantiles is None
+                    else len(transform.winsorize_quantiles)
+                )
+            )
+        )
     return {
         "transform_id": transform.transform_id,
         "source_columns": list(transform.source_columns),
