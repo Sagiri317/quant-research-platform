@@ -827,12 +827,135 @@ def test_csmar_identity_ignores_unrequested_bad_schema_and_cleans_scratch(
     assert not tuple(filesystem_glob(tmp_path.parent, ".k-*/k.db"))
 
 
+def test_csmar_source_identity_streams_inventory_with_accounted_members(
+    tmp_path, monkeypatch
+):
+    import hashlib
+    import sys
+
+    from quant_research_platform.storage import identity as identity_owner
+
+    scratch = tmp_path / "scratch"
+    filesystem_mkdir(scratch)
+    monkeypatch.setattr(
+        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(scratch)
+    )
+    real_hash = identity_owner._hash_file_content
+    real_content_hash = interim.content_hash_for_files
+    reservations = []
+
+    def hash_member(*args, **kwargs):
+        metadata = sys._getframe(1).f_locals["metadata"]
+        reservations.append(metadata.reserved_bytes)
+        return real_hash(*args, **kwargs)
+
+    def hash_stream(files, **kwargs):
+        assert iter(files) is files
+        return real_content_hash(files, **kwargs)
+
+    monkeypatch.setattr(identity_owner, "_hash_file_content", hash_member)
+    monkeypatch.setattr(interim, "content_hash_for_files", hash_stream)
+    payload = b"Markettype,Clddt,Daywk,State\n"
+    peaks = []
+    for count in (1, 64):
+        raw = tmp_path / str(count)
+        filesystem_mkdir(raw)
+        for index in range(count):
+            filesystem_write_bytes(
+                raw / f"csmar__trading_calendar__p{index}__full__export-20260101.csv",
+                payload,
+            )
+        reservations.clear()
+        with runtime_resource_policy_scope(explicit_cap_bytes=8 * 1024**2) as policy:
+            actual = interim.source_content_identity(raw, "trading_calendar")
+            assert policy.used_memory_bytes == 0
+        expected = hashlib.sha256()
+        for _ in range(count):
+            for value in ("trading_calendar", hashlib.sha256(payload).hexdigest()):
+                encoded = value.encode("utf-8")
+                expected.update(len(encoded).to_bytes(8, "big"))
+                expected.update(encoded)
+        assert actual == expected.hexdigest()
+        assert len(reservations) == count
+        peaks.append(max(reservations))
+        assert not tuple(filesystem_iterdir(scratch))
+    assert peaks[1] > peaks[0] * 16
+
+
+def test_csmar_materialization_replays_each_dataset_from_one_inventory(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    raw = tmp_path / "raw"
+    for index in range(2):
+        shard = raw / str(index)
+        filesystem_mkdir(shard, parents=True)
+        stamp = f"2020-01-0{index + 2}"
+        _write_csmar(
+            shard,
+            "trading_calendar",
+            [{"Markettype": 4, "Clddt": stamp, "Daywk": index + 4, "State": "O"}],
+        )
+        _write_csmar(
+            shard,
+            "index_weights",
+            [
+                {
+                    "Indexcd": "000905",
+                    "Enddt": stamp,
+                    "Stkcd": "000001",
+                    "Constdnme": "合成",
+                    "Weight": 1,
+                }
+            ],
+        )
+    data_ids = ("trading_calendar", "index_weights")
+    single = StorageLayout(tmp_path / "single")
+    combined = StorageLayout(tmp_path / "combined")
+    real_content_hash = interim.content_hash_for_files
+    calls = 0
+
+    def hash_stream(files, **kwargs):
+        nonlocal calls
+        assert iter(files) is files
+        calls += 1
+        return real_content_hash(files, **kwargs)
+
+    monkeypatch.setattr(interim, "content_hash_for_files", hash_stream)
+    with runtime_resource_policy_scope() as policy:
+        expected = {}
+        for data_id in data_ids:
+            result = interim.materialize_interim_data(
+                layout=single, raw_root=raw, data_ids=(data_id,), resource_policy=policy
+            )
+            expected[data_id] = read_dataset(
+                result.artifact_roots[data_id], resource_policy=policy
+            )
+        result = interim.materialize_interim_data(
+            layout=combined, raw_root=raw, data_ids=data_ids, resource_policy=policy
+        )
+        assert set(result.artifact_roots) == set(data_ids)
+        for data_id in data_ids:
+            actual = read_dataset(
+                result.artifact_roots[data_id], resource_policy=policy
+            )
+            pd.testing.assert_frame_equal(actual, expected[data_id], check_exact=True)
+            assert len(actual) == 2
+        assert policy.used_memory_bytes == 0
+    # Each selected dataset is hashed before reading and again before publication.
+    assert calls == 8
+
+
+@pytest.mark.parametrize("member_count", (1, 32))
 @pytest.mark.parametrize(
     "mutation",
     ("planned", "reading", "staged", "staged_added", "staged_removed", "unrelated"),
 )
 def test_csmar_materialization_binds_inspected_content_to_plan(
-    tmp_path, monkeypatch, mutation
+    tmp_path, monkeypatch, mutation, member_count
 ):
     from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.datasets.reading import read_dataset
@@ -846,6 +969,12 @@ def test_csmar_materialization_binds_inspected_content_to_plan(
     calendar = source / "native-calendar.csv"
     original = "Markettype,Clddt,Daywk,State\n4,2020-01-02,4,O\n"
     filesystem_write_text(calendar, original, encoding="utf-8")
+    for index in range(member_count - 1):
+        filesystem_write_text(
+            source / f"calendar-{index}.csv",
+            original.splitlines()[0] + "\n",
+            encoding="utf-8",
+        )
     built = research.data_materialize(
         profile=research_profile(),
         layout=layout,

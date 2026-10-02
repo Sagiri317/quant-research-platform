@@ -1737,20 +1737,20 @@ def _prepare_in_filter(
             max_scalar_bytes = data_type.byte_width
         else:
             max_scalar_bytes = max(1, data_type.bit_width // 8)
-    _require_filter_preparation_overlap(
-        preflight_bytes=0,
-        input_state_bytes=input_state_bytes,
-        sort_state_bytes=sort_state_bytes,
-        timsort_scratch_bytes=timsort_scratch_bytes,
-        resource_policy=resource_policy,
-    )
-    with (
-        runtime_resource_policy_scope(resource_policy),
-        resource_policy.lease(
-            "storage.filter.sort",
-            sort_state_bytes + timsort_scratch_bytes,
-        ),
-    ):
+    with runtime_resource_policy_scope(resource_policy), ExitStack() as preparation:
+        _require_filter_preparation_overlap(
+            preflight_bytes=0,
+            input_state_bytes=input_state_bytes,
+            sort_state_bytes=sort_state_bytes,
+            timsort_scratch_bytes=timsort_scratch_bytes,
+            resource_policy=resource_policy,
+        )
+        preparation.enter_context(
+            resource_policy.lease(
+                "storage.filter.sort",
+                sort_state_bytes + timsort_scratch_bytes,
+            )
+        )
         sorted_values = sorted(values)
         if sorted_values:
             write_position = 1
@@ -1817,6 +1817,16 @@ def _require_filter_preparation_overlap(
         raise DatasetReadCapacityExceeded(
             "dataset_filter_values_exceed_task_memory_budget"
         )
+    # Borrowed input predates capture; only new allocations consume free capacity.
+    try:
+        resource_policy.require_working_set(
+            preflight_bytes + sort_state_bytes + timsort_scratch_bytes,
+            error="dataset_filter_values_exceed_task_memory_budget",
+        )
+    except ValueError:
+        raise DatasetReadCapacityExceeded(
+            "dataset_filter_values_exceed_task_memory_budget"
+        ) from None
 
 
 def _validated_physical_filter_value(field: pa.Field, value: Any) -> Any:

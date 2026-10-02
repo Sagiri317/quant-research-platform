@@ -102,7 +102,8 @@ def test_action_quantity_stays_inside_limit_after_float_fill_accumulation():
         assert policy.used_memory_bytes == 0
 
 
-@pytest.mark.parametrize("cap", [64 * 1024, 32 * 1024**2])
+# The successful case includes the deep calibration spool when scratch is tmpfs.
+@pytest.mark.parametrize("cap", [64 * 1024, 64 * 1024**2])
 def test_query_admits_deep_book_temporaries_before_materialization(monkeypatch, cap):
     state = _state(
         0,

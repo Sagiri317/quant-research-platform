@@ -10,7 +10,7 @@ import shutil
 import stat
 import sys
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, nullcontext
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
@@ -95,65 +95,108 @@ def content_hash_for_files(
 ) -> str:
     """Hash logical member ids and bytes without using paths as identity."""
 
-    entries: list[tuple[str, Path, DatasetFileIdentity | None]] = []
-    for item in files:
-        if isinstance(item, tuple):
-            if len(item) == 2:
-                logical_id, path = item
-                expected = None
-            elif len(item) == 3:
-                logical_id, path, expected = item
-            else:
-                raise ValueError(error)
-            if (
-                type(logical_id) is not str
-                or not logical_id
-                or not isinstance(path, Path)
-                or expected is not None
-                and not isinstance(expected, DatasetFileIdentity)
-            ):
-                raise ValueError(error)
-        else:
-            raise ValueError(error)
-        entries.append((logical_id, path, expected))
-    if not entries:
-        raise ValueError(error)
-    member_hashes: list[tuple[str, str]] = []
-    try:
-        for index, (logical_id, path, expected) in enumerate(entries):
-            before = dataset_file_identity(path)
-            if expected is not None and before != expected:
-                raise ValueError(error)
-            entries[index] = (logical_id, path, before)
-            if resource_policy is None:
-                member_hash = _hash_file_content(path, before, error)
-            else:
-                headroom = resource_policy.operation_headroom_bytes
-                if headroom <= 0:
+    with (
+        resource_policy.lease("storage.content.identity.members", 0)
+        if resource_policy is not None
+        else nullcontext() as metadata,
+        closing_iterator(iter(files)) as members,
+    ):
+        if metadata is not None:
+            if 4096 > resource_policy.operation_headroom_bytes:
+                raise MemoryError("runtime_memory_budget_exceeded")
+            metadata.grow(4096)
+        entries: list[tuple[str, Path, DatasetFileIdentity | None]] = []
+        member_hashes: list[tuple[str, str]] = []
+        try:
+            for item in members:
+                if not isinstance(item, tuple):
                     raise ValueError(error)
-                with resource_policy.lease(
-                    "storage.content.identity",
-                    min(1024 * 1024, headroom),
-                ) as lease:
-                    member_hash = _hash_file_content(
-                        path,
-                        before,
-                        error,
-                        chunk_size=lease.reserved_bytes,
+                if len(item) == 2:
+                    logical_id, path = item
+                    expected = None
+                elif len(item) == 3:
+                    logical_id, path, expected = item
+                else:
+                    raise ValueError(error)
+                if (
+                    type(logical_id) is not str
+                    or not logical_id
+                    or not isinstance(path, Path)
+                    or expected is not None
+                    and not isinstance(expected, DatasetFileIdentity)
+                ):
+                    raise ValueError(error)
+                if metadata is not None:
+                    # Borrow one input while sizing; admit before retaining it.
+                    # Include Unicode/UTF-8, Path caches/components, identities,
+                    # both lists/tuples, hex digests and in-place sort workspace.
+                    additional = (
+                        1024
+                        + 4 * sys.getsizeof(logical_id)
+                        + 4
+                        * (
+                            sys.getsizeof(path)
+                            + sys.getsizeof(str(path))
+                            + sum(sys.getsizeof(part) + 8 for part in path.parts)
+                        )
                     )
-            member_hashes.append((logical_id, member_hash))
-        digest = hashlib.sha256()
-        for logical_id, member_hash in sorted(member_hashes):
-            for value in (logical_id, member_hash):
-                encoded = value.encode("utf-8")
-                digest.update(len(encoded).to_bytes(8, "big"))
-                digest.update(encoded)
-        for _, path, expected in entries:
-            if dataset_file_identity(path) != expected:
+                    if expected is not None:
+                        additional += sys.getsizeof(expected) + sum(
+                            sys.getsizeof(value)
+                            for value in (
+                                expected.device,
+                                expected.inode,
+                                expected.size,
+                                expected.modified_ns,
+                            )
+                        )
+                    if additional > resource_policy.operation_headroom_bytes:
+                        raise MemoryError("runtime_memory_budget_exceeded")
+                    metadata.grow(additional)
+                entries.append((logical_id, path, expected))
+            if not entries:
                 raise ValueError(error)
-        return digest.hexdigest()
-    except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
-        raise ValueError(error) from exc
+            for index, (logical_id, path, expected) in enumerate(entries):
+                before = dataset_file_identity(path)
+                if expected is not None and before != expected:
+                    raise ValueError(error)
+                entries[index] = (logical_id, path, before)
+                if resource_policy is None:
+                    member_hash = _hash_file_content(path, before, error)
+                else:
+                    headroom = resource_policy.operation_headroom_bytes
+                    if headroom <= 0:
+                        raise MemoryError("runtime_memory_budget_exceeded")
+                    with resource_policy.lease(
+                        "storage.content.identity",
+                        min(1024 * 1024, headroom),
+                    ) as lease:
+                        member_hash = _hash_file_content(
+                            path,
+                            before,
+                            error,
+                            chunk_size=lease.reserved_bytes,
+                        )
+                member_hashes.append((logical_id, member_hash))
+            digest = hashlib.sha256()
+            member_hashes.sort()
+            for logical_id, member_hash in member_hashes:
+                for value in (logical_id, member_hash):
+                    encoded = value.encode("utf-8")
+                    digest.update(len(encoded).to_bytes(8, "big"))
+                    digest.update(encoded)
+            for _logical_id, path, expected in entries:
+                if dataset_file_identity(path) != expected:
+                    raise ValueError(error)
+            return digest.hexdigest()
+        except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
+            raise ValueError(error) from exc
+        finally:
+            # Tracebacks must not retain the inventory beyond its lease.
+            entries.clear()
+            member_hashes.clear()
+            files = item = logical_id = _logical_id = path = expected = before = None
+            member_hash = encoded = value = None
 
 
 @contextmanager

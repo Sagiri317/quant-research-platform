@@ -1079,7 +1079,7 @@ def test_compare_float_value_zero_keeps_bit_identity(tmp_path: Path) -> None:
     assert compare_datasets(left, right).status == "CONTENT_MISMATCH"
 
 
-def test_exact_compare_reserves_payload_before_reader_traversal(
+def test_exact_compare_bounds_payload_by_headroom_after_reader_admission(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1091,11 +1091,12 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
     )
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024**2,
+        # Include SQLite page/journal growth when scratch is backed by tmpfs.
+        explicit_cap_bytes=8 * 1024**2,
     )
     reader_headrooms: list[int] = []
     payload_targets: list[int] = []
-    comparison_reservations: list[int] = []
+    payload_headrooms: list[int] = []
     value_columns: list[tuple[str, ...]] = []
     iter_batches = dataset_comparison.iter_dataset_file_batches
     add_table = dataset_comparison.ExactPrimaryKeyIndex.add_comparison_table
@@ -1106,7 +1107,7 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
 
     def observed_add(self: object, *args: object, **kwargs: object) -> int:
         payload_targets.append(kwargs["payload_target_bytes"])  # type: ignore[arg-type]
-        comparison_reservations.append(policy.used_memory_bytes)
+        payload_headrooms.append(policy.operation_headroom_bytes)
         value_columns.append(tuple(kwargs["value_columns"]))  # type: ignore[arg-type]
         return add_table(self, *args, **kwargs)  # type: ignore[arg-type]
 
@@ -1132,9 +1133,9 @@ def test_exact_compare_reserves_payload_before_reader_traversal(
     assert len(reader_headrooms) == 2
     assert all(0 < target < policy.memory_budget_bytes for target in payload_targets)
     assert all(
-        reserved >= target
-        for reserved, target in zip(
-            comparison_reservations,
+        target <= available
+        for available, target in zip(
+            payload_headrooms,
             payload_targets,
             strict=True,
         )

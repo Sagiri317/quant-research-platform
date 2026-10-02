@@ -108,6 +108,44 @@ def test_year_end_forecast_period_rolls_without_changing_price_basis():
     assert actual.forward_earnings_yield_fy2.tolist() == [0.4, 0.6]
 
 
+def test_missing_or_nonpositive_close_preserves_rows_and_later_forecasts():
+    records = pd.DataFrame(
+        [
+            {
+                "asset_id": "asset",
+                "declare_date": pd.Timestamp("2025-01-03"),
+                "forecast_end_date": pd.Timestamp(f"{year}-12-31"),
+                "institution_id": str(i),
+                "forecast_eps": float((i + 1) * multiple),
+            }
+            for year, multiple in ((2025, 1), (2026, 2))
+            for i in range(3)
+        ]
+    )
+    sessions = pd.bdate_range("2025-01-03", periods=8).as_unit("ns")
+    observations = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": sessions[1:],
+            "close": [10.0, None, np.nan, pd.NA, 0.0, -1.0, 10.0],
+        }
+    )
+    actual = build_expectations_features(
+        records, observations, trading_sessions=sessions
+    )
+    pd.testing.assert_frame_equal(
+        actual.loc[:, ["asset_id", "timestamp"]],
+        observations.loc[:, ["asset_id", "timestamp"]],
+        check_exact=True,
+    )
+    assert actual.iloc[1:-1, 2:].isna().all().all()
+    for position in (0, len(actual) - 1):
+        assert actual.loc[position, "forward_earnings_yield_fy1"] == 0.2
+        assert actual.loc[position, "forward_earnings_yield_fy2"] == 0.4
+        assert actual.loc[position, "forecast_dispersion_fy1"] == 1.0
+        assert actual.loc[position, "log_analyst_coverage"] == pytest.approx(np.log(3))
+
+
 @pytest.mark.parametrize("nonannual", [False, True])
 def test_expectations_processed_producer_persists_latest_declaration(
     tmp_path, nonannual
@@ -138,13 +176,13 @@ def test_expectations_processed_producer_persists_latest_declaration(
             forecast_end_date=pd.Timestamp("2025-09-30"), forecast_eps=999.0
         )
         records = pd.concat((records, extra), ignore_index=True)
-    sessions = pd.bdate_range("2025-01-03", "2025-01-07").as_unit("ns")
+    sessions = pd.bdate_range("2025-01-03", "2025-01-09").as_unit("ns")
     panel = pd.DataFrame(
         {
             "market_id": "a_share",
             "asset_id": "asset",
             "timestamp": sessions,
-            "close": 10.0,
+            "close": [10.0, 10.0, None, 0.0, 10.0],
         }
     )
     with runtime_resource_policy_scope() as policy:
@@ -162,6 +200,8 @@ def test_expectations_processed_producer_persists_latest_declaration(
         pd.testing.assert_frame_equal(saved, actual, check_exact=True)
         assert saved.loc[1, "forward_earnings_yield_fy1"] == 1.3
         assert saved.iloc[0, 3:].isna().all()
+        assert saved.iloc[2:4, 3:].isna().all().all()
+        assert saved.loc[4, "forward_earnings_yield_fy1"] == 1.3
         assert policy.used_memory_bytes == 0
 
 

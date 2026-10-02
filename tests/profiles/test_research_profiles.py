@@ -85,7 +85,10 @@ def test_expanded_pv_uses_existing_owners_and_keeps_formal_selections():
     }
     for candidate in expanded.portfolio_candidates():
         assert candidate.risk_style_columns
-        assert candidate.risk_context_target_ids == ("price_volume_facts",)
+        assert candidate.risk_context_target_ids == (
+            "price_volume_facts",
+            "market_model_factors",
+        )
         ledger = targets[f"pv_expanded_{candidate.candidate_id}_ledger"]
         assert set(candidate.risk_context_target_ids) <= set(ledger.dependencies)
         assert set(candidate.risk_context_target_ids) <= set(

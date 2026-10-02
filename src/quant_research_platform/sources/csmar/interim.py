@@ -50,6 +50,7 @@ from quant_research_platform.sources.csmar.field_mappings import (
 from quant_research_platform.sources.csmar.fields import field_role
 from quant_research_platform.sources.csmar.ids import SOURCE_ID, market_bars_data_id
 from quant_research_platform.sources.csmar.raw_exports import (
+    _iter_dataset_file_identities,
     _verify_csmar_member_set,
     dataset_files_with_identity_by_id,
     iter_private_export_chunks_with_policy,
@@ -620,21 +621,17 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
             requested_datasets=(data_id,),
         )
         with closing_iterator(records_iterator):
-            records = tuple(records_iterator)
+            for record in records_iterator:
+                del record
         _verify_csmar_member_set(
             root,
             index,
             requested_datasets=(data_id,),
         )
-        selected = [
-            (dataset, path, identity)
-            for dataset, path, identity in records
-            if dataset == data_id
-        ]
-        if not selected:
+        if not index.identity_payload_count(namespace="csmar-dataset-paths"):
             return None
         identity = content_hash_for_files(
-            selected,
+            _iter_dataset_file_identities(root, index, data_id=data_id),
             error="csmar_raw_export_identity_changed",
             resource_policy=policy,
         )
@@ -1359,9 +1356,8 @@ def _materialize_interim_data(
 
         with closing_iterator(indexed_files):
             for data_id, group in groupby(indexed_files, key=lambda item: item[0]):
-                selected = tuple(group)
                 identity = content_hash_for_files(
-                    selected,
+                    group,
                     error="csmar_raw_export_identity_changed",
                     resource_policy=resource_policy,
                 )
@@ -1378,11 +1374,13 @@ def _materialize_interim_data(
                     ):
                         raise ValueError("csmar_raw_export_identity_changed")
 
-                def verify_source(_receipt, files=selected, expected=identity):
+                def verify_source(_receipt, dataset=data_id, expected=identity):
                     verify_members()
                     if (
                         content_hash_for_files(
-                            files,
+                            _iter_dataset_file_identities(
+                                source_raw_root, identity_index, data_id=dataset
+                            ),
                             error="csmar_raw_export_identity_changed",
                             resource_policy=resource_policy,
                         )
@@ -1391,7 +1389,10 @@ def _materialize_interim_data(
                         raise ValueError("csmar_raw_export_identity_changed")
                     verify_members()
 
-                input_files = ((item[1], item[2]) for item in selected)
+                input_records = _iter_dataset_file_identities(
+                    source_raw_root, identity_index, data_id=data_id
+                )
+                input_files = ((item[1], item[2]) for item in input_records)
                 pending.discard(data_id)
                 spec = catalog.get(data_id)
                 artifact_root = require_artifact_root(
@@ -1420,7 +1421,7 @@ def _materialize_interim_data(
                     source_row_counts=source_row_counts,
                     producer_diagnostics=diagnostics,
                 )
-                with closing_iterator(frames):
+                with closing_iterator(input_records), closing_iterator(frames):
                     try:
                         write_dataset(
                             artifact_root,

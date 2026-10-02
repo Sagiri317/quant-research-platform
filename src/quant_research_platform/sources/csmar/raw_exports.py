@@ -1043,28 +1043,41 @@ def dataset_files_with_identity_by_id(
                             namespace="csmar-dataset-paths",
                             payloads=((dataset + b"\0" + relative, payload),),
                         )
-                    payloads = iter(
-                        index.identity_payload_values(namespace="csmar-dataset-paths")
-                    )
-                    for _, dataset_payloads in groupby(
-                        payloads,
-                        key=lambda payload: payload.split(b"\0", 1)[0],
-                    ):
-                        for payload in dataset_payloads:
-                            dataset, relative, device, inode, size, modified_ns = (
-                                payload.split(b"\0")
-                            )
-                            path = root / relative.decode("utf-8")
-                            identity = DatasetFileIdentity(
-                                device=int(device),
-                                inode=int(inode),
-                                size=int(size),
-                                modified_ns=int(modified_ns),
-                            )
-                            yield dataset.decode("utf-8"), path, identity
-                        verify_root()
+                    with closing_iterator(
+                        _iter_dataset_file_identities(root, index)
+                    ) as records:
+                        for _, group in groupby(records, key=lambda item: item[0]):
+                            yield from group
+                            verify_root()
 
     return iter_files()
+
+
+def _iter_dataset_file_identities(
+    root: Path,
+    index: ExactPrimaryKeyIndex,
+    *,
+    data_id: str | None = None,
+) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
+    """Replay the inspected inventory without retaining a second member list."""
+
+    with closing_iterator(
+        index.identity_payload_values(namespace="csmar-dataset-paths")
+    ) as payloads:
+        for payload in payloads:
+            dataset, relative, device, inode, size, modified_ns = payload.split(b"\0")
+            dataset = dataset.decode("utf-8")
+            if data_id is None or dataset == data_id:
+                yield (
+                    dataset,
+                    root / relative.decode("utf-8"),
+                    DatasetFileIdentity(
+                        device=int(device),
+                        inode=int(inode),
+                        size=int(size),
+                        modified_ns=int(modified_ns),
+                    ),
+                )
 
 
 def _iter_indexed_raw_export_files(

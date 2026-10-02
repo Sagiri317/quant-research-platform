@@ -1940,6 +1940,214 @@ def test_content_hash_rechecks_earlier_members_before_return(tmp_path, monkeypat
         )
 
 
+@pytest.mark.parametrize("member_count", (1, 64))
+@pytest.mark.parametrize("unicode_paths", (False, True))
+def test_content_hash_member_metadata_covers_live_objects_and_legacy_digest(
+    tmp_path, monkeypatch, member_count, unicode_paths
+):
+    import gc
+    import hashlib
+    import sys
+
+    root = tmp_path / ("路径𐀀" * 20 if unicode_paths else "files")
+    identity.filesystem_mkdir(root)
+    expected_members = []
+
+    def members():
+        for index in reversed(range(member_count)):
+            path = root / f"{index}.bin"
+            payload = str(index).encode() if index else b""
+            identity.filesystem_write_bytes(path, payload)
+            logical_id = ("重复𐀀" * 100 if unicode_paths else "same") + str(index % 2)
+            expected_members.append((logical_id, hashlib.sha256(payload).hexdigest()))
+            yield logical_id, path, identity.dataset_file_identity(path)
+
+    real_hash = identity._hash_file_content
+    reservations = []
+
+    def observed_hash(*args, **kwargs):
+        state = sys._getframe(1).f_locals
+        metadata = state["metadata"]
+        if metadata is not None:
+            seen = set()
+            pending = [state["entries"], state["member_hashes"]]
+            live_bytes = 0
+            while pending:
+                value = pending.pop()
+                if id(value) in seen or not isinstance(
+                    value,
+                    (list, tuple, str, bytes, int, Path, identity.DatasetFileIdentity),
+                ):
+                    continue
+                seen.add(id(value))
+                live_bytes += sys.getsizeof(value)
+                pending.extend(gc.get_referents(value))
+            assert metadata.reserved_bytes >= live_bytes
+            assert (
+                policy.used_memory_bytes
+                == metadata.reserved_bytes + kwargs["chunk_size"]
+            )
+            reservations.append(metadata.reserved_bytes)
+        return real_hash(*args, **kwargs)
+
+    monkeypatch.setattr(identity, "_hash_file_content", observed_hash)
+    with runtime_resource_policy_scope(explicit_cap_bytes=8 * 1024**2) as policy:
+        actual = identity.content_hash_for_files(
+            members(), error="changed", resource_policy=policy
+        )
+        assert policy.used_memory_bytes == 0
+    expected = hashlib.sha256()
+    for logical_id, member_hash in sorted(expected_members):
+        for value in (logical_id, member_hash):
+            encoded = value.encode("utf-8")
+            expected.update(len(encoded).to_bytes(8, "big"))
+            expected.update(encoded)
+    assert actual == expected.hexdigest()
+    assert len(reservations) == member_count
+    assert min(reservations) > member_count * 1024
+    # The ungoverned fixed-size caller must not acquire an implicit Runtime.
+    first = root / "0.bin"
+    assert current_runtime_resource_policy() is None
+
+    def unexpected_runtime(**kwargs):
+        pytest.fail("fixed-size content hashing opened an implicit Runtime")
+
+    monkeypatch.setattr(
+        runtime_resources, "_capture_runtime_resource_policy", unexpected_runtime
+    )
+    actual = identity.content_hash_for_files(
+        (("same", first), ("same", first)), error="changed"
+    )
+    expected = hashlib.sha256()
+    for value in ("same", hashlib.sha256(b"").hexdigest()) * 2:
+        encoded = value.encode("utf-8")
+        expected.update(len(encoded).to_bytes(8, "big"))
+        expected.update(encoded)
+    assert actual == expected.hexdigest()
+    assert current_runtime_resource_policy() is None
+
+
+@pytest.mark.parametrize("explicit_cap", (False, True))
+def test_content_hash_admits_metadata_before_retention_and_closes_on_capacity(
+    tmp_path, monkeypatch, explicit_cap
+):
+    import sys
+
+    path = tmp_path / "member"
+    identity.filesystem_write_bytes(path, b"synthetic")
+    yielded = []
+    closed = []
+
+    def members():
+        try:
+            for index in range(128):
+                yielded.append(index)
+                yield f"{index}:" + "标识𐀀" * 128, path
+        finally:
+            closed.append(True)
+
+    def unexpected_hash(*args, **kwargs):
+        pytest.fail("content read before the complete inventory was admitted")
+
+    real_grow = runtime_resources.MemoryLease.grow
+
+    def admit(self, additional_bytes):
+        if self.owner == "storage.content.identity.members" and yielded:
+            entries = sys._getframe(1).f_locals["entries"]
+            assert len(entries) == len(yielded) - 1
+        return real_grow(self, additional_bytes)
+
+    monkeypatch.setattr(identity, "_hash_file_content", unexpected_hash)
+    monkeypatch.setattr(runtime_resources.MemoryLease, "grow", admit)
+    policy = capture_test_policy(
+        available_memory_bytes=8 * 1024**2 if explicit_cap else 64 * 1024,
+        explicit_cap_bytes=64 * 1024 if explicit_cap else None,
+    )
+    inputs = members()
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(
+            MemoryError, match="runtime_memory_budget_exceeded"
+        ) as caught:
+            identity.content_hash_for_files(
+                inputs, error="changed", resource_policy=policy
+            )
+        assert policy.used_memory_bytes == 0
+    assert 1 < len(yielded) < 128
+    assert closed == [True] and inputs.gi_frame is None
+    trace = caught.value.__traceback__
+    while trace.tb_frame.f_code is not identity.content_hash_for_files.__code__:
+        trace = trace.tb_next
+    assert trace.tb_frame.f_locals["entries"] == []
+    assert trace.tb_frame.f_locals["member_hashes"] == []
+    assert trace.tb_frame.f_locals["path"] is None
+
+
+@pytest.mark.parametrize("phase", ("iterator", "hash", "final_identity"))
+@pytest.mark.parametrize("primary_type", (MemoryError, OSError, KeyboardInterrupt))
+def test_content_hash_metadata_failure_preserves_primary_and_clears_traceback(
+    tmp_path, monkeypatch, phase, primary_type
+):
+    path = tmp_path / "member"
+    identity.filesystem_write_bytes(path, b"synthetic")
+    primary = primary_type("primary")
+    closed = []
+    hashed = 0
+    real_hash, real_identity = (
+        identity._hash_file_content,
+        identity.dataset_file_identity,
+    )
+
+    class Members:
+        count = 0
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            if self.count == 16:
+                if phase == "iterator":
+                    raise primary
+                raise StopIteration
+            self.count += 1
+            return f"{self.count}:" + "标识𐀀" * 128, path
+
+        def close(self):
+            closed.append(True)
+            raise OSError("close_secondary")
+
+    def hash_member(*args, **kwargs):
+        nonlocal hashed
+        if phase == "hash":
+            raise primary
+        result = real_hash(*args, **kwargs)
+        hashed += 1
+        return result
+
+    def file_identity(*args, **kwargs):
+        if phase == "final_identity" and hashed == 16:
+            raise primary
+        return real_identity(*args, **kwargs)
+
+    monkeypatch.setattr(identity, "_hash_file_content", hash_member)
+    monkeypatch.setattr(identity, "dataset_file_identity", file_identity)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(primary_type) as caught:
+            identity.content_hash_for_files(
+                Members(), error="changed", resource_policy=policy
+            )
+        assert policy.used_memory_bytes == 0
+    assert caught.value is primary
+    assert closed == [True]
+    assert primary.__notes__ == ["iterator close also failed: OSError"]
+    trace = primary.__traceback__
+    while trace.tb_frame.f_code is not identity.content_hash_for_files.__code__:
+        trace = trace.tb_next
+    assert trace.tb_frame.f_locals["entries"] == []
+    assert trace.tb_frame.f_locals["member_hashes"] == []
+    assert trace.tb_frame.f_locals["item"] is None
+    assert trace.tb_frame.f_locals["path"] is None
+
+
 @pytest.mark.parametrize("boundary", ("stat", "open"))
 @pytest.mark.parametrize("failure", ("missing", "memory", "io", "interrupt"))
 def test_content_identity_distinguishes_invalid_from_fatal(

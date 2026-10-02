@@ -146,7 +146,7 @@ def _features_for_observation(
         "timestamp": timestamp,
         **{factor: float("nan") for factor in EXPECTATIONS_FACTORS},
     }
-    if not np.isfinite(close) or close <= 0.0:
+    if pd.isna(close) or close <= 0.0:
         return base
     by_period = {}
     for event in forecast:

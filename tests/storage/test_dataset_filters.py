@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import builtins
+import sys
 from datetime import time
 from pathlib import Path
 
@@ -418,16 +419,21 @@ def test_dataset_session_plan_retained_memory_scales_with_wide_columns(
     )
 
 
-def test_dataset_filter_capacity_uses_the_typed_storage_signal(tmp_path: Path) -> None:
+@pytest.mark.parametrize("explicit_cap_bytes", (None, 4 * 1024**2))
+def test_dataset_filter_capacity_uses_the_typed_storage_signal(
+    tmp_path: Path, explicit_cap_bytes: int | None
+) -> None:
     root = make_dataset_artifact_root(tmp_path, "typed_filter_capacity")
     write_dataset(
         root,
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("typed_filter_capacity"),
     )
+    width = (2 if explicit_cap_bytes is not None else 4) * 1024**2
+    values = ("x" * width,)
     policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
+        explicit_cap_bytes=explicit_cap_bytes,
     )
     capacity_error = getattr(storage_errors, "DatasetReadCapacityExceeded", None)
     assert capacity_error is not None
@@ -440,10 +446,12 @@ def test_dataset_filter_capacity_uses_the_typed_storage_signal(tmp_path: Path) -
             root,
             columns=("timestamp",),
             time_window=None,
-            row_filters=(("asset_id", "in", ("x" * (2 * 1024**2),)),),
+            row_filters=(("asset_id", "in", values),),
             resource_policy=policy,
         ):
             pass
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
 
 
 @pytest.mark.parametrize(
@@ -496,24 +504,26 @@ def test_dataset_filter_preflight_rejects_before_bulk_arrow_array(
     assert scalar_called is False
 
 
+@pytest.mark.parametrize("explicit_cap_bytes", (None, 1024**2))
 def test_dataset_filter_preparation_subtracts_shared_reservations_before_sort(
     monkeypatch: pytest.MonkeyPatch,
+    explicit_cap_bytes: int | None,
 ) -> None:
     policy = capture_test_policy(
         available_memory_bytes=4 * 1024**2,
-        explicit_cap_bytes=1 * 1024 * 1024,
+        explicit_cap_bytes=explicit_cap_bytes,
     )
     values = (1, 2)
 
     def reject_late_work(*_args, **_kwargs):
         raise AssertionError("late filter preparation work ran before task admission")
 
-    monkeypatch.setattr(builtins, "sorted", reject_late_work)
+    monkeypatch.setattr(dataset_reading, "sorted", reject_late_work, raising=False)
     monkeypatch.setattr(dataset_reading.pa, "array", reject_late_work)
 
     with (
         runtime_resource_policy_scope(policy),
-        policy.lease("outer", policy.memory_budget_bytes - 1),
+        policy.lease("outer", policy.working_set_headroom_bytes - 1),
         pytest.raises(
             storage_errors.DatasetReadCapacityExceeded,
             match="dataset_filter_values_exceed_task_memory_budget",
@@ -524,6 +534,92 @@ def test_dataset_filter_preparation_subtracts_shared_reservations_before_sort(
             values,
             resource_policy=policy,
         )
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+
+
+@pytest.mark.parametrize("stage", ("sort", "arrow"))
+def test_dataset_filter_preparation_checks_physical_overlap_before_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+) -> None:
+    values = (
+        ("x",) * 400
+        if stage == "sort"
+        else tuple(f"{index:04d}" + "x" * 48 for index in range(64))
+    )
+    policy = capture_test_policy(available_memory_bytes=4096)
+    sort_calls = []
+
+    def guarded_sort(items):
+        assert stage == "arrow", "sort allocated beyond physical capacity"
+        sort_calls.append(1)
+        return builtins.sorted(items)
+
+    def reject_arrow(*_args, **_kwargs):
+        raise AssertionError("Arrow allocated beyond the remaining physical capacity")
+
+    monkeypatch.setattr(dataset_reading, "sorted", guarded_sort, raising=False)
+    monkeypatch.setattr(dataset_reading.pa, "array", reject_arrow)
+
+    with pytest.raises(
+        storage_errors.DatasetReadCapacityExceeded,
+        match="^dataset_filter_values_exceed_task_memory_budget$",
+    ):
+        dataset_reading._prepare_in_filter(
+            pa.field("asset_id", pa.string()),
+            values,
+            resource_policy=policy,
+        )
+
+    assert len(sort_calls) == (stage == "arrow")
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+
+
+@pytest.mark.parametrize("shape", ("small", "sort_above_soft", "arrow_above_soft"))
+def test_dataset_filter_preparation_accepts_physical_capacity_above_soft_target(
+    monkeypatch: pytest.MonkeyPatch,
+    shape: str,
+) -> None:
+    if shape == "small":
+        values = ("b", "a")
+    elif shape == "sort_above_soft":
+        values = ("duplicate",) * 256
+    else:
+        values = ("x" * 3000,)
+    policy = capture_test_policy(available_memory_bytes=4096)
+    reservations = []
+    array = dataset_reading.pa.array
+
+    def observed_sort(items):
+        reservations.append(policy.used_memory_bytes)
+        return builtins.sorted(items)
+
+    def observed_array(items, **kwargs):
+        reservations.append(policy.used_memory_bytes)
+        return array(items, **kwargs)
+
+    monkeypatch.setattr(dataset_reading, "sorted", observed_sort, raising=False)
+    monkeypatch.setattr(dataset_reading.pa, "array", observed_array)
+
+    prepared = dataset_reading._prepare_in_filter(
+        pa.field("asset_id", pa.string()),
+        values,
+        resource_policy=policy,
+    )
+
+    assert prepared.values.to_pylist() == sorted(set(values))
+    assert len(reservations) == 2
+    assert max(reservations) < policy.captured_available_memory_bytes
+    if shape != "small":
+        assert max(reservations) > policy.memory_budget_bytes
+        borrowed_bytes = sys.getsizeof(values) + sum(map(len, values))
+        assert (
+            borrowed_bytes + max(reservations) > policy.captured_available_memory_bytes
+        )
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
 
 
 def test_membership_internal_grammar_rejects_raw_arrow_values() -> None:
