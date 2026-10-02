@@ -390,53 +390,57 @@ class TardisArchive:
         position = 0
         while True:
             pair = self._spools.get(requested)
-            if pair is not None:
-                spool, _reservation = pair
+            record = None
+            if pair is not None and position < pair[2]:
+                spool, _reservation, _end = pair
                 spool.seek(position)
-                header = spool.read(8)
-                if header:
-                    size = struct.unpack(">Q", header)[0]
-                    with self.resource_policy.lease(
-                        "tardis.canonical_record",
-                        json_record_working_set_bytes(size) + 64 * 1024,
-                    ):
-                        record = None
-                        try:
-                            record = parse_qrp_json_object(spool.read(size))
-                            position = spool.tell()
-                            if (
-                                end_ns is not None
-                                and strict_iso_timestamp(
-                                    record["receive_time"],
-                                    error="tardis_observed_time_invalid",
-                                ).value
-                                > end_ns
-                            ):
-                                return
-                            yield record
-                        finally:
-                            record = None
+                size = struct.unpack(">Q", spool.read(8))[0]
+            else:
+                item = next(self._native_records, None)
+                if item is None:
+                    return
+                key, record = item
+                encoded = json.dumps(
+                    record, separators=(",", ":"), allow_nan=False
+                ).encode()
+                pair = self._spools.get(key)
+                if pair is None:
+                    target, reservation = self._replay_resources.enter_context(
+                        reserved_temporary_file(resource_policy=self.resource_policy)
+                    )
+                    pair = target, reservation, 0
+                target, reservation, end = pair
+                if target.tell() != end:
+                    target.seek(end)
+                size = len(encoded)
+                append_bytes = size + 8
+                _reserve_spool_capacity(reservation, end + append_bytes, append_bytes)
+                target.write(struct.pack(">Q", size))
+                target.write(encoded)
+                self._spools[key] = target, reservation, end + append_bytes
+                item = encoded = None
+                if key != requested:
+                    record = None
                     continue
-            item = next(self._native_records, None)
-            if item is None:
-                return
-            key, record = item
-            encoded = json.dumps(
-                record, separators=(",", ":"), allow_nan=False
-            ).encode()
-            pair = self._spools.get(key)
-            if pair is None:
-                pair = self._replay_resources.enter_context(
-                    reserved_temporary_file(resource_policy=self.resource_policy)
-                )
-                self._spools[key] = pair
-            target, reservation = pair
-            end = target.seek(0, 2)
-            append_bytes = len(encoded) + 8
-            _reserve_spool_capacity(reservation, end + append_bytes, append_bytes)
-            target.write(struct.pack(">Q", len(encoded)))
-            target.write(encoded)
-            item = record = encoded = None
+            with self.resource_policy.lease(
+                "tardis.canonical_record",
+                json_record_working_set_bytes(size) + 64 * 1024,
+            ):
+                try:
+                    if record is None:
+                        record = parse_qrp_json_object(spool.read(size))
+                    position += size + 8
+                    if (
+                        end_ns is not None
+                        and strict_iso_timestamp(
+                            record["receive_time"], error="tardis_observed_time_invalid"
+                        ).value
+                        > end_ns
+                    ):
+                        return
+                    yield record
+                finally:
+                    record = None
 
     def funding_root(self, symbol):
         return self.root / "funding" / symbol / "observations"

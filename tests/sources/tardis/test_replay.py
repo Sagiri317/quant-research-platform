@@ -849,6 +849,123 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
     assert policy.used_memory_bytes == 0
 
 
+def test_archive_tail_spooling_batches_raw_io_and_preserves_replay(
+    tmp_path, monkeypatch
+):
+    from collections import Counter
+    from contextlib import contextmanager
+    from functools import partial
+
+    import quant_research_platform.sources.tardis.replay as replay
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    rows = [
+        _line(
+            0,
+            "depthSnapshot",
+            {"lastUpdateId": 100, "bids": [["100", "2"]], "asks": [["101", "2"]]},
+        )
+    ]
+    for identifier in range(1, 257):
+        second = (identifier - 1) // 8 + 1
+        rows.append(
+            _line(
+                second,
+                "aggTrade",
+                {
+                    "e": "aggTrade",
+                    "E": 1788220800000 + second * 1000,
+                    "T": 1788220800000 + second * 1000,
+                    "s": "BTCUSDT",
+                    "st": 1,
+                    "a": identifier,
+                    "f": identifier,
+                    "l": identifier,
+                    "p": "100",
+                    "q": "2",
+                    "nq": "1",
+                    "m": True,
+                },
+            )
+        )
+    native = b"".join(
+        row + row.replace(b"btcusdt", b"ethusdt").replace(b"BTCUSDT", b"ETHUSDT")
+        for row in rows
+    )
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    published = tmp_path / "published"
+    with runtime_resource_policy_scope(policy):
+        import_slices(
+            published,
+            date="2026-09-01",
+            slices=_slices(tmp_path / "native", native, count=1),
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        calls = Counter()
+        handles = []
+        original_spool = replay.reserved_temporary_file
+        original_records = replay.iter_native_slice
+
+        def counted(operation, method, *args):
+            calls[operation] += 1
+            return method(*args)
+
+        @contextmanager
+        def counted_spool(**kwargs):
+            with original_spool(**kwargs) as (spool, reservation):
+                handles.append(spool)
+                for name in ("readinto", "write", "seek", "tell"):
+                    monkeypatch.setattr(
+                        spool.raw,
+                        name,
+                        partial(counted, name, getattr(spool.raw, name)),
+                    )
+                yield spool, reservation
+
+        def counted_records(*args, **kwargs):
+            calls["native_scans"] += 1
+            with closing_iterator(original_records(*args, **kwargs)) as records:
+                for record in records:
+                    calls["native_rows"] += 1
+                    yield record
+
+        monkeypatch.setattr(replay, "reserved_temporary_file", counted_spool)
+        monkeypatch.setattr(replay, "iter_native_slice", counted_records)
+        with open_market_source(published, resource_policy=policy) as source:
+            read = partial(
+                source.iter_market_records,
+                market_type=FUTURES_MARKET_TYPE,
+                data_kinds=("agg_trades",),
+            )
+            leading = list(read(symbol="BTCUSDT"))
+            for handle in handles:
+                handle.flush()
+            first_io = dict(calls)
+            assert [row["source_sequence"] for row in leading] == list(range(3, 515, 2))
+            expected = json.dumps(leading)
+            leading[0]["payload"]["a"] = -1
+            lagging = list(read(symbol="ETHUSDT"))
+            assert [row["source_sequence"] for row in lagging] == list(range(4, 516, 2))
+            assert json.dumps(list(read(symbol="BTCUSDT"))) == expected
+            assert (
+                len(
+                    list(
+                        read(
+                            symbol="BTCUSDT",
+                            end_ns=pd.Timestamp("2026-09-01T00:00:01Z").value,
+                        )
+                    )
+                )
+                == 8
+            )
+            assert calls["native_scans"] == 1 and calls["native_rows"] == 514
+        assert all(handle.closed for handle in handles)
+    assert policy.used_memory_bytes == 0
+    assert first_io.get("readinto", 0) == 0, first_io
+    assert first_io["write"] < 128, first_io
+
+
 def test_tardis_spool_reservation_keeps_small_cap_usable(monkeypatch):
     import quant_research_platform.sources.tardis.replay as replay
     import quant_research_platform.storage._scratch_ownership as scratch

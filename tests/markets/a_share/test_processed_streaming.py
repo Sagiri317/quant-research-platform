@@ -16,6 +16,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 from quant_research_platform.markets.implementations.a_share.processed import producer
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.research.filtering import a_share_eligibility
 from quant_research_platform.research.portfolios import (
     production as portfolio_production,
 )
@@ -176,6 +177,61 @@ def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tm
             False,
             False,
             True,
+        ]
+        assert policy.used_memory_bytes == 0
+
+
+def test_panel_window_preserves_listing_age_history_and_eligibility(tmp_path):
+    dates = pd.bdate_range("2019-01-02", periods=256).as_unit("ns")
+    requested = dates[250:255]
+    source = _synthetic_interim_frames(dates)
+    stock = source["stock_master"]
+    stock["listing_date"] = [dates[0], dates[0], requested[0]]
+    stock["timestamp"] = stock["listing_date"]
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with runtime_resource_policy_scope(explicit_cap_bytes=32 * 1024**2) as policy:
+        for data_id in spec.source_input_data_ids:
+            source_spec = profile.interim.get(data_id)
+            write_dataset(
+                layout.interim_data_root(source_spec.source_id, data_id),
+                source[data_id],
+                spec=source_spec,
+                resource_policy=policy,
+                borrowed_input=True,
+            )
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(requested[0], requested[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+            resource_policy=policy,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                resource_policy=policy,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        actual = read_dataset(root, resource_policy=policy)
+        assert actual["timestamp"].tolist() == [
+            timestamp for timestamp in requested for _ in range(3)
+        ]
+        assert actual["listing_age_trading_days"].tolist() == [
+            age
+            for offset in range(5)
+            for age in (251 + offset, 251 + offset, 1 + offset)
+        ]
+        assert a_share_eligibility(actual, "pv_expanded").tolist() == [
+            False,
+            False,
+            False,
+            *([True, True, False] * 4),
         ]
         assert policy.used_memory_bytes == 0
 

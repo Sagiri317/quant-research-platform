@@ -81,6 +81,7 @@ _OPTIONAL_SOURCE_IDS = frozenset(
     }
 )
 _FULL_HISTORY_SOURCE_IDS = _OPTIONAL_SOURCE_IDS | {
+    "trading_calendar",
     "index_info",
     "a_share_industry_snapshots",
 }
