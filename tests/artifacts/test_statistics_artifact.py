@@ -821,14 +821,18 @@ def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
         assert policy.used_memory_bytes == 0
 
 
+@pytest.mark.parametrize("finish", ["normal", "writer_failure", "capacity"])
 def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
-    tmp_path, monkeypatch, maker_calibration_tables
+    tmp_path, monkeypatch, maker_calibration_tables, finish
 ):
+    import gc
+    import weakref
     from contextlib import nullcontext
     from types import SimpleNamespace
 
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.crypto import portfolio
+    from quant_research_platform.runtime.resources import MemoryLease
     from quant_research_platform.storage.layout import StorageLayout
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
@@ -858,31 +862,75 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
 
     def validation_chunks(*, fold_id, model_id):
         assert fold_id == "fold_1"
-        yield pd.DataFrame(
-            {
-                "asset_id": ["btc_usdt"] * 2,
-                "timestamp": pd.to_datetime([2100, 2200], unit="ms"),
-                "label_available_at": pd.to_datetime([2600, 2700], unit="ms"),
-                "book_segment_id": ["s1"] * 2,
-                "trade_observation_id": ["trade-connection-1"] * 2,
-                "segment_id": ["segment"] * 2,
-                "prediction_score": [0.0 if model_id == MAKER_MODEL_IDS[0] else 1.0]
-                * 2,
-                "label": [0.0] * 2,
-            }
-        )
+        try:
+            yield pd.DataFrame(
+                {
+                    "asset_id": ["btc_usdt"] * 2,
+                    "timestamp": pd.to_datetime([2100, 2200], unit="ms"),
+                    "label_available_at": pd.to_datetime([2600, 2700], unit="ms"),
+                    "book_segment_id": ["s1"] * 2,
+                    "trade_observation_id": ["trade-connection-1"] * 2,
+                    "segment_id": ["segment"] * 2,
+                    "prediction_score": [0.0 if model_id == MAKER_MODEL_IDS[0] else 1.0]
+                    * 2,
+                    "label": [0.0] * 2,
+                }
+            )
+        finally:
+            closed.append(model_id)
 
     models = SimpleNamespace(validation_chunks=validation_chunks)
+    primary = KeyboardInterrupt("synthetic_maker_writer_failure")
+    if finish == "writer_failure":
+        close = MemoryLease.close
+
+        def fail_buffer_close(lease):
+            close(lease)
+            if lease.owner == "crypto.maker.calibration.buffer":
+                raise OSError("synthetic_buffer_close_failure")
+
+        monkeypatch.setattr(MemoryLease, "close", fail_buffer_close)
+
     roots, group_counts = [], []
-    for budget in (4096, 65536):
+    for budget in (512, 4096, 65536) if finish == "normal" else (512,):
+        closed, emitted, frames = [], [], []
         monkeypatch.setattr(portfolio, "_CALIBRATION_BATCH_BYTES", budget)
         with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy:
 
-            def produce(on_table):
+            def books(*_args, closed=closed, **_kwargs):
+                try:
+                    with (
+                        policy.lease(
+                            "test.sibling", policy.working_set_headroom_bytes - 128
+                        )
+                        if finish == "capacity"
+                        else nullcontext()
+                    ):
+                        yield from (_state(stamp) for stamp in (2100, 2150, 2650, 2700))
+                finally:
+                    closed.append("books")
+
+            def trades(*_args, closed=closed, **_kwargs):
+                try:
+                    yield from (
+                        _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
+                        for stamp in (2180, 2400)
+                    )
+                finally:
+                    closed.append("trades")
+
+            def produce(on_table, emitted=emitted, frames=frames):
+                def append(table_name, output_frame):
+                    emitted.append((table_name, len(output_frame)))
+                    frames.append(weakref.ref(output_frame))
+                    if finish == "writer_failure" and len(emitted) == 2:
+                        raise primary
+                    on_table(table_name, output_frame)
+
                 portfolio.produce_maker_calibration(
                     asset_id="btc_usdt",
                     model_ids=MAKER_MODEL_IDS,
-                    on_table=on_table,
+                    on_table=append,
                     layout=StorageLayout(tmp_path),
                     protocol_manifest=manifest,
                     time_window=TimeWindow(
@@ -892,27 +940,47 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                     raw_root=tmp_path / "raw",
                     resource_policy=policy,
                     open_run=lambda *_: nullcontext(run),
-                    reconstruct_depth=lambda *_args, **_kwargs: iter(
-                        [_state(stamp) for stamp in (2100, 2150, 2650, 2700)]
-                    ),
-                    read_trades=lambda *_args, **_kwargs: iter(
-                        [
-                            _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
-                            for stamp in (2180, 2400)
-                        ]
-                    ),
+                    reconstruct_depth=books,
+                    read_trades=trades,
                     read_model_artifact=lambda *_args, **_kwargs: models,
                     symbol="BTCUSDT",
                     market_type="futures",
                 )
 
-            root = statistics.write_statistics_artifact(
-                tmp_path / f"batch_{budget}",
-                envelope=envelope,
-                tables=produce,
-                table_group="crypto_maker_calibration",
-                validate_tables=portfolio.validate_maker_calibration,
-            )
+            logical = tmp_path / f"batch_{budget}"
+
+            def write(logical=logical):
+                return statistics.write_statistics_artifact(
+                    logical,
+                    envelope=envelope,
+                    tables=produce,
+                    table_group="crypto_maker_calibration",
+                    validate_tables=portfolio.validate_maker_calibration,
+                )
+
+            if finish != "normal":
+                with pytest.raises(
+                    KeyboardInterrupt if finish == "writer_failure" else MemoryError
+                ) as caught:
+                    write()
+                if finish == "writer_failure":
+                    assert caught.value is primary and len(emitted) == 2
+                    assert any(
+                        "crypto.maker.calibration lease close also failed: OSError"
+                        in note
+                        for note in primary.__notes__
+                    )
+                else:
+                    assert str(caught.value) == "runtime_memory_budget_exceeded"
+                    assert not emitted
+                assert sorted(closed) == sorted(["books", "trades", *MAKER_MODEL_IDS])
+                assert policy.used_memory_bytes == 0
+                assert not tuple(filesystem_glob(logical / "instances", "*"))
+                gc.collect()
+                assert all(frame() is None for frame in frames)
+                return
+
+            root = write()
             artifact = statistics.read_statistics_artifact(
                 root,
                 expected_identity=envelope.instance_identity,
@@ -921,14 +989,29 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
             for name, frame in expected.items():
                 with artifact.table(f"{name}.parquet") as actual:
                     pd.testing.assert_frame_equal(actual, frame)
+                with pq.ParquetFile(
+                    native_filesystem_path(root / f"{name}.parquet")
+                ) as parquet:
+                    assert parquet.schema_arrow.equals(
+                        statistics._ARROW_SCHEMAS[f"{name}.parquet"]
+                    )
+            assert sorted(closed) == sorted(["books", "trades", *MAKER_MODEL_IDS])
+            if budget == 512:
+                assert all(
+                    count == 1
+                    for name, count in emitted
+                    if name == "crypto_maker_events"
+                )
             roots.append(root)
             with pq.ParquetFile(
                 native_filesystem_path(root / "crypto_maker_events.parquet")
             ) as parquet:
                 group_counts.append(parquet.num_row_groups)
             assert policy.used_memory_bytes == 0
-    assert group_counts[0] > group_counts[1]
-    assert compare_semantic_artifacts(*roots).status == "MATCH"
+    assert group_counts[0] > group_counts[1] > group_counts[2]
+    assert all(root.name == envelope.instance_identity for root in roots)
+    for root in roots[1:]:
+        assert compare_semantic_artifacts(roots[0], root).status == "MATCH"
 
 
 @pytest.mark.parametrize("failure", ("disk_full", "interrupted", "writer_failed"))

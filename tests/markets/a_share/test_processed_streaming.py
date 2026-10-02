@@ -46,6 +46,7 @@ def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tm
 
     dates = pd.bdate_range("2020-01-06", periods=5)
     source = _synthetic_interim_frames(dates)
+    source["stock_master"]["timestamp"] = source["stock_master"]["listing_date"]
     source["industry_classification_versions"]["implement_date"] = pd.Timestamp(
         "2012-10-26"
     )
@@ -64,7 +65,6 @@ def test_local_panel_window_keeps_public_industry_history_and_unknown_barrier(tm
             "parent_industry_code": ["", "A", "", "B", "", "C"],
             "industry_level": ["1", "2", "1", "2", "1", "2"],
             "industry_id": [str(index) for index in range(6)],
-            "timestamp": pd.Timestamp("2012-10-26"),
         }
     )
     source["industry_classification"] = (

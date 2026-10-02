@@ -405,7 +405,7 @@ def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
     assert policy.used_memory_bytes == 0
 
 
-@pytest.mark.parametrize("count", (256, 1024))
+@pytest.mark.parametrize("count", (512, 1024))
 def test_native_trade_batches_keep_spilled_and_pending_exact_identities(
     monkeypatch, count
 ):

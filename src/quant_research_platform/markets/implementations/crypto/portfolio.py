@@ -3,7 +3,7 @@
 from array import array
 from contextlib import ExitStack
 from functools import partial
-from itertools import chain, groupby, zip_longest
+from itertools import chain, groupby, islice, zip_longest
 from math import isfinite
 from pathlib import Path
 from types import SimpleNamespace
@@ -727,23 +727,34 @@ def produce_maker_calibration(
         sizes[name] = 0
         lease.shrink_to(65536 + sum(sizes.values()))
 
-    def append(name, values):
-        row_bytes = (512 if name == "crypto_maker_events" else 2048) + 4 * sum(
-            len(value) for value in values if isinstance(value, str)
-        )
-        target = max(
-            1,
-            min(
-                _CALIBRATION_BATCH_BYTES,
-                (resource_policy.planning_headroom_bytes + sum(sizes.values())) // 8,
-            ),
-        )
-        if sum(sizes.values()) and sum(sizes.values()) + row_bytes > target:
-            flush(max(sizes, key=sizes.get))
-        lease.grow(row_bytes)
-        sizes[name] += row_bytes
-        for column, value in zip(columns_by_table[name], values, strict=True):
-            buffers[name][column].append(value)
+    def append(name, rows, count, string_bytes):
+        row_bytes = (512 if name == "crypto_maker_events" else 2048) + 4 * string_bytes
+        rows = iter(rows)
+        while count:
+            total = sum(sizes.values())
+            target = max(
+                1,
+                min(
+                    _CALIBRATION_BATCH_BYTES,
+                    (resource_policy.planning_headroom_bytes + total) // 8,
+                ),
+            )
+            if total and total + row_bytes > target:
+                flush(max(sizes, key=sizes.get))
+                continue
+            take = min(count, max(1, (target - total) // row_bytes))
+            lease.grow(take * row_bytes)
+            sizes[name] += take * row_bytes
+            batch = values = None
+            try:
+                batch = tuple(islice(rows, take))
+                for column, values in zip(
+                    columns_by_table[name], zip(*batch, strict=True), strict=True
+                ):
+                    buffers[name][column].extend(values)
+            finally:
+                batch = values = None
+            count -= take
 
     try:
         with open_run(raw_root, resource_policy) as run:
@@ -803,7 +814,12 @@ def produce_maker_calibration(
                         event_start,
                         event_end,
                     )
-                    append("crypto_maker_samples", values)
+                    append(
+                        "crypto_maker_samples",
+                        (values,),
+                        1,
+                        sum(len(value) for value in values if isinstance(value, str)),
+                    )
                     counts[side][0] += 1
                     counts[side][1] += int(filled == 0)
                     counts[side][2] += int(
@@ -825,9 +841,11 @@ def produce_maker_calibration(
                                 event.visible_quantity,
                             ),
                         )
+                        count = 1
                     elif isinstance(event, BookBoundary):
                         kind, context = "boundary", event.segment_id
                         rows = (("", 0, 0, 0.0),)
+                        count = 1
                     else:
                         kind, context = "book", event.segment_id
                         rows = (
@@ -838,19 +856,26 @@ def produce_maker_calibration(
                             )
                             for index, (tick, quantity) in enumerate(levels)
                         )
-                    for side, level, tick, quantity in rows:
-                        values = (
-                            fold_id,
-                            event_id,
-                            event.observed_time_ns,
-                            kind,
-                            context,
-                            side,
-                            level,
-                            tick,
-                            quantity,
-                        )
-                        append("crypto_maker_events", values)
+                        count = len(event.bids) + len(event.asks)
+                    append(
+                        "crypto_maker_events",
+                        (
+                            (
+                                fold_id,
+                                event_id,
+                                event.observed_time_ns,
+                                kind,
+                                context,
+                                side,
+                                level,
+                                tick,
+                                quantity,
+                            )
+                            for side, level, tick, quantity in rows
+                        ),
+                        count,
+                        len(fold_id) + len(kind) + len(context) + len("sell"),
+                    )
 
                 cutoff = pd.Timestamp(fold["validation"]["end"]).value
                 result = replay_maker_calibration(
