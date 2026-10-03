@@ -430,6 +430,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
 ):
     from quant_research_platform.artifacts import statistics as statistics_module
     from quant_research_platform.artifacts.crypto_hft import (
+        read_crypto_episode_artifact,
         write_crypto_episode_artifact,
     )
     from quant_research_platform.artifacts.research import (
@@ -551,7 +552,14 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
             raw_content_identity=None,
         )
         statistics_reservations = []
+        metadata_reservations = []
         grow = type(policy)._grow_lease
+
+        def observe_episode_metadata(*args, lease, **kwargs):
+            before = lease.reserved_bytes
+            collection = read_crypto_episode_artifact(*args, lease=lease, **kwargs)
+            metadata_reservations.append(lease.reserved_bytes - before)
+            return collection
 
         def track_statistics_reservation(root, lease, additional):
             grow(root, lease, additional)
@@ -567,9 +575,12 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
             time_window=window,
             upstream_identities=upstream,
             resource_policy=policy,
+            read_episodes=observe_episode_metadata,
         )
-        assert max(statistics_reservations) < 512 * 1024
         try:
+            (metadata_reserved,) = metadata_reservations
+            assert metadata_reserved > 0
+            assert max(statistics_reservations) - metadata_reserved < 512 * 1024
             root = write_statistics_artifact(
                 layout.semantic_artifact_root(
                     "crypto", descriptor.statistics_target_id

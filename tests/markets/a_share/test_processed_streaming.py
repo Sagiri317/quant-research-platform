@@ -29,6 +29,7 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
+    open_dataset_session,
     read_dataset,
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
@@ -720,7 +721,7 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
     )
     layout = StorageLayout(tmp_path)
 
-    def build():
+    def build(*, plan=False):
         return research.dataset_build(
             profile=profile,
             layout=layout,
@@ -728,6 +729,7 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
             start_date="2030-01-01" if case == "empty_window" else str(dates[0].date()),
             end_date="2030-01-04" if case == "empty_window" else str(dates[-1].date()),
             raw_root=tmp_path / "synthetic-raw",
+            plan=plan,
         )
 
     errors = {
@@ -735,6 +737,13 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
         "closed_calendar": "a_share_trading_calendar_empty",
         "invalid_market_type": "invalid_market_type",
     }
+    if case == "empty_window":
+        planned = build(plan=True)
+        core_identity = next(
+            row["requested_identity"]
+            for row in planned["targets"]
+            if row["target_id"] == "market_panel_1d"
+        )
     result = build()
     market = next(
         row for row in result["target_results"] if row["target_id"] == "market_panel_1d"
@@ -763,6 +772,42 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
             )
         assert len(saved) == 3 * (130 - 70)
         assert saved["timestamp"].min() == dates[70]
+    elif case == "empty_window":
+        assert result["status"] == "BLOCKED"
+        assert market["instance_identity"] is None
+        assert not layout.instance_root(root, core_identity).exists()
+        descendant = next(
+            row for row in result["target_results"] if row["target_id"] == "pv_all"
+        )
+        assert descendant["status"] == "BLOCKED"
+        assert descendant["reason"].startswith("dependency_blocked: ")
+        assert descendant["instance_identity"] is None
+        dataset_root = layout.research_dataset_root(spec.market_id, "pv_all")
+        assert not tuple(dataset_root.rglob("manifest.json"))
+        (history_manifest,) = root.rglob("manifest.json")
+        history_root = history_manifest.parent.parent
+        assert history_root.name != core_identity
+        with runtime_resource_policy_scope() as policy:
+            with open_dataset_session(
+                history_root,
+                columns=None,
+                time_window=None,
+                resource_policy=policy,
+            ) as session:
+                manifest = session.manifest
+                common = manifest["common_manifest"]
+                assert common["instance_identity"] == history_root.name
+                assert common["research_window"] == {
+                    "start": "2011-01-01",
+                    "end": "2030-01-04",
+                    "access": "not_applicable",
+                }
+                assert manifest["row_count"] == 12
+                common = manifest = None
+            saved = read_dataset(history_root, resource_policy=policy)
+            assert len(saved) == 12
+            assert tuple(saved["timestamp"].sort_values().unique()) == tuple(dates)
+            saved = None
     else:
         assert not tuple(root.rglob("manifest.json"))
 
