@@ -40,7 +40,7 @@ data/processed/
 data/research/
 data/artifacts/
 data/runs/
-data/reference_docs/
+data/reference/
 secrets.*
 credentials.*
 token.*

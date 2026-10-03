@@ -374,7 +374,7 @@ Adjprcwd
 
 `Dsmvosd float_market_cap`
 
-CSMAR 字段单位依据本地 `data/reference_docs/股票市场交易(升级测试) 数据库说明书.pdf`
+CSMAR 字段单位依据本地 `data/reference/股票市场交易(升级测试) 数据库说明书.pdf`
 的 76 页版本：PDF 第 21–24 页（正文第 17–20 页），表三 `TRDNEW_Capchg`
 及表四 `TRDNEW_Dalyr`。PDF 原件不进入 Git；本节保存处理所需的口径。
 
