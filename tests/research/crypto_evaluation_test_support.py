@@ -12,6 +12,9 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.evaluations import runner
 from quant_research_platform.research.evaluations.engine import EvaluationResult
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact,
@@ -34,87 +37,96 @@ def check_crypto_evaluation_readback(
         pd.Timestamp(window["start"]), pd.Timestamp(window["end"])
     )
     cutoff.loc[oos] = pd.Timestamp(window["end"])
-    for spec in profile.evaluations.list():
-        identity = targets[spec.evaluation_id]["instance_identity"]
-        root = layout.instance_root(
-            layout.semantic_artifact_root("crypto", spec.evaluation_id), identity
-        )
-        read_semantic_artifact(root, expected_identity=identity)
-        bundle = root / "outputs" / spec.evaluation_id
-        manifest, _ = validate_output_bundle(
-            bundle,
-            expected_output_id=spec.evaluation_id,
-            expected_run_id=f"run_{spec.evaluation_id}",
-        )
-        metrics = read_parquet(bundle / "metrics.parquet")
-        work = frame.copy()
-        assets = ()
-        if spec.signals[0].source_kind == "prediction":
-            scopes = profile.protocol(
-                profile.research_datasets.list()[0].data_id
-            ).manifest()["model_scopes"]
-            asset_sets = []
-            for signal in spec.signals:
-                model_id = signal.signal_id
-                predictions = read_parquet(
-                    prediction_root
-                    / "outputs"
-                    / f"{model_id}_prediction"
-                    / "prediction.parquet"
-                )
-                work = work.merge(
-                    predictions[["timestamp", "asset_id", "prediction_score"]].rename(
-                        columns={"prediction_score": signal.source_column}
-                    ),
-                    on=["timestamp", "asset_id"],
-                    how="left",
-                    validate="one_to_one",
-                )
-                asset_sets.append(set(scopes[model_id]["evaluation_asset_ids"]))
-            assets = tuple(set.intersection(*asset_sets))
-        scope = oos & work.eligible
-        if spec.signals[0].source_kind == "prediction":
-            scope &= work.asset_id.isin(assets)
-            for signal in spec.signals:
-                scope &= np.isfinite(work[signal.source_column])
-        for signal in spec.signals:
-            for label, availability in spec.label_availability_columns.items():
-                mask = (
-                    scope
-                    & work[availability].le(cutoff)
-                    & work[label].notna()
-                    & work[signal.source_column].notna()
-                )
-                pair = metrics.loc[
-                    metrics.signal.eq(signal.signal_id) & metrics.label.eq(label)
-                ]
-                assert int(pair.n_obs.sum()) == int(mask.sum()), (
-                    spec.evaluation_id,
-                    label,
-                )
-                if (
-                    spec.evaluation_axis == "single_asset_time_series"
-                    and mask.sum() > 1
-                ):
-                    values = work.loc[mask, [signal.source_column, label]].to_numpy(
-                        dtype=float
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        for spec in profile.evaluations.list():
+            identity = targets[spec.evaluation_id]["instance_identity"]
+            root = layout.instance_root(
+                layout.semantic_artifact_root("crypto", spec.evaluation_id), identity
+            )
+            read_semantic_artifact(
+                root, expected_identity=identity, lease=artifact_lease
+            )
+            bundle = root / "outputs" / spec.evaluation_id
+            manifest, _ = validate_output_bundle(
+                bundle,
+                expected_output_id=spec.evaluation_id,
+                expected_run_id=f"run_{spec.evaluation_id}",
+                lease=artifact_lease,
+            )
+            metrics = read_parquet(bundle / "metrics.parquet")
+            work = frame.copy()
+            assets = ()
+            if spec.signals[0].source_kind == "prediction":
+                scopes = profile.protocol(
+                    profile.research_datasets.list()[0].data_id
+                ).manifest()["model_scopes"]
+                asset_sets = []
+                for signal in spec.signals:
+                    model_id = signal.signal_id
+                    predictions = read_parquet(
+                        prediction_root
+                        / "outputs"
+                        / f"{model_id}_prediction"
+                        / "prediction.parquet"
                     )
-                    if np.std(values[:, 0]) > 0 and np.std(values[:, 1]) > 0:
-                        direction = (
-                            -1.0
-                            if signal.source_kind == "factor"
-                            and signal.source_column in {"spread", "relative_spread"}
-                            else 1.0
+                    work = work.merge(
+                        predictions[
+                            ["timestamp", "asset_id", "prediction_score"]
+                        ].rename(columns={"prediction_score": signal.source_column}),
+                        on=["timestamp", "asset_id"],
+                        how="left",
+                        validate="one_to_one",
+                    )
+                    asset_sets.append(set(scopes[model_id]["evaluation_asset_ids"]))
+                assets = tuple(set.intersection(*asset_sets))
+            scope = oos & work.eligible
+            if spec.signals[0].source_kind == "prediction":
+                scope &= work.asset_id.isin(assets)
+                for signal in spec.signals:
+                    scope &= np.isfinite(work[signal.source_column])
+            for signal in spec.signals:
+                for label, availability in spec.label_availability_columns.items():
+                    mask = (
+                        scope
+                        & work[availability].le(cutoff)
+                        & work[label].notna()
+                        & work[signal.source_column].notna()
+                    )
+                    pair = metrics.loc[
+                        metrics.signal.eq(signal.signal_id) & metrics.label.eq(label)
+                    ]
+                    assert int(pair.n_obs.sum()) == int(mask.sum()), (
+                        spec.evaluation_id,
+                        label,
+                    )
+                    if (
+                        spec.evaluation_axis == "single_asset_time_series"
+                        and mask.sum() > 1
+                    ):
+                        values = work.loc[mask, [signal.source_column, label]].to_numpy(
+                            dtype=float
                         )
-                        assert float(pair.ic.iloc[0]) == pytest.approx(
-                            direction * float(np.corrcoef(values.T)[0, 1]), abs=1e-10
-                        )
-        diagnostics = manifest["metadata"]["evaluation_diagnostics"]
-        if diagnostics["timestamp_count"]:
-            assert diagnostics["min_timestamp"] >= plan["test"]["start"]
-        else:
-            assert diagnostics["min_timestamp"] is None
-            assert diagnostics["max_timestamp"] is None
+                        if np.std(values[:, 0]) > 0 and np.std(values[:, 1]) > 0:
+                            direction = (
+                                -1.0
+                                if signal.source_kind == "factor"
+                                and signal.source_column
+                                in {"spread", "relative_spread"}
+                                else 1.0
+                            )
+                            assert float(pair.ic.iloc[0]) == pytest.approx(
+                                direction * float(np.corrcoef(values.T)[0, 1]),
+                                abs=1e-10,
+                            )
+            diagnostics = manifest["metadata"]["evaluation_diagnostics"]
+            if diagnostics["timestamp_count"]:
+                assert diagnostics["min_timestamp"] >= plan["test"]["start"]
+            else:
+                assert diagnostics["min_timestamp"] is None
+                assert diagnostics["max_timestamp"] is None
 
 
 def check_crypto_evaluation_old_good(
@@ -128,57 +140,65 @@ def check_crypto_evaluation_old_good(
     logical = layout.semantic_artifact_root("crypto", target)
     root = layout.instance_root(logical, targets[target]["instance_identity"])
 
-    original = read_semantic_artifact_record(root)
-    binding = profile.producer_bindings[target]
-    primary = KeyboardInterrupt("evaluation_interrupted_after_output")
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        original = read_semantic_artifact_record(root, lease=artifact_lease)
+        binding = profile.producer_bindings[target]
+        primary = KeyboardInterrupt("evaluation_interrupted_after_output")
 
-    def interrupted(**kwargs):
-        result = binding.producer(**kwargs)
+        def interrupted(**kwargs):
+            result = binding.producer(**kwargs)
 
-        def chunks():
-            with result:
-                for chunk in result.output_chunks:
-                    yield chunk
-                    raise primary
+            def chunks():
+                with result:
+                    for chunk in result.output_chunks:
+                        yield chunk
+                        raise primary
 
-        source = chunks()
+            source = chunks()
 
-        def close():
-            source.close()
-            raise RuntimeError("evaluation_cleanup_failed")
+            def close():
+                source.close()
+                raise RuntimeError("evaluation_cleanup_failed")
 
-        return EvaluationResult(source, result.summaries, close)
+            return EvaluationResult(source, result.summaries, close)
 
-    altered = replace(
-        profile,
-        producer_bindings={
-            **profile.producer_bindings,
-            target: ProducerBinding(binding.kind, interrupted),
-        },
-    )
-    with pytest.raises(KeyboardInterrupt) as caught:
-        research.research_run(
-            profile=altered,
-            layout=layout,
-            raw_root=raw,
-            rebuild=True,
-            holdout=True,
-            development_run_id=development_run_id,
-            research_plan=research_configuration(
-                "crypto",
-                "baseline",
-                small_models=True,
-                development=(
-                    plan["folds"][0]["validation"]["start"],
-                    plan["folds"][-1]["validation"]["end"],
-                ),
-                plan=plan,
-            ),
+        altered = replace(
+            profile,
+            producer_bindings={
+                **profile.producer_bindings,
+                target: ProducerBinding(binding.kind, interrupted),
+            },
         )
-    assert caught.value is primary
-    assert any("RuntimeError" in note for note in primary.__notes__)
-    assert read_semantic_artifact_record(root) == original
-    read_semantic_artifact(root, expected_identity=targets[target]["instance_identity"])
+        with pytest.raises(KeyboardInterrupt) as caught:
+            research.research_run(
+                profile=altered,
+                layout=layout,
+                raw_root=raw,
+                rebuild=True,
+                holdout=True,
+                development_run_id=development_run_id,
+                research_plan=research_configuration(
+                    "crypto",
+                    "baseline",
+                    small_models=True,
+                    development=(
+                        plan["folds"][0]["validation"]["start"],
+                        plan["folds"][-1]["validation"]["end"],
+                    ),
+                    plan=plan,
+                ),
+            )
+        assert caught.value is primary
+        assert any("RuntimeError" in note for note in primary.__notes__)
+        assert read_semantic_artifact_record(root, lease=artifact_lease) == original
+        read_semantic_artifact(
+            root,
+            expected_identity=targets[target]["instance_identity"],
+            lease=artifact_lease,
+        )
 
 
 def check_crypto_evaluation_input_boundaries(

@@ -32,6 +32,9 @@ from quant_research_platform.runtime.resources import (
     MemoryLease,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_iterdir,
@@ -113,12 +116,15 @@ def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
             for index, quantity in enumerate((0.1, 0.2, -0.3))
         ),
     )
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         old_root = ledger_artifact.write_portfolio_ledger_artifact(
             tmp_path / "old", envelope=envelope, produce=lambda emit: emit(baseline)
         )
         old = read_portfolio_ledger_artifact(
-            old_root, expected_identity=envelope.instance_identity
+            old_root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         assert len(tuple(old.iter_chunks())) == 1
         assert ledger_artifact.summarize_portfolio_ledger(old)["net_pnl"] == 0.0
@@ -145,7 +151,7 @@ def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
             candidate / "instances" / envelope.instance_identity
         )
         assert _file_bytes(old_root) == old_bytes
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("mode", ("maker", "taker"))
@@ -219,13 +225,18 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
         )
 
     policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
-    with runtime_resource_policy_scope(policy):
+    with (
+        runtime_resource_policy_scope(policy) as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = write_portfolio_ledger_artifact(
             tmp_path / mode,
             envelope=envelope,
             produce=lambda emit: run(emit, policy, funding_rate),
         )
-        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
         summary = summarize_portfolio_ledger(artifact)
         batches = list(artifact.iter_chunks())
     expected_gross = -0.5 if mode == "taker" else 0.5
@@ -371,23 +382,33 @@ def test_adjusted_return_terminal_nav_is_valued_at_actual_interval_end(
     root = write_test_sessions(
         tmp_path / "interval", envelope=_envelope(), ledger_chunks=(frame,)
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    batch = next(artifact.iter_chunks())
-    asset_end = next(
-        row
-        for row in batch.valuations
-        if row.asset_id == "asset" and row.phase == "end"
-    )
-    assert pd.Timestamp(asset_end.timestamp_ns) == pd.Timestamp("2019-01-03")
-    assert asset_end.value == pytest.approx(110.0)
-    summary = summarize_portfolio_ledger(artifact)
-    assert summary["nav"] == 110.0
-    assert pd.Timestamp(summary["valuation_timestamp_ns"]) == pd.Timestamp("2019-01-03")
-    assert sum(row.value for row in batch.valuations if row.phase == "after") == 100.0
-    assert {flow.kind for flow in batch.cashflows} == {"principal"}
-    assert not {"holding_return", "end_notional", "post_trade_notional"} & {
-        row.name for row in batch.diagnostics
-    }
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
+        batch = next(artifact.iter_chunks())
+        asset_end = next(
+            row
+            for row in batch.valuations
+            if row.asset_id == "asset" and row.phase == "end"
+        )
+        assert pd.Timestamp(asset_end.timestamp_ns) == pd.Timestamp("2019-01-03")
+        assert asset_end.value == pytest.approx(110.0)
+        summary = summarize_portfolio_ledger(artifact)
+        assert summary["nav"] == 110.0
+        assert pd.Timestamp(summary["valuation_timestamp_ns"]) == pd.Timestamp(
+            "2019-01-03"
+        )
+        assert (
+            sum(row.value for row in batch.valuations if row.phase == "after") == 100.0
+        )
+        assert {flow.kind for flow in batch.cashflows} == {"principal"}
+        assert not {"holding_return", "end_notional", "post_trade_notional"} & {
+            row.name for row in batch.diagnostics
+        }
 
 
 def test_full_session_crossing_physical_batches_is_admitted_and_released(tmp_path):
@@ -415,8 +436,13 @@ def test_full_session_crossing_physical_batches_is_admitted_and_released(tmp_pat
         tmp_path / "large_session", envelope=_envelope(), ledger_chunks=(frame,)
     )
     policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
-    with runtime_resource_policy_scope(policy):
-        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    with (
+        runtime_resource_policy_scope(policy) as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
         chunks = artifact.iter_chunks()
         batch = next(chunks)
         assert len(batch.trades) == 2000
@@ -426,8 +452,14 @@ def test_full_session_crossing_physical_batches_is_admitted_and_released(tmp_pat
     limited = capture_test_policy(
         available_memory_bytes=128 * 1024**2, explicit_cap_bytes=8 * 1024**2
     )
-    with runtime_resource_policy_scope(limited), pytest.raises(MemoryError):
-        read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    with (
+        runtime_resource_policy_scope(limited) as artifact_policy,
+        pytest.raises(MemoryError),
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
     assert limited.used_memory_bytes == 0
 
 
@@ -593,36 +625,42 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
         with closing_iterator(batches):
             assert next(batches).sequence == 0
 
-    with monkeypatch.context() as patch:
-        patch.setattr(ledger_artifact, "_iter_batches", counted_batches)
-        artifact = read_portfolio_ledger_artifact(
-            root,
-            expected_identity=root.name,
-            consume_batches=consume_first,
-        )
-    assert inspected == [0, 1]
-
-    def invalid_tail(*args):
-        with closing_iterator(original_batches(*args)) as batches:
-            yield next(batches)
-            raise ValueError("synthetic_tail_invalid")
-
-    with monkeypatch.context() as patch:
-        patch.setattr(ledger_artifact, "_iter_batches", invalid_tail)
-        with pytest.raises(ValueError, match="synthetic_tail_invalid"):
-            read_portfolio_ledger_artifact(
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with monkeypatch.context() as patch:
+            patch.setattr(ledger_artifact, "_iter_batches", counted_batches)
+            artifact = read_portfolio_ledger_artifact(
                 root,
                 expected_identity=root.name,
                 consume_batches=consume_first,
+                lease=artifact_lease,
             )
-    if long_path:
-        assert len(str(root / "trades.parquet")) > 260
-    chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
-    assert len(chunks) == 2
-    assert [chunk["asset_id"].tolist() for chunk in chunks] == [
-        ["asset", "__cash__"],
-        ["asset", "__cash__"],
-    ]
+        assert inspected == [0, 1]
+
+        def invalid_tail(*args):
+            with closing_iterator(original_batches(*args)) as batches:
+                yield next(batches)
+                raise ValueError("synthetic_tail_invalid")
+
+        with monkeypatch.context() as patch:
+            patch.setattr(ledger_artifact, "_iter_batches", invalid_tail)
+            with pytest.raises(ValueError, match="synthetic_tail_invalid"):
+                read_portfolio_ledger_artifact(
+                    root,
+                    expected_identity=root.name,
+                    consume_batches=consume_first,
+                    lease=artifact_lease,
+                )
+        if long_path:
+            assert len(str(root / "trades.parquet")) > 260
+        chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
+        assert len(chunks) == 2
+        assert [chunk["asset_id"].tolist() for chunk in chunks] == [
+            ["asset", "__cash__"],
+            ["asset", "__cash__"],
+        ]
 
 
 def test_portfolio_ledger_member_mutation_fails_closed(tmp_path: Path) -> None:
@@ -643,8 +681,16 @@ def test_portfolio_ledger_member_mutation_fails_closed(tmp_path: Path) -> None:
     )
     with open_filesystem_file(root / "valuations.parquet", "ab") as handle:
         handle.write(b"mutation")
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(
+            ValueError, match="semantic_artifact_member_integrity_invalid"
+        ):
+            read_portfolio_ledger_artifact(
+                root, expected_identity=root.name, lease=artifact_lease
+            )
 
 
 def test_portfolio_ledger_rejects_an_extra_persisted_member(tmp_path: Path) -> None:
@@ -664,8 +710,16 @@ def test_portfolio_ledger_rejects_an_extra_persisted_member(tmp_path: Path) -> N
         ledger_chunks=(frame,),
     )
     filesystem_write_bytes(root / "extra.parquet", b"not-a-ledger")
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(
+            ValueError, match="semantic_artifact_member_integrity_invalid"
+        ):
+            read_portfolio_ledger_artifact(
+                root, expected_identity=root.name, lease=artifact_lease
+            )
 
 
 def test_portfolio_ledger_reconciles_cash_rotation_costs_and_zero_asset_carry(
@@ -713,17 +767,23 @@ def test_portfolio_ledger_reconciles_cash_rotation_costs_and_zero_asset_carry(
         envelope=_envelope(),
         ledger_chunks=(first, second),
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
-    assert float(chunks[0]["post_trade_notional"].sum()) == 99.0
-    assert chunks[0]["target_notional"].sum() == 100.0
-    assert (
-        chunks[0]
-        .loc[chunks[0]["asset_id"].eq("__cash__"), "executed_delta_notional"]
-        .iloc[0]
-        == 1.0
-    )
-    assert chunks[1]["asset_id"].tolist() == ["buyer", "__cash__"]
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
+        chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
+        assert float(chunks[0]["post_trade_notional"].sum()) == 99.0
+        assert chunks[0]["target_notional"].sum() == 100.0
+        assert (
+            chunks[0]
+            .loc[chunks[0]["asset_id"].eq("__cash__"), "executed_delta_notional"]
+            .iloc[0]
+            == 1.0
+        )
+        assert chunks[1]["asset_id"].tolist() == ["buyer", "__cash__"]
 
 
 def test_portfolio_ledger_diagnostic_counts_are_integral(
@@ -746,19 +806,26 @@ def test_portfolio_ledger_diagnostic_counts_are_integral(
         envelope=_envelope(),
         ledger_chunks=(frame,),
     )
-    read = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    result = session_frame(next(read.iter_chunks()))
-    assert (
-        result.loc[result["asset_id"].eq("__cash__"), "alpha_valid_dates"].iloc[0] == 3
-    )
-
-    frame.loc[frame["asset_id"].eq("__cash__"), "alpha_valid_dates"] = 1.5
-    with pytest.raises(ValueError, match="portfolio_ledger_count_invalid"):
-        write_test_sessions(
-            tmp_path / "invalid",
-            envelope=_envelope(),
-            ledger_chunks=(frame,),
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        read = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
         )
+        result = session_frame(next(read.iter_chunks()))
+        assert (
+            result.loc[result["asset_id"].eq("__cash__"), "alpha_valid_dates"].iloc[0]
+            == 3
+        )
+
+        frame.loc[frame["asset_id"].eq("__cash__"), "alpha_valid_dates"] = 1.5
+        with pytest.raises(ValueError, match="portfolio_ledger_count_invalid"):
+            write_test_sessions(
+                tmp_path / "invalid",
+                envelope=_envelope(),
+                ledger_chunks=(frame,),
+            )
 
 
 def test_portfolio_ledger_writer_keeps_native_state_until_close(
@@ -805,7 +872,13 @@ def test_portfolio_ledger_writer_keeps_native_state_until_close(
         )
     assert policy.used_memory_bytes == 0
     assert close_usage and close_usage[0] > 0
-    read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
 
 
 def test_portfolio_ledger_frame_lease_covers_validation_and_write(
@@ -901,13 +974,18 @@ def test_portfolio_ledger_small_row_groups_preserve_complete_transitions(
         available_memory_bytes=256 * 1024 * 1024,
         explicit_cap_bytes=64 * 1024 * 1024,
     )
-    with runtime_resource_policy_scope(policy):
+    with (
+        runtime_resource_policy_scope(policy) as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = write_test_sessions(
             tmp_path / "portfolio",
             envelope=_envelope(),
             ledger_chunks=(frame,),
         )
-        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
         assert len(list(artifact.iter_chunks())) == 1
     assert policy.used_memory_bytes == 0
 
@@ -1036,18 +1114,24 @@ def test_portfolio_ledger_rechecks_outer_manifest_and_member_set_each_iteration(
         envelope=_envelope(),
         ledger_chunks=(frame,),
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    if mutation == "manifest":
-        manifest_path = root / "manifest.json"
-        manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
-        manifest["members"].append(
-            {"path": "extra.parquet", "size": 0, "sha256": "0" * 64}
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
         )
-        filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-    else:
-        filesystem_write_bytes(root / "extra.parquet", b"extra")
-    with pytest.raises(ValueError, match=f"^{error}$"):
-        next(artifact.iter_chunks())
+        if mutation == "manifest":
+            manifest_path = root / "manifest.json"
+            manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
+            manifest["members"].append(
+                {"path": "extra.parquet", "size": 0, "sha256": "0" * 64}
+            )
+            filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
+        else:
+            filesystem_write_bytes(root / "extra.parquet", b"extra")
+        with pytest.raises(ValueError, match=f"^{error}$"):
+            next(artifact.iter_chunks())
 
 
 @pytest.mark.parametrize(
@@ -1105,7 +1189,10 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
             {"timestamp_ms": 30, "prediction": 0.0},
         ]
     result = {}
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
 
         def produce(emit):
             kwargs = dict(
@@ -1144,7 +1231,7 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
             tmp_path / mode, envelope=envelope, produce=produce
         )
         artifact = read_portfolio_ledger_artifact(
-            root, expected_identity=envelope.instance_identity
+            root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         chunks = list(artifact.iter_chunks())
         terminal = chunks[-1]
@@ -1174,7 +1261,7 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
         else:
             assert summary["nav"] == result["nav"] == 1000.0
         chunks = terminal = None
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize(
@@ -1207,11 +1294,16 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
         )
         for index in range(2)
     )
-    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy:
+    with (
+        runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = write_test_sessions(
             tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=sessions
         )
-        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
         original = {
             path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)
         }
@@ -1221,7 +1313,7 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
                 native_filesystem_path(root), native_filesystem_path(copied)
             )
             artifact = read_portfolio_ledger_artifact(
-                copied, expected_identity=copied.name
+                copied, expected_identity=copied.name, lease=artifact_lease
             )
         closed_indexes = []
         close_index = ledger_artifact.ExactPrimaryKeyIndex.close
@@ -1285,7 +1377,7 @@ def test_portfolio_reader_early_close_reports_real_cleanup_failures(
         assert {
             path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)
         } == original
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("observed_dates", [1, 8])
@@ -1338,22 +1430,29 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
         ledger_chunks=(frame,),
         final_calibration=lambda: _alpha_payload(calibration, envelope),
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    summary = ledger_artifact.summarize_portfolio_ledger(artifact)
-    assert summary["alpha_calibration"]["status"] == "UNDEFINED"
-    assert (
-        summary["alpha_calibration"]["undefined_reason"] == calibration.undefined_reason
-    )
-    assert "slope" not in summary["alpha_calibration"]
-    assert summary["nav"] == 100.0
-    with pytest.raises(
-        PortfolioTargetBlocked, match="holdout_alpha_calibration_undefined"
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
     ):
-        frozen_alpha_calibration(
-            artifact.final_alpha_calibration,
-            cutoff=pd.Timestamp("2023-12-31"),
-            selection_group="global",
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
         )
+        summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+        assert summary["alpha_calibration"]["status"] == "UNDEFINED"
+        assert (
+            summary["alpha_calibration"]["undefined_reason"]
+            == calibration.undefined_reason
+        )
+        assert "slope" not in summary["alpha_calibration"]
+        assert summary["nav"] == 100.0
+        with pytest.raises(
+            PortfolioTargetBlocked, match="holdout_alpha_calibration_undefined"
+        ):
+            frozen_alpha_calibration(
+                artifact.final_alpha_calibration,
+                cutoff=pd.Timestamp("2023-12-31"),
+                selection_group="global",
+            )
 
 
 @pytest.mark.parametrize("alpha_exponent", (0, 600, -600))
@@ -1420,41 +1519,49 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
         ledger_chunks=(frame,),
         final_calibration=lambda: _alpha_payload(calibration, envelope),
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    frozen, _ = frozen_alpha_calibration(
-        artifact.final_alpha_calibration,
-        cutoff=pd.Timestamp("2019-12-31"),
-        selection_group="global",
-    )
-    assert frozen == calibration
-    summary = ledger_artifact.summarize_portfolio_ledger(artifact)
-    assert summary["alpha_calibration"]["inference_status"] == "UNDEFINED"
-    assert (
-        summary["alpha_calibration"]["inference_reason"]
-        == "alpha_calibration_zero_standard_error"
-    )
-    assert "slope_t" not in summary["alpha_calibration"]
-    from quant_research_platform.artifacts.research import (
-        read_research_report_artifact,
-        write_research_report_artifact,
-    )
-    from tests.artifacts.test_research_artifact import _report
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
+        frozen, _ = frozen_alpha_calibration(
+            artifact.final_alpha_calibration,
+            cutoff=pd.Timestamp("2019-12-31"),
+            selection_group="global",
+        )
+        assert frozen == calibration
+        summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+        assert summary["alpha_calibration"]["inference_status"] == "UNDEFINED"
+        assert (
+            summary["alpha_calibration"]["inference_reason"]
+            == "alpha_calibration_zero_standard_error"
+        )
+        assert "slope_t" not in summary["alpha_calibration"]
+        from quant_research_platform.artifacts.research import (
+            read_research_report_artifact,
+            write_research_report_artifact,
+        )
+        from tests.artifacts.test_research_artifact import _report
 
-    envelope, payload = _report()
-    payload["sections"]["portfolio"] = {"status": "DEFINED", "results": [summary]}
-    report_root = write_research_report_artifact(
-        tmp_path / "report", envelope=envelope, payload=payload
-    )
-    saved = read_research_report_artifact(
-        report_root, expected_identity=envelope.instance_identity
-    )
-    assert (
-        saved["sections"]["portfolio"]["results"][0]["alpha_calibration"]
-        == summary["alpha_calibration"]
-    )
-    assert "alpha_calibration_zero_standard_error" in filesystem_read_text(
-        report_root / "report.md", encoding="utf-8"
-    )
+        envelope, payload = _report()
+        payload["sections"]["portfolio"] = {"status": "DEFINED", "results": [summary]}
+        report_root = write_research_report_artifact(
+            tmp_path / "report", envelope=envelope, payload=payload
+        )
+        saved = read_research_report_artifact(
+            report_root,
+            expected_identity=envelope.instance_identity,
+            report_lease=artifact_lease,
+        )
+        assert (
+            saved["sections"]["portfolio"]["results"][0]["alpha_calibration"]
+            == summary["alpha_calibration"]
+        )
+        assert "alpha_calibration_zero_standard_error" in filesystem_read_text(
+            report_root / "report.md", encoding="utf-8"
+        )
 
 
 @pytest.mark.parametrize("engine", ("taker", "maker"))
@@ -1489,7 +1596,10 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
         semantic_metadata={"portfolio_capital": asdict(capital)},
     )
     batches = []
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
 
         def produce(emit):
             def observe(batch):
@@ -1542,7 +1652,9 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
             tmp_path / "flat_eof", envelope=envelope, produce=produce
         )
         artifact = read_portfolio_ledger_artifact(
-            published, expected_identity=envelope.instance_identity
+            published,
+            expected_identity=envelope.instance_identity,
+            lease=artifact_lease,
         )
         persisted = list(artifact.iter_chunks())
         trades = [trade for batch in persisted for trade in batch.trades]
@@ -1559,7 +1671,7 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
             row.fill_id for row in trades
         }
         assert len(persisted) == len(batches)
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("scale", [1.0, 2.0**-700])
@@ -1614,11 +1726,16 @@ def test_perpetual_close_sign_is_independent_of_quantity_units(
         assert economics.quantity == direction * (1.0 - closing_units) * scale
         assert economics.cost_basis == expected_basis
 
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = ledger_artifact.write_portfolio_ledger_artifact(
             tmp_path / "units", envelope=envelope, produce=produce
         )
-        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
         batches = tuple(artifact.iter_chunks())
         assert (
             sum(
@@ -1636,7 +1753,7 @@ def test_perpetual_close_sign_is_independent_of_quantity_units(
         assert end["asset"].cost_basis == expected_basis
         summary = ledger_artifact.summarize_portfolio_ledger(artifact)
         assert summary["net_pnl"] == summary["gross_pnl"] == direction
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("direction", [1.0, -1.0])
@@ -1710,34 +1827,42 @@ def test_verified_member_identity_reaches_ledger_decoder(tmp_path, monkeypatch, 
     root = write_test_sessions(
         tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
     )
-    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    native = ledger_artifact.read_semantic_artifact_record
-
-    def replace_after_verification(*args, **kwargs):
-        result = native(*args, **kwargs)
-        member = root / "valuations.parquet"
-        table = pq.read_table(native_filesystem_path(member))
-        rows = table.to_pylist()
-        for row in rows:
-            if row["phase"] == "end" and row["asset_id"] == "asset":
-                row["value"] = 120.0
-                row["mark_price"] = 1.2
-        replacement = tmp_path / "replacement.parquet"
-        pq.write_table(
-            pa.Table.from_pylist(rows, schema=table.schema),
-            native_filesystem_path(replacement),
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
         )
-        filesystem_replace(replacement, member)
-        return result
+        native = ledger_artifact.read_semantic_artifact_record
 
-    monkeypatch.setattr(
-        ledger_artifact, "read_semantic_artifact_record", replace_after_verification
-    )
-    with pytest.raises(ValueError, match="identity_changed"):
-        if entry == "read":
-            read_portfolio_ledger_artifact(root, expected_identity=root.name)
-        else:
-            tuple(artifact.iter_chunks())
+        def replace_after_verification(*args, **kwargs):
+            result = native(*args, **kwargs)
+            member = root / "valuations.parquet"
+            table = pq.read_table(native_filesystem_path(member))
+            rows = table.to_pylist()
+            for row in rows:
+                if row["phase"] == "end" and row["asset_id"] == "asset":
+                    row["value"] = 120.0
+                    row["mark_price"] = 1.2
+            replacement = tmp_path / "replacement.parquet"
+            pq.write_table(
+                pa.Table.from_pylist(rows, schema=table.schema),
+                native_filesystem_path(replacement),
+            )
+            filesystem_replace(replacement, member)
+            return result
+
+        monkeypatch.setattr(
+            ledger_artifact, "read_semantic_artifact_record", replace_after_verification
+        )
+        with pytest.raises(ValueError, match="identity_changed"):
+            if entry == "read":
+                read_portfolio_ledger_artifact(
+                    root, expected_identity=root.name, lease=artifact_lease
+                )
+            else:
+                tuple(artifact.iter_chunks())
 
 
 def _alpha_envelope(cutoff):
@@ -1819,14 +1944,17 @@ def test_portfolio_reader_releases_previous_transition_before_next_admission(
         for _batch in rows:
             _batch = None
 
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = ledger_artifact.write_portfolio_ledger_artifact(
             tmp_path / "ledger",
             envelope=envelope,
             produce=produce,
         )
         artifact = read_portfolio_ledger_artifact(
-            root, expected_identity=envelope.instance_identity
+            root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         original = _file_bytes(root)
         original_grow = MemoryLease.grow
@@ -1871,7 +1999,8 @@ def test_portfolio_reader_releases_previous_transition_before_next_admission(
                 root,
                 expected_identity=envelope.instance_identity,
                 consume_batches=consume if entry == "callback" else None,
+                lease=artifact_lease,
             )
         assert observed == [[]]
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         assert _file_bytes(root) == original

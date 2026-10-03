@@ -249,7 +249,7 @@ def test_price_volume_rejects_removed_names_before_calculation():
 
 
 @pytest.mark.parametrize("size", [20, 60])
-@pytest.mark.parametrize("scale", [1.0, 1e-10, 1e10])
+@pytest.mark.parametrize("scale", [1.0, 1e-10, 1e10, 1e-200, 1e200])
 def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
     values = np.random.default_rng(20260910).normal(size=320) * scale
     values[200] = np.nan
@@ -309,6 +309,71 @@ def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
     pd.testing.assert_frame_equal(panel, original, check_exact=True)
 
 
+@pytest.mark.parametrize("size", (20, 60))
+@pytest.mark.parametrize(
+    "case",
+    (
+        "adjacent",
+        "adjacent_anchor",
+        "tiny_adjacent",
+        "large_adjacent",
+        "subnormal_adjacent",
+        "opposite_extremes",
+        "constant",
+        "missing",
+    ),
+)
+def test_standardized_moments_preserve_adjacent_values_against_decimal(size, case):
+    from decimal import Decimal, localcontext
+
+    base = {
+        "tiny_adjacent": 1e-200,
+        "large_adjacent": 1e308,
+        "subnormal_adjacent": np.nextafter(0.0, 1.0),
+    }.get(case, 0.01)
+    values = np.full(size, base)
+    values[0 if case == "adjacent_anchor" else -1] = np.nextafter(base, np.inf)
+    if case == "opposite_extremes":
+        values = np.resize([-1e308, 1e308], size)
+    elif case == "constant":
+        values[:] = base
+    elif case == "missing":
+        values[0] = np.nan
+    names = (f"skewness_{size}d",) + (("kurtosis_60d",) if size == 60 else ())
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=size),
+            "period_return": values,
+        }
+    )
+    actual = calculate_price_volume_factors(panel, factor_columns=names)
+    assert actual.loc[: size - 2, list(names)].isna().all().all()
+    if case in {"constant", "missing"}:
+        assert actual.loc[size - 1, list(names)].isna().all()
+        return
+    with localcontext() as context:
+        context.prec = 120
+        data = [Decimal.from_float(float(value)) for value in values]
+        n = Decimal(size)
+        mean = sum(data) / n
+        centered = [value - mean for value in data]
+        m2 = sum(value**2 for value in centered) / n
+        m3 = sum(value**3 for value in centered) / n
+        expected = [(n * (n - 1)).sqrt() / (n - 2) * m3 / (m2 * m2.sqrt())]
+        if size == 60:
+            m4 = sum(value**4 for value in centered) / n
+            expected.append(
+                (n - 1) / ((n - 2) * (n - 3)) * ((n + 1) * (m4 / m2**2 - 3) + 6)
+            )
+    np.testing.assert_allclose(
+        actual.loc[size - 1, list(names)].to_numpy(dtype=float),
+        [float(value) for value in expected],
+        rtol=2e-14,
+        atol=2e-14,
+    )
+
+
 @pytest.mark.parametrize("value", [0.0, 0.01, -0.125])
 @pytest.mark.parametrize("count", [1, 59, 60, 61])
 def test_standardized_moments_require_nonzero_variance(value, count, tmp_path):
@@ -337,7 +402,7 @@ def test_standardized_moments_require_nonzero_variance(value, count, tmp_path):
 
 
 @pytest.mark.parametrize("missing", [None, 0, "all"])
-@pytest.mark.parametrize("scale", [1.0, 1e-10, 1e10])
+@pytest.mark.parametrize("scale", [1.0, 1e-10, 1e10, 1e-200, 1e200])
 def test_skewness_independent_central_moment_oracle(missing, scale):
     from fractions import Fraction
 
@@ -760,4 +825,96 @@ def test_turnover_uses_canonical_suspension_zero_and_preserves_unknown(tmp_path)
         calculate_price_volume_factors(unknown, factor_columns=("turnover_20d",))
         .turnover_20d.isna()
         .all()
+    )
+
+
+@pytest.mark.parametrize("amount_scale", (1.0, 1e-308, 1e308))
+@pytest.mark.parametrize("direction", (1.0, -1.0, 0.0))
+def test_amount_flow_ratios_preserve_finite_units_and_undefined_denominators(
+    amount_scale, direction
+):
+    names = ("signed_amount_flow_20d", "return_amount_imbalance_20d")
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=20),
+            "period_return": direction * 0.1,
+            "amount": amount_scale,
+        }
+    )
+    result = calculate_price_volume_factors(panel, factor_columns=names)
+    assert result.loc[:18, list(names)].isna().all().all()
+    assert result[names[0]].iloc[-1] == direction
+    if direction:
+        assert result[names[1]].iloc[-1] == direction
+    else:
+        assert pd.isna(result[names[1]].iloc[-1])
+    panel.loc[0, "amount"] = np.nan
+    assert (
+        calculate_price_volume_factors(panel, factor_columns=names)[list(names)]
+        .isna()
+        .all()
+        .all()
+    )
+    panel["amount"] = 0.0
+    assert (
+        calculate_price_volume_factors(panel, factor_columns=names)[list(names)]
+        .isna()
+        .all()
+        .all()
+    )
+
+
+def test_return_amount_products_preserve_opposing_extreme_units():
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=20),
+            "period_return": [1e308, -1e-308] * 10,
+            "amount": [1e-308, 1e308] * 10,
+        }
+    )
+    result = calculate_price_volume_factors(
+        panel, factor_columns=("return_amount_imbalance_20d",)
+    )
+    assert result.return_amount_imbalance_20d.iloc[-1] == 0.0
+
+
+@pytest.mark.parametrize("scale", (1.0, 1e-200))
+def test_market_model_residual_volatility_matches_decimal_oracle(scale):
+    from decimal import Decimal, localcontext
+
+    from quant_research_platform.compute.market_model import MarketModelRiskState
+
+    left = np.resize(np.array([0.01, 0.02, -0.01, 0.03, 0.0]), 420) * scale
+    right = np.resize(np.array([-0.01, 0.01, 0.02, -0.01, 0.04]), 420) * scale
+    with localcontext() as context:
+        context.prec = 100
+        a = [Decimal.from_float(float(value)) for value in left]
+        b = [Decimal.from_float(float(value)) for value in right]
+        market = [(x + y) / 2 for x, y in zip(a, b, strict=True)]
+        residuals = []
+        for stop in range(len(a) - 60, len(a)):
+            xs, ys = market[stop - 251 : stop + 1], a[stop - 251 : stop + 1]
+            mx, my = sum(xs) / 252, sum(ys) / 252
+            beta = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / sum(
+                (x - mx) ** 2 for x in xs
+            )
+            residuals.append(ys[-1] - my - beta * (xs[-1] - mx))
+        mean = sum(residuals) / 60
+        expected = float((sum((value - mean) ** 2 for value in residuals) / 60).sqrt())
+    state = MarketModelRiskState()
+    for left_value, right_value in zip(left, right, strict=True):
+        observed = state.observe(
+            pd.DataFrame(
+                {
+                    "asset_id": ("a", "b"),
+                    "period_return": (left_value, right_value),
+                    "float_market_cap": 1000.0,
+                    "eligible": True,
+                }
+            )
+        )
+    assert observed.residual_volatility["a"] == pytest.approx(
+        expected, rel=1e-12, abs=0
     )

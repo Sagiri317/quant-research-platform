@@ -31,6 +31,7 @@ from quant_research_platform.research import statistics_production
 from quant_research_platform.research.evaluations.runner import (
     build_evaluation_result_from_research_dataset,
 )
+from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics_production import (
@@ -39,12 +40,16 @@ from quant_research_platform.research.statistics_production import (
 from quant_research_platform.runtime.resources import (
     runtime_resource_policy_scope,
 )
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     CORE6_FACTORS,
     PV25_FACTORS,
+    configured_models,
     research_configuration,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
@@ -56,7 +61,7 @@ from tests.research.workflow_test_support import (
 )
 
 
-def _statistics_models(layout, spec, protocol, window):
+def _statistics_models(layout, spec, protocol, window, *, lease):
     factor = spec.factor_columns[0]
     configuration = research_configuration(small_models=True)
     models = tuple(
@@ -104,12 +109,11 @@ def _statistics_models(layout, spec, protocol, window):
             "models": model_protocol["research_configuration"]["models"],
         },
     )
-    from quant_research_platform.research.models.supervised import preflight_model_specs
-
     preflight_model_specs(models)
     with runtime_resource_policy_scope():
         case = shared_model_case(
             layout.project_root,
+            lease=lease,
             specs=models,
             dataset=spec,
             protocol=model_protocol,
@@ -139,6 +143,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
 ):
     from arch.bootstrap import MCS, SPA, StepM
 
+    preflight_model_specs(configured_models())
     layout = StorageLayout(tmp_path)
     protocol = deepcopy(a_share.protocol("pv_all").manifest())
     protocol["statistics"]["factor_fdr_families"] = {"fixture": ["x"]}
@@ -211,373 +216,424 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             "end": cutoff.date().isoformat(),
         }
     write_dataset(layout.research_dataset_root("a_share", "pv_all"), frame, spec=spec)
-    model = _statistics_models(layout, spec, protocol, TimeWindow(dates[0], cutoff))
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id="pv_all_global_statistics",
-        schema_identity="a" * 64,
-        protocol_or_spec_identity="b" * 64,
-        software_identity="c" * 64,
-        research_window={
-            "start": "2019-01-01",
-            "end": str(cutoff.date()),
-            "access": "development",
-        },
-        upstream_identities={},
-        semantic_metadata={},
-    )
-    with runtime_resource_policy_scope() as policy:
-        owned = build_a_share_statistics_tables(
-            layout=layout,
-            dataset_catalog=ResearchDatasetCatalog((spec,)),
-            dataset_id="pv_all",
-            prediction_id="prediction",
-            persisted_model=model,
-            protocol_manifest=protocol,
-            time_window=TimeWindow(dates[0], cutoff),
-            prediction_lookup=Lookup(),
-            resource_policy=policy,
-            global_statistics=None,
-        )
-        try:
-            global_tables = {name: table.copy() for name, table in owned.value.items()}
-            assert global_tables["model_group_comparison"].empty
-            root = write_statistics_artifact(
-                layout.semantic_artifact_root("a_share", "pv_all_global_statistics"),
-                envelope=envelope,
-                tables=owned.value,
-            )
-        finally:
-            owned.release(owner="research.statistics.output")
-        artifact = read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
-        )
-        with artifact.table("factor_diagnostics.parquet") as factors:
-            assert factors.observation_count.eq(65 if full_factor_history else 64).all()
-        with artifact.table("model_losses.parquet") as table:
-            assert len(table) == 64 * 8
-            assert table.common_date.eq(1).all()
-            assert table.asset_coverage_id.eq(canonical_json_hash(sorted(assets))).all()
-            losses = (
-                table.pivot(index="timestamp", columns="family_id", values="loss")
-                .loc[:, list(families)]
-                .copy()
-            )
-        expected = pd.DataFrame(
-            {
-                family: [
-                    -pd.Series(scores[day, :, model_index]).corr(
-                        pd.Series(np.arange(len(assets))), method="spearman"
-                    )
-                    for day in range(len(dates))
-                ]
-                for model_index, family in enumerate(families)
-            },
-            index=dates,
-        )
-        np.testing.assert_allclose(losses, expected, rtol=0, atol=1e-14)
-        benchmark, challengers = losses[families[0]], losses.loc[:, list(families[1:])]
-        blocked_reason = "global_development_selection_reuses_validation"
-        for member in ("prediction_diagnostics.parquet", "model_comparison.parquet"):
-            with artifact.table(member) as summary:
-                assert summary.observation_count.eq(64).all()
-                assert summary.status.eq("UNDEFINED").all()
-                assert summary.reason.eq(blocked_reason).all()
-                assert summary["mean"].notna().all()
-                assert (
-                    summary.loc[
-                        :,
-                        [
-                            "standard_error",
-                            "t_statistic",
-                            "p_value",
-                            "ci_lower",
-                            "ci_upper",
-                            "bootstrap_lower",
-                            "bootstrap_upper",
-                        ],
-                    ]
-                    .isna()
-                    .all()
-                    .all()
-                )
-        with artifact.table("model_reality_checks.parquet") as checks:
-            assert checks.status.eq("UNDEFINED").all()
-            assert checks.reason.eq(blocked_reason).all()
-            assert checks.value.isna().all()
-            assert checks.observation_count.eq(64).all()
-        quarterly_protocol = {**protocol, "selection_group": "quarterly"}
-        paired_envelope = build_business_manifest_envelope(
-            **{
-                key: value
-                for key, value in envelope.payload().items()
-                if key not in {"instance_identity", "status", "logical_artifact_id"}
-            },
-            logical_artifact_id="pv_all_quarterly_statistics",
-        )
-        paired_owned = build_a_share_statistics_tables(
-            layout=layout,
-            dataset_catalog=ResearchDatasetCatalog((spec,)),
-            dataset_id="pv_all",
-            prediction_id="quarterly_prediction",
-            persisted_model=model,
-            protocol_manifest=quarterly_protocol,
-            time_window=TimeWindow(dates[0], cutoff),
-            prediction_lookup=Lookup(),
-            resource_policy=policy,
-            global_statistics=artifact,
-        )
-        try:
-            quarterly_losses = paired_owned.value["model_losses"].copy()
-            paired_root = write_statistics_artifact(
-                layout.semantic_artifact_root("a_share", "pv_all_quarterly_statistics"),
-                envelope=paired_envelope,
-                tables=paired_owned.value,
-            )
-        finally:
-            paired_owned.release(owner="research.statistics.output")
-        paired_artifact = read_statistics_artifact(
-            paired_root, expected_identity=paired_envelope.instance_identity
-        )
-        with paired_artifact.table("model_reality_checks.parquet") as checks:
-            assert checks.status.eq("DEFINED").all()
-            assert checks.observation_count.eq(64).all()
-            for test_id, constructor in (
-                ("spa_reality_check", SPA),
-                ("stepm_superior_models", StepM),
-                ("model_confidence_set", MCS),
-            ):
-                seed = derive_seed(
-                    42, "a_share_model_reality_check", "pv_all", "development", test_id
-                )
-                options = dict(block_size=20, reps=10000, seed=seed)
-                native = (
-                    constructor(losses, size=0.05, **options)
-                    if constructor is MCS
-                    else constructor(benchmark, challengers, size=0.05, **options)
-                    if constructor is StepM
-                    else constructor(benchmark, challengers, **options)
-                )
-                native.compute()
-                rows = checks.loc[checks.test_id.eq(test_id)]
-                assert rows.seed.eq(seed).all()
-                if constructor is SPA:
-                    for label in ("lower", "consistent", "upper"):
-                        assert (
-                            rows.loc[
-                                rows.statistic_id.eq(label + "_p_value"), "value"
-                            ].iloc[0]
-                            == native.pvalues[label]
-                        )
-                elif constructor is StepM:
-                    assert set(rows.loc[rows.value.eq(1), "family_id"]) == set(
-                        native.superior_models
-                    )
-                else:
-                    for family in families:
-                        assert (
-                            rows.loc[
-                                rows.family_id.eq(family)
-                                & rows.statistic_id.eq("p_value"),
-                                "value",
-                            ].iloc[0]
-                            == native.pvalues.loc[family].iloc[0]
-                        )
-                    assert set(
-                        rows.loc[
-                            rows.statistic_id.eq("included") & rows.value.eq(1),
-                            "family_id",
-                        ]
-                    ) == set(native.included)
-        with artifact.table("model_comparison.parquet") as table:
-            assert len(table) == 7
-            assert table.observation_count.eq(64).all()
-            for row in table.itertuples():
-                assert row.mean == pytest.approx(
-                    float((losses[families[0]] - losses[row.prediction_id]).mean())
-                )
-        with paired_artifact.table("model_group_comparison.parquet") as paired:
-            assert set(paired.family_id) == set(families)
-            assert paired.observation_count.eq(64).all()
-            np.testing.assert_allclose(paired.mean_difference, 0.0, rtol=0, atol=1e-14)
-            assert paired.status.eq("UNDEFINED").all()
-            assert paired.reason.eq(
-                "global_development_selection_reuses_validation"
-            ).all()
-            assert paired.bootstrap_reason.eq(blocked_reason).all()
-        if not full_factor_history:
-            for mutation in ("key", "count", "asset_identity", "family"):
-                malformed = {
-                    name: table.copy() for name, table in global_tables.items()
-                }
-                losses_table = malformed["model_losses"]
-                if mutation == "key":
-                    losses_table.loc[0, "timestamp"] += pd.Timedelta(days=1000)
-                elif mutation == "count":
-                    losses_table.loc[0, "observation_count"] += 1
-                elif mutation == "family":
-                    malformed["model_losses"] = losses_table.loc[
-                        losses_table.family_id.ne(families[-1])
-                    ].copy()
-                else:
-                    losses_table.loc[0, "asset_coverage_id"] = canonical_json_hash(
-                        sorted([*assets[:-1], "different_asset"])
-                    )
-                mutated_envelope = build_business_manifest_envelope(
-                    **{
-                        key: value
-                        for key, value in envelope.payload().items()
-                        if key
-                        not in {"instance_identity", "status", "logical_artifact_id"}
-                    },
-                    logical_artifact_id=f"coverage_{mutation}",
-                )
-                mutated_root = write_statistics_artifact(
-                    tmp_path / f"coverage_{mutation}",
-                    envelope=mutated_envelope,
-                    tables=malformed,
-                )
-                mutated_artifact = read_statistics_artifact(
-                    mutated_root, expected_identity=mutated_envelope.instance_identity
-                )
-                with pytest.raises(
-                    ValueError,
-                    match="model_group_comparison_family_incomplete"
-                    if mutation == "family"
-                    else "model_group_comparison_coverage_invalid",
-                ):
-                    statistics_production._paired_group_rankic(
-                        quarterly_losses.loc[
-                            quarterly_losses.family_id.ne(families[-1])
-                        ].copy()
-                        if mutation == "family"
-                        else quarterly_losses,
-                        global_statistics=mutated_artifact,
-                        selection_group="quarterly",
-                        family_ids=families,
-                        protocol_manifest=quarterly_protocol,
-                    )
-        assert policy.used_memory_bytes == 0
-    from quant_research_platform.artifacts.research import (
-        load_a_share_run_evidence,
-        read_research_report_artifact,
-        write_research_report_artifact,
-    )
-    from quant_research_platform.contracts.targets import (
-        ProducerKind,
-        ResearchRunRecord,
-        ResearchRunTargetResult,
-        RunStatus,
-        TargetStatus,
-    )
-    from quant_research_platform.reports.a_share import (
-        REQUIRED_REPORT_SECTIONS,
-        build_a_share_report,
-    )
-
-    record = ResearchRunRecord(
-        operation_evidence=unmeasured_operation_evidence("fixture_record"),
-        run_id="run_statistics",
-        profile_id="fixture",
-        scenario_id="pv_all",
-        protocol=protocol,
-        protocol_identity=canonical_json_hash(protocol),
-        research_window=envelope.research_window,
-        software_identity="c" * 64,
-        terminal_targets=("pv_all_global_statistics",),
-        target_results=(
-            ResearchRunTargetResult(
-                target_id="pv_all_global_statistics",
-                producer_kind=ProducerKind.STATISTIC,
-                status=TargetStatus.BUILT,
-                instance_identity=envelope.instance_identity,
-                schema_identity=envelope.schema_identity,
-                artifact_root="data/artifacts/a_share/pv_all_global_statistics",
-            ),
-        ),
-        status=RunStatus.COMPLETE,
-    )
-    from quant_research_platform.artifacts.research import report_payload_working_set
-
     with (
-        runtime_resource_policy_scope() as report_policy,
-        report_policy.lease(
-            "reports.test_payload", report_payload_working_set(record.payload())
-        ) as report_lease,
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
     ):
-        evidence = load_a_share_run_evidence(
-            layout=layout,
-            record=record,
-            report_lease=report_lease,
-            selections=model.selections,
+        model = _statistics_models(
+            layout, spec, protocol, TimeWindow(dates[0], cutoff), lease=artifact_lease
         )
-        report = build_a_share_report(record=record, evidence=evidence)
-        projected = deepcopy(evidence)
-        projected["issues"] = []
-        projected["portfolio_statistics"] = {
-            "status": "UNDEFINED",
-            "capacity": [{"status": "UNDEFINED", "reason": "no_rebalance_requests"}],
-            "performance": [],
-            "attribution": [],
-            "robustness": [],
-        }
-        unavailable = build_a_share_report(record=record, evidence=projected)
-        assert unavailable["sections"]["capacity"]["status"] == "UNDEFINED"
-        assert unavailable["report_status"] == "COMPLETE"
-        projected["portfolio_statistics"]["performance"] = [
-            {
-                "metric_id": "tracking_error",
-                "status": "BLOCKED",
-                "reason": "benchmark_total_return_open_missing",
-            }
-        ]
-        unavailable = build_a_share_report(record=record, evidence=projected)
-        assert unavailable["sections"]["risk"]["status"] == "BLOCKED"
-        assert unavailable["report_status"] == "BLOCKED"
-        assert unavailable["source_run_status"] == "COMPLETE"
-        actual = report["sections"]["OOS prediction"]["global"]["reality_checks"]
-        assert len(actual) == 26 and all(
-            row["status"] == "UNDEFINED"
-            and row["reason"] == blocked_reason
-            and row["observation_count"] == 64
-            for row in actual
-        )
-        assert report["sections"]["OOS prediction"]["global"][
-            "inference_qualification"
-        ] == {"status": "UNDEFINED", "reason": blocked_reason}
-        assert report["sections"]["OOS prediction"]["quarterly"][
-            "inference_qualification"
-        ] == {"status": "ELIGIBLE", "reason": None}
-        source_identity = canonical_json_hash(record.payload())
-        contract = {
-            "schema_id": "qrp-a-share-research-report",
-            "required_sections": list(REQUIRED_REPORT_SECTIONS),
-            "source_run_identity": source_identity,
-        }
-        report_envelope = build_business_manifest_envelope(
-            logical_artifact_id="pv_all_report_artifact",
-            schema_identity=canonical_json_hash(contract),
-            protocol_or_spec_identity="a" * 64,
+        envelope = build_business_manifest_envelope(
+            logical_artifact_id="pv_all_global_statistics",
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
             software_identity="c" * 64,
-            research_window=envelope.research_window,
-            upstream_identities={"source_run": source_identity},
-            semantic_metadata={
-                "target_contract": contract,
-                "source_run_id": record.run_id,
-                "source_run_status": "COMPLETE",
-                "report_status": report["report_status"],
+            research_window={
+                "start": "2019-01-01",
+                "end": str(cutoff.date()),
+                "access": "development",
             },
+            upstream_identities={},
+            semantic_metadata={},
         )
-        report_root = write_research_report_artifact(
-            tmp_path / "report", envelope=report_envelope, payload=report
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("test.artifact.metadata", 0) as nested_artifact_lease,
+        ):
+            owned = build_a_share_statistics_tables(
+                layout=layout,
+                dataset_catalog=ResearchDatasetCatalog((spec,)),
+                dataset_id="pv_all",
+                prediction_id="prediction",
+                persisted_model=model,
+                protocol_manifest=protocol,
+                time_window=TimeWindow(dates[0], cutoff),
+                prediction_lookup=Lookup(),
+                resource_policy=policy,
+                global_statistics=None,
+            )
+            try:
+                global_tables = {
+                    name: table.copy() for name, table in owned.value.items()
+                }
+                assert global_tables["model_group_comparison"].empty
+                root = write_statistics_artifact(
+                    layout.semantic_artifact_root(
+                        "a_share", "pv_all_global_statistics"
+                    ),
+                    envelope=envelope,
+                    tables=owned.value,
+                )
+            finally:
+                owned.release(owner="research.statistics.output")
+            artifact = read_statistics_artifact(
+                root,
+                expected_identity=envelope.instance_identity,
+                lease=nested_artifact_lease,
+            )
+            with artifact.table("factor_diagnostics.parquet") as factors:
+                assert factors.observation_count.eq(
+                    65 if full_factor_history else 64
+                ).all()
+            with artifact.table("model_losses.parquet") as table:
+                assert len(table) == 64 * 8
+                assert table.common_date.eq(1).all()
+                assert table.asset_coverage_id.eq(
+                    canonical_json_hash(sorted(assets))
+                ).all()
+                losses = (
+                    table.pivot(index="timestamp", columns="family_id", values="loss")
+                    .loc[:, list(families)]
+                    .copy()
+                )
+            expected = pd.DataFrame(
+                {
+                    family: [
+                        -pd.Series(scores[day, :, model_index]).corr(
+                            pd.Series(np.arange(len(assets))), method="spearman"
+                        )
+                        for day in range(len(dates))
+                    ]
+                    for model_index, family in enumerate(families)
+                },
+                index=dates,
+            )
+            np.testing.assert_allclose(losses, expected, rtol=0, atol=1e-14)
+            benchmark, challengers = (
+                losses[families[0]],
+                losses.loc[:, list(families[1:])],
+            )
+            blocked_reason = "global_development_selection_reuses_validation"
+            for member in (
+                "prediction_diagnostics.parquet",
+                "model_comparison.parquet",
+            ):
+                with artifact.table(member) as summary:
+                    assert summary.observation_count.eq(64).all()
+                    assert summary.status.eq("UNDEFINED").all()
+                    assert summary.reason.eq(blocked_reason).all()
+                    assert summary["mean"].notna().all()
+                    assert (
+                        summary.loc[
+                            :,
+                            [
+                                "standard_error",
+                                "t_statistic",
+                                "p_value",
+                                "ci_lower",
+                                "ci_upper",
+                                "bootstrap_lower",
+                                "bootstrap_upper",
+                            ],
+                        ]
+                        .isna()
+                        .all()
+                        .all()
+                    )
+            with artifact.table("model_reality_checks.parquet") as checks:
+                assert checks.status.eq("UNDEFINED").all()
+                assert checks.reason.eq(blocked_reason).all()
+                assert checks.value.isna().all()
+                assert checks.observation_count.eq(64).all()
+            quarterly_protocol = {**protocol, "selection_group": "quarterly"}
+            paired_envelope = build_business_manifest_envelope(
+                **{
+                    key: value
+                    for key, value in envelope.payload().items()
+                    if key not in {"instance_identity", "status", "logical_artifact_id"}
+                },
+                logical_artifact_id="pv_all_quarterly_statistics",
+            )
+            paired_owned = build_a_share_statistics_tables(
+                layout=layout,
+                dataset_catalog=ResearchDatasetCatalog((spec,)),
+                dataset_id="pv_all",
+                prediction_id="quarterly_prediction",
+                persisted_model=model,
+                protocol_manifest=quarterly_protocol,
+                time_window=TimeWindow(dates[0], cutoff),
+                prediction_lookup=Lookup(),
+                resource_policy=policy,
+                global_statistics=artifact,
+            )
+            try:
+                quarterly_losses = paired_owned.value["model_losses"].copy()
+                paired_root = write_statistics_artifact(
+                    layout.semantic_artifact_root(
+                        "a_share", "pv_all_quarterly_statistics"
+                    ),
+                    envelope=paired_envelope,
+                    tables=paired_owned.value,
+                )
+            finally:
+                paired_owned.release(owner="research.statistics.output")
+            paired_artifact = read_statistics_artifact(
+                paired_root,
+                expected_identity=paired_envelope.instance_identity,
+                lease=nested_artifact_lease,
+            )
+            with paired_artifact.table("model_reality_checks.parquet") as checks:
+                assert checks.status.eq("DEFINED").all()
+                assert checks.observation_count.eq(64).all()
+                for test_id, constructor in (
+                    ("spa_reality_check", SPA),
+                    ("stepm_superior_models", StepM),
+                    ("model_confidence_set", MCS),
+                ):
+                    seed = derive_seed(
+                        42,
+                        "a_share_model_reality_check",
+                        "pv_all",
+                        "development",
+                        test_id,
+                    )
+                    options = dict(block_size=20, reps=10000, seed=seed)
+                    native = (
+                        constructor(losses, size=0.05, **options)
+                        if constructor is MCS
+                        else constructor(benchmark, challengers, size=0.05, **options)
+                        if constructor is StepM
+                        else constructor(benchmark, challengers, **options)
+                    )
+                    native.compute()
+                    rows = checks.loc[checks.test_id.eq(test_id)]
+                    assert rows.seed.eq(seed).all()
+                    if constructor is SPA:
+                        for label in ("lower", "consistent", "upper"):
+                            assert (
+                                rows.loc[
+                                    rows.statistic_id.eq(label + "_p_value"), "value"
+                                ].iloc[0]
+                                == native.pvalues[label]
+                            )
+                    elif constructor is StepM:
+                        assert set(rows.loc[rows.value.eq(1), "family_id"]) == set(
+                            native.superior_models
+                        )
+                    else:
+                        for family in families:
+                            assert (
+                                rows.loc[
+                                    rows.family_id.eq(family)
+                                    & rows.statistic_id.eq("p_value"),
+                                    "value",
+                                ].iloc[0]
+                                == native.pvalues.loc[family].iloc[0]
+                            )
+                        assert set(
+                            rows.loc[
+                                rows.statistic_id.eq("included") & rows.value.eq(1),
+                                "family_id",
+                            ]
+                        ) == set(native.included)
+            with artifact.table("model_comparison.parquet") as table:
+                assert len(table) == 7
+                assert table.observation_count.eq(64).all()
+                for row in table.itertuples():
+                    assert row.mean == pytest.approx(
+                        float((losses[families[0]] - losses[row.prediction_id]).mean())
+                    )
+            with paired_artifact.table("model_group_comparison.parquet") as paired:
+                assert set(paired.family_id) == set(families)
+                assert paired.observation_count.eq(64).all()
+                np.testing.assert_allclose(
+                    paired.mean_difference, 0.0, rtol=0, atol=1e-14
+                )
+                assert paired.status.eq("UNDEFINED").all()
+                assert paired.reason.eq(
+                    "global_development_selection_reuses_validation"
+                ).all()
+                assert paired.bootstrap_reason.eq(blocked_reason).all()
+            if not full_factor_history:
+                for mutation in ("key", "count", "asset_identity", "family"):
+                    malformed = {
+                        name: table.copy() for name, table in global_tables.items()
+                    }
+                    losses_table = malformed["model_losses"]
+                    if mutation == "key":
+                        losses_table.loc[0, "timestamp"] += pd.Timedelta(days=1000)
+                    elif mutation == "count":
+                        losses_table.loc[0, "observation_count"] += 1
+                    elif mutation == "family":
+                        malformed["model_losses"] = losses_table.loc[
+                            losses_table.family_id.ne(families[-1])
+                        ].copy()
+                    else:
+                        losses_table.loc[0, "asset_coverage_id"] = canonical_json_hash(
+                            sorted([*assets[:-1], "different_asset"])
+                        )
+                    mutated_envelope = build_business_manifest_envelope(
+                        **{
+                            key: value
+                            for key, value in envelope.payload().items()
+                            if key
+                            not in {
+                                "instance_identity",
+                                "status",
+                                "logical_artifact_id",
+                            }
+                        },
+                        logical_artifact_id=f"coverage_{mutation}",
+                    )
+                    mutated_root = write_statistics_artifact(
+                        tmp_path / f"coverage_{mutation}",
+                        envelope=mutated_envelope,
+                        tables=malformed,
+                    )
+                    mutated_artifact = read_statistics_artifact(
+                        mutated_root,
+                        expected_identity=mutated_envelope.instance_identity,
+                        lease=nested_artifact_lease,
+                    )
+                    with pytest.raises(
+                        ValueError,
+                        match="model_group_comparison_family_incomplete"
+                        if mutation == "family"
+                        else "model_group_comparison_coverage_invalid",
+                    ):
+                        statistics_production._paired_group_rankic(
+                            quarterly_losses.loc[
+                                quarterly_losses.family_id.ne(families[-1])
+                            ].copy()
+                            if mutation == "family"
+                            else quarterly_losses,
+                            global_statistics=mutated_artifact,
+                            selection_group="quarterly",
+                            family_ids=families,
+                            protocol_manifest=quarterly_protocol,
+                        )
+            assert (
+                policy.used_memory_bytes
+                == nested_artifact_lease.reserved_bytes + artifact_lease.reserved_bytes
+            )
+        from quant_research_platform.artifacts.research import (
+            load_a_share_run_evidence,
+            read_research_report_artifact,
+            write_research_report_artifact,
         )
-        saved_report = read_research_report_artifact(
-            report_root, expected_identity=report_envelope.instance_identity
+        from quant_research_platform.contracts.targets import (
+            ProducerKind,
+            ResearchRunRecord,
+            ResearchRunTargetResult,
+            RunStatus,
+            TargetStatus,
         )
-        assert (
-            saved_report["sections"]["OOS prediction"]["global"]["reality_checks"]
-            == actual
+        from quant_research_platform.reports.a_share import (
+            REQUIRED_REPORT_SECTIONS,
+            build_a_share_report,
         )
-    assert report_policy.used_memory_bytes == 0
+
+        record = ResearchRunRecord(
+            operation_evidence=unmeasured_operation_evidence("fixture_record"),
+            run_id="run_statistics",
+            profile_id="fixture",
+            scenario_id="pv_all",
+            protocol=protocol,
+            protocol_identity=canonical_json_hash(protocol),
+            research_window=envelope.research_window,
+            software_identity="c" * 64,
+            terminal_targets=("pv_all_global_statistics",),
+            target_results=(
+                ResearchRunTargetResult(
+                    target_id="pv_all_global_statistics",
+                    producer_kind=ProducerKind.STATISTIC,
+                    status=TargetStatus.BUILT,
+                    instance_identity=envelope.instance_identity,
+                    schema_identity=envelope.schema_identity,
+                    artifact_root="data/artifacts/a_share/pv_all_global_statistics",
+                ),
+            ),
+            status=RunStatus.COMPLETE,
+        )
+        from quant_research_platform.artifacts.research import (
+            report_payload_working_set,
+        )
+
+        with (
+            runtime_resource_policy_scope() as report_policy,
+            report_policy.lease(
+                "reports.test_payload", report_payload_working_set(record.payload())
+            ) as report_lease,
+            report_policy.lease("test.artifact.metadata", 0) as nested_artifact_lease,
+        ):
+            evidence = load_a_share_run_evidence(
+                layout=layout,
+                record=record,
+                report_lease=report_lease,
+                selections=model.selections,
+            )
+            report = build_a_share_report(record=record, evidence=evidence)
+            projected = deepcopy(evidence)
+            projected["issues"] = []
+            projected["portfolio_statistics"] = {
+                "status": "UNDEFINED",
+                "capacity": [
+                    {"status": "UNDEFINED", "reason": "no_rebalance_requests"}
+                ],
+                "performance": [],
+                "attribution": [],
+                "robustness": [],
+            }
+            unavailable = build_a_share_report(record=record, evidence=projected)
+            assert unavailable["sections"]["capacity"]["status"] == "UNDEFINED"
+            assert unavailable["report_status"] == "COMPLETE"
+            projected["portfolio_statistics"]["performance"] = [
+                {
+                    "metric_id": "tracking_error",
+                    "status": "BLOCKED",
+                    "reason": "benchmark_total_return_open_missing",
+                }
+            ]
+            unavailable = build_a_share_report(record=record, evidence=projected)
+            assert unavailable["sections"]["risk"]["status"] == "BLOCKED"
+            assert unavailable["report_status"] == "BLOCKED"
+            assert unavailable["source_run_status"] == "COMPLETE"
+            actual = report["sections"]["OOS prediction"]["global"]["reality_checks"]
+            assert len(actual) == 26 and all(
+                row["status"] == "UNDEFINED"
+                and row["reason"] == blocked_reason
+                and row["observation_count"] == 64
+                for row in actual
+            )
+            assert report["sections"]["OOS prediction"]["global"][
+                "inference_qualification"
+            ] == {"status": "UNDEFINED", "reason": blocked_reason}
+            assert report["sections"]["OOS prediction"]["quarterly"][
+                "inference_qualification"
+            ] == {"status": "ELIGIBLE", "reason": None}
+            source_identity = canonical_json_hash(record.payload())
+            contract = {
+                "schema_id": "qrp-a-share-research-report",
+                "required_sections": list(REQUIRED_REPORT_SECTIONS),
+                "source_run_identity": source_identity,
+            }
+            report_envelope = build_business_manifest_envelope(
+                logical_artifact_id="pv_all_report_artifact",
+                schema_identity=canonical_json_hash(contract),
+                protocol_or_spec_identity="a" * 64,
+                software_identity="c" * 64,
+                research_window=envelope.research_window,
+                upstream_identities={"source_run": source_identity},
+                semantic_metadata={
+                    "target_contract": contract,
+                    "source_run_id": record.run_id,
+                    "source_run_status": "COMPLETE",
+                    "report_status": report["report_status"],
+                },
+            )
+            report_root = write_research_report_artifact(
+                tmp_path / "report", envelope=report_envelope, payload=report
+            )
+            saved_report = read_research_report_artifact(
+                report_root,
+                expected_identity=report_envelope.instance_identity,
+                report_lease=nested_artifact_lease,
+            )
+            assert (
+                saved_report["sections"]["OOS prediction"]["global"]["reality_checks"]
+                == actual
+            )
+        assert report_policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_empty_fama_macbeth_periods_do_not_invent_dates_or_coefficients() -> None:
@@ -601,6 +657,7 @@ def test_empty_fama_macbeth_periods_do_not_invent_dates_or_coefficients() -> Non
 def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     tmp_path: Path,
 ) -> None:
+    preflight_model_specs(configured_models())
     outputs = []
     evaluation_summaries = []
     for name, immature_sign in (("first", 1.0), ("changed", -1.0), ("zero", 1.0)):
@@ -699,9 +756,18 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             "price_volume": list(PV25_FACTORS)
         }
         protocol["statistics"]["fama_macbeth_core_factors"] = list(CORE6_FACTORS)
-        model = _statistics_models(layout, spec, protocol, TimeWindow(dates[0], cutoff))
         policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-        with runtime_resource_policy_scope(policy):
+        with (
+            runtime_resource_policy_scope(policy),
+            policy.lease("test.artifact.metadata", 0) as artifact_lease,
+        ):
+            model = _statistics_models(
+                layout,
+                spec,
+                protocol,
+                TimeWindow(dates[0], cutoff),
+                lease=artifact_lease,
+            )
             owned_tables = build_a_share_statistics_tables(
                 layout=layout,
                 dataset_catalog=ResearchDatasetCatalog((spec,)),
@@ -776,7 +842,10 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         semantic_metadata={},
     )
     artifact_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    with runtime_resource_policy_scope(artifact_policy):
+    with (
+        runtime_resource_policy_scope(artifact_policy),
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         artifact_root = write_statistics_artifact(
             tmp_path / "statistics",
             envelope=envelope,
@@ -785,25 +854,30 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         artifact = read_statistics_artifact(
             artifact_root,
             expected_identity=envelope.instance_identity,
+            lease=artifact_lease,
         )
-    members = {
-        "factor_diagnostics.parquet",
-        "prediction_diagnostics.parquet",
-        "model_trials.parquet",
-        "robustness.parquet",
-        "fama_macbeth.parquet",
-        "fama_macbeth_periods.parquet",
-        "model_losses.parquet",
-        "model_comparison.parquet",
-        "model_reality_checks.parquet",
-    }
-    with artifact.table("model_group_comparison.parquet") as table:
-        assert table.empty
-    for member in members:
-        with artifact.table(member) as table:
-            assert not table.empty
+        members = {
+            "factor_diagnostics.parquet",
+            "prediction_diagnostics.parquet",
+            "model_trials.parquet",
+            "robustness.parquet",
+            "fama_macbeth.parquet",
+            "fama_macbeth_periods.parquet",
+            "model_losses.parquet",
+            "model_comparison.parquet",
+            "model_reality_checks.parquet",
+        }
+        with artifact.table("model_group_comparison.parquet") as table:
+            assert table.empty
+        for member in members:
+            with artifact.table(member) as table:
+                assert not table.empty
+        artifact = None
     zero_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    with runtime_resource_policy_scope(zero_policy):
+    with (
+        runtime_resource_policy_scope(zero_policy),
+        zero_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         zero_root = write_statistics_artifact(
             tmp_path / "statistics_zero_residual",
             envelope=envelope,
@@ -812,32 +886,37 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         zero_artifact = read_statistics_artifact(
             zero_root,
             expected_identity=envelope.instance_identity,
+            lease=artifact_lease,
         )
-    for member in members:
-        with zero_artifact.table(member) as table:
-            assert not table.empty
-    with zero_artifact.table("fama_macbeth_periods.parquet") as table:
-        periods = table.copy()
-    single_factor = periods.loc[
-        periods["regression_id"].eq("single:" + CORE6_FACTORS[0])
-    ]
-    assert single_factor["status"].eq("DEFINED").all()
-    assert single_factor["value"].eq(0.0).all()
-    assert single_factor["white_p_value"].isna().all()
-    assert single_factor["white_reason"].eq("white_test_undefined").all()
-    with zero_artifact.table("fama_macbeth.parquet") as table:
-        zero_summary = table.copy()
-    single_summary = zero_summary.loc[
-        zero_summary["regression_id"].eq("single:" + CORE6_FACTORS[0])
-    ]
-    assert single_summary["white_defined_period_count"].eq(0).all()
-    assert single_summary["white_undefined_period_count"].eq(20).all()
+        for member in members:
+            with zero_artifact.table(member) as table:
+                assert not table.empty
+        with zero_artifact.table("fama_macbeth_periods.parquet") as table:
+            periods = table.copy()
+        single_factor = periods.loc[
+            periods["regression_id"].eq("single:" + CORE6_FACTORS[0])
+        ]
+        assert single_factor["status"].eq("DEFINED").all()
+        assert single_factor["value"].eq(0.0).all()
+        assert single_factor["white_p_value"].isna().all()
+        assert single_factor["white_reason"].eq("white_test_undefined").all()
+        with zero_artifact.table("fama_macbeth.parquet") as table:
+            zero_summary = table.copy()
+        single_summary = zero_summary.loc[
+            zero_summary["regression_id"].eq("single:" + CORE6_FACTORS[0])
+        ]
+        assert single_summary["white_defined_period_count"].eq(0).all()
+        assert single_summary["white_undefined_period_count"].eq(20).all()
+        zero_artifact = None
     empty_period_tables = dict(outputs[0])
     empty_period_tables["fama_macbeth_periods"] = empty_period_tables[
         "fama_macbeth_periods"
     ].iloc[:0]
     empty_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    with runtime_resource_policy_scope(empty_policy):
+    with (
+        runtime_resource_policy_scope(empty_policy),
+        empty_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         empty_root = write_statistics_artifact(
             tmp_path / "statistics_empty_periods",
             envelope=envelope,
@@ -846,27 +925,50 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         empty_artifact = read_statistics_artifact(
             empty_root,
             expected_identity=envelope.instance_identity,
+            lease=artifact_lease,
         )
-    with empty_artifact.table("fama_macbeth_periods.parquet") as table:
-        assert table.empty
+        with empty_artifact.table("fama_macbeth_periods.parquet") as table:
+            assert table.empty
+        empty_artifact = None
     capped = capture_test_policy(
-        available_memory_bytes=64 * 1024**2, explicit_cap_bytes=1024
+        available_memory_bytes=64 * 1024**2, explicit_cap_bytes=64 * 1024**2
     )
-    with runtime_resource_policy_scope(capped):
-        with pytest.raises(MemoryError):
-            with artifact.table("model_losses.parquet"):
-                pytest.fail("decode should not be admitted")
-        assert capped.used_memory_bytes == 0
+    with (
+        runtime_resource_policy_scope(capped),
+        capped.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_statistics_artifact(
+            artifact_root,
+            expected_identity=envelope.instance_identity,
+            lease=artifact_lease,
+        )
+        with capped.lease(
+            "test.table.capacity", capped.working_set_headroom_bytes - 1024
+        ):
+            with pytest.raises(MemoryError):
+                with artifact.table("model_losses.parquet"):
+                    pytest.fail("decode should not be admitted")
+        artifact = None
+        assert capped.used_memory_bytes == artifact_lease.reserved_bytes
     interrupted = capture_test_policy(available_memory_bytes=64 * 1024**2)
     primary = KeyboardInterrupt("table_consumer_interrupted")
-    with runtime_resource_policy_scope(interrupted):
+    with (
+        runtime_resource_policy_scope(interrupted),
+        interrupted.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_statistics_artifact(
+            artifact_root,
+            expected_identity=envelope.instance_identity,
+            lease=artifact_lease,
+        )
         with pytest.raises(KeyboardInterrupt) as caught:
             with artifact.table("model_losses.parquet") as table:
                 assert not table.empty
                 table = None
                 raise primary
         assert caught.value is primary
-        assert interrupted.used_memory_bytes == 0
+        artifact = None
+        assert interrupted.used_memory_bytes == artifact_lease.reserved_bytes
     import shutil
 
     import pyarrow as pa
@@ -892,10 +994,16 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     wrong_root = write_semantic_artifact(
         tmp_path / "bad_schema", envelope, wrong_schema
     )
-    with pytest.raises(ValueError, match="statistics_table_schema_invalid"):
-        read_statistics_artifact(
-            wrong_root, expected_identity=envelope.instance_identity
-        )
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(ValueError, match="statistics_table_schema_invalid"):
+            read_statistics_artifact(
+                wrong_root,
+                expected_identity=envelope.instance_identity,
+                lease=artifact_lease,
+            )
 
 
 @pytest.mark.parametrize(

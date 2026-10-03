@@ -2295,7 +2295,10 @@ def test_persisted_storage_boundaries_preserve_serious_io(
     def fail(*args, **kwargs):
         raise primary
 
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         with monkeypatch.context() as patch:
             if boundary.endswith("instances_stat"):
                 owner = instances if boundary.startswith("dataset") else semantic
@@ -2375,9 +2378,9 @@ def test_persisted_storage_boundaries_preserve_serious_io(
                 elif "instances" in boundary:
                     semantic.discover_semantic_artifact_instances(logical)
                 else:
-                    semantic.read_semantic_artifact(root)
+                    semantic.read_semantic_artifact(root, lease=artifact_lease)
             assert caught.value is primary
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
     assert all(
         identity.filesystem_read_bytes(path) == value for path, value in before.items()
     )

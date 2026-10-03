@@ -884,6 +884,7 @@ def _select_a_share_models(
 def read_quarterly_model_artifact(
     instance_root,
     *,
+    lease,
     expected_identity=None,
     trial_layout=None,
     expected_member_identities=None,
@@ -897,6 +898,15 @@ def read_quarterly_model_artifact(
         member_identities=member_identities,
         expected_member_identities=expected_member_identities,
         operational_metadata=operational,
+        lease=lease,
+    )
+    _admit_model_metadata(
+        sum(
+            2 * json_record_working_set_bytes(member["size"])
+            for member in members
+            if str(member["path"]).endswith(".json")
+        ),
+        lease=lease,
     )
     return _validate_a_share_model_payload(
         instance_root,
@@ -1076,163 +1086,184 @@ def _validate_a_share_model_payload(
             with read_model_trial_ledger_reference(
                 trial_layout, by_identity[identity]
             ) as (plan, records):
-                if (
-                    plan.stage != "selection"
-                    or plan.market_id != "a_share"
-                    or plan.research_dataset_id != protocol["scenario_id"]
-                    or plan.data_snapshot_id != dataset_identity
-                    or plan.input_lineage != (dataset_identity,)
-                    or plan.target_id != envelope["logical_artifact_id"]
-                    or plan.research_protocol_identity != canonical_json_hash(protocol)
-                    or plan.candidate_family_id != family_id
-                    or len(plan.folds) != 1
-                    or plan.candidate_ids != candidate_orders[family_id]
-                    or plan.tie_break_order != plan.candidate_ids
-                    or plan.trial_budget != len(plan.candidate_ids)
-                    or plan.selection_metric != "validation_rankic"
-                    or plan.selection_direction != "maximize"
-                    or _window_payload(plan.test) != protocol["holdout_window"]
-                    or tuple(record.candidate_id for record in records)
-                    != plan.candidate_ids
-                    or any(record.status != "completed" for record in records)
-                ):
-                    raise ValueError("model_trial_artifact_binding_invalid")
-                fold = plan.folds[0]
-                if (
-                    quarter_id_for_fold(fold) != quarter
-                    or str(pd.Period(fold.validation.start, freq="Q")) != quarter
-                    or str(pd.Period(fold.validation.end, freq="Q")) != quarter
-                    or pd.Timestamp(fold.train.start).year
-                    != pd.Timestamp(protocol["formal_dataset_window"]["start"]).year
-                    or (quarter in folds and folds[quarter] != fold)
-                ):
-                    raise ValueError("model_trial_fold_binding_invalid")
-                folds[quarter] = fold
-                configuration = configurations[family_id]
-                parameters = configuration.get(
-                    "parameter_candidates", [configuration["hyperparameters"]]
-                )
-                for entry, record in zip(entries, records, strict=True):
-                    if set(entry) != {
-                        "quarter_id",
-                        "family_id",
-                        "model_id",
-                        "training_window",
-                        "validation_window",
-                        "model_metadata",
-                        "validation_prediction",
-                        "trial_semantic_identity",
-                    }:
-                        raise ValueError("model_candidate_metadata_invalid")
-                    metadata = validate_model_metadata_core(entry["model_metadata"])
-                    expected_spec = _selection_model_specs(
-                        specs[family_id],
-                        parameters,
-                        n_train=record.metrics["n_train"],
-                        root_seed=protocol["root_seed"],
-                        quarter_id=quarter,
-                    )[plan.candidate_ids.index(record.candidate_id)]
-                    expected_parameters = model_spec_payload(expected_spec)
+                try:
                     if (
-                        record.payload()["normalized_parameters"] != expected_parameters
-                        or plan.protocol_payload()["candidate_parameters"][
-                            record.candidate_id
-                        ]
-                        != expected_parameters
-                        or record.metrics["n_train"]
-                        != metadata["rows_after_input_label_dropna"]
-                        or entry["training_window"] != _window_payload(fold.train)
-                        or entry["validation_window"]
-                        != _window_payload(fold.validation)
-                        or pd.Timestamp(metadata["train_start"])
-                        < pd.Timestamp(fold.train.start)
-                        or pd.Timestamp(metadata["train_end"])
-                        > pd.Timestamp(fold.train.end)
+                        plan.stage != "selection"
+                        or plan.market_id != "a_share"
+                        or plan.research_dataset_id != protocol["scenario_id"]
+                        or plan.data_snapshot_id != dataset_identity
+                        or plan.input_lineage != (dataset_identity,)
+                        or plan.target_id != envelope["logical_artifact_id"]
+                        or plan.research_protocol_identity
+                        != canonical_json_hash(protocol)
+                        or plan.candidate_family_id != family_id
+                        or len(plan.folds) != 1
+                        or plan.candidate_ids != candidate_orders[family_id]
+                        or plan.tie_break_order != plan.candidate_ids
+                        or plan.trial_budget != len(plan.candidate_ids)
+                        or plan.selection_metric != "validation_rankic"
+                        or plan.selection_direction != "maximize"
+                        or _window_payload(plan.test) != protocol["holdout_window"]
+                        or tuple(record.candidate_id for record in records)
+                        != plan.candidate_ids
+                        or any(record.status != "completed" for record in records)
                     ):
-                        raise ValueError("model_trial_parameters_misaligned")
-                    _validate_a_share_model_parameters(metadata, expected_parameters)
-                    member = entry["validation_prediction"]
-                    path = f"models/{quarter}/{entry['model_id']}.parquet"
-                    if member.get("path") != path or member != member_records.get(path):
-                        raise ValueError("model_validation_member_invalid")
-                    required.add(path)
-                    expected_coverage = ModelSampleCoverage(
-                        model_validation_coverage_scope(
-                            dataset_identity, fold, tuple(specs.values())
-                        )
-                    )
-
-                    def scoring_frames(
-                        entry=entry, fold=fold, coverage=expected_coverage
-                    ):
-                        with closing_iterator(
-                            _a_share_validation_chunks(
-                                root,
-                                entry,
-                                member_identities=member_identities,
-                                development_end=protocol["development_window"]["end"],
+                        raise ValueError("model_trial_artifact_binding_invalid")
+                    fold = plan.folds[0]
+                    if (
+                        quarter_id_for_fold(fold) != quarter
+                        or str(pd.Period(fold.validation.start, freq="Q")) != quarter
+                        or str(pd.Period(fold.validation.end, freq="Q")) != quarter
+                        or pd.Timestamp(fold.train.start).year
+                        != pd.Timestamp(protocol["formal_dataset_window"]["start"]).year
+                        or (
+                            quarter in folds
+                            and (
+                                folds[quarter]["training_window"]
+                                != _window_payload(fold.train)
+                                or folds[quarter]["validation_window"]
+                                != _window_payload(fold.validation)
                             )
-                        ) as frames:
-                            for frame in frames:
-                                with current_runtime_resource_policy().lease(
-                                    "research.model.validation_reader",
-                                    max(1, 3 * pandas_frame_payload_bytes(frame)),
-                                ):
-                                    mature = frame.loc[
-                                        label_maturity_mask(
-                                            frame,
-                                            fitting_cutoff=fold.validation.end,
-                                            availability_column="label_available_at",
-                                            target_column="label",
-                                        )
-                                        & frame["score_eligible"]
-                                    ]
-                                    coverage.add(mature)
-                                    yield mature
-
-                    metrics = evaluate_model_trial_metrics_from_chunks(
-                        scoring_frames(),
-                        model_id=entry["model_id"],
-                        label_column="label",
-                        prediction_column="prediction_score",
-                        expected_coverage=expected_coverage,
-                    )
-                    terminal = {
-                        key: None
-                        if isinstance(value, float) and np.isnan(value)
-                        else value.item()
-                        if isinstance(value, np.generic)
-                        else value
-                        for key, value in metrics.items()
-                        if key != "model_id"
-                    }
-                    terminal["n_train"] = metadata["rows_after_input_label_dropna"]
-                    if (
-                        dict(record.metrics) != terminal
-                        or record.common_coverage_id
-                        != expected_coverage.semantic_identity
+                        )
                     ):
-                        raise ValueError("model_validation_trial_mismatch")
+                        raise ValueError("model_trial_fold_binding_invalid")
+                    folds[quarter] = entries[0]
+                    configuration = configurations[family_id]
+                    parameters = configuration.get(
+                        "parameter_candidates", [configuration["hyperparameters"]]
+                    )
+                    for entry, record in zip(entries, records, strict=True):
+                        if set(entry) != {
+                            "quarter_id",
+                            "family_id",
+                            "model_id",
+                            "training_window",
+                            "validation_window",
+                            "model_metadata",
+                            "validation_prediction",
+                            "trial_semantic_identity",
+                        }:
+                            raise ValueError("model_candidate_metadata_invalid")
+                        metadata = validate_model_metadata_core(entry["model_metadata"])
+                        expected_spec = _selection_model_specs(
+                            specs[family_id],
+                            parameters,
+                            n_train=record.metrics["n_train"],
+                            root_seed=protocol["root_seed"],
+                            quarter_id=quarter,
+                        )[plan.candidate_ids.index(record.candidate_id)]
+                        expected_parameters = model_spec_payload(expected_spec)
+                        if (
+                            record.payload()["normalized_parameters"]
+                            != expected_parameters
+                            or plan.protocol_payload()["candidate_parameters"][
+                                record.candidate_id
+                            ]
+                            != expected_parameters
+                            or record.metrics["n_train"]
+                            != metadata["rows_after_input_label_dropna"]
+                            or entry["training_window"] != _window_payload(fold.train)
+                            or entry["validation_window"]
+                            != _window_payload(fold.validation)
+                            or pd.Timestamp(metadata["train_start"])
+                            < pd.Timestamp(fold.train.start)
+                            or pd.Timestamp(metadata["train_end"])
+                            > pd.Timestamp(fold.train.end)
+                        ):
+                            raise ValueError("model_trial_parameters_misaligned")
+                        _validate_a_share_model_parameters(
+                            metadata, expected_parameters
+                        )
+                        member = entry["validation_prediction"]
+                        path = f"models/{quarter}/{entry['model_id']}.parquet"
+                        if member.get("path") != path or member != member_records.get(
+                            path
+                        ):
+                            raise ValueError("model_validation_member_invalid")
+                        required.add(path)
+                        expected_coverage = ModelSampleCoverage(
+                            model_validation_coverage_scope(
+                                dataset_identity, fold, tuple(specs.values())
+                            )
+                        )
+
+                        def scoring_frames(
+                            entry=entry, fold=fold, coverage=expected_coverage
+                        ):
+                            with closing_iterator(
+                                _a_share_validation_chunks(
+                                    root,
+                                    entry,
+                                    member_identities=member_identities,
+                                    development_end=protocol["development_window"][
+                                        "end"
+                                    ],
+                                )
+                            ) as frames:
+                                for frame in frames:
+                                    with current_runtime_resource_policy().lease(
+                                        "research.model.validation_reader",
+                                        max(1, 3 * pandas_frame_payload_bytes(frame)),
+                                    ):
+                                        mature = frame.loc[
+                                            label_maturity_mask(
+                                                frame,
+                                                fitting_cutoff=fold.validation.end,
+                                                availability_column="label_available_at",
+                                                target_column="label",
+                                            )
+                                            & frame["score_eligible"]
+                                        ]
+                                        coverage.add(mature)
+                                        yield mature
+
+                        metrics = evaluate_model_trial_metrics_from_chunks(
+                            scoring_frames(),
+                            model_id=entry["model_id"],
+                            label_column="label",
+                            prediction_column="prediction_score",
+                            expected_coverage=expected_coverage,
+                        )
+                        terminal = {
+                            key: None
+                            if isinstance(value, float) and np.isnan(value)
+                            else value.item()
+                            if isinstance(value, np.generic)
+                            else value
+                            for key, value in metrics.items()
+                            if key != "model_id"
+                        }
+                        terminal["n_train"] = metadata["rows_after_input_label_dropna"]
+                        if (
+                            dict(record.metrics) != terminal
+                            or record.common_coverage_id
+                            != expected_coverage.semantic_identity
+                        ):
+                            raise ValueError("model_validation_trial_mismatch")
+                finally:
+                    plan = records = record = fold = scoring_frames = None
     cutoff = pd.Timestamp(protocol["development_window"]["end"])
     complete = pd.Timestamp(envelope["research_window"]["end"]) >= cutoff
     expected_decisions = []
-    for quarter, fold in folds.items():
-        if pd.Timestamp(fold.validation.start) >= pd.Timestamp(
+    for quarter, entry in folds.items():
+        if pd.Timestamp(entry["validation_window"]["start"]) >= pd.Timestamp(
             protocol["development_window"]["start"]
         ):
             expected_decisions.append(
                 (
                     "quarterly",
                     quarter,
-                    pd.Timestamp(fold.train.end),
+                    pd.Timestamp(entry["training_window"]["end"]),
                     TimeWindow(
-                        pd.Timestamp(fold.validation.start).to_period("Q").start_time
+                        pd.Timestamp(entry["validation_window"]["start"])
+                        .to_period("Q")
+                        .start_time
                         - pd.DateOffset(
                             months=protocol["model_chronology"][
                                 "scoring_lookback_months"
                             ]
                         ),
-                        fold.train.end,
+                        pd.Timestamp(entry["training_window"]["end"]),
                     ),
                 )
             )
@@ -1338,41 +1369,44 @@ def _validate_a_share_model_payload(
             plan,
             records,
         ):
-            if (
-                plan.stage != "refit"
-                or plan.selection_group != group
-                or plan.selection_ledger_semantic_identities
-                != tuple(decision["selection_ledger_semantic_identities"])
-                or plan.market_id != "a_share"
-                or plan.research_dataset_id != protocol["scenario_id"]
-                or plan.data_snapshot_id != dataset_identity
-                or plan.input_lineage != (dataset_identity,)
-                or plan.target_id != envelope["logical_artifact_id"]
-                or plan.candidate_family_id != family_id
-                or plan.research_protocol_identity != canonical_json_hash(protocol)
-                or plan.fit_windows != fit_windows
-                or pd.Timestamp(plan.fit_cutoff) != cutoff
-                or plan.candidate_ids != (expected_spec.model_id,)
-                or plan.random_seed != expected_spec.random_seed
-                or plan.protocol_payload()["candidate_parameters"]
-                != {expected_spec.model_id: normalized}
-                or _window_payload(plan.test) != protocol["holdout_window"]
-                or len(records) != 1
-                or records[0].status != "completed"
-                or records[0].payload()["normalized_parameters"] != normalized
-                or records[0].common_coverage_id != metadata["fit_coverage_id"]
-                or dict(records[0].metrics)
-                != {"n_train": metadata["rows_after_input_label_dropna"]}
-                or entry["model_id"] != expected_spec.model_id
-                or entry["fit_windows"]
-                != [_window_payload(part) for part in fit_windows]
-                or entry["fit_cutoff"] != cutoff.date().isoformat()
-                or metadata["fit_cutoff"] != entry["fit_cutoff"]
-                or pd.Timestamp(metadata["train_start"])
-                < pd.Timestamp(fit_windows[0].start)
-                or pd.Timestamp(metadata["train_end"]) > cutoff
-            ):
-                raise ValueError("model_trial_refit_misaligned")
+            try:
+                if (
+                    plan.stage != "refit"
+                    or plan.selection_group != group
+                    or plan.selection_ledger_semantic_identities
+                    != tuple(decision["selection_ledger_semantic_identities"])
+                    or plan.market_id != "a_share"
+                    or plan.research_dataset_id != protocol["scenario_id"]
+                    or plan.data_snapshot_id != dataset_identity
+                    or plan.input_lineage != (dataset_identity,)
+                    or plan.target_id != envelope["logical_artifact_id"]
+                    or plan.candidate_family_id != family_id
+                    or plan.research_protocol_identity != canonical_json_hash(protocol)
+                    or plan.fit_windows != fit_windows
+                    or pd.Timestamp(plan.fit_cutoff) != cutoff
+                    or plan.candidate_ids != (expected_spec.model_id,)
+                    or plan.random_seed != expected_spec.random_seed
+                    or plan.protocol_payload()["candidate_parameters"]
+                    != {expected_spec.model_id: normalized}
+                    or _window_payload(plan.test) != protocol["holdout_window"]
+                    or len(records) != 1
+                    or records[0].status != "completed"
+                    or records[0].payload()["normalized_parameters"] != normalized
+                    or records[0].common_coverage_id != metadata["fit_coverage_id"]
+                    or dict(records[0].metrics)
+                    != {"n_train": metadata["rows_after_input_label_dropna"]}
+                    or entry["model_id"] != expected_spec.model_id
+                    or entry["fit_windows"]
+                    != [_window_payload(part) for part in fit_windows]
+                    or entry["fit_cutoff"] != cutoff.date().isoformat()
+                    or metadata["fit_cutoff"] != entry["fit_cutoff"]
+                    or pd.Timestamp(metadata["train_start"])
+                    < pd.Timestamp(fit_windows[0].start)
+                    or pd.Timestamp(metadata["train_end"]) > cutoff
+                ):
+                    raise ValueError("model_trial_refit_misaligned")
+            finally:
+                plan = records = None
         _validate_a_share_model_parameters(metadata, normalized)
         relative = f"models/final/{group}/{family_id}.pkl"
         required.add(relative)
@@ -1719,7 +1753,7 @@ def write_crypto_model_artifact(
                                 ),
                                 "training_asset_ids": member.training_assets,
                                 "evaluation_asset_ids": member.evaluation_assets,
-                                "model_metadata": member.result.metadata,
+                                "model_metadata": None,
                                 "refit_trial_semantic_identity": (
                                     member.refit_trial_reference["semantic_identity"]
                                 ),
@@ -1732,8 +1766,8 @@ def write_crypto_model_artifact(
                                     "evaluation_asset_ids": list(
                                         member.evaluation_assets
                                     ),
-                                    "model_metadata": validate_model_metadata_core(
-                                        member.result.metadata
+                                    "model_metadata": _persisted_model_metadata(
+                                        member.result, retain=retain
                                     ),
                                 }
                             )
@@ -1828,7 +1862,12 @@ def _intraday_window(window):
 
 
 def read_crypto_model_artifact(
-    root, *, expected_identity=None, trial_layout=None, expected_member_identities=None
+    root,
+    *,
+    lease,
+    expected_identity=None,
+    trial_layout=None,
+    expected_member_identities=None,
 ):
     root = Path(root)
     member_identities = {}
@@ -1839,6 +1878,15 @@ def read_crypto_model_artifact(
         member_identities=member_identities,
         expected_member_identities=expected_member_identities,
         operational_metadata=operational,
+        lease=lease,
+    )
+    _admit_model_metadata(
+        sum(
+            2 * json_record_working_set_bytes(member["size"])
+            for member in members
+            if str(member["path"]).endswith(".json")
+        ),
+        lease=lease,
     )
     refs = operational.get("model_trial_ledgers")
     return _validate_crypto_model_payload(
@@ -2012,67 +2060,70 @@ def _validate_crypto_model_payload(
                 plan,
                 records,
             ):
-                expected_spec = replace(
-                    registered_specs[entry["model_id"]],
-                    random_seed=derive_seed(
-                        ROOT_SEED, "crypto_model", fold.fold_id, entry["model_id"]
-                    ),
-                )
-                parameters = model_spec_payload(expected_spec)
-                if (
-                    plan.stage != "selection"
-                    or plan.market_id != "crypto"
-                    or plan.research_dataset_id != protocol["scenario_id"]
-                    or plan.data_snapshot_id
-                    != envelope["upstream_identities"][protocol["scenario_id"]]
-                    or plan.input_lineage != (plan.data_snapshot_id,)
-                    or plan.candidate_family_id != entry["model_id"]
-                    or plan.target_id != envelope["logical_artifact_id"]
-                    or plan.folds != (fold,)
-                    or plan.test != test
-                    or plan.candidate_ids != (entry["model_id"],)
-                    or plan.selection_metric != "validation_mse"
-                    or plan.selection_direction != "minimize"
-                    or plan.research_protocol_identity != canonical_json_hash(protocol)
-                    or plan.protocol_payload()["candidate_parameters"]
-                    != {entry["model_id"]: parameters}
-                    or len(records) != 1
-                    or records[0].status != "completed"
-                    or records[0].payload()["normalized_parameters"] != parameters
-                    or records[0].metrics["n_train"]
-                    != entry["model_metadata"]["rows_after_input_label_dropna"]
-                ):
-                    raise ValueError("crypto_model_trial_binding_invalid")
-                validate_parameters(entry["model_metadata"], parameters)
-                validate_fit_bounds(
-                    entry["model_metadata"], (fold.train,), fold.train.end
-                )
-                path = entry["validation_prediction_path"]
-                if (
-                    path
-                    != f"models/{fold.fold_id}/validation/{entry['model_id']}.parquet"
-                ):
-                    raise ValueError("crypto_model_validation_path_invalid")
-                required.add(path)
-                validation_coverage = ModelSampleCoverage(
-                    crypto_validation_coverage_scope(
-                        plan, expected_spec, prediction.training_asset_ids
+                try:
+                    expected_spec = replace(
+                        registered_specs[entry["model_id"]],
+                        random_seed=derive_seed(
+                            ROOT_SEED, "crypto_model", fold.fold_id, entry["model_id"]
+                        ),
                     )
-                )
-                with closing_iterator(
-                    _crypto_validation_chunks(
-                        root, entry, member_identities=member_identities
+                    parameters = model_spec_payload(expected_spec)
+                    if (
+                        plan.stage != "selection"
+                        or plan.market_id != "crypto"
+                        or plan.research_dataset_id != protocol["scenario_id"]
+                        or plan.data_snapshot_id
+                        != envelope["upstream_identities"][protocol["scenario_id"]]
+                        or plan.input_lineage != (plan.data_snapshot_id,)
+                        or plan.candidate_family_id != entry["model_id"]
+                        or plan.target_id != envelope["logical_artifact_id"]
+                        or plan.folds != (fold,)
+                        or plan.test != test
+                        or plan.candidate_ids != (entry["model_id"],)
+                        or plan.selection_metric != "validation_mse"
+                        or plan.selection_direction != "minimize"
+                        or plan.research_protocol_identity
+                        != canonical_json_hash(protocol)
+                        or plan.protocol_payload()["candidate_parameters"]
+                        != {entry["model_id"]: parameters}
+                        or len(records) != 1
+                        or records[0].status != "completed"
+                        or records[0].payload()["normalized_parameters"] != parameters
+                        or records[0].metrics["n_train"]
+                        != entry["model_metadata"]["rows_after_input_label_dropna"]
+                    ):
+                        raise ValueError("crypto_model_trial_binding_invalid")
+                    validate_parameters(entry["model_metadata"], parameters)
+                    validate_fit_bounds(
+                        entry["model_metadata"], (fold.train,), fold.train.end
                     )
-                ) as chunks:
-                    for frame in chunks:
-                        validation_coverage.add(frame)
-                if (
-                    validation_coverage.row_count
-                    != records[0].metrics["validation_rows"]
-                    or validation_coverage.semantic_identity
-                    != records[0].common_coverage_id
-                ):
-                    raise ValueError("crypto_model_validation_count_invalid")
+                    path = entry["validation_prediction_path"]
+                    if path != (
+                        f"models/{fold.fold_id}/validation/{entry['model_id']}.parquet"
+                    ):
+                        raise ValueError("crypto_model_validation_path_invalid")
+                    required.add(path)
+                    validation_coverage = ModelSampleCoverage(
+                        crypto_validation_coverage_scope(
+                            plan, expected_spec, prediction.training_asset_ids
+                        )
+                    )
+                    with closing_iterator(
+                        _crypto_validation_chunks(
+                            root, entry, member_identities=member_identities
+                        )
+                    ) as chunks:
+                        for frame in chunks:
+                            validation_coverage.add(frame)
+                    if (
+                        validation_coverage.row_count
+                        != records[0].metrics["validation_rows"]
+                        or validation_coverage.semantic_identity
+                        != records[0].common_coverage_id
+                    ):
+                        raise ValueError("crypto_model_validation_count_invalid")
+                finally:
+                    plan = records = None
             selection_references[(fold.fold_id, entry["model_id"])] = ref
             models.append(entry)
 
@@ -2116,52 +2167,60 @@ def _validate_crypto_model_payload(
         if refit_ref is None:
             raise ValueError("crypto_model_trial_references_invalid")
         with ExitStack() as ledgers:
-            selection_plan, selection_records = ledgers.enter_context(
-                read_model_trial_ledger_reference(trial_layout, selection_ref)
-            )
-            refit_plan, records = ledgers.enter_context(
-                read_model_trial_ledger_reference(trial_layout, refit_ref)
-            )
-            parameters = selection_records[0].payload()["normalized_parameters"]
-            metadata = entry["model_metadata"]
-            if (
-                refit_plan.stage != "refit"
-                or refit_plan.selection_ledger_semantic_identities
-                != (selection_ref["semantic_identity"],)
-                or refit_plan.fit_windows != (final_fold.train, final_fold.validation)
-                or refit_plan.fit_cutoff != final_fold.validation.end
-                or any(
-                    getattr(refit_plan, key) != getattr(selection_plan, key)
-                    for key in (
-                        "market_id",
-                        "research_dataset_id",
-                        "data_snapshot_id",
-                        "input_lineage",
-                        "research_protocol_identity",
-                        "target_id",
-                        "candidate_family_id",
-                        "test",
-                        "candidate_ids",
-                        "backend_versions",
-                        "cost_assumptions",
-                        "risk_assumptions",
-                    )
+            try:
+                selection_plan, selection_records = ledgers.enter_context(
+                    read_model_trial_ledger_reference(trial_layout, selection_ref)
                 )
-                or refit_plan.protocol_payload()["candidate_parameters"]
-                != {entry["model_id"]: parameters}
-                or refit_plan.random_seed != parameters["random_seed"]
-                or len(records) != 1
-                or records[0].status != "completed"
-                or records[0].payload()["normalized_parameters"] != parameters
-                or records[0].random_seed != metadata["random_seed"]
-                or records[0].common_coverage_id != entry["fit_coverage_id"]
-                or re.fullmatch(r"[0-9a-f]{64}", entry["fit_coverage_id"]) is None
-                or dict(records[0].metrics)
-                != {"n_train": metadata["rows_after_input_label_dropna"]}
-            ):
-                raise ValueError("crypto_model_refit_binding_invalid")
-            validate_parameters(metadata, parameters)
-            validate_fit_bounds(metadata, refit_plan.fit_windows, refit_plan.fit_cutoff)
+                refit_plan, records = ledgers.enter_context(
+                    read_model_trial_ledger_reference(trial_layout, refit_ref)
+                )
+                parameters = selection_records[0].payload()["normalized_parameters"]
+                metadata = entry["model_metadata"]
+                if (
+                    refit_plan.stage != "refit"
+                    or refit_plan.selection_ledger_semantic_identities
+                    != (selection_ref["semantic_identity"],)
+                    or refit_plan.fit_windows
+                    != (final_fold.train, final_fold.validation)
+                    or refit_plan.fit_cutoff != final_fold.validation.end
+                    or any(
+                        getattr(refit_plan, key) != getattr(selection_plan, key)
+                        for key in (
+                            "market_id",
+                            "research_dataset_id",
+                            "data_snapshot_id",
+                            "input_lineage",
+                            "research_protocol_identity",
+                            "target_id",
+                            "candidate_family_id",
+                            "test",
+                            "candidate_ids",
+                            "backend_versions",
+                            "cost_assumptions",
+                            "risk_assumptions",
+                        )
+                    )
+                    or refit_plan.protocol_payload()["candidate_parameters"]
+                    != {entry["model_id"]: parameters}
+                    or refit_plan.random_seed != parameters["random_seed"]
+                    or len(records) != 1
+                    or records[0].status != "completed"
+                    or records[0].payload()["normalized_parameters"] != parameters
+                    or records[0].random_seed != metadata["random_seed"]
+                    or records[0].common_coverage_id != entry["fit_coverage_id"]
+                    or re.fullmatch(r"[0-9a-f]{64}", entry["fit_coverage_id"]) is None
+                    or dict(records[0].metrics)
+                    != {"n_train": metadata["rows_after_input_label_dropna"]}
+                ):
+                    raise ValueError("crypto_model_refit_binding_invalid")
+                validate_parameters(metadata, parameters)
+                validate_fit_bounds(
+                    metadata, refit_plan.fit_windows, refit_plan.fit_cutoff
+                )
+            finally:
+                selection_plan = selection_records = refit_plan = records = (
+                    parameters
+                ) = None
         required.add(f"models/final/{entry['model_id']}.pkl")
 
     if references or {member["path"] for member in members} != required:

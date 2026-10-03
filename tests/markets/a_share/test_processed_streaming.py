@@ -269,6 +269,7 @@ def test_financial_event_builder_is_admitted_before_expansion(monkeypatch, bound
             closing_iterator(
                 producer._processed_frames(
                     research_profile().processed.get("fundamental_pit"),
+                    time_window=TimeWindow(dates[0], dates[-1]),
                     source=source,
                     source_sessions={},
                     dependencies={"panel": object()},
@@ -530,7 +531,9 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
                 ),
                 time_window=None
                 if data_id in producer._FULL_HISTORY_SOURCE_IDS
-                else window,
+                else producer.a_share.source_history_window(
+                    profile.interim.get(data_id), window
+                ),
                 resource_policy=policy,
             )
             for data_id in source
@@ -922,3 +925,100 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
         assert rows.loc[dates[-1], "period_return"] == 0.1
         assert rows.loc[dates[-1], "adj_close"] == 120.0
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("target", ("price_volume_facts", "market_model_factors"))
+def test_processed_narrow_output_uses_existing_panel_history(
+    tmp_path, monkeypatch, target
+):
+    dates = pd.bdate_range("2020-01-02", periods=420).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    calendar = pd.bdate_range(dates[0] - pd.offsets.BDay(300), dates[-1]).as_unit("ns")
+    source["trading_calendar"] = pd.DataFrame(
+        dict(
+            timestamp=calendar,
+            calendar_date=calendar,
+            source_market_type=1,
+            is_trading_day=True,
+            source_day_of_week=calendar.dayofweek,
+            source_state="O",
+        )
+    )
+    bars = source["market_bars_1d"]
+    bars["period_return"] = np.sin(np.arange(len(bars)) / 3) * 0.01
+    profile = research_profile()
+    panel_spec = profile.processed.get("market_panel_1d")
+    spec = profile.processed.get(target)
+    panel = producer._compute_processed_frame(
+        panel_spec, source=source, dependencies={}, trading_sessions=tuple(dates)
+    )
+    expected = producer._compute_processed_frame(
+        spec,
+        source={},
+        dependencies={"market_panel_1d": panel},
+        trading_sessions=tuple(dates),
+    )
+    core = dates[-20:]
+    expected = (
+        expected.loc[expected.timestamp.isin(core)]
+        .sort_values(["timestamp", "market_id", "asset_id"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    layout = StorageLayout(tmp_path)
+    write_dataset(
+        layout.processed_data_root(
+            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
+        ),
+        panel,
+        spec=panel_spec,
+        resource_policy=None,
+        borrowed_input=True,
+    )
+    compute = producer._compute_processed_frame
+    input_sessions = []
+
+    def observed(spec, **kwargs):
+        input_sessions.append(
+            kwargs["dependencies"]["market_panel_1d"].timestamp.nunique()
+        )
+        return compute(spec, **kwargs)
+
+    monkeypatch.setattr(producer, "_compute_processed_frame", observed)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(core[0], core[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+            resource_policy=policy,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                resource_policy=policy,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        actual = read_dataset(root, resource_policy=policy)
+        assert policy.used_memory_bytes == 0
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    assert actual.timestamp.min() == core[0]
+    assert actual.timestamp.max() == core[-1]
+    columns = [
+        definition.output_column
+        for definition in profile.factors.list()
+        if definition.output_column in spec.required_columns
+    ]
+    assert actual.loc[actual.timestamp.eq(core[0]), columns].notna().any().any()
+    lookback = producer.factor_engine.factor_lookback_bars(
+        tuple(
+            definition
+            for definition in profile.factors.list()
+            if definition.output_column in spec.required_columns
+        )
+    )
+    assert input_sessions and max(input_sessions) <= lookback + len(core)
+    assert max(input_sessions) < len(dates)

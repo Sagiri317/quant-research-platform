@@ -495,6 +495,14 @@ def bind_research_configuration(
             archive_paths=archive_paths,
             time_window=source_window,
         )
+        calibration_window = TimeWindow(
+            source_window.start, TimeWindow(**config["windows"]["development"]).end
+        )
+        calibration_opener = partial(
+            open_market_source,
+            archive_paths=archive_paths,
+            time_window=calibration_window,
+        )
         source_root = tardis_root if archive_paths is not None else None
         panel_binding = bindings[crypto_ids.HFT_PANEL_DATA_ID]
         bindings[crypto_ids.HFT_PANEL_DATA_ID] = replace(
@@ -545,7 +553,7 @@ def bind_research_configuration(
                         asset_id=candidate.asset_id,
                         model_ids=candidate.model_ids,
                         market_type=FUTURES_MARKET_TYPE,
-                        open_run=source_opener,
+                        open_run=calibration_opener,
                         reconstruct_depth=partial(
                             iter_reconstructed_depth,
                             market_type=FUTURES_MARKET_TYPE,
@@ -556,9 +564,11 @@ def bind_research_configuration(
                         ),
                         read_model_artifact=read_crypto_model_artifact,
                     ),
-                    source_identity=bindings[
-                        crypto_ids.HFT_PANEL_DATA_ID
-                    ].source_identity,
+                    source_identity=partial(
+                        market_source_identity,
+                        archive_paths=archive_paths,
+                        time_window=calibration_window,
+                    ),
                     raw_root=source_root,
                 )
             for target in bound.execution_targets():

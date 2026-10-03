@@ -10,7 +10,11 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 
 
 def calibration_from_paths(paths, errors, policy):
-    return MakerCalibration(*calibration_inputs(paths, errors), resource_policy=policy)
+    return MakerCalibration(
+        *calibration_inputs(paths, errors),
+        resource_policy=policy,
+        price_unit=paths[0][0][0].price_unit,
+    )
 
 
 def calibration_inputs(paths, errors):

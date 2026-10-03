@@ -131,7 +131,7 @@ def portfolio_curve(
         with policy.lease("queries.portfolio_curve", initial_bytes) as retained:
             identities = {}
             root, envelope = report_artifact.read_validated_reference(
-                layout, result, member_identities=identities
+                layout, result, member_identities=identities, lease=retained
             )
             mode = (
                 envelope["semantic_metadata"]["target_contract"]["execution_contract"][
@@ -145,6 +145,7 @@ def portfolio_curve(
                     root,
                     expected_identity=result.instance_identity,
                     expected_member_identities=identities,
+                    lease=retained,
                 )
                 episodes = []
                 with closing_iterator(artifact.iter_episodes()) as children:
@@ -188,6 +189,7 @@ def portfolio_curve(
                     root,
                     expected_identity=result.instance_identity,
                     expected_member_identities=identities,
+                    lease=retained,
                 )
                 curve = {
                     "episode_id": "continuous",

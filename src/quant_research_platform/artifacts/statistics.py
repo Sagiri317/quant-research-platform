@@ -425,6 +425,7 @@ _ARROW_SCHEMAS = {
         [
             pa.field("fold_id", pa.string()),
             pa.field("side", pa.string()),
+            pa.field("price_unit", pa.string()),
             pa.field("sample_count", pa.int64()),
             pa.field("zero_fill_count", pa.int64()),
             pa.field("post_only_rejection_count", pa.int64()),
@@ -831,6 +832,7 @@ def _statistics_artifact(root, identity, members, member_identities=None):
 def read_statistics_artifact(
     instance_root: Path,
     *,
+    lease,
     expected_identity: str,
     validate_tables=None,
     expected_member_identities=None,
@@ -841,6 +843,7 @@ def read_statistics_artifact(
         expected_identity=expected_identity,
         member_identities=identities,
         expected_member_identities=expected_member_identities,
+        lease=lease,
     )
     with runtime_resource_policy_scope(current_runtime_resource_policy()):
         artifact = _statistics_artifact(

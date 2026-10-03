@@ -412,3 +412,369 @@ def _synthetic_interim_frames(sessions: pd.DatetimeIndex) -> dict[str, pd.DataFr
         "trading_no_limit": no_limit,
         "special_treatment_changes": special,
     }
+
+
+def _windowed_source_profile(frames, calls, *, reject_before=None, reject_at=None):
+    base = research_profile()
+    frames = dict(frames)
+    sessions = pd.DatetimeIndex(frames["trading_calendar"].calendar_date)
+    calendar = pd.bdate_range(sessions[0] - pd.offsets.BDay(300), sessions[-1]).as_unit(
+        "ns"
+    )
+    frames["trading_calendar"] = pd.DataFrame(
+        dict(
+            timestamp=calendar,
+            calendar_date=calendar,
+            source_market_type=1,
+            is_trading_day=True,
+            source_day_of_week=calendar.dayofweek,
+            source_state="O",
+        )
+    )
+
+    def identity(_raw_root, data_id):
+        return hashlib.sha256(f"{data_id}:{len(frames[data_id])}".encode()).hexdigest()
+
+    def produce(**kwargs):
+        (data_id,) = kwargs["data_ids"]
+        spec = base.interim.get(data_id)
+        start, end = (
+            pd.Timestamp(kwargs["start_date"]),
+            pd.Timestamp(kwargs["end_date"]),
+        )
+        calls.append((data_id, start, end))
+        if data_id == "market_bars_1d" and (
+            (reject_before is not None and start < reject_before)
+            or (reject_at is not None and start == reject_at)
+        ):
+            raise ValueError("synthetic_history_unavailable")
+        frame = frames[data_id]
+        if "timestamp" in frame:
+            frame = frame.loc[frame.timestamp.le(end)]
+        if data_id == "market_bars_1d":
+            frame = frame.loc[frame.timestamp.ge(start)]
+        root = kwargs["layout"].target_root(
+            data_id, kwargs["layout"].interim_data_root(spec.source_id, data_id)
+        )
+        write_dataset(
+            root,
+            frame,
+            spec=spec,
+            instance_metadata=kwargs["instance_metadata"],
+            resource_policy=kwargs["resource_policy"],
+            borrowed_input=True,
+        )
+        return InterimImportResult(
+            artifact_roots={data_id: root},
+            skipped=(),
+            pruning_report_text="synthetic windowed source",
+        )
+
+    return replace(
+        base,
+        producer_bindings={
+            **base.producer_bindings,
+            **{
+                data_id: ProducerBinding(
+                    ProducerKind.INTERIM, produce, source_identity=identity
+                )
+                for data_id in frames
+            },
+        },
+    )
+
+
+def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(tmp_path):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=425).as_unit("ns")
+    requested = dates[410:420]
+    frames = _synthetic_interim_frames(dates)
+    frames["market_bars_1d"]["period_return"] = (
+        np.sin(np.arange(len(frames["market_bars_1d"])) / 3) * 0.01
+    )
+    calls = []
+    profile = _windowed_source_profile(frames, calls)
+    layout = StorageLayout(tmp_path)
+    targets = ("market_panel_1d", "price_volume_facts", "market_model_factors")
+    arguments = dict(
+        profile=profile,
+        layout=layout,
+        raw_root=tmp_path / "raw",
+        start_date=str(requested[0].date()),
+        end_date=str(requested[-1].date()),
+        data_ids=targets,
+    )
+    plan = research.data_materialize(**arguments, plan=True)
+    assert plan["status"] == "COMPLETE"
+    assert len({entry["target_id"] for entry in plan["targets"]}) == len(
+        plan["targets"]
+    )
+    assert not calls and not tuple(tmp_path.rglob("manifest.json"))
+    first = research.data_materialize(**arguments)
+    assert first["status"] == "COMPLETE", first["blockers"]
+    result = {entry["target_id"]: entry for entry in first["target_results"]}
+    assert len(result) == len(first["target_results"])
+    planned = {entry["target_id"]: entry for entry in plan["targets"]}
+    panel_spec = profile.processed.get("market_panel_1d")
+    panel_root = layout.processed_data_root(
+        panel_spec.market_id, panel_spec.kind, panel_spec.data_id
+    )
+    public_panel_id = result["market_panel_1d"]["instance_identity"]
+    history_panel_id = planned["price_volume_facts"]["upstream_identities"][
+        "market_panel_1d"
+    ]
+    assert history_panel_id != public_panel_id
+    assert (
+        planned["market_model_factors"]["upstream_identities"]["market_panel_1d"]
+        == history_panel_id
+    )
+    public_panel = read_dataset(layout.instance_root(panel_root, public_panel_id))
+    history_panel = read_dataset(layout.instance_root(panel_root, history_panel_id))
+    assert public_panel.timestamp.min() == requested[0]
+    assert (
+        public_panel.timestamp.max() == history_panel.timestamp.max() == requested[-1]
+    )
+    assert history_panel.timestamp.min() == dates[0]
+    for target in targets[1:]:
+        spec = profile.processed.get(target)
+        root = layout.processed_data_root(spec.market_id, spec.kind, target)
+        actual = read_dataset(
+            layout.instance_root(root, result[target]["instance_identity"])
+        )
+        expected = producer._compute_processed_frame(
+            spec,
+            source={},
+            dependencies={"market_panel_1d": history_panel},
+            trading_sessions=tuple(dates[:420]),
+        )
+        expected = (
+            expected.loc[expected.timestamp.isin(requested)]
+            .sort_values(["timestamp", "market_id", "asset_id"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+        pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+        assert actual.timestamp.min() == requested[0]
+        assert actual.timestamp.max() == requested[-1]
+    before_reuse = tuple(calls)
+    second = research.data_materialize(**arguments)
+    assert second["status"] == "COMPLETE"
+    assert all(entry["status"] == "REUSED" for entry in second["target_results"])
+    assert tuple(calls) == before_reuse
+    assert {
+        entry["target_id"]: entry["instance_identity"]
+        for entry in second["target_results"]
+    } == {key: entry["instance_identity"] for key, entry in result.items()}
+    dataset = research.dataset_build(
+        profile=profile,
+        layout=layout,
+        dataset_id="pv_all",
+        raw_root=tmp_path / "raw",
+        start_date=str(requested[0].date()),
+        end_date=str(requested[-1].date()),
+    )
+    assert dataset["status"] == "COMPLETE", dataset["blockers"]
+    dataset_result = next(
+        entry for entry in dataset["target_results"] if entry["target_id"] == "pv_all"
+    )
+    restored = read_dataset(
+        layout.instance_root(
+            layout.research_dataset_root("a_share", "pv_all"),
+            dataset_result["instance_identity"],
+        )
+    )
+    assert (
+        restored.timestamp.min() == requested[0]
+        and restored.timestamp.max() == requested[-1]
+    )
+    first_asset = restored.loc[restored.asset_id.eq("000001")].set_index("timestamp")
+    history_asset = history_panel.loc[history_panel.asset_id.eq("000001")].set_index(
+        "timestamp"
+    )
+    expected_reversal = -(
+        history_asset.loc[requested[0], "adj_close"]
+        / history_asset.loc[dates[405], "adj_close"]
+        - 1
+    )
+    assert first_asset.loc[requested[0], "reversal_5d"] == expected_reversal
+    assert restored["forward_return_20d"].isna().all()
+
+
+@pytest.mark.parametrize("failed_window", ("history", "core"))
+def test_internal_history_failure_blocks_exact_dependent_without_hiding_failure(
+    tmp_path,
+    failed_window,
+):
+    dates = pd.bdate_range("2020-01-02", periods=40).as_unit("ns")
+    requested = dates[-10:]
+    profile = _windowed_source_profile(
+        _synthetic_interim_frames(dates),
+        [],
+        reject_before=requested[0] if failed_window == "history" else None,
+        reject_at=requested[0] if failed_window == "core" else None,
+    )
+    result = research.data_materialize(
+        profile=profile,
+        layout=StorageLayout(tmp_path),
+        raw_root=tmp_path / "raw",
+        start_date=str(requested[0].date()),
+        end_date=str(requested[-1].date()),
+        data_ids=("market_panel_1d", "price_volume_facts"),
+    )
+    assert result["status"] == "FAILED"
+    assert any(
+        entry["target_id"] == "market_bars_1d"
+        and entry["reason"] == "interim_build_failed:synthetic_history_unavailable"
+        for entry in result["blockers"]
+    )
+    targets = {entry["target_id"]: entry for entry in result["target_results"]}
+    assert len(targets) == len(result["target_results"])
+    if failed_window == "history":
+        assert targets["market_panel_1d"]["status"] == "BUILT"
+        assert targets["price_volume_facts"]["status"] == "BLOCKED"
+        assert "market_panel_1d" in targets["price_volume_facts"]["reason"]
+    else:
+        assert targets["market_panel_1d"]["status"] == "BLOCKED"
+        assert targets["price_volume_facts"]["status"] == "BUILT"
+
+
+def test_mixed_window_rebuild_reports_each_instance_and_preserves_old_good(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=40).as_unit("ns")
+    requested = dates[-10:]
+    profile = _windowed_source_profile(_synthetic_interim_frames(dates), [])
+    layout = StorageLayout(tmp_path)
+    arguments = dict(
+        profile=profile,
+        layout=layout,
+        raw_root=tmp_path / "raw",
+        start_date=str(requested[0].date()),
+        end_date=str(requested[-1].date()),
+        data_ids=("market_panel_1d", "price_volume_facts"),
+    )
+    initial = research.data_materialize(**arguments)
+    assert initial["status"] == "COMPLETE"
+    plan = research.data_materialize(**arguments, plan=True)
+    targets = {entry["target_id"]: entry for entry in plan["targets"]}
+    core_identity = targets["market_panel_1d"]["requested_identity"]
+    history_identity = targets["price_volume_facts"]["upstream_identities"][
+        "market_panel_1d"
+    ]
+    assert core_identity != history_identity
+    spec = profile.processed.get("market_panel_1d")
+    logical_root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    old_roots = [
+        layout.instance_root(logical_root, identity)
+        for identity in (core_identity, history_identity)
+    ]
+
+    def originals():
+        return {
+            (root.name, path.relative_to(root).as_posix()): hashlib.sha256(
+                path.read_bytes()
+            ).hexdigest()
+            for root in old_roots
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    before = originals()
+    build_target = research._build_target
+    compute = producer._compute_processed_frame
+    core_panel_active = False
+
+    def altered_build(**kwargs):
+        nonlocal core_panel_active
+        core_panel_active = (
+            kwargs["spec"].target_id == "market_panel_1d"
+            and pd.Timestamp(kwargs["time_window"].start) == requested[0]
+        )
+        try:
+            return build_target(**kwargs)
+        finally:
+            core_panel_active = False
+
+    def altered_compute(spec, **kwargs):
+        output = compute(spec, **kwargs)
+        if core_panel_active:
+            output["close"] *= 1.001
+        return output
+
+    monkeypatch.setattr(research, "_build_target", altered_build)
+    monkeypatch.setattr(producer, "_compute_processed_frame", altered_compute)
+    rebuilt = research.data_materialize(**arguments, rebuild=True)
+    assert rebuilt["status"] == "FAILED"
+    evidence = [
+        entry
+        for entry in rebuilt["rebuild_evidence"]
+        if entry["target_id"] == "market_panel_1d"
+    ]
+    assert len(evidence) == 2
+    assert {
+        entry["instance_identity"]: entry["comparison_status"] for entry in evidence
+    } == {
+        core_identity: "CONTENT_MISMATCH",
+        history_identity: "MATCH",
+    }
+    assert originals() == before
+    public = {entry["target_id"]: entry for entry in rebuilt["target_results"]}
+    assert public["market_panel_1d"]["status"] == "FAILED"
+    assert public["price_volume_facts"]["status"] == "BUILT"
+
+
+def test_mixed_window_interruption_preserves_completed_public_result_sink(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.runtime.resources import (
+        current_runtime_resource_policy,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=40).as_unit("ns")
+    requested = dates[-10:]
+    profile = _windowed_source_profile(_synthetic_interim_frames(dates), [])
+    build = research._build_target
+    primary = KeyboardInterrupt("synthetic_factor_interruption")
+    policies = []
+
+    def interrupt_factor(**kwargs):
+        if kwargs["spec"].target_id == "price_volume_facts":
+            policies.append(current_runtime_resource_policy())
+            raise primary
+        return build(**kwargs)
+
+    monkeypatch.setattr(research, "_build_target", interrupt_factor)
+    sink = {}
+    with pytest.raises(KeyboardInterrupt) as caught:
+        research._execute_action(
+            profile=profile,
+            action="data materialize",
+            terminal_targets=("market_panel_1d", "price_volume_facts"),
+            layout=StorageLayout(tmp_path),
+            time_window=None,
+            raw_root=tmp_path / "raw",
+            start_date=str(requested[0].date()),
+            end_date=str(requested[-1].date()),
+            result_sink=sink,
+        )
+    assert caught.value is primary
+    assert len(policies) == 1 and policies[0].used_memory_bytes == 0
+    assert sink["market_panel_1d"].status.value == "BUILT"
+    assert "price_volume_facts" not in sink
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    panel = read_dataset(
+        layout.instance_root(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            sink["market_panel_1d"].instance_identity,
+        )
+    )
+    assert (
+        panel.timestamp.min() == requested[0] and panel.timestamp.max() == requested[-1]
+    )

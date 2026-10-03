@@ -15,6 +15,9 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
     open_dataset_session,
@@ -48,6 +51,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
     windows = []
     mutated = False
     with runtime_resource_policy_scope() as policy:
+        baseline = policy.used_memory_bytes
         frame = read_dataset(
             dataset_root, mode=DatasetReadMode.MATERIALIZED, resource_policy=policy
         )
@@ -191,7 +195,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                     pd.Timestamp("1970-01-01T00:00:08.500000"),
                 ),
             }
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == baseline
 
             def no_legal_validation(*args, **kwargs):
                 for selected in chunks(*args, **kwargs):
@@ -227,7 +231,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                         results("run_crypto_empty_validation")
                     ) as source:
                         next(source)
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == baseline
 
             primary = KeyboardInterrupt("after refit")
             finish = production.TrialRecorder.finish
@@ -252,7 +256,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                     next(source)
             assert caught.value is primary
             assert any("release also failed" in note for note in primary.__notes__)
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == baseline
         frame = None
 
 
@@ -269,89 +273,110 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
         write_semantic_artifact,
     )
 
-    old = read_semantic_artifact_record(prediction_root)
-    payload = old[0]
-    entry = next(
-        item for item in saved.final_models if "leave_btc_out" in item["model_id"]
-    )
-    spec = PredictionSpec(
-        prediction_id=f"{entry['model_id']}_prediction",
-        model_id=entry["model_id"],
-        research_dataset_id=payload["semantic_metadata"]["target_contract"]["protocol"][
-            "scenario_id"
-        ],
-        train_end=None,
-        test_start="1970-01-01T00:00:08.600000",
-        test_end="1970-01-01T00:00:09",
-        prediction_mode="crypto_oos",
-        training_asset_ids=tuple(entry["training_asset_ids"]),
-        evaluation_asset_ids=tuple(entry["evaluation_asset_ids"]),
-    )
-    logical_root = prediction_root.parent.parent
-    prior = {p.name for p in filesystem_iterdir(prediction_root.parent)}
-    with runtime_resource_policy_scope() as policy:
-        for index, (stamp, asset) in enumerate(
-            (("08.500000", "btc_usdt"), ("08.700000", "eth_usdt"))
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        baseline = artifact_policy.used_memory_bytes
+        old = read_semantic_artifact_record(prediction_root, lease=artifact_lease)
+        payload = old[0]
+        entry = next(
+            item for item in saved.final_models if "leave_btc_out" in item["model_id"]
+        )
+        spec = PredictionSpec(
+            prediction_id=f"{entry['model_id']}_prediction",
+            model_id=entry["model_id"],
+            research_dataset_id=payload["semantic_metadata"]["target_contract"][
+                "protocol"
+            ]["scenario_id"],
+            train_end=None,
+            test_start="1970-01-01T00:00:08.600000",
+            test_end="1970-01-01T00:00:09",
+            prediction_mode="crypto_oos",
+            training_asset_ids=tuple(entry["training_asset_ids"]),
+            evaluation_asset_ids=tuple(entry["evaluation_asset_ids"]),
+        )
+        logical_root = prediction_root.parent.parent
+        prior = {p.name for p in filesystem_iterdir(prediction_root.parent)}
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("test.artifact.metadata", 0) as nested_artifact_lease,
         ):
-            envelope = build_business_manifest_envelope(
-                **{
-                    key: (
-                        dict(
-                            payload[key], start=f"1970-01-01T00:00:08.60000{index + 1}"
+            for index, (stamp, asset) in enumerate(
+                (("08.500000", "btc_usdt"), ("08.700000", "eth_usdt"))
+            ):
+                envelope = build_business_manifest_envelope(
+                    **{
+                        key: (
+                            dict(
+                                payload[key],
+                                start=f"1970-01-01T00:00:08.60000{index + 1}",
+                            )
+                            if key == "research_window"
+                            else payload[key]
                         )
-                        if key == "research_window"
-                        else payload[key]
-                    )
-                    for key in (
-                        "logical_artifact_id",
-                        "schema_identity",
-                        "protocol_or_spec_identity",
-                        "software_identity",
-                        "research_window",
-                        "upstream_identities",
-                        "semantic_metadata",
-                    )
-                }
-            )
-            frame = pd.DataFrame(
-                {
-                    "timestamp": [pd.Timestamp(f"1970-01-01T00:00:{stamp}")],
-                    "asset_id": [asset],
-                    "prediction_score": [0.1],
-                }
-            )
-
-            def write(staging, frame=frame):
-                write_prediction_outputs(
-                    spec=spec,
-                    output_spec=OutputSpec(
-                        spec.prediction_id,
-                        "prediction_outputs",
-                        f"run_{spec.prediction_id}",
-                        "crypto",
-                        "prediction",
-                        OutputScope.LOCAL_ONLY,
-                    ),
-                    layout=StorageLayout(staging),
-                    output_chunks=(frame,),
-                    model_metadata=saved.prediction_lineage(
-                        entry["model_id"],
-                        TimeWindow(spec.test_start, spec.test_end),
-                        access_window="holdout",
-                    ),
-                    prediction_metadata_factory=lambda: pytest.fail(
-                        "invalid row must reject before metadata publication"
-                    ),
-                    resource_policy=policy,
+                        for key in (
+                            "logical_artifact_id",
+                            "schema_identity",
+                            "protocol_or_spec_identity",
+                            "software_identity",
+                            "research_window",
+                            "upstream_identities",
+                            "semantic_metadata",
+                        )
+                    }
+                )
+                frame = pd.DataFrame(
+                    {
+                        "timestamp": [pd.Timestamp(f"1970-01-01T00:00:{stamp}")],
+                        "asset_id": [asset],
+                        "prediction_score": [0.1],
+                    }
                 )
 
-            with pytest.raises(
-                ValueError, match="crypto_prediction_fold_scope_misaligned"
-            ):
-                write_semantic_artifact(logical_root, envelope, write)
-            assert {p.name for p in filesystem_iterdir(prediction_root.parent)} == prior
-            assert read_semantic_artifact_record(prediction_root) == old
-            assert policy.used_memory_bytes == 0
+                def write(staging, frame=frame):
+                    write_prediction_outputs(
+                        spec=spec,
+                        output_spec=OutputSpec(
+                            spec.prediction_id,
+                            "prediction_outputs",
+                            f"run_{spec.prediction_id}",
+                            "crypto",
+                            "prediction",
+                            OutputScope.LOCAL_ONLY,
+                        ),
+                        layout=StorageLayout(staging),
+                        output_chunks=(frame,),
+                        model_metadata=saved.prediction_lineage(
+                            entry["model_id"],
+                            TimeWindow(spec.test_start, spec.test_end),
+                            access_window="holdout",
+                        ),
+                        prediction_metadata_factory=lambda: pytest.fail(
+                            "invalid row must reject before metadata publication"
+                        ),
+                        resource_policy=policy,
+                    )
+
+                with pytest.raises(
+                    ValueError, match="crypto_prediction_fold_scope_misaligned"
+                ):
+                    write_semantic_artifact(logical_root, envelope, write)
+                assert {
+                    p.name for p in filesystem_iterdir(prediction_root.parent)
+                } == prior
+                assert (
+                    read_semantic_artifact_record(
+                        prediction_root, lease=nested_artifact_lease
+                    )
+                    == old
+                )
+                assert (
+                    policy.used_memory_bytes
+                    == baseline
+                    + nested_artifact_lease.reserved_bytes
+                    + artifact_lease.reserved_bytes
+                )
 
 
 def check_crypto_model_staging(*, layout, profile, saved):
@@ -380,464 +405,534 @@ def check_crypto_model_staging(*, layout, profile, saved):
         read_semantic_artifact_record,
     )
 
-    original = read_semantic_artifact_record(saved.instance_root)
-    references = read_semantic_artifact_operational_metadata(saved.instance_root)[
-        "model_trial_ledgers"
-    ]
-    contract = saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
-    protocol = profile.protocol(contract["scenario_id"])
-    logical_root = saved.instance_root.parent.parent
-    previous_instances = {
-        p.name for p in filesystem_iterdir(saved.instance_root.parent)
-    }
-    with runtime_resource_policy_scope() as policy:
-        from quant_research_platform.research.protocols.crypto_hft import (
-            HFT_FACTOR_COLUMNS,
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        baseline = artifact_policy.used_memory_bytes
+        original = read_semantic_artifact_record(
+            saved.instance_root, lease=artifact_lease
         )
-
-        for entry in saved.final_models:
-            spec = profile.models.get(entry["model_id"])
-            if spec.model_algorithm != "ridge_regression":
-                continue
-            assert tuple(entry["model_metadata"]["input_columns"]) == spec.input_columns
-            with persisted.read_crypto_model_member(
-                saved, entry, resource_policy=policy
-            ) as model:
-                assert model.scaler.columns == spec.input_columns
-                probe = pd.DataFrame(
-                    {
-                        column: np.arange(3, dtype=float) + 1
-                        for column in HFT_FACTOR_COLUMNS
-                    }
-                )
-                predict = fitting.prediction_callable(spec.input_columns, model)
-                before = predict(probe)
-                for column in set(HFT_FACTOR_COLUMNS) - set(spec.input_columns):
-                    probe[column] *= 1000
-                np.testing.assert_array_equal(before, predict(probe))
-        assert policy.used_memory_bytes == 0
-        with policy.lease("test.crypto.model_corruption", 8 * 1024**2):
-            from dataclasses import replace
-            from uuid import uuid4
-
-            from quant_research_platform.contracts.experiments import (
-                trial_ledger_semantic_identity,
-            )
-            from quant_research_platform.storage.experiments import (
-                append_trial_record,
-                read_model_trial_ledger_reference,
-            )
-
-            with read_model_trial_ledger_reference(layout, references[0]) as (
-                plan,
-                terminals,
-            ):
-                for kind, changes in (
-                    ("lineage", {"input_lineage": ("e" * 64,)}),
-                    ("family", {"candidate_family_id": "different_family"}),
-                ):
-                    changed_plan = replace(
-                        plan, experiment_id=f"experiment_{uuid4().hex}", **changes
-                    )
-                    terminal = replace(
-                        terminals[0],
-                        event_id=f"event_{uuid4().hex}",
-                        run_id=f"run_{uuid4().hex}",
-                        experiment_id=changed_plan.experiment_id,
-                        protocol_hash=changed_plan.protocol_hash,
-                        candidate_family_id=changed_plan.candidate_family_id,
-                        artifact_lineage=changed_plan.input_lineage,
-                    )
-                    append_trial_record(
-                        layout.trial_ledger_root(
-                            terminal.run_id, changed_plan.experiment_id
-                        ),
-                        changed_plan,
-                        terminal,
-                    )
-                    reference = {
-                        "run_id": terminal.run_id,
-                        "experiment_id": changed_plan.experiment_id,
-                        "protocol_hash": changed_plan.protocol_hash,
-                        "semantic_identity": trial_ledger_semantic_identity(
-                            changed_plan, (terminal,)
-                        ),
-                    }
-                    # The replacement trial is valid by itself, but belongs elsewhere.
-                    with read_model_trial_ledger_reference(layout, reference):
-                        pass
-                    copied = (
-                        layout.project_root / f"wrong-{kind}" / saved.instance_root.name
-                    )
-                    shutil.copytree(
-                        native_filesystem_path(saved.instance_root),
-                        native_filesystem_path(copied),
-                    )
-                    manifest_path = copied / "manifest.json"
-                    manifest = json.loads(
-                        filesystem_read_text(manifest_path, encoding="utf-8")
-                    )
-                    manifest["operational_metadata"]["model_trial_ledgers"][0] = (
-                        reference
-                    )
-                    relative = f"models/{saved.models[0]['fold_id']}/metadata.json"
-                    metadata_path = copied / relative
-                    metadata = json.loads(
-                        filesystem_read_text(metadata_path, encoding="utf-8")
-                    )
-                    metadata["models"][0]["trial_semantic_identity"] = reference[
-                        "semantic_identity"
-                    ]
-                    filesystem_write_text(
-                        metadata_path, json.dumps(metadata), encoding="utf-8"
-                    )
-                    raw = filesystem_read_bytes(metadata_path)
-                    member = next(
-                        row for row in manifest["members"] if row["path"] == relative
-                    )
-                    member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
-                    filesystem_write_text(
-                        manifest_path, json.dumps(manifest), encoding="utf-8"
-                    )
-                    with pytest.raises(
-                        ValueError, match="crypto_model_trial_binding_invalid"
-                    ):
-                        persisted.read_crypto_model_artifact(
-                            copied,
-                            expected_identity=saved.envelope["instance_identity"],
-                            trial_layout=layout,
-                        )
-                    assert (
-                        read_semantic_artifact_record(saved.instance_root) == original
-                    )
-            entry = saved.final_models[0]
-            columns = entry["model_metadata"]["input_columns"]
-            probe = pd.DataFrame(np.zeros((2, len(columns))), columns=columns)
-            wrong = DummyRegressor(strategy="constant", constant=0.125).fit(
-                probe, np.zeros(2)
-            )
-            copied = layout.project_root / "corrupt-model" / saved.instance_root.name
-            shutil.copytree(
-                native_filesystem_path(saved.instance_root),
-                native_filesystem_path(copied),
-            )
-            relative = f"models/final/{entry['model_id']}.pkl"
-            raw = pickle.dumps(wrong, protocol=pickle.HIGHEST_PROTOCOL)
-            filesystem_write_bytes(copied / relative, raw)
-            manifest_path = copied / "manifest.json"
-            manifest = json.loads(filesystem_read_text(manifest_path, encoding="utf-8"))
-            member = next(row for row in manifest["members"] if row["path"] == relative)
-            member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
-            filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
-            changed = persisted.read_crypto_model_artifact(
-                copied,
-                expected_identity=saved.envelope["instance_identity"],
-                trial_layout=layout,
-            )
-            with pytest.raises(ValueError, match="model_state_metadata_mismatch"):
-                with persisted.read_crypto_model_member(
-                    changed, changed.final_models[0], resource_policy=policy
-                ):
-                    pytest.fail("wrong predictor reached the consumer")
-            del probe, wrong, raw, manifest, changed, member
-        assert policy.used_memory_bytes == 0
-        assert read_semantic_artifact_record(saved.instance_root) == original
-        validation_entry = next(
-            entry for entry in saved.models if entry["validation_prediction_path"]
-        )
-        validation_fold = next(
-            fold
-            for fold in protocol.research_plan.folds
-            if fold.fold_id == validation_entry["fold_id"]
-        )
-        validation_spec = profile.models.get(validation_entry["model_id"])
-        validation = pd.concat(
-            saved.validation_chunks(
-                fold_id=validation_entry["fold_id"],
-                model_id=validation_entry["model_id"],
-            ),
-            ignore_index=True,
-        ).rename(columns={"label": validation_spec.label_column})
-        for failure in ("disk", "primary"):
-            primary = KeyboardInterrupt("validation_training_primary")
-            opened = []
-            closed = []
-
-            def observed_results(*, on_validation, on_selection, primary=primary):
-                on_validation(validation_fold, validation_spec, validation.iloc[:1])
-                raise primary
-
-            writer_type = parquet_storage.pq.ParquetWriter
-
-            class ClosingWriter:
-                def __init__(
-                    self, *args, opened=opened, writer_type=writer_type, **kwargs
-                ):
-                    opened.append(args[0])
-                    self.writer = writer_type(*args, **kwargs)
-
-                def write_table(self, *args, **kwargs):
-                    return self.writer.write_table(*args, **kwargs)
-
-                def add_key_value_metadata(self, *args, **kwargs):
-                    return self.writer.add_key_value_metadata(*args, **kwargs)
-
-                def close(self, closed=closed):
-                    self.writer.close()
-                    closed.append(True)
-                    raise RuntimeError("validation_close_secondary")
-
-            with pytest.MonkeyPatch.context() as patch:
-                patch.setattr(parquet_storage.pq, "ParquetWriter", ClosingWriter)
-                if failure == "disk":
-                    disk_admission = parquet_storage.require_free_disk_headroom
-
-                    def reject_validation_disk(
-                        path, disk_admission=disk_admission, **kwargs
-                    ):
-                        if Path(path).name == "validation":
-                            raise RuntimeError("validation_disk_admission")
-                        return disk_admission(path, **kwargs)
-
-                    patch.setattr(
-                        parquet_storage,
-                        "require_free_disk_headroom",
-                        reject_validation_disk,
-                    )
-                with pytest.raises(
-                    RuntimeError if failure == "disk" else KeyboardInterrupt,
-                    match=(
-                        "validation_disk_admission"
-                        if failure == "disk"
-                        else "validation_training_primary"
-                    ),
-                ) as raised:
-                    write_crypto_model_artifact(
-                        logical_root,
-                        envelope=build_business_manifest_envelope(
-                            **{
-                                key: (
-                                    dict(
-                                        saved.envelope[key],
-                                        start="1970-01-01T00:00:04.000005",
-                                    )
-                                    if key == "research_window"
-                                    else saved.envelope[key]
-                                )
-                                for key in (
-                                    "logical_artifact_id",
-                                    "schema_identity",
-                                    "protocol_or_spec_identity",
-                                    "software_identity",
-                                    "research_window",
-                                    "upstream_identities",
-                                    "semantic_metadata",
-                                )
-                            }
-                        ),
-                        model_results=observed_results,
-                        trial_layout=layout,
-                        verify_source=lambda: pytest.fail(
-                            "invalid_model_reached_source_verification"
-                        ),
-                    )
-                if failure == "disk":
-                    assert not opened and not closed
-                else:
-                    assert raised.value is primary
-                    assert len(opened) == len(closed) == 1
-                    assert any("close" in note for note in primary.__notes__)
-            assert policy.used_memory_bytes == 0
-            assert read_semantic_artifact_record(saved.instance_root) == original
-            assert {
-                p.name for p in filesystem_iterdir(saved.instance_root.parent)
-            } == previous_instances
-            assert not tuple(filesystem_glob(logical_root, ".*staging*"))
-        validation = None
-        for index, failure in enumerate(
-            (
-                "seed",
-                "parameters",
-                "missing_fold",
-                "training_assets",
-                "evaluation_assets",
-                "refit_window",
-                "trial_reference",
-                "trial_binding",
-                "disk",
-                "primary",
-            )
+        references = read_semantic_artifact_operational_metadata(
+            saved.instance_root, lease=artifact_lease
+        )["model_trial_ledgers"]
+        contract = saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
+        protocol = profile.protocol(contract["scenario_id"])
+        logical_root = saved.instance_root.parent.parent
+        previous_instances = {
+            p.name for p in filesystem_iterdir(saved.instance_root.parent)
+        }
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("test.artifact.metadata", 0) as nested_artifact_lease,
         ):
-            envelope = build_business_manifest_envelope(
-                **{
-                    key: (
-                        dict(
-                            saved.envelope[key],
-                            start=f"1970-01-01T00:00:04.{index + 1:06d}",
-                        )
-                        if key == "research_window"
-                        else saved.envelope[key]
-                    )
-                    for key in (
-                        "logical_artifact_id",
-                        "schema_identity",
-                        "protocol_or_spec_identity",
-                        "software_identity",
-                        "research_window",
-                        "upstream_identities",
-                        "semantic_metadata",
-                    )
-                }
+            from quant_research_platform.research.protocols.crypto_hft import (
+                HFT_FACTOR_COLUMNS,
             )
 
-            def members(*, on_validation, on_selection, failure=failure):
-                by_identity = {ref["semantic_identity"]: ref for ref in references}
-                folds = {fold.fold_id: fold for fold in protocol.research_plan.folds}
-                for number, entry in enumerate(saved.models):
-                    if failure == "missing_fold" and entry["fold_id"] == "fold_2":
-                        continue
-                    fold = folds[entry["fold_id"]]
-                    spec = profile.models.get(entry["model_id"])
-                    with closing_iterator(
-                        saved.validation_chunks(
-                            fold_id=entry["fold_id"], model_id=entry["model_id"]
-                        )
-                    ) as chunks:
-                        for frame in chunks:
-                            on_validation(fold, spec, frame)
-                    reference = by_identity[
-                        saved.models[1 - number]["trial_semantic_identity"]
-                        if failure == "trial_binding" and number < 2
-                        else entry["trial_semantic_identity"]
-                    ]
-                    if failure == "trial_reference" and number == 1:
-                        reference = by_identity[
-                            saved.models[0]["trial_semantic_identity"]
-                        ]
-                    on_selection(
-                        fold,
-                        spec,
-                        deepcopy(entry["model_metadata"]),
-                        ("outside_scope",)
-                        if failure == "training_assets" and number == 0
-                        else tuple(entry["training_asset_ids"]),
-                        ("outside_scope",)
-                        if failure == "evaluation_assets" and number == 0
-                        else tuple(entry["evaluation_asset_ids"]),
-                        reference,
-                    )
-                for number, entry in enumerate(saved.final_models):
-                    with _read_model_member(
-                        saved.instance_root,
-                        saved.member_records,
-                        f"models/final/{entry['model_id']}.pkl",
-                        resource_policy=policy,
-                        workspace_factor=4,
-                    ) as owned:
-                        payload = owned.value
-                        metadata = deepcopy(entry["model_metadata"])
-                        if failure == "seed" and number == 0:
-                            metadata["random_seed"] += 1
-                        if failure == "parameters" and number == 0:
-                            metadata["max_train_rows"] = (
-                                1
-                                if metadata["max_train_rows"] is None
-                                else metadata["max_train_rows"] + 1
-                            )
-                        if failure == "refit_window" and number == 0:
-                            metadata["train_end"] = (
-                                protocol.research_plan.test.end.isoformat()
-                            )
-                        selection = next(
-                            item
-                            for item in saved.models
-                            if item["fold_id"] == entry["fold_id"]
-                            and item["model_id"] == entry["model_id"]
-                        )
-                        member = production.CryptoFoldModelResult(
-                            folds[entry["fold_id"]],
-                            profile.models.get(entry["model_id"]),
-                            fitting.ModelFitResult(metadata, payload),
-                            tuple(entry["training_asset_ids"]),
-                            tuple(entry["evaluation_asset_ids"]),
-                            by_identity[selection["trial_semantic_identity"]],
-                            by_identity[entry["refit_trial_semantic_identity"]],
-                            entry["fit_coverage_id"],
-                        )
-                        owned.value = member
-                        member = payload = None
-                        try:
-                            yield owned
-                        finally:
-                            assert owned.value is None
-                            assert not owned.lease.active
-
-            message = {
-                "seed": "crypto_model_refit_binding_invalid",
-                "parameters": "crypto_model_parameters_misaligned",
-                "missing_fold": "crypto_model_fold_coverage_invalid",
-                "training_assets": "crypto_model_fold_binding_invalid",
-                "evaluation_assets": "crypto_model_fold_binding_invalid",
-                "refit_window": "crypto_model_fit_window_invalid",
-                "trial_reference": "crypto_model_trial_references_invalid",
-                "trial_binding": "crypto_model_trial_binding_invalid",
-                "disk": "insufficient_free_disk",
-                "primary": "model_pickle_primary",
-            }[failure]
-            primary = KeyboardInterrupt("model_pickle_primary")
-            with pytest.MonkeyPatch.context() as patch:
-                if failure == "disk":
-                    patch.setattr(
-                        resources.shutil,
-                        "disk_usage",
-                        lambda _path: SimpleNamespace(free=1),
-                    )
-
-                    def reject_dump(*_args, **_kwargs):
-                        raise AssertionError("pickle_started_before_disk_admission")
-
-                    patch.setattr(persisted.pickle, "dump", reject_dump)
-                if failure == "primary":
-                    close = resources.MemoryLease.close
-
-                    def close_then_fail(lease, close=close):
-                        close(lease)
-                        if lease.owner == "research.model.crypto.persist":
-                            raise RuntimeError("secondary_model_release")
-
-                    def fail_dump(*_args, primary=primary, **_kwargs):
-                        raise primary
-
-                    patch.setattr(resources.MemoryLease, "close", close_then_fail)
-                    patch.setattr(persisted.pickle, "dump", fail_dump)
-                expected = (
-                    RuntimeError
-                    if failure == "disk"
-                    else KeyboardInterrupt
-                    if failure == "primary"
-                    else ValueError
+            for entry in saved.final_models:
+                spec = profile.models.get(entry["model_id"])
+                if spec.model_algorithm != "ridge_regression":
+                    continue
+                assert (
+                    tuple(entry["model_metadata"]["input_columns"])
+                    == spec.input_columns
                 )
-                with pytest.raises(expected, match=message) as raised:
-                    write_crypto_model_artifact(
-                        logical_root,
-                        envelope=envelope,
-                        model_results=members,
-                        trial_layout=layout,
-                        verify_source=lambda: pytest.fail(
-                            "invalid_model_reached_source_verification"
+                with persisted.read_crypto_model_member(
+                    saved, entry, resource_policy=policy
+                ) as model:
+                    assert model.scaler.columns == spec.input_columns
+                    probe = pd.DataFrame(
+                        {
+                            column: np.arange(3, dtype=float) + 1
+                            for column in HFT_FACTOR_COLUMNS
+                        }
+                    )
+                    predict = fitting.prediction_callable(spec.input_columns, model)
+                    before = predict(probe)
+                    for column in set(HFT_FACTOR_COLUMNS) - set(spec.input_columns):
+                        probe[column] *= 1000
+                    np.testing.assert_array_equal(before, predict(probe))
+            assert (
+                policy.used_memory_bytes
+                == baseline
+                + nested_artifact_lease.reserved_bytes
+                + artifact_lease.reserved_bytes
+            )
+            with policy.lease("test.crypto.model_corruption", 8 * 1024**2):
+                from dataclasses import replace
+                from uuid import uuid4
+
+                from quant_research_platform.contracts.experiments import (
+                    trial_ledger_semantic_identity,
+                )
+                from quant_research_platform.storage.experiments import (
+                    append_trial_record,
+                    read_model_trial_ledger_reference,
+                )
+
+                with read_model_trial_ledger_reference(layout, references[0]) as (
+                    plan,
+                    terminals,
+                ):
+                    for kind, changes in (
+                        ("lineage", {"input_lineage": ("e" * 64,)}),
+                        ("family", {"candidate_family_id": "different_family"}),
+                    ):
+                        changed_plan = replace(
+                            plan, experiment_id=f"experiment_{uuid4().hex}", **changes
+                        )
+                        terminal = replace(
+                            terminals[0],
+                            event_id=f"event_{uuid4().hex}",
+                            run_id=f"run_{uuid4().hex}",
+                            experiment_id=changed_plan.experiment_id,
+                            protocol_hash=changed_plan.protocol_hash,
+                            candidate_family_id=changed_plan.candidate_family_id,
+                            artifact_lineage=changed_plan.input_lineage,
+                        )
+                        append_trial_record(
+                            layout.trial_ledger_root(
+                                terminal.run_id, changed_plan.experiment_id
+                            ),
+                            changed_plan,
+                            terminal,
+                        )
+                        reference = {
+                            "run_id": terminal.run_id,
+                            "experiment_id": changed_plan.experiment_id,
+                            "protocol_hash": changed_plan.protocol_hash,
+                            "semantic_identity": trial_ledger_semantic_identity(
+                                changed_plan, (terminal,)
+                            ),
+                        }
+                        # The valid replacement trial belongs elsewhere.
+                        with read_model_trial_ledger_reference(layout, reference):
+                            pass
+                        copied = (
+                            layout.project_root
+                            / f"wrong-{kind}"
+                            / saved.instance_root.name
+                        )
+                        shutil.copytree(
+                            native_filesystem_path(saved.instance_root),
+                            native_filesystem_path(copied),
+                        )
+                        manifest_path = copied / "manifest.json"
+                        manifest = json.loads(
+                            filesystem_read_text(manifest_path, encoding="utf-8")
+                        )
+                        manifest["operational_metadata"]["model_trial_ledgers"][0] = (
+                            reference
+                        )
+                        relative = f"models/{saved.models[0]['fold_id']}/metadata.json"
+                        metadata_path = copied / relative
+                        metadata = json.loads(
+                            filesystem_read_text(metadata_path, encoding="utf-8")
+                        )
+                        metadata["models"][0]["trial_semantic_identity"] = reference[
+                            "semantic_identity"
+                        ]
+                        filesystem_write_text(
+                            metadata_path, json.dumps(metadata), encoding="utf-8"
+                        )
+                        raw = filesystem_read_bytes(metadata_path)
+                        member = next(
+                            row
+                            for row in manifest["members"]
+                            if row["path"] == relative
+                        )
+                        member.update(
+                            size=len(raw), sha256=hashlib.sha256(raw).hexdigest()
+                        )
+                        filesystem_write_text(
+                            manifest_path, json.dumps(manifest), encoding="utf-8"
+                        )
+                        with pytest.raises(
+                            ValueError, match="crypto_model_trial_binding_invalid"
+                        ):
+                            persisted.read_crypto_model_artifact(
+                                copied,
+                                expected_identity=saved.envelope["instance_identity"],
+                                trial_layout=layout,
+                                lease=nested_artifact_lease,
+                            )
+                        assert (
+                            read_semantic_artifact_record(
+                                saved.instance_root, lease=nested_artifact_lease
+                            )
+                            == original
+                        )
+                entry = saved.final_models[0]
+                columns = entry["model_metadata"]["input_columns"]
+                probe = pd.DataFrame(np.zeros((2, len(columns))), columns=columns)
+                wrong = DummyRegressor(strategy="constant", constant=0.125).fit(
+                    probe, np.zeros(2)
+                )
+                copied = (
+                    layout.project_root / "corrupt-model" / saved.instance_root.name
+                )
+                shutil.copytree(
+                    native_filesystem_path(saved.instance_root),
+                    native_filesystem_path(copied),
+                )
+                relative = f"models/final/{entry['model_id']}.pkl"
+                raw = pickle.dumps(wrong, protocol=pickle.HIGHEST_PROTOCOL)
+                filesystem_write_bytes(copied / relative, raw)
+                manifest_path = copied / "manifest.json"
+                manifest = json.loads(
+                    filesystem_read_text(manifest_path, encoding="utf-8")
+                )
+                member = next(
+                    row for row in manifest["members"] if row["path"] == relative
+                )
+                member.update(size=len(raw), sha256=hashlib.sha256(raw).hexdigest())
+                filesystem_write_text(
+                    manifest_path, json.dumps(manifest), encoding="utf-8"
+                )
+                changed = persisted.read_crypto_model_artifact(
+                    copied,
+                    expected_identity=saved.envelope["instance_identity"],
+                    trial_layout=layout,
+                    lease=nested_artifact_lease,
+                )
+                with pytest.raises(ValueError, match="model_state_metadata_mismatch"):
+                    with persisted.read_crypto_model_member(
+                        changed, changed.final_models[0], resource_policy=policy
+                    ):
+                        pytest.fail("wrong predictor reached the consumer")
+                del probe, wrong, raw, manifest, changed, member
+            assert (
+                policy.used_memory_bytes
+                == baseline
+                + nested_artifact_lease.reserved_bytes
+                + artifact_lease.reserved_bytes
+            )
+            assert (
+                read_semantic_artifact_record(
+                    saved.instance_root, lease=nested_artifact_lease
+                )
+                == original
+            )
+            validation_entry = next(
+                entry for entry in saved.models if entry["validation_prediction_path"]
+            )
+            validation_fold = next(
+                fold
+                for fold in protocol.research_plan.folds
+                if fold.fold_id == validation_entry["fold_id"]
+            )
+            validation_spec = profile.models.get(validation_entry["model_id"])
+            validation = pd.concat(
+                saved.validation_chunks(
+                    fold_id=validation_entry["fold_id"],
+                    model_id=validation_entry["model_id"],
+                ),
+                ignore_index=True,
+            ).rename(columns={"label": validation_spec.label_column})
+            for failure in ("disk", "primary"):
+                primary = KeyboardInterrupt("validation_training_primary")
+                opened = []
+                closed = []
+
+                def observed_results(*, on_validation, on_selection, primary=primary):
+                    on_validation(validation_fold, validation_spec, validation.iloc[:1])
+                    raise primary
+
+                writer_type = parquet_storage.pq.ParquetWriter
+
+                class ClosingWriter:
+                    def __init__(
+                        self, *args, opened=opened, writer_type=writer_type, **kwargs
+                    ):
+                        opened.append(args[0])
+                        self.writer = writer_type(*args, **kwargs)
+
+                    def write_table(self, *args, **kwargs):
+                        return self.writer.write_table(*args, **kwargs)
+
+                    def add_key_value_metadata(self, *args, **kwargs):
+                        return self.writer.add_key_value_metadata(*args, **kwargs)
+
+                    def close(self, closed=closed):
+                        self.writer.close()
+                        closed.append(True)
+                        raise RuntimeError("validation_close_secondary")
+
+                with pytest.MonkeyPatch.context() as patch:
+                    patch.setattr(parquet_storage.pq, "ParquetWriter", ClosingWriter)
+                    if failure == "disk":
+                        disk_admission = parquet_storage.require_free_disk_headroom
+
+                        def reject_validation_disk(
+                            path, disk_admission=disk_admission, **kwargs
+                        ):
+                            if Path(path).name == "validation":
+                                raise RuntimeError("validation_disk_admission")
+                            return disk_admission(path, **kwargs)
+
+                        patch.setattr(
+                            parquet_storage,
+                            "require_free_disk_headroom",
+                            reject_validation_disk,
+                        )
+                    with pytest.raises(
+                        RuntimeError if failure == "disk" else KeyboardInterrupt,
+                        match=(
+                            "validation_disk_admission"
+                            if failure == "disk"
+                            else "validation_training_primary"
                         ),
+                    ) as raised:
+                        write_crypto_model_artifact(
+                            logical_root,
+                            envelope=build_business_manifest_envelope(
+                                **{
+                                    key: (
+                                        dict(
+                                            saved.envelope[key],
+                                            start="1970-01-01T00:00:04.000005",
+                                        )
+                                        if key == "research_window"
+                                        else saved.envelope[key]
+                                    )
+                                    for key in (
+                                        "logical_artifact_id",
+                                        "schema_identity",
+                                        "protocol_or_spec_identity",
+                                        "software_identity",
+                                        "research_window",
+                                        "upstream_identities",
+                                        "semantic_metadata",
+                                    )
+                                }
+                            ),
+                            model_results=observed_results,
+                            trial_layout=layout,
+                            verify_source=lambda: pytest.fail(
+                                "invalid_model_reached_source_verification"
+                            ),
+                        )
+                    if failure == "disk":
+                        assert not opened and not closed
+                    else:
+                        assert raised.value is primary
+                        assert len(opened) == len(closed) == 1
+                        assert any("close" in note for note in primary.__notes__)
+                assert (
+                    policy.used_memory_bytes
+                    == baseline
+                    + nested_artifact_lease.reserved_bytes
+                    + artifact_lease.reserved_bytes
+                )
+                assert (
+                    read_semantic_artifact_record(
+                        saved.instance_root, lease=nested_artifact_lease
                     )
-                if failure == "primary":
-                    assert raised.value is primary
-                    assert any(
-                        "lease close also failed" in note for note in primary.__notes__
+                    == original
+                )
+                assert {
+                    p.name for p in filesystem_iterdir(saved.instance_root.parent)
+                } == previous_instances
+                assert not tuple(filesystem_glob(logical_root, ".*staging*"))
+            validation = None
+            for index, failure in enumerate(
+                (
+                    "seed",
+                    "parameters",
+                    "missing_fold",
+                    "training_assets",
+                    "evaluation_assets",
+                    "refit_window",
+                    "trial_reference",
+                    "trial_binding",
+                    "disk",
+                    "primary",
+                )
+            ):
+                envelope = build_business_manifest_envelope(
+                    **{
+                        key: (
+                            dict(
+                                saved.envelope[key],
+                                start=f"1970-01-01T00:00:04.{index + 1:06d}",
+                            )
+                            if key == "research_window"
+                            else saved.envelope[key]
+                        )
+                        for key in (
+                            "logical_artifact_id",
+                            "schema_identity",
+                            "protocol_or_spec_identity",
+                            "software_identity",
+                            "research_window",
+                            "upstream_identities",
+                            "semantic_metadata",
+                        )
+                    }
+                )
+
+                def members(*, on_validation, on_selection, failure=failure):
+                    by_identity = {ref["semantic_identity"]: ref for ref in references}
+                    folds = {
+                        fold.fold_id: fold for fold in protocol.research_plan.folds
+                    }
+                    for number, entry in enumerate(saved.models):
+                        if failure == "missing_fold" and entry["fold_id"] == "fold_2":
+                            continue
+                        fold = folds[entry["fold_id"]]
+                        spec = profile.models.get(entry["model_id"])
+                        with closing_iterator(
+                            saved.validation_chunks(
+                                fold_id=entry["fold_id"], model_id=entry["model_id"]
+                            )
+                        ) as chunks:
+                            for frame in chunks:
+                                on_validation(fold, spec, frame)
+                        reference = by_identity[
+                            saved.models[1 - number]["trial_semantic_identity"]
+                            if failure == "trial_binding" and number < 2
+                            else entry["trial_semantic_identity"]
+                        ]
+                        if failure == "trial_reference" and number == 1:
+                            reference = by_identity[
+                                saved.models[0]["trial_semantic_identity"]
+                            ]
+                        on_selection(
+                            fold,
+                            spec,
+                            deepcopy(entry["model_metadata"]),
+                            ("outside_scope",)
+                            if failure == "training_assets" and number == 0
+                            else tuple(entry["training_asset_ids"]),
+                            ("outside_scope",)
+                            if failure == "evaluation_assets" and number == 0
+                            else tuple(entry["evaluation_asset_ids"]),
+                            reference,
+                        )
+                    for number, entry in enumerate(saved.final_models):
+                        with _read_model_member(
+                            saved.instance_root,
+                            saved.member_records,
+                            f"models/final/{entry['model_id']}.pkl",
+                            resource_policy=policy,
+                            workspace_factor=4,
+                        ) as owned:
+                            payload = owned.value
+                            metadata = deepcopy(entry["model_metadata"])
+                            if failure == "seed" and number == 0:
+                                metadata["random_seed"] += 1
+                            if failure == "parameters" and number == 0:
+                                metadata["max_train_rows"] = (
+                                    1
+                                    if metadata["max_train_rows"] is None
+                                    else metadata["max_train_rows"] + 1
+                                )
+                            if failure == "refit_window" and number == 0:
+                                metadata["train_end"] = (
+                                    protocol.research_plan.test.end.isoformat()
+                                )
+                            selection = next(
+                                item
+                                for item in saved.models
+                                if item["fold_id"] == entry["fold_id"]
+                                and item["model_id"] == entry["model_id"]
+                            )
+                            member = production.CryptoFoldModelResult(
+                                folds[entry["fold_id"]],
+                                profile.models.get(entry["model_id"]),
+                                fitting.ModelFitResult(metadata, payload),
+                                tuple(entry["training_asset_ids"]),
+                                tuple(entry["evaluation_asset_ids"]),
+                                by_identity[selection["trial_semantic_identity"]],
+                                by_identity[entry["refit_trial_semantic_identity"]],
+                                entry["fit_coverage_id"],
+                            )
+                            owned.value = member
+                            member = payload = None
+                            try:
+                                yield owned
+                            finally:
+                                assert owned.value is None
+                                assert not owned.lease.active
+
+                message = {
+                    "seed": "crypto_model_refit_binding_invalid",
+                    "parameters": "crypto_model_parameters_misaligned",
+                    "missing_fold": "crypto_model_fold_coverage_invalid",
+                    "training_assets": "crypto_model_fold_binding_invalid",
+                    "evaluation_assets": "crypto_model_fold_binding_invalid",
+                    "refit_window": "crypto_model_fit_window_invalid",
+                    "trial_reference": "crypto_model_trial_references_invalid",
+                    "trial_binding": "crypto_model_trial_binding_invalid",
+                    "disk": "insufficient_free_disk",
+                    "primary": "model_pickle_primary",
+                }[failure]
+                primary = KeyboardInterrupt("model_pickle_primary")
+                with pytest.MonkeyPatch.context() as patch:
+                    if failure == "disk":
+                        patch.setattr(
+                            resources.shutil,
+                            "disk_usage",
+                            lambda _path: SimpleNamespace(free=1),
+                        )
+
+                        def reject_dump(*_args, **_kwargs):
+                            raise AssertionError("pickle_started_before_disk_admission")
+
+                        patch.setattr(persisted.pickle, "dump", reject_dump)
+                    if failure == "primary":
+                        close = resources.MemoryLease.close
+
+                        def close_then_fail(lease, close=close):
+                            close(lease)
+                            if lease.owner == "research.model.crypto.persist":
+                                raise RuntimeError("secondary_model_release")
+
+                        def fail_dump(*_args, primary=primary, **_kwargs):
+                            raise primary
+
+                        patch.setattr(resources.MemoryLease, "close", close_then_fail)
+                        patch.setattr(persisted.pickle, "dump", fail_dump)
+                    expected = (
+                        RuntimeError
+                        if failure == "disk"
+                        else KeyboardInterrupt
+                        if failure == "primary"
+                        else ValueError
                     )
-            assert {
-                p.name for p in filesystem_iterdir(saved.instance_root.parent)
-            } == previous_instances
-            assert read_semantic_artifact_record(saved.instance_root) == original
-            assert not tuple(filesystem_glob(logical_root, ".*staging*"))
-            assert policy.used_memory_bytes == 0
+                    with pytest.raises(expected, match=message) as raised:
+                        write_crypto_model_artifact(
+                            logical_root,
+                            envelope=envelope,
+                            model_results=members,
+                            trial_layout=layout,
+                            verify_source=lambda: pytest.fail(
+                                "invalid_model_reached_source_verification"
+                            ),
+                        )
+                    if failure == "primary":
+                        assert raised.value is primary
+                        assert any(
+                            "lease close also failed" in note
+                            for note in primary.__notes__
+                        )
+                assert {
+                    p.name for p in filesystem_iterdir(saved.instance_root.parent)
+                } == previous_instances
+                assert (
+                    read_semantic_artifact_record(
+                        saved.instance_root, lease=nested_artifact_lease
+                    )
+                    == original
+                )
+                assert not tuple(filesystem_glob(logical_root, ".*staging*"))
+                assert (
+                    policy.used_memory_bytes
+                    == baseline
+                    + nested_artifact_lease.reserved_bytes
+                    + artifact_lease.reserved_bytes
+                )
 
 
 def check_crypto_wide_fold_artifact(
@@ -907,7 +1002,11 @@ def check_crypto_wide_fold_artifact(
 
     preflight_model_specs(profile.models.list())
     ids = tuple(spec.model_id for spec in profile.models.list())
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        baseline = policy.used_memory_bytes
         frame = read_dataset(
             dataset_root, mode=DatasetReadMode.MATERIALIZED, resource_policy=policy
         )
@@ -988,7 +1087,10 @@ def check_crypto_wide_fold_artifact(
                 verify_source=dataset_session.verify,
             )
         loaded = persisted.read_crypto_model_artifact(
-            root, expected_identity=envelope.instance_identity, trial_layout=layout
+            root,
+            expected_identity=envelope.instance_identity,
+            trial_layout=layout,
+            lease=artifact_lease,
         )
         assert len(loaded.models) == 22 * 9
         assert len(loaded.final_models) == 9
@@ -998,7 +1100,7 @@ def check_crypto_wide_fold_artifact(
                 loaded, entry, resource_policy=policy
             ) as model:
                 assert model is not None
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == baseline + artifact_lease.reserved_bytes
 
 
 def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
@@ -1221,7 +1323,10 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
     monkeypatch.setattr(production.TrialRecorder, "begin_refit", begin_refit)
     monkeypatch.setattr(fitting.ModelMatrixScaler, "fit", classmethod(fit_scaler))
     logical_root = tmp_path / "models"
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
 
         def results(
             run_id,
@@ -1327,14 +1432,18 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                 empty_root,
                 expected_identity=empty_envelope.instance_identity,
                 trial_layout=layout,
+                lease=artifact_lease,
             ).models
             == ()
         )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
         root = publish(envelope, "run_crypto_refit_success")
         saved = persisted.read_crypto_model_artifact(
-            root, expected_identity=envelope.instance_identity, trial_layout=layout
+            root,
+            expected_identity=envelope.instance_identity,
+            trial_layout=layout,
+            lease=artifact_lease,
         )
         assert len(saved.models) == len(saved.final_models) == 1
         assert len(captured) == 1
@@ -1371,7 +1480,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                 frame.iloc[:3]
             )
             assert np.isfinite(predictions).all()
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         original = file_hashes(root)
         assert len(opened_sessions) == 1
         captured.clear()
@@ -1384,7 +1493,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             owned = next(source)
             owned.release(owner="test.crypto.early_close")
         assert len(opened_sessions) == 2
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         for index, error in enumerate(
             (RuntimeError("refit_failure"), KeyboardInterrupt("refit_cancel"))
         ):
@@ -1415,7 +1524,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                 logical_root / "instances" / other.instance_identity
             )
             assert original == file_hashes(root)
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         assert len(observed_attempts) == 4
         part = next(
             parent / name
@@ -1462,7 +1571,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             assert not filesystem_exists(
                 logical_root / "instances" / changed_source_envelope.instance_identity
             )
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         assert mutation_points == [
             "selection",
             "refit",
@@ -1515,7 +1624,7 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                 id(value) not in copied_metadata_ids for value in local_values.values()
             )
             current = current.tb_next
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         assert original == file_hashes(root)
         assert not filesystem_exists(
             logical_root / "instances" / metadata_envelope.instance_identity

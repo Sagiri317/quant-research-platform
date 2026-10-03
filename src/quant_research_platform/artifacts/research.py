@@ -169,6 +169,7 @@ def read_evaluation_report_evidence(
             if key.startswith(f"outputs/{evaluation_id}/")
         },
         observer=observe,
+        lease=report_lease,
     )
     undefined = not any(tables.values()) or any(
         value
@@ -223,6 +224,7 @@ def load_a_share_run_evidence(
                 expected_member_identities=None
                 if reference_member_identities is None
                 else reference_member_identities.get(target_id),
+                lease=report_lease,
             )
             captured[target_id] = identities
         except (FileNotFoundError, OSError, ValueError):
@@ -351,6 +353,7 @@ def load_a_share_run_evidence(
             expected_identity=model_ref.instance_identity,
             expected_member_identities=captured[model_ref.target_id],
             operational_metadata=operational,
+            lease=report_lease,
         )
         if "model_phase_observations" in operational:
             model_costs.append(
@@ -369,7 +372,10 @@ def load_a_share_run_evidence(
                 _plan,
                 records,
             ):
-                trial_counts.update(item.status for item in records)
+                try:
+                    trial_counts.update(item.status for item in records)
+                finally:
+                    _plan = records = None
         except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
             trial_status = "FAILED"
             issues.append(
@@ -392,6 +398,7 @@ def load_a_share_run_evidence(
                     _instance_root(layout, statistics_ref),
                     expected_identity=str(statistics_ref.instance_identity),
                     expected_member_identities=captured[statistics_ref.target_id],
+                    lease=report_lease,
                 )
                 tables = {
                     name: table_records(artifact, name + ".parquet")
@@ -448,6 +455,7 @@ def load_a_share_run_evidence(
                 _instance_root(layout, portfolio_ref),
                 expected_identity=portfolio_ref.instance_identity,
                 expected_member_identities=captured[portfolio_ref.target_id],
+                lease=report_lease,
             )
             summaries = {
                 name: table_records(artifact, "portfolio_" + name + ".parquet")
@@ -572,6 +580,7 @@ def load_a_share_run_evidence(
                 _instance_root(layout, ledger_ref),
                 expected_identity=ledger_ref.instance_identity,
                 expected_member_identities=captured[ledger_ref.target_id],
+                lease=report_lease,
             )
             ledger_operations = {}
             read_semantic_artifact_record(
@@ -579,6 +588,7 @@ def load_a_share_run_evidence(
                 expected_identity=ledger_ref.instance_identity,
                 expected_member_identities=captured[ledger_ref.target_id],
                 operational_metadata=ledger_operations,
+                lease=report_lease,
             )
             portfolios.append(
                 {
@@ -642,6 +652,7 @@ def read_validated_reference(
     layout: StorageLayout,
     result: ResearchRunTargetResult,
     *,
+    lease,
     member_identities=None,
     expected_member_identities=None,
 ):
@@ -666,6 +677,7 @@ def read_validated_reference(
             expected_identity=result.instance_identity,
             member_identities=member_identities,
             expected_member_identities=expected_member_identities,
+            lease=lease,
         )
     if (
         envelope["logical_artifact_id"] != result.target_id
@@ -721,12 +733,11 @@ def read_research_report_artifact(
     *,
     expected_identity: str,
     source_run: ResearchRunRecord | None = None,
-    report_lease=None,
+    report_lease,
     include_markdown: bool = False,
 ) -> dict[str, object]:
     envelope, members = read_semantic_artifact_record(
-        Path(instance_root),
-        expected_identity=expected_identity,
+        Path(instance_root), expected_identity=expected_identity, lease=report_lease
     )
     by_path = _require_members(members, ("report.json", "report.md"))
     contract = envelope["semantic_metadata"].get("target_contract")

@@ -241,19 +241,29 @@ def _calculate_values(
         )
     elif factor == "min_return_20d":
         result = np.min(current, axis=1)
-    elif factor in {"skewness_20d", "skewness_60d"}:
-        result = pd.DataFrame(current).skew(axis=1).to_numpy(dtype="float64")
-    elif factor == "kurtosis_60d":
-        normalized = current / np.max(np.abs(current), axis=1, keepdims=True)
-        centered = normalized - np.mean(normalized, axis=1, keepdims=True)
+    elif factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
+        # Binary scaling preserves adjacent values and bounds anchor subtraction.
+        # Center the differences so the original offset cannot round away the mean.
+        _, exponent = np.frexp(np.max(np.abs(current), axis=1, keepdims=True))
+        normalized = np.ldexp(current, -exponent)
+        differences = normalized - normalized[:, :1]
+        centered = differences - np.mean(differences, axis=1, keepdims=True)
         centered /= np.max(np.abs(centered), axis=1, keepdims=True)
         moment_2 = np.mean(centered * centered, axis=1)
-        moment_4 = np.mean(centered**4, axis=1)
-        result = (
-            (size - 1)
-            / ((size - 2) * (size - 3))
-            * ((size + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
-        )
+        if factor == "kurtosis_60d":
+            moment_4 = np.mean(centered**4, axis=1)
+            result = (
+                (size - 1)
+                / ((size - 2) * (size - 3))
+                * ((size + 1) * (moment_4 / (moment_2 * moment_2) - 3.0) + 6.0)
+            )
+        else:
+            moment_3 = np.mean(centered**3, axis=1)
+            result = (
+                sqrt(size * (size - 1))
+                / (size - 2)
+                * (moment_3 / (moment_2 * np.sqrt(moment_2)))
+            )
     elif factor == "drawdown_60d":
         result = np.min(current / np.maximum.accumulate(current, axis=1) - 1.0, axis=1)
     elif factor == "amplitude_20d":
@@ -278,15 +288,30 @@ def _calculate_values(
         )
     elif factor in {"signed_amount_flow_20d", "return_amount_imbalance_20d"}:
         flow = extra["amount"]
-        numerator = np.sum(
-            (np.sign(current) if factor == "signed_amount_flow_20d" else current)
-            * flow,
-            axis=1,
-        )
-        denominator = np.sum(
-            flow if factor == "signed_amount_flow_20d" else np.abs(current) * flow,
-            axis=1,
-        )
+        if factor == "signed_amount_flow_20d":
+            scale = np.max(np.abs(flow), axis=1, keepdims=True)
+            normalized = np.divide(
+                flow, scale, out=np.zeros_like(flow), where=scale > 0
+            )
+            numerator = np.sum(np.sign(current) * normalized, axis=1)
+            denominator = np.sum(normalized, axis=1)
+        else:
+            return_mantissa, return_exponent = np.frexp(current)
+            flow_mantissa, flow_exponent = np.frexp(flow)
+            products = return_mantissa * flow_mantissa
+            exponents = return_exponent + flow_exponent
+            scale = np.max(
+                np.where(
+                    products != 0,
+                    exponents,
+                    np.min(exponents, axis=1, keepdims=True),
+                ),
+                axis=1,
+                keepdims=True,
+            )
+            normalized = np.ldexp(products, exponents - scale)
+            numerator = np.sum(normalized, axis=1)
+            denominator = np.sum(np.abs(normalized) * np.sign(flow), axis=1)
         result = np.divide(
             numerator,
             denominator,

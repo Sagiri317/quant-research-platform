@@ -14,6 +14,9 @@ from quant_research_platform.artifacts.outputs.manifest import (
     output_manifest_payload,
     prediction_output_metadata,
 )
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
     native_filesystem_path,
@@ -243,20 +246,25 @@ def test_validate_output_bundle_returns_declared_member_order(tmp_path: Path) ->
     root = tmp_path / "bundle"
     _write_bundle(root)
 
-    manifest, members = validate_output_bundle(
-        root,
-        expected_run_id="test_run",
-        expected_output_id="pred-run",
-    )
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        manifest, members = validate_output_bundle(
+            root,
+            expected_run_id="test_run",
+            expected_output_id="pred-run",
+            lease=artifact_lease,
+        )
 
-    assert manifest["files"] == ["prediction.parquet"]
-    assert members == (
-        (root / "manifest.json", dataset_file_identity(root / "manifest.json")),
-        (
-            root / "prediction.parquet",
-            dataset_file_identity(root / "prediction.parquet"),
-        ),
-    )
+        assert manifest["files"] == ["prediction.parquet"]
+        assert members == (
+            (root / "manifest.json", dataset_file_identity(root / "manifest.json")),
+            (
+                root / "prediction.parquet",
+                dataset_file_identity(root / "prediction.parquet"),
+            ),
+        )
 
 
 def test_validate_output_bundle_accepts_local_only_manifest_value(
@@ -269,10 +277,14 @@ def test_validate_output_bundle_accepts_local_only_manifest_value(
     payload["metadata"]["research_dataset_id"] = "data/raw/private"
     manifest_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
 
-    manifest, members = validate_output_bundle(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        manifest, members = validate_output_bundle(root, lease=artifact_lease)
 
-    assert manifest["metadata"]["research_dataset_id"] == "data/raw/private"
-    assert members[0][0] == manifest_path
+        assert manifest["metadata"]["research_dataset_id"] == "data/raw/private"
+        assert members[0][0] == manifest_path
 
 
 def test_validate_output_bundle_rejects_alias_above_bundle_root(tmp_path: Path) -> None:
@@ -285,8 +297,12 @@ def test_validate_output_bundle_rejects_alias_above_bundle_root(tmp_path: Path) 
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
 
-    with pytest.raises(ValueError, match="output_bundle_root_invalid"):
-        validate_output_bundle(alias / "nested" / "bundle")
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(ValueError, match="output_bundle_root_invalid"):
+            validate_output_bundle(alias / "nested" / "bundle", lease=artifact_lease)
 
 
 @pytest.mark.parametrize("mutation", ("missing", "extra"))
@@ -301,8 +317,12 @@ def test_validate_output_bundle_requires_exact_member_set(
     else:
         (root / "extra.bin").write_bytes(b"extra")
 
-    with pytest.raises(ValueError, match="output_member_set_mismatch"):
-        validate_output_bundle(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(ValueError, match="output_member_set_mismatch"):
+            validate_output_bundle(root, lease=artifact_lease)
 
 
 def test_validate_output_bundle_rejects_declared_hardlink_alias(
@@ -325,8 +345,12 @@ def test_validate_output_bundle_rejects_declared_hardlink_alias(
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
 
-    with pytest.raises(ValueError, match="output_member_physical_identity_invalid"):
-        validate_output_bundle(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(ValueError, match="output_member_physical_identity_invalid"):
+            validate_output_bundle(root, lease=artifact_lease)
 
 
 def test_validate_output_bundle_accepts_external_hardlink(tmp_path: Path) -> None:
@@ -337,10 +361,14 @@ def test_validate_output_bundle_accepts_external_hardlink(tmp_path: Path) -> Non
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
 
-    manifest, members = validate_output_bundle(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        manifest, members = validate_output_bundle(root, lease=artifact_lease)
 
-    assert manifest["files"] == ["prediction.parquet"]
-    assert members[1][0] == root / "prediction.parquet"
+        assert manifest["files"] == ["prediction.parquet"]
+        assert members[1][0] == root / "prediction.parquet"
 
 
 def test_validate_output_bundle_rejects_symlinked_manifest(tmp_path: Path) -> None:
@@ -354,8 +382,14 @@ def test_validate_output_bundle_rejects_symlinked_manifest(tmp_path: Path) -> No
     except OSError as exc:
         pytest.skip(f"symlink_not_available: {exc}")
 
-    with pytest.raises(ValueError, match="output_manifest_physical_identity_invalid"):
-        validate_output_bundle(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(
+            ValueError, match="output_manifest_physical_identity_invalid"
+        ):
+            validate_output_bundle(root, lease=artifact_lease)
 
 
 @pytest.mark.parametrize("mutation", ("add", "delete", "rename"))
@@ -388,8 +422,12 @@ def test_validate_output_bundle_rechecks_exact_member_set_at_operation_end(
         mutate_before_final_gate,
     )
 
-    with pytest.raises(ValueError, match="output_member_set_mismatch"):
-        validate_output_bundle(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(ValueError, match="output_member_set_mismatch"):
+            validate_output_bundle(root, lease=artifact_lease)
 
 
 def test_validate_output_bundle_rejects_same_path_root_replacement(
@@ -419,10 +457,14 @@ def test_validate_output_bundle_rejects_same_path_root_replacement(
         replace_after_initial_capture,
     )
 
-    with pytest.raises(ValueError, match="output_bundle_identity_changed"):
-        validate_output_bundle(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(ValueError, match="output_bundle_identity_changed"):
+            validate_output_bundle(root, lease=artifact_lease)
 
-    assert calls == 2
+        assert calls == 2
 
 
 def test_validate_output_bundle_runs_observer_once_between_capture_and_final_recheck(
@@ -459,19 +501,25 @@ def test_validate_output_bundle_runs_observer_once_between_capture_and_final_rec
         observed_members,
     )
 
-    payload, members = validate_output_bundle(root, observer=observer)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        payload, members = validate_output_bundle(
+            root, observer=observer, lease=artifact_lease
+        )
 
-    assert {
-        "events": events,
-        "observer_hits": len(observer_hits),
-        "payload_is_same": observer_hits[0][0] is payload,
-        "members_are_same": observer_hits[0][1] == members,
-    } == {
-        "events": ["root", "members", "observer", "root", "members"],
-        "observer_hits": 1,
-        "payload_is_same": True,
-        "members_are_same": True,
-    }
+        assert {
+            "events": events,
+            "observer_hits": len(observer_hits),
+            "payload_is_same": observer_hits[0][0] is payload,
+            "members_are_same": observer_hits[0][1] == members,
+        } == {
+            "events": ["root", "members", "observer", "root", "members"],
+            "observer_hits": 1,
+            "payload_is_same": True,
+            "members_are_same": True,
+        }
 
 
 @pytest.mark.parametrize(
@@ -525,20 +573,24 @@ def test_validate_output_bundle_final_recheck_rejects_observer_window_mutation(
             root.rename(moved)
             replacement.rename(root)
 
-    with pytest.raises(ValueError) as caught:
-        validate_output_bundle(root, observer=observer)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(ValueError) as caught:
+            validate_output_bundle(root, observer=observer, lease=artifact_lease)
 
-    assert {
-        "observer_hits": observer_hits,
-        "error": str(caught.value),
-    } == {
-        "observer_hits": 1,
-        "error": (
-            "output_member_set_mismatch"
-            if mutation in {"add", "delete", "rename"}
-            else "output_bundle_identity_changed"
-        ),
-    }
+        assert {
+            "observer_hits": observer_hits,
+            "error": str(caught.value),
+        } == {
+            "observer_hits": 1,
+            "error": (
+                "output_member_set_mismatch"
+                if mutation in {"add", "delete", "rename"}
+                else "output_bundle_identity_changed"
+            ),
+        }
 
 
 @pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt, SystemExit))
@@ -577,20 +629,24 @@ def test_validate_output_bundle_preserves_observer_primary_over_final_secondary(
         final_secondary,
     )
     caught: BaseException | None = None
-    try:
-        validate_output_bundle(root, observer=observer)
-    except BaseException as exc:
-        caught = exc
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        try:
+            validate_output_bundle(root, observer=observer, lease=artifact_lease)
+        except BaseException as exc:
+            caught = exc
 
-    assert {
-        "caught_is_primary": caught is primary,
-        "observer_hits": observer_hits,
-        "root_hits": root_hits,
-    } == {
-        "caught_is_primary": True,
-        "observer_hits": 1,
-        "root_hits": 2,
-    }
+        assert {
+            "caught_is_primary": caught is primary,
+            "observer_hits": observer_hits,
+            "root_hits": root_hits,
+        } == {
+            "caught_is_primary": True,
+            "observer_hits": 1,
+            "root_hits": 2,
+        }
 
 
 @pytest.mark.parametrize(
@@ -625,20 +681,24 @@ def test_validate_output_bundle_propagates_final_secondary_without_primary(
         final_secondary,
     )
     caught: BaseException | None = None
-    try:
-        validate_output_bundle(root, observer=observer)
-    except BaseException as exc:
-        caught = exc
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        try:
+            validate_output_bundle(root, observer=observer, lease=artifact_lease)
+        except BaseException as exc:
+            caught = exc
 
-    assert {
-        "caught_is_secondary": caught is secondary,
-        "observer_hits": observer_hits,
-        "root_hits": root_hits,
-    } == {
-        "caught_is_secondary": True,
-        "observer_hits": 1,
-        "root_hits": 2,
-    }
+        assert {
+            "caught_is_secondary": caught is secondary,
+            "observer_hits": observer_hits,
+            "root_hits": root_hits,
+        } == {
+            "caught_is_secondary": True,
+            "observer_hits": 1,
+            "root_hits": 2,
+        }
 
 
 @pytest.mark.parametrize(

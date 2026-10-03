@@ -274,9 +274,12 @@ def build_crypto_portfolio_statistics_tables(
         root = layout.target_root(target_id, None)
         identity = upstream_identities[target_id]
         if mode == "continuous":
-            yield None, read_ledger(root, expected_identity=identity)
+            yield (
+                None,
+                read_ledger(root, expected_identity=identity, lease=lease),
+            )
         else:
-            collection = read_episodes(root, expected_identity=identity)
+            collection = read_episodes(root, expected_identity=identity, lease=lease)
             with closing_iterator(collection.iter_episodes()) as episodes:
                 yield from episodes
 
@@ -626,8 +629,12 @@ def build_crypto_portfolio_statistics_tables(
         interval_rows = daily_rows = metrics = diagnostics = costs = coverage = (
             records
         ) = None
+        artifact = episode = None
         lease.shrink_to(
-            max(1, sum(pandas_frame_payload_bytes(frame) for frame in tables.values()))
+            max(
+                1,
+                sum(pandas_frame_payload_bytes(frame) for frame in tables.values()),
+            )
         )
         lease.transfer("research.statistics.output")
         return OwnedValue(tables, lease)

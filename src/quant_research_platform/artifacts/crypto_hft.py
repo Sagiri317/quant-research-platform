@@ -221,16 +221,25 @@ def _episode_rows(root, envelope, members, identities, manifest_identity=None):
                         path.removeprefix(child_root + "/"): identities[path]
                         for path in child_paths
                     }
-                    child = read_portfolio_ledger_artifact(
-                        root / child_root,
-                        expected_identity=expected_child.instance_identity,
-                        expected_member_identities=child_identities,
-                        consume_batches=consume,
-                    )
-                    if terminal_observed != terminal:
-                        raise ValueError("crypto_episode_child_contract_invalid")
-                    count += 1
-                    yield row, child
+                    with policy.lease(
+                        "artifacts.crypto_episode.child_metadata", 0
+                    ) as child_lease:
+                        child = read_portfolio_ledger_artifact(
+                            root / child_root,
+                            expected_identity=expected_child.instance_identity,
+                            expected_member_identities=child_identities,
+                            consume_batches=consume,
+                            lease=child_lease,
+                        )
+                        try:
+                            if terminal_observed != terminal:
+                                raise ValueError(
+                                    "crypto_episode_child_contract_invalid"
+                                )
+                            count += 1
+                            yield row, child
+                        finally:
+                            child = None
         if not count or expected_paths != {member["path"] for member in members}:
             raise ValueError("crypto_episode_child_members_invalid")
     finally:
@@ -279,7 +288,7 @@ class CryptoEpisodeArtifact:
 
 
 def read_crypto_episode_artifact(
-    root, *, expected_identity, expected_member_identities=None
+    root, *, lease, expected_identity, expected_member_identities=None
 ):
     root = Path(root)
     identities = {}
@@ -288,6 +297,7 @@ def read_crypto_episode_artifact(
         expected_identity=expected_identity,
         member_identities=identities,
         expected_member_identities=expected_member_identities,
+        lease=lease,
     )
     manifest_identity = identities.pop("manifest.json")
     artifact = CryptoEpisodeArtifact(
@@ -408,7 +418,9 @@ def produce_crypto_report(
             continue
         try:
             identities = {}
-            read_validated_reference(layout, result, member_identities=identities)
+            read_validated_reference(
+                layout, result, member_identities=identities, lease=report_lease
+            )
             captured[result.target_id] = identities
         except (OSError, ValueError):
             issues.append(
@@ -503,6 +515,7 @@ def produce_crypto_report(
                 expected_identity=reference.instance_identity,
                 expected_member_identities=captured[reference.target_id],
                 trial_layout=layout,
+                lease=report_lease,
             )
             report_lease.grow(
                 report_payload_working_set(
@@ -546,6 +559,7 @@ def produce_crypto_report(
                         for key, value in captured[reference.target_id].items()
                         if key.startswith(f"outputs/{output_id}/")
                     },
+                    lease=report_lease,
                 )
                 metadata = manifest["metadata"]
                 if (
@@ -619,6 +633,7 @@ def produce_crypto_report(
                     expected_identity=reference.instance_identity,
                     expected_member_identities=captured[reference.target_id],
                     validate_tables=validate_maker_calibration,
+                    lease=report_lease,
                 )
                 with artifact.table("crypto_maker_calibration.parquet") as frame:
                     calibration = {
@@ -676,6 +691,7 @@ def produce_crypto_report(
                         root,
                         expected_identity=reference.instance_identity,
                         expected_member_identities=captured[reference.target_id],
+                        lease=report_lease,
                     )
                     result = {
                         "episode_id": "continuous",
@@ -695,6 +711,7 @@ def produce_crypto_report(
                         root,
                         expected_identity=reference.instance_identity,
                         expected_member_identities=captured[reference.target_id],
+                        lease=report_lease,
                     )
                     episode_rows = []
                     with closing_iterator(collection.iter_episodes()) as episodes:
@@ -754,6 +771,7 @@ def produce_crypto_report(
                 _instance_root(layout, reference),
                 expected_identity=reference.instance_identity,
                 expected_member_identities=captured[reference.target_id],
+                lease=report_lease,
             )
             tables = {}
             for member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]:

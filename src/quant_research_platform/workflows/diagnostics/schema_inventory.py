@@ -94,18 +94,21 @@ def iter_schema_inventory_items(
             for artifact_root in _iter_dataset_artifact_roots(root):
                 with ExitStack() as item_state:
                     try:
-                        item, _item_bytes = _inventory_item(
-                            root,
-                            artifact_root,
-                            important_null_count_columns=important_columns,
-                            resource_policy=policy,
-                            retained_items=item_state,
-                        )
-                    except MemoryError:
-                        raise ValueError(
-                            "schema_inventory_payload_exceeds_task_memory_budget"
-                        ) from None
-                    yield item
+                        try:
+                            item, _item_bytes = _inventory_item(
+                                root,
+                                artifact_root,
+                                important_null_count_columns=important_columns,
+                                resource_policy=policy,
+                                retained_items=item_state,
+                            )
+                        except MemoryError:
+                            raise ValueError(
+                                "schema_inventory_payload_exceeds_task_memory_budget"
+                            ) from None
+                        yield item
+                    finally:
+                        item = None
 
         with closing_iterator(generate()) as items:
             yield items
@@ -130,15 +133,20 @@ def write_schema_inventory(
             resource_policy=resource_policy,
         ) as items:
             for item in items:
-                _validate_schema_inventory_item(item)
-                logical_root = item["logical_relative_root"]
-                if previous_root is not None and logical_root <= previous_root:
-                    raise ValueError("schema_inventory_dataset_order_invalid")
-                previous_root = logical_root
-                rendered = render_qrp_json_object(item)
-                prefix = "\n" if not found else ",\n"
-                found = True
-                yield prefix + "\n".join("  " + line for line in rendered.splitlines())
+                try:
+                    _validate_schema_inventory_item(item)
+                    logical_root = item["logical_relative_root"]
+                    if previous_root is not None and logical_root <= previous_root:
+                        raise ValueError("schema_inventory_dataset_order_invalid")
+                    previous_root = logical_root
+                    rendered = render_qrp_json_object(item)
+                    prefix = "\n" if not found else ",\n"
+                    found = True
+                    yield prefix + "\n".join(
+                        "  " + line for line in rendered.splitlines()
+                    )
+                finally:
+                    item = rendered = None
         if not found:
             raise ValueError("schema_inventory_no_datasets_found")
         yield '\n  ],\n  "schema_id": "qrp-schema-inventory"\n}\n'

@@ -914,3 +914,188 @@ def test_begin_refit_persists_fit_domain_and_all_real_parent_ledgers(tmp_path, g
             selection_group=group,
         )
     assert set(layout.trial_ledger_root("run_refit").iterdir()) == roots_before
+
+
+@pytest.mark.parametrize("reader_name", ("direct", "reference", "model"))
+@pytest.mark.parametrize("cancel", (False, True))
+def test_decoded_trial_objects_die_before_ledger_release(
+    tmp_path, monkeypatch, reader_name, cancel
+):
+    import weakref
+
+    from quant_research_platform.contracts.experiments import (
+        trial_ledger_semantic_identity,
+    )
+    from quant_research_platform.runtime.resources import (
+        MemoryLease,
+        runtime_resource_policy_scope,
+    )
+    from quant_research_platform.storage.experiments import (
+        read_model_trial_ledger_reference,
+        read_trial_ledger_reference,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    layout = StorageLayout(tmp_path)
+    plan = _plan()
+    record = replace(
+        _record(plan, event_id="event-1", attempt_index=1, status="failed"),
+        normalized_parameters={"blob": "a" * 200_000},
+    )
+    root = layout.trial_ledger_root(record.run_id, plan.experiment_id)
+    append_trial_record(root, plan, record)
+    before = {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    }
+    reference = {
+        "run_id": record.run_id,
+        "experiment_id": plan.experiment_id,
+        "protocol_hash": plan.protocol_hash,
+        "semantic_identity": trial_ledger_semantic_identity(plan, (record,)),
+    }
+    objects = []
+    released = []
+    close = MemoryLease.close
+
+    def observe_release(lease):
+        if lease.owner == "storage.trial.ledger" and lease.active:
+            released.append(bool(objects) and all(ref() is None for ref in objects))
+        close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", observe_release)
+    scope = (
+        read_trial_ledger(root)
+        if reader_name == "direct"
+        else (
+            read_trial_ledger_reference
+            if reader_name == "reference"
+            else read_model_trial_ledger_reference
+        )(layout, reference)
+    )
+    primary = KeyboardInterrupt("trial_consumer_cancelled")
+
+    def consume():
+        with scope as (saved, records):
+            objects.extend(weakref.ref(value) for value in (saved, *records))
+            assert len(records) == 1 and records[0].status == "failed"
+            saved = records = None
+            if cancel:
+                raise primary
+
+    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+        if cancel:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                consume()
+            assert caught.value is primary
+            assert primary.__traceback__ is not None
+        else:
+            consume()
+        assert policy.used_memory_bytes == 0
+    assert released == [True]
+    assert {
+        path.relative_to(root): path.read_bytes()
+        for path in root.rglob("*")
+        if path.is_file()
+    } == before
+
+
+@pytest.mark.parametrize("caller", ("append", "read"))
+def test_invalid_trial_completion_releases_decoded_objects_before_lease(
+    tmp_path, monkeypatch, caller
+):
+    import json
+    import sys
+    import weakref
+
+    from quant_research_platform.runtime.resources import (
+        MemoryLease,
+        runtime_resource_policy_scope,
+    )
+    from quant_research_platform.storage import experiments
+
+    root = tmp_path / "ledger"
+    plan = _plan()
+    start = replace(
+        _record(plan, event_id="start", attempt_index=1, status="attempted"),
+        normalized_parameters={"scale_blob": "a" * 200_000},
+        cost_assumptions={"scale_blob": "b" * 200_000},
+    )
+    terminal = replace(start, event_id="finish", status="abandoned")
+    append_trial_record(root, plan, start)
+    original = {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*.json")
+    }
+    if caller == "append":
+        terminal = replace(terminal, random_seed=99)
+    else:
+        terminal_path = append_trial_record(root, plan, terminal)
+        payload = json.loads(terminal_path.read_text(encoding="utf-8"))
+        payload["random_seed"] = 99
+        terminal_path.write_text(json.dumps(payload), encoding="utf-8")
+    before = {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*.json")
+    }
+    borrowed_ids = {id(start), id(terminal)}
+    objects = []
+    released = []
+    primary_at_release = []
+    close = MemoryLease.close
+    validator_code = experiments._validate_trial_completion.__code__
+    replace_code = experiments.replace.__code__
+
+    def observe(frame, event, value):
+        if event == "call" and frame.f_code is validator_code:
+            objects.extend(
+                weakref.ref(frame.f_locals[name])
+                for name in ("start", "terminal")
+                if id(frame.f_locals[name]) not in borrowed_ids
+            )
+        elif (
+            event == "return"
+            and frame.f_code is replace_code
+            and frame.f_back.f_code is validator_code
+        ):
+            objects.append(weakref.ref(value))
+
+    def observe_release(lease):
+        if lease.owner == "storage.trial.ledger" and lease.active:
+            released.append(bool(objects) and all(ref() is None for ref in objects))
+            primary_at_release.append(sys.exception())
+        close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", observe_release)
+    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+        previous_profile = sys.getprofile()
+        sys.setprofile(observe)
+        try:
+            with pytest.raises(
+                ValueError, match="^trial_terminal_identity_mismatch$"
+            ) as caught:
+                if caller == "append":
+                    append_trial_record(root, plan, terminal)
+                else:
+                    with read_trial_ledger(root):
+                        pytest.fail("invalid_terminal_was_accepted")
+        finally:
+            sys.setprofile(previous_profile)
+        assert policy.used_memory_bytes == 0
+    assert primary_at_release == [caught.value]
+    assert released == [True]
+    assert len(objects) == (2 if caller == "append" else 3)
+    trace = caught.value.__traceback__
+    helper_frames = 0
+    while trace is not None:
+        if trace.tb_frame.f_code is validator_code:
+            helper_frames += 1
+            assert all(
+                trace.tb_frame.f_locals[name] is None
+                for name in ("start", "terminal", "expected")
+            )
+        trace = trace.tb_next
+    assert helper_frames == 1
+    assert {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*.json")
+    } == before
+    assert all((root / name).read_bytes() == value for name, value in original.items())

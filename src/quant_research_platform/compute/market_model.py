@@ -145,11 +145,16 @@ class MarketModelRiskState:
             if len(residuals) > self.residual_window:
                 residuals.pop(0)
             betas[asset] = float(beta)
-            volatilities[asset] = (
-                float(np.std(residuals, ddof=0))
-                if len(residuals) == self.residual_window
-                else np.nan
-            )
+            volatility = np.nan
+            if len(residuals) == self.residual_window:
+                values = np.asarray(residuals)
+                residual_scale = float(np.max(np.abs(values)))
+                volatility = (
+                    0.0
+                    if residual_scale == 0.0
+                    else float(np.std(values / residual_scale, ddof=0) * residual_scale)
+                )
+            volatilities[asset] = volatility
         self._previous_weights = {
             asset: current_weight
             for asset, _return, _previous_weight, current_weight, _eligible in weighted

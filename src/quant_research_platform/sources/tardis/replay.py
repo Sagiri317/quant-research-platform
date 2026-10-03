@@ -9,6 +9,7 @@ import struct
 import sys
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
+from fractions import Fraction
 from functools import partial
 from pathlib import Path
 
@@ -735,9 +736,15 @@ class _TardisArchives:
         values = [
             archive.market_metadata(market_type, symbol) for archive in self.archives
         ]
-        if any(value != values[0] for value in values[1:]):
+        if any(
+            value["snapshot_limit"] != values[0]["snapshot_limit"]
+            for value in values[1:]
+        ):
             raise ValueError("tardis_archive_market_metadata_mismatch")
-        return values[0]
+        return {
+            "price_unit": min((value["price_unit"] for value in values), key=Fraction),
+            "snapshot_limit": values[0]["snapshot_limit"],
+        }
 
     def observation_coverage(self, **scope):
         return _ArchiveCoverage(
@@ -745,7 +752,7 @@ class _TardisArchives:
         )
 
     def iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
-        self.market_metadata(market_type, symbol)
+        price_unit = self.market_metadata(market_type, symbol)["price_unit"]
         for archive in self.archives:
             with closing_iterator(
                 archive.iter_market_records(
@@ -755,7 +762,9 @@ class _TardisArchives:
                     end_ns=end_ns,
                 )
             ) as records:
-                yield from records
+                for record in records:
+                    record["price_unit"] = price_unit
+                    yield record
 
     def iter_state_observations(self, *, symbol):
         for archive in self.archives:

@@ -777,3 +777,131 @@ def test_inventory_uses_declared_time_and_closes_early_context(
         finally:
             if items is not None:
                 items.close()
+
+
+@pytest.mark.parametrize("exit_mode", ("complete", "early_close", "write_failure"))
+def test_real_inventory_payload_lifetime_at_release(tmp_path, monkeypatch, exit_mode):
+    import sys
+
+    import quant_research_platform.storage.atomic as atomic
+
+    layout = StorageLayout(tmp_path)
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share", "a_share"],
+            "asset_id": ["asset_a", "asset_b"],
+            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
+            **{f"value_{number}": [1.0, 2.0] for number in range(8)},
+        }
+    )
+    for name in ("inventory_a", "inventory_b"):
+        spec = InterimDataSpec(
+            source_id="fixture",
+            data_id=name,
+            frequency=DataFrequency.DAILY,
+            grain=DataGrain.ASSET_TIMESTAMP,
+            column_roles={
+                "market_id": ColumnRole.KEY,
+                "asset_id": ColumnRole.KEY,
+                "timestamp": ColumnRole.TIMESTAMP,
+                **{f"value_{number}": ColumnRole.FACTOR for number in range(8)},
+            },
+            primary_key=("market_id", "asset_id", "timestamp"),
+            partition_columns=("year",),
+        )
+        write_dataset(layout.interim_data_root("fixture", name), frame, spec=spec)
+    output = tmp_path / "inventory.json"
+    old_good = tmp_path / "old_good.json"
+    old_good.write_bytes(b"previous successful output")
+    observations = []
+    calls = 0
+    primary = KeyboardInterrupt("inventory_write_primary")
+    open_file = atomic.open_owned_scratch_file
+
+    class FailingHandle:
+        def __init__(self, handle):
+            self.handle = handle
+            self.calls = 0
+
+        def write(self, text):
+            self.calls += 1
+            if self.calls == 2:
+                text = None
+                raise primary
+            return self.handle.write(text)
+
+        def close(self):
+            self.handle.close()
+
+    if exit_mode == "write_failure":
+        monkeypatch.setattr(
+            atomic,
+            "open_owned_scratch_file",
+            lambda *args, **kwargs: FailingHandle(open_file(*args, **kwargs)),
+        )
+
+    def observe(call_frame, event, _arg):
+        nonlocal calls
+        if (
+            event != "call"
+            or call_frame.f_code is not schema_inventory._inventory_item.__code__
+        ):
+            return
+        calls += 1
+        if calls != 2:
+            return
+        cursor = call_frame.f_back
+        retained = []
+        while cursor is not None:
+            if cursor.f_code.co_filename.endswith(("schema_inventory.py", "atomic.py")):
+                retained.extend(
+                    (cursor.f_code.co_name, name)
+                    for name in ("item", "rendered", "chunk")
+                    if type(cursor.f_locals.get(name)) in (dict, str)
+                )
+            cursor = cursor.f_back
+        observations.append(retained)
+
+    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+        previous_profile = sys.getprofile()
+        sys.setprofile(observe)
+        try:
+            if exit_mode == "early_close":
+                with schema_inventory.iter_schema_inventory_items(
+                    tmp_path, resource_policy=policy
+                ) as items:
+                    item = next(items)
+                    assert item["artifact_id"] == "inventory_a"
+                    item = None
+                    items.close()
+                    assert items.gi_frame is None
+            elif exit_mode == "write_failure":
+                with pytest.raises(KeyboardInterrupt) as caught:
+                    schema_inventory.write_schema_inventory(
+                        tmp_path, output, resource_policy=policy
+                    )
+                assert caught.value is primary
+                trace = primary.__traceback__
+                observed_atomic = False
+                while trace is not None:
+                    if trace.tb_frame.f_code.co_name == "atomic_write_chunks":
+                        state = trace.tb_frame.f_locals
+                        assert state["chunk"] is None
+                        assert state["source"].gi_frame is None
+                        observed_atomic = True
+                    trace = trace.tb_next
+                assert observed_atomic
+            else:
+                schema_inventory.write_schema_inventory(
+                    tmp_path, output, resource_policy=policy
+                )
+        finally:
+            sys.setprofile(previous_profile)
+        assert policy.used_memory_bytes == 0
+    if exit_mode == "complete":
+        assert calls == 2 and observations == [[]]
+        assert len(json.loads(output.read_text())["datasets"]) == 2
+    else:
+        assert calls == 1 and not output.exists()
+    assert old_good.read_bytes() == b"previous successful output"
+    assert not list(tmp_path.glob(".f-*"))

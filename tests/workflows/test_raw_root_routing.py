@@ -225,7 +225,10 @@ def test_crypto_semantic_source_identity_and_producer_share_one_root(
     calibration = profile.producer_bindings[candidate.calibration_target_id]
     panel = profile.producer_bindings["binance_futures_l2_panel_100ms"]
     assert calibration.raw_root == panel.raw_root == bound_root
-    assert calibration.source_identity is panel.source_identity
+    assert (
+        calibration.source_identity.keywords["time_window"]
+        == panel.source_identity.keywords["time_window"]
+    )
     assert callable(calibration.source_identity)
     target_id = (
         candidate.calibration_target_id
@@ -314,3 +317,48 @@ def test_crypto_semantic_source_identity_and_producer_share_one_root(
             )
         assert caught.value is primary
     assert seen == [("identity", expected_root), ("producer", expected_root)]
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    (
+        "baseline",
+        "derivatives_state",
+        "spot_context",
+        "cross_asset",
+        "external_context",
+    ),
+)
+@pytest.mark.parametrize("explicit", (False, True))
+def test_research_entry_binds_main_and_auxiliary_sources_to_selected_raw_root(
+    tmp_path, monkeypatch, configuration, explicit
+):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", configuration)
+    layout = StorageLayout(tmp_path / "project_a")
+    selected = (
+        tmp_path / "project_b" / "raw"
+        if explicit
+        else layout.project_root / "data" / "raw"
+    )
+    roots = []
+
+    def plan_targets(*, profile, raw_root, **_):
+        assert raw_root == selected
+        for binding in profile.producer_bindings.values():
+            if binding.raw_root is not None:
+                assert binding.raw_root.is_relative_to(selected / "tardis")
+                roots.append(binding.raw_root)
+        return {"status": "COMPLETE"}
+
+    monkeypatch.setattr(research, "plan_targets", plan_targets)
+    result = research.research_run(
+        profile=research_profile(config["profile_id"]),
+        layout=layout,
+        research_plan=config,
+        raw_root=selected if explicit else None,
+        plan=True,
+    )
+    assert result["status"] == "COMPLETE"
+    assert roots

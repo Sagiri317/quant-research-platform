@@ -1236,3 +1236,929 @@ def test_archive_source_identity_is_validated_on_write_and_read(tmp_path, mutati
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="invalid_source_artifact_identity"):
         read_dataset(root)
+
+
+@pytest.mark.parametrize("handoff", (False, True))
+@pytest.mark.parametrize("explicit_cap", (None, 8 * 1024**2))
+def test_private_writer_rejects_unadmitted_physical_bound_before_send(
+    tmp_path, handoff, explicit_cap
+):
+    policy = capture_test_policy(
+        available_memory_bytes=8 * 1024**2, explicit_cap_bytes=explicit_cap
+    )
+    entered = False
+
+    def producer():
+        nonlocal entered
+        pending = policy.lease("test.pending", 128 * 1024) if handoff else None
+        try:
+            yield (16 * 1024**2, pending) if handoff else 16 * 1024**2
+            entered = True
+            raise AssertionError("producer_entered_before_admission")
+        finally:
+            if pending is not None:
+                pending.close()
+
+    error = ValueError if explicit_cap is None else MemoryError
+    message = (
+        "dataset_producer_working_set_exceeds_memory_capacity"
+        if explicit_cap is None
+        else "runtime_memory_budget_exceeded"
+    )
+    with pytest.raises(error, match=message):
+        dataset_writing.write_dataset(
+            make_dataset_artifact_root(tmp_path, "physical_admission"),
+            producer(),
+            spec=make_processed_dataset_spec("physical_admission"),
+            resource_policy=policy,
+        )
+    assert not entered
+    assert policy.used_memory_bytes == 0
+
+
+def test_private_writer_admits_only_new_handoff_bytes_above_soft_target(tmp_path):
+    policy = capture_test_policy(available_memory_bytes=8 * 1024**2)
+    entered = False
+    primary = RuntimeError("producer_admitted")
+
+    def producer():
+        nonlocal entered
+        with policy.lease("test.pending", 1024**2) as pending:
+            with policy.lease(
+                "test.retained", policy.operation_headroom_bytes - 768 * 1024
+            ):
+                assert policy.planning_headroom_bytes == 0
+                received = yield (1536 * 1024, pending)
+                assert received is pending
+                assert received.reserved_bytes == 1536 * 1024
+                entered = True
+                raise primary
+
+    with pytest.raises(RuntimeError, match="producer_admitted") as caught:
+        dataset_writing.write_dataset(
+            make_dataset_artifact_root(tmp_path, "incremental_admission"),
+            producer(),
+            spec=make_processed_dataset_spec("incremental_admission"),
+            resource_policy=policy,
+        )
+    assert caught.value is primary
+    assert entered
+    assert policy.used_memory_bytes == 0
+
+
+def _footer_boundary_frame_and_spec(data_id, *, partitioned):
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    rows = 600
+    frame = pd.DataFrame(
+        {
+            "market_id": pd.Series(["a_share"] * rows, dtype=object),
+            "asset_id": pd.Series(
+                ["asset_a", "asset_b", "asset_c"] * 200
+                if partitioned
+                else [f"a{index:06d}" for index in range(rows)],
+                dtype=object,
+            ),
+            "timestamp": pd.date_range("2024-01-01", periods=200, freq="B")
+            .repeat(3)
+            .astype("datetime64[ns]"),
+            **{
+                f"factor_{index:02d}": np.arange(rows, dtype=float)
+                for index in range(34)
+            },
+            "note": pd.Series(
+                [None] * 220 + [f"value_{index:04d}" for index in range(220, rows)],
+                dtype=object,
+            ),
+            "category": pd.Categorical(
+                ["shared", "observed"] * 300,
+                categories=["shared", "observed", "unused_" + "汉" * 128],
+                ordered=True,
+            ),
+        }
+    )
+    frame.loc[rows - 1, "note"] = "汉" * 128
+    frame = pd.concat(
+        (frame.iloc[220:320], frame.iloc[:220], frame.iloc[320:]), ignore_index=True
+    )
+    spec = replace(
+        make_processed_dataset_spec(data_id),
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            **{f"factor_{index:02d}": ColumnRole.FACTOR for index in range(34)},
+            "note": ColumnRole.CONTEXT,
+            "category": ColumnRole.CONTEXT,
+        },
+        primary_key=("market_id", "asset_id", "timestamp")
+        if partitioned
+        else ("market_id", "asset_id"),
+        partition_columns=("year",) if partitioned else (),
+    )
+    return frame, spec
+
+
+@pytest.mark.parametrize("partitioned", (False, True))
+def test_writer_plans_complete_footer_and_preserves_bounded_logical_schema(
+    tmp_path, monkeypatch, partitioned
+):
+    frame, spec = _footer_boundary_frame_and_spec(
+        "footer_boundary", partitioned=partitioned
+    )
+    root = make_dataset_artifact_root(tmp_path, spec.data_id)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=7 * 1024**2,
+    )
+    writes = []
+    original_write = dataset_writing.pq.write_table
+
+    def observe_write(table, *args, **kwargs):
+        note = table.column("note")
+        writes.append((table.num_rows, note.null_count == table.num_rows))
+        assert pa.types.is_string(note.type) or pa.types.is_large_string(note.type)
+        assert pa.types.is_dictionary(table.schema.field("category").type)
+        minimum_native = dataset_writing._parquet_row_group_footer_upper_bound(
+            table.schema, rows=table.num_rows
+        ) + dataset_writing._table_parquet_page_working_set_bytes(table, rows=1)
+        native_leases = [
+            lease
+            for lease in policy._leases
+            if lease.owner == "storage.parquet.native" and lease.active
+        ]
+        assert len(native_leases) == 1
+        assert native_leases[0].reserved_bytes >= minimum_native
+        return original_write(table, *args, **kwargs)
+
+    monkeypatch.setattr(dataset_writing.pq, "write_table", observe_write)
+    dataset_writing.write_dataset(
+        root,
+        _bound_first_frames(
+            (frame,), bound=runtime_resources.pandas_frame_payload_bytes(frame)
+        ),
+        spec=spec,
+        resource_policy=policy,
+    )
+    assert len(writes) > 1
+    assert sum(rows for rows, _ in writes) == len(frame)
+    assert any(all_null for _, all_null in writes)
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+    expected = frame.sort_values(list(spec.primary_key)).reset_index(drop=True)
+    actual = (
+        read_dataset(root).sort_values(list(spec.primary_key)).reset_index(drop=True)
+    )
+    pd.testing.assert_frame_equal(
+        actual.drop(columns="note"), expected.drop(columns="note")
+    )
+    assert actual["note"].dtype == expected["note"].dtype
+    missing = expected["note"].isna()
+    pd.testing.assert_series_equal(actual["note"].isna(), missing)
+    pd.testing.assert_series_equal(
+        actual.loc[~missing, "note"], expected.loc[~missing, "note"]
+    )
+
+
+def test_writer_rejects_when_single_row_and_complete_footer_do_not_fit(tmp_path):
+    from tests.storage.dataset_test_support import _persisted_table
+
+    previous = make_dataset_artifact_root(tmp_path, "previous_good")
+    write_dataset(
+        previous,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("previous_good"),
+    )
+    previous_bytes = {
+        path.relative_to(previous): path.read_bytes()
+        for path in previous.rglob("*")
+        if path.is_file()
+    }
+    frame, spec = _footer_boundary_frame_and_spec("footer_nonfit", partitioned=True)
+    frame = frame.iloc[:1].copy()
+    persisted = dataset_writing.table_with_decoded_row_bounds(_persisted_table(frame))
+    footer_bytes = dataset_writing._parquet_row_group_footer_upper_bound(
+        persisted.schema, rows=1
+    )
+    minimum_page_bytes = dataset_writing._table_parquet_page_working_set_bytes(
+        persisted, rows=1
+    )
+    del persisted
+    frame_bytes = runtime_resources.pandas_frame_payload_bytes(frame)
+    policy = capture_test_policy(
+        available_memory_bytes=64 * 1024**2,
+        explicit_cap_bytes=(
+            dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+            + frame_bytes
+            + minimum_page_bytes
+            + footer_bytes // 2
+        ),
+    )
+    root = make_dataset_artifact_root(tmp_path, spec.data_id)
+    with pytest.raises(
+        ValueError, match="dataset_working_set_exceeds_task_memory_budget"
+    ):
+        dataset_writing.write_dataset(
+            root,
+            _bound_first_frames((frame,), bound=frame_bytes),
+            spec=spec,
+            resource_policy=policy,
+        )
+    assert not root.exists()
+    assert set(root.parent.iterdir()) == {previous}
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+    assert previous_bytes == {
+        path.relative_to(previous): path.read_bytes()
+        for path in previous.rglob("*")
+        if path.is_file()
+    }
+
+
+@pytest.mark.parametrize("failure_stage", ("prepare", "arrow", "metadata"))
+def test_writer_footer_preview_failure_drops_owned_objects_before_release(
+    tmp_path, monkeypatch, failure_stage
+):
+    policy = _writer_test_policy()
+    root = make_dataset_artifact_root(tmp_path, "preview_failure")
+    frame_refs = []
+    table_refs = []
+    releases = []
+    primary = KeyboardInterrupt("footer_preview_primary")
+    original_prepare = dataset_writing._WriteStats.prepare_frame
+    original_table = dataset_writing._WriteStats.table_for_frame
+    original_bounds = dataset_writing.table_with_decoded_row_bounds
+    original_close = runtime_resources.MemoryLease.close
+
+    def prepare(stats, frame):
+        prepared, logical = original_prepare(stats, frame)
+        frame_refs.append(weakref.ref(prepared))
+        if failure_stage == "prepare":
+            raise primary
+        return prepared, logical
+
+    def table_for_frame(stats, frame, **kwargs):
+        table = original_table(stats, frame, **kwargs)
+        table_refs.append(weakref.ref(table))
+        if failure_stage == "arrow":
+            raise primary
+        return table
+
+    def with_bounds(table):
+        persisted = original_bounds(table)
+        table_refs.append(weakref.ref(persisted))
+        if failure_stage == "metadata":
+            raise primary
+        return persisted
+
+    def close(lease):
+        if lease.active and lease.owner == "storage.dataset.arrow":
+            releases.append(
+                ("arrow", all(reference() is None for reference in table_refs))
+            )
+        if lease.active and lease.owner == "storage.dataset.prepare":
+            releases.append(
+                ("prepare", all(reference() is None for reference in frame_refs))
+            )
+        return original_close(lease)
+
+    monkeypatch.setattr(dataset_writing._WriteStats, "prepare_frame", prepare)
+    monkeypatch.setattr(dataset_writing._WriteStats, "table_for_frame", table_for_frame)
+    monkeypatch.setattr(dataset_writing, "table_with_decoded_row_bounds", with_bounds)
+    monkeypatch.setattr(runtime_resources.MemoryLease, "close", close)
+    with pytest.raises(KeyboardInterrupt, match="footer_preview_primary") as caught:
+        dataset_writing.write_dataset(
+            root,
+            _bound_first_frames((make_default_dataset_frame(),)),
+            spec=make_processed_dataset_spec("preview_failure"),
+            resource_policy=policy,
+        )
+    assert caught.value is primary
+    assert primary.__traceback__ is not None
+    expected_owners = (
+        ["prepare"] if failure_stage == "prepare" else ["arrow", "prepare"]
+    )
+    assert releases == [(owner, True) for owner in expected_owners]
+    assert frame_refs
+    assert not root.exists()
+    assert list(root.parent.iterdir()) == []
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+
+
+def _schema_name_frame_and_spec(data_id, *, schema_kind, width):
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    name = "k" * width
+    frame = pd.DataFrame(
+        {
+            "market_id": pd.Series(["a_share"] * 4, dtype=object),
+            "asset_id": pd.Series(
+                [f"{index:06d}" for index in range(1, 5)], dtype=object
+            ),
+            "timestamp": pd.Series(
+                pd.Timestamp("2024-01-02"), index=range(4), dtype="datetime64[ns]"
+            ),
+        }
+    )
+    payload_column = name if schema_kind == "top_level" else "payload"
+    frame[payload_column] = (
+        pd.Series([1, 2, 3, 4], dtype="int64")
+        if schema_kind == "top_level"
+        else pd.Series([{name: {"items": [1, 2]}} for _ in range(4)], dtype=object)
+    )
+    spec = replace(
+        make_processed_dataset_spec(data_id),
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            payload_column: ColumnRole.CONTEXT,
+        },
+    )
+    return frame, spec, name
+
+
+@pytest.mark.parametrize("schema_kind", ("top_level", "nested"))
+def test_public_writer_admits_schema_names_before_arrow_and_round_trips(
+    tmp_path, monkeypatch, schema_kind
+):
+    from tests.helpers.runtime_resources import _TestMachineLock
+
+    policies = []
+    reservations = {}
+    payload_sizes = []
+    expected_roots = set()
+    original_capture = runtime_resources._capture_runtime_resource_policy
+    original_table = dataset_writing._WriteStats.table_for_frame
+    current_width = 0
+
+    def capture_policy(*, explicit_cap_bytes=None):
+        assert explicit_cap_bytes is None
+        policy = original_capture(explicit_cap_bytes=64 * 1024**2)
+        policies.append(policy)
+        return policy
+
+    def observe_table(stats, frame, **kwargs):
+        policy = current_runtime_resource_policy()
+        assert policy is not None
+        metadata = [
+            lease.reserved_bytes
+            for lease in policy._leases
+            if lease.active and lease.owner == "storage.dataset.schema"
+        ]
+        assert len(metadata) == 1
+        reservations[current_width] = max(
+            reservations.get(current_width, 0), metadata[0]
+        )
+        return original_table(stats, frame, **kwargs)
+
+    monkeypatch.setattr(
+        runtime_resources, "_available_memory_bytes", lambda: 128 * 1024**2
+    )
+    monkeypatch.setattr(
+        runtime_resources._MachineLock, "acquire", lambda: _TestMachineLock()
+    )
+    monkeypatch.setattr(
+        runtime_resources, "_capture_runtime_resource_policy", capture_policy
+    )
+    monkeypatch.setattr(dataset_writing._WriteStats, "table_for_frame", observe_table)
+    for current_width in (8, 4096):
+        frame, spec, name = _schema_name_frame_and_spec(
+            f"schema_{schema_kind}_{current_width}",
+            schema_kind=schema_kind,
+            width=current_width,
+        )
+        payload_sizes.append(runtime_resources.pandas_frame_payload_bytes(frame))
+        root = make_dataset_artifact_root(tmp_path, spec.data_id)
+        expected_roots.add(root)
+        write_dataset(root, frame, spec=spec)
+        actual = read_dataset(root).sort_values("asset_id").reset_index(drop=True)
+        if schema_kind == "top_level":
+            pd.testing.assert_frame_equal(actual, frame)
+        else:
+            pd.testing.assert_frame_equal(
+                actual.drop(columns="payload"), frame.drop(columns="payload")
+            )
+            assert actual["payload"].dtype == frame["payload"].dtype
+            for value in actual["payload"]:
+                assert set(value) == {name}
+                assert set(value[name]) == {"items"}
+                assert list(value[name]["items"]) == [1, 2]
+            # Arrow returns nested lists as arrays; exercise their real rewrite path.
+            rewritten = make_dataset_artifact_root(
+                tmp_path / f"rewritten_{current_width}", spec.data_id
+            )
+            write_dataset(rewritten, actual, spec=spec)
+            restored = (
+                read_dataset(rewritten).sort_values("asset_id").reset_index(drop=True)
+            )
+            pd.testing.assert_frame_equal(restored, actual)
+            assert set(rewritten.parent.iterdir()) == {rewritten}
+        assert set(root.parent.iterdir()) == expected_roots
+    assert payload_sizes[0] == payload_sizes[1]
+    assert reservations[4096] > reservations[8]
+    assert policies
+    assert all(
+        policy.used_memory_bytes == 0 and policy.state == "CLOSED"
+        for policy in policies
+    )
+
+
+@pytest.mark.parametrize("schema_kind", ("top_level", "nested"))
+def test_public_writer_rejects_schema_nonfit_before_arrow_preserving_old_output(
+    tmp_path, monkeypatch, schema_kind
+):
+    from tests.helpers.runtime_resources import _TestMachineLock
+
+    previous = make_dataset_artifact_root(tmp_path, "schema_previous_good")
+    write_dataset(
+        previous,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("schema_previous_good"),
+    )
+    previous_bytes = {
+        path.relative_to(previous): path.read_bytes()
+        for path in previous.rglob("*")
+        if path.is_file()
+    }
+    policies = []
+    original_capture = runtime_resources._capture_runtime_resource_policy
+
+    def capture_policy(*, explicit_cap_bytes=None):
+        assert explicit_cap_bytes is None
+        policy = original_capture(
+            explicit_cap_bytes=(
+                dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+                + dataset_writing._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+                + 256 * 1024
+            )
+        )
+        policies.append(policy)
+        return policy
+
+    def unexpected_arrow(*_args, **_kwargs):
+        raise AssertionError("schema_nonfit_entered_arrow")
+
+    monkeypatch.setattr(
+        runtime_resources, "_available_memory_bytes", lambda: 128 * 1024**2
+    )
+    monkeypatch.setattr(
+        runtime_resources._MachineLock, "acquire", lambda: _TestMachineLock()
+    )
+    monkeypatch.setattr(
+        runtime_resources, "_capture_runtime_resource_policy", capture_policy
+    )
+    monkeypatch.setattr(
+        dataset_writing._WriteStats, "table_for_frame", unexpected_arrow
+    )
+    frame, spec, _name = _schema_name_frame_and_spec(
+        f"schema_nonfit_{schema_kind}", schema_kind=schema_kind, width=4096
+    )
+    root = make_dataset_artifact_root(tmp_path, spec.data_id)
+    with pytest.raises(
+        ValueError, match="dataset_working_set_exceeds_task_memory_budget"
+    ):
+        write_dataset(root, frame, spec=spec)
+    assert not root.exists()
+    assert set(root.parent.iterdir()) == {previous}
+    assert previous_bytes == {
+        path.relative_to(previous): path.read_bytes()
+        for path in previous.rglob("*")
+        if path.is_file()
+    }
+    assert len(policies) == 1
+    assert policies[0].used_memory_bytes == 0
+    assert policies[0].state == "CLOSED"
+
+
+def test_public_writer_omits_caller_attrs_before_copy_and_arrow_serialization(
+    tmp_path, monkeypatch
+):
+    class CallerOnly:
+        def __deepcopy__(self, _memo):
+            raise AssertionError("caller_attrs_were_copied")
+
+    expected = make_default_dataset_frame()
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    frames = (expected.iloc[:1].copy(), expected.iloc[1:].copy())
+    caller_only = CallerOnly()
+    payload = ["x" * 200_000, caller_only]
+    for frame in frames:
+        frame.attrs["caller_only"] = payload
+    original_attrs = [frame.attrs for frame in frames]
+    view_refs = []
+    view_releases = []
+    original_declared = dataset_writing._WriteStats.declared_frame
+    original_close = runtime_resources.MemoryLease.close
+
+    def declared(stats, frame, **kwargs):
+        assert all(reference() is None for reference in view_refs)
+        assert frame.attrs == {}
+        policy = current_runtime_resource_policy()
+        assert policy is not None
+        assert (
+            sum(
+                lease.active and lease.owner == "storage.dataset.input.view"
+                for lease in policy._leases
+            )
+            == 1
+        )
+        view_refs.append(weakref.ref(frame))
+        return original_declared(stats, frame, **kwargs)
+
+    def close(lease):
+        if lease.active and lease.owner == "storage.dataset.input.view":
+            view_releases.append(all(reference() is None for reference in view_refs))
+        return original_close(lease)
+
+    monkeypatch.setattr(dataset_writing._WriteStats, "declared_frame", declared)
+    monkeypatch.setattr(runtime_resources.MemoryLease, "close", close)
+    root = make_dataset_artifact_root(tmp_path, "caller_attrs")
+    write_dataset(
+        root,
+        frames,
+        spec=make_processed_dataset_spec("caller_attrs"),
+        instance_metadata={"producer_diagnostics": {"label": "preserved"}},
+    )
+    primary_key = list(make_processed_dataset_spec("caller_attrs").primary_key)
+    pd.testing.assert_frame_equal(
+        read_dataset(root).sort_values(primary_key).reset_index(drop=True),
+        expected.sort_values(primary_key).reset_index(drop=True),
+    )
+    assert len(view_refs) == len(frames)
+    assert view_releases == [True] * len(frames)
+    for frame, attrs in zip(frames, original_attrs, strict=True):
+        assert frame.attrs is attrs
+        assert frame.attrs["caller_only"] is payload
+    assert payload[0] == "x" * 200_000
+    assert payload[1] is caller_only
+    manifest = json.loads((root / "_manifest" / "manifest.json").read_text())
+    assert manifest["producer_diagnostics"] == {"label": "preserved"}
+
+
+@pytest.mark.parametrize("cancel_write", (False, True))
+def test_empty_publication_tables_die_before_arrow_release(
+    tmp_path, monkeypatch, cancel_write
+):
+    references = []
+    releases = []
+    primary = KeyboardInterrupt("empty_publication_primary")
+    original_tables = dataset_writing._bounded_persisted_tables
+    original_write = dataset_writing.pq.write_table
+    original_close = runtime_resources.MemoryLease.close
+
+    def observe_tables(table, **kwargs):
+        if table.num_rows == 0:
+            references.append(weakref.ref(table))
+        return original_tables(table, **kwargs)
+
+    def write(table, *args, **kwargs):
+        if table.num_rows == 0 and cancel_write:
+            raise primary
+        return original_write(table, *args, **kwargs)
+
+    def close(lease):
+        if lease.active and lease.owner == "storage.dataset.arrow" and references:
+            releases.append(all(reference() is None for reference in references))
+        return original_close(lease)
+
+    monkeypatch.setattr(dataset_writing, "_bounded_persisted_tables", observe_tables)
+    monkeypatch.setattr(dataset_writing.pq, "write_table", write)
+    monkeypatch.setattr(runtime_resources.MemoryLease, "close", close)
+    root = make_dataset_artifact_root(tmp_path, "empty_publication_lifetime")
+    frame = make_default_dataset_frame().iloc[:0].copy()
+    frame["timestamp"] = frame["timestamp"].astype("datetime64[ns]")
+    spec = make_processed_dataset_spec("empty_publication_lifetime")
+    if cancel_write:
+        with pytest.raises(
+            KeyboardInterrupt, match="empty_publication_primary"
+        ) as caught:
+            write_dataset(root, frame, spec=spec)
+        assert caught.value is primary
+        assert primary.__traceback__ is not None
+        assert not root.exists()
+        assert list(root.parent.iterdir()) == []
+    else:
+        write_dataset(root, frame, spec=spec)
+        pd.testing.assert_frame_equal(read_dataset(root), frame)
+    assert references
+    assert releases and all(releases)
+
+
+@pytest.mark.parametrize(
+    "leaf_kind",
+    (
+        "text",
+        "bytes",
+        "list",
+        "unicode_array",
+        "bytes_array",
+        "numeric_array",
+        "object_array",
+        "memoryview",
+        "noncontiguous_memoryview",
+    ),
+)
+def test_public_writer_admits_nested_leaf_buffers_and_preserves_values(
+    tmp_path, monkeypatch, leaf_kind
+):
+    from tests.helpers.runtime_resources import _TestMachineLock
+
+    policies = []
+    original_capture = runtime_resources._capture_runtime_resource_policy
+
+    def capture_policy(*, explicit_cap_bytes=None):
+        assert explicit_cap_bytes is None
+        policy = original_capture(explicit_cap_bytes=64 * 1024**2)
+        policies.append(policy)
+        return policy
+
+    monkeypatch.setattr(
+        runtime_resources, "_available_memory_bytes", lambda: 128 * 1024**2
+    )
+    monkeypatch.setattr(
+        runtime_resources._MachineLock, "acquire", lambda: _TestMachineLock()
+    )
+    monkeypatch.setattr(
+        runtime_resources, "_capture_runtime_resource_policy", capture_policy
+    )
+    for width in (8, 65_536):
+        frame, spec, name = _schema_name_frame_and_spec(
+            f"nested_leaf_{leaf_kind}_{width}", schema_kind="nested", width=1
+        )
+        frame = frame.iloc[:1].copy()
+        if leaf_kind == "text":
+            leaf = "a" * width
+        elif leaf_kind == "bytes":
+            leaf = b"a" * width
+        elif leaf_kind == "list":
+            leaf = ["a" * width]
+        elif leaf_kind == "unicode_array":
+            leaf = np.array(["a" * width], dtype=f"U{width}")
+        elif leaf_kind == "bytes_array":
+            leaf = np.array([b"a" * width], dtype=f"S{width}")
+        elif leaf_kind == "numeric_array":
+            leaf = np.arange(width, dtype=np.int64)
+        elif leaf_kind == "memoryview":
+            leaf = memoryview(b"a" * width)
+        elif leaf_kind == "noncontiguous_memoryview":
+            leaf = memoryview(b"ab" * width)[::2]
+        else:
+            leaf = np.array(["a" * width], dtype=object)
+        frame["payload"] = pd.Series([{name: leaf}], index=frame.index, dtype=object)
+        root = make_dataset_artifact_root(tmp_path, spec.data_id)
+        write_dataset(root, frame, spec=spec)
+        restored = read_dataset(root)
+        pd.testing.assert_frame_equal(
+            restored.drop(columns="payload"), frame.drop(columns="payload")
+        )
+        assert restored["payload"].dtype == frame["payload"].dtype
+        actual = restored["payload"].iloc[0]
+        assert set(actual) == {name}
+        if leaf_kind in ("memoryview", "noncontiguous_memoryview"):
+            assert actual[name] == b"a" * width
+        elif leaf_kind in ("text", "bytes"):
+            assert actual[name] == leaf
+        else:
+            np.testing.assert_array_equal(actual[name], leaf)
+    assert policies
+    assert all(
+        policy.used_memory_bytes == 0 and policy.state == "CLOSED"
+        for policy in policies
+    )
+
+
+@pytest.mark.parametrize(
+    "leaf_kind",
+    ("text", "unicode_array", "object_array", "memoryview", "noncontiguous_memoryview"),
+)
+def test_public_writer_rejects_nested_leaf_nonfit_before_arrow(
+    tmp_path, monkeypatch, leaf_kind
+):
+    from tests.helpers.runtime_resources import _TestMachineLock
+
+    frame, spec, name = _schema_name_frame_and_spec(
+        f"nested_leaf_nonfit_{leaf_kind}", schema_kind="nested", width=1
+    )
+    frame = frame.iloc[:1].copy()
+    value = "a" * 200_000
+    if leaf_kind == "text":
+        leaf = value
+    elif leaf_kind == "memoryview":
+        leaf = memoryview(b"a" * 200_000)
+    elif leaf_kind == "noncontiguous_memoryview":
+        leaf = memoryview(b"ab" * 200_000)[::2]
+    else:
+        leaf = np.array(
+            [value], dtype="U200000" if leaf_kind == "unicode_array" else object
+        )
+    frame["payload"] = pd.Series([{name: leaf}], index=frame.index, dtype=object)
+    original_capture = runtime_resources._capture_runtime_resource_policy
+    policies = []
+
+    def capture_policy(*, explicit_cap_bytes=None):
+        assert explicit_cap_bytes is None
+        policy = original_capture(
+            explicit_cap_bytes=(
+                dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+                + dataset_writing._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+                + 256 * 1024
+            )
+        )
+        policies.append(policy)
+        return policy
+
+    def unexpected_arrow(*_args, **_kwargs):
+        raise AssertionError("nested_leaf_nonfit_entered_arrow")
+
+    monkeypatch.setattr(
+        runtime_resources, "_available_memory_bytes", lambda: 128 * 1024**2
+    )
+    monkeypatch.setattr(
+        runtime_resources._MachineLock, "acquire", lambda: _TestMachineLock()
+    )
+    monkeypatch.setattr(
+        runtime_resources, "_capture_runtime_resource_policy", capture_policy
+    )
+    monkeypatch.setattr(
+        dataset_writing._WriteStats, "table_for_frame", unexpected_arrow
+    )
+    root = make_dataset_artifact_root(tmp_path, spec.data_id)
+    with pytest.raises(
+        ValueError, match="dataset_working_set_exceeds_task_memory_budget"
+    ):
+        write_dataset(root, frame, spec=spec)
+    assert not root.exists()
+    assert list(root.parent.iterdir()) == []
+    assert len(policies) == 1
+    assert policies[0].used_memory_bytes == 0
+    assert policies[0].state == "CLOSED"
+
+
+@pytest.mark.parametrize("drift_kind", ("numeric_type", "nested_field"))
+def test_public_writer_rejects_nonnull_object_schema_drift(tmp_path, drift_kind):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    first = make_default_dataset_frame().iloc[:1].copy()
+    second = make_default_dataset_frame().iloc[1:2].copy()
+    initial = 1 if drift_kind == "numeric_type" else {"initial": 1}
+    changed = 2.0 if drift_kind == "numeric_type" else {"initial": 2, "added": 3}
+    first["value"] = pd.Series([initial], index=first.index, dtype=object)
+    second["value"] = pd.Series([changed], index=second.index, dtype=object)
+    root = make_dataset_artifact_root(tmp_path, "object_numeric_drift")
+    spec = make_processed_dataset_spec(
+        "object_numeric_drift", value_role=ColumnRole.CONTEXT
+    )
+    with pytest.raises(ValueError, match="dataset_schema_mismatch"):
+        write_dataset(root, (first, second), spec=spec)
+    assert not root.exists()
+    assert list(root.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure_stage", ("plan", "view"))
+def test_writer_admission_failure_clears_owned_item_before_input_release(
+    tmp_path, monkeypatch, failure_stage
+):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    class WeakMapping(dict):
+        pass
+
+    policy = _writer_test_policy()
+    primary = MemoryError("input_view_admission_primary")
+    holder = {}
+    references = []
+    closed = []
+    original_lease = RuntimeResourcePolicy.lease
+    original_close = runtime_resources.MemoryLease.close
+
+    def lease(root_policy, owner, reserved_bytes):
+        if owner == "storage.dataset.input.view" and failure_stage == "view":
+            raise primary
+        return original_lease(root_policy, owner, reserved_bytes)
+
+    def close(acquired):
+        if acquired is holder.get("lease"):
+            closed.append(all(reference() is None for reference in references))
+        return original_close(acquired)
+
+    def producer():
+        frame = payload = owned = None
+        try:
+            acquired = yield 128 * 1024
+            holder["lease"] = acquired
+            frame = make_default_dataset_frame(value_column="payload").iloc[:1].copy()
+            payload = WeakMapping(
+                {"k" * (100_000 if failure_stage == "plan" else 1): 1}
+            )
+            frame["payload"] = pd.Series([payload], index=frame.index, dtype=object)
+            references.extend((weakref.ref(frame), weakref.ref(payload)))
+            owned = runtime_resources.OwnedValue(frame, acquired)
+            yield owned
+        finally:
+            frame = payload = owned = None
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", lease)
+    monkeypatch.setattr(runtime_resources.MemoryLease, "close", close)
+    root = make_dataset_artifact_root(tmp_path, "input_admission_failure")
+    spec = make_processed_dataset_spec(
+        "input_admission_failure", value_column="payload", value_role=ColumnRole.CONTEXT
+    )
+    error_type = ValueError if failure_stage == "plan" else MemoryError
+    message = (
+        "dataset_working_set_exceeds_task_memory_budget"
+        if failure_stage == "plan"
+        else "input_view_admission_primary"
+    )
+    with pytest.raises(error_type, match=message) as caught:
+        dataset_writing.write_dataset(
+            root, producer(), spec=spec, resource_policy=policy
+        )
+    if failure_stage == "view":
+        assert caught.value is primary
+    assert caught.value.__traceback__ is not None
+    assert references
+    assert closed == [True]
+    assert not root.exists()
+    assert list(root.parent.iterdir()) == []
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+
+
+@pytest.mark.parametrize("contiguous", (False, True))
+@pytest.mark.parametrize("reject", (False, True))
+def test_public_writer_root_memoryview_admission_preserves_binary_values(
+    tmp_path, monkeypatch, contiguous, reject
+):
+    from tests.helpers.runtime_resources import _TestMachineLock
+
+    policies = []
+    original_capture = runtime_resources._capture_runtime_resource_policy
+
+    def capture_policy(*, explicit_cap_bytes=None):
+        assert explicit_cap_bytes is None
+        cap = (
+            dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
+            + dataset_writing._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
+            + 256 * 1024
+            if reject
+            else 64 * 1024**2
+        )
+        policy = original_capture(explicit_cap_bytes=cap)
+        policies.append(policy)
+        return policy
+
+    def unexpected_arrow(*_args, **_kwargs):
+        raise AssertionError("root_memoryview_nonfit_entered_arrow")
+
+    monkeypatch.setattr(
+        runtime_resources, "_available_memory_bytes", lambda: 128 * 1024**2
+    )
+    monkeypatch.setattr(
+        runtime_resources._MachineLock, "acquire", lambda: _TestMachineLock()
+    )
+    monkeypatch.setattr(
+        runtime_resources, "_capture_runtime_resource_policy", capture_policy
+    )
+    if reject:
+        monkeypatch.setattr(
+            dataset_writing._WriteStats, "table_for_frame", unexpected_arrow
+        )
+    for width in (200_000,) if reject else (8, 65_536):
+        frame, spec, _name = _schema_name_frame_and_spec(
+            f"root_memoryview_{contiguous}_{width}", schema_kind="nested", width=1
+        )
+        frame = frame.iloc[:1].copy()
+        view = (
+            memoryview(b"a" * width) if contiguous else memoryview(b"ab" * width)[::2]
+        )
+        frame.at[frame.index[0], "payload"] = view
+        assert frame["payload"].iloc[0] is view
+        root = make_dataset_artifact_root(tmp_path, spec.data_id)
+        if reject:
+            with pytest.raises(
+                ValueError, match="dataset_working_set_exceeds_task_memory_budget"
+            ):
+                write_dataset(root, frame, spec=spec)
+            assert not root.exists()
+            assert list(root.parent.iterdir()) == []
+        else:
+            write_dataset(root, frame, spec=spec)
+            actual = read_dataset(root)
+            pd.testing.assert_frame_equal(
+                actual.drop(columns="payload"), frame.drop(columns="payload")
+            )
+            assert actual["payload"].dtype == frame["payload"].dtype
+            assert type(actual["payload"].iloc[0]) is bytes
+            assert actual["payload"].iloc[0] == b"a" * width
+        assert frame["payload"].iloc[0] is view
+    assert policies
+    assert all(
+        policy.used_memory_bytes == 0 and policy.state == "CLOSED"
+        for policy in policies
+    )

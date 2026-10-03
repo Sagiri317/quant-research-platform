@@ -1092,6 +1092,14 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_
                 timestamp, body = line.split(" ", 1)
                 record = json.loads(body)
                 seconds = pd.Timestamp(timestamp).second
+                if date == dates[1]:
+                    for side in ("bids", "asks", "b", "a"):
+                        levels = record["data"].get(side)
+                        if isinstance(levels, list):
+                            for level in levels:
+                                level[0] = str(float(level[0]) + 0.5)
+                    if "p" in record["data"]:
+                        record["data"]["p"] = "100.5"
                 for key in ("E", "T"):
                     if key in record["data"]:
                         record["data"][key] = midnight + seconds * 1000
@@ -1113,6 +1121,14 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_
                 resource_policy=policy,
             )
         with opener(tmp_path, policy) as source:
+            assert [
+                archive.market_metadata(FUTURES_MARKET_TYPE, "BTCUSDT")["price_unit"]
+                for archive in source.archives
+            ] == ["1", "0.1"]
+            assert (
+                source.market_metadata(FUTURES_MARKET_TYPE, "BTCUSDT")["price_unit"]
+                == "0.1"
+            )
             identity = canonical_json_hash(source.source_identity)
             rows = list(
                 source.iter_market_records(
@@ -1122,6 +1138,7 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_
                 )
             )
             assert [row["payload"]["a"] for row in rows] == [3, 4, 3, 4]
+            assert {row["price_unit"] for row in rows} == {"0.1"}
             assert len({row["source_sequence"] for row in rows}) == 4
             observation_ids = [row["observation_id"] for row in rows]
             assert observation_ids[0] == observation_ids[1]
@@ -1157,6 +1174,8 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_
             )
         panel = read_dataset(root, resource_policy=policy)
         assert set(panel.timestamp.dt.strftime("%Y-%m-%d")) == set(dates)
+        assert panel.loc[panel.timestamp.dt.month == 7, "mid"].dropna().eq(100.5).all()
+        assert panel.loc[panel.timestamp.dt.month == 8, "mid"].dropna().eq(101.0).all()
         assert panel.segment_id.nunique() == 2
         assert panel.book_segment_id.nunique() == 2
         assert panel.book_observation_id.nunique() == 2

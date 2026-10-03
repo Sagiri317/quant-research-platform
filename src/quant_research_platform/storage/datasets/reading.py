@@ -49,6 +49,7 @@ from quant_research_platform.storage.datasets.paths import (
     timestamp_column_from_spec_payload,
 )
 from quant_research_platform.storage.datasets.schema import (
+    _utf8_payload_length,
     logical_dtype_metadata_bytes,
     merge_logical_dtype_payloads,
     pandas_dtype_overrides_from_logical_payload,
@@ -1654,25 +1655,6 @@ def _freeze_filter_value(value: Any) -> Any:
     ):
         return value
     raise ValueError("invalid_dataset_physical_filter_value")
-
-
-def _utf8_payload_length(value: str) -> int:
-    """Return the UTF-8 payload width without allocating an encoded copy."""
-
-    payload_bytes = 0
-    for character in value:
-        codepoint = ord(character)
-        if codepoint <= 0x7F:
-            payload_bytes += 1
-        elif codepoint <= 0x7FF:
-            payload_bytes += 2
-        elif 0xD800 <= codepoint <= 0xDFFF:
-            raise ValueError("invalid_dataset_physical_filter_value")
-        elif codepoint <= 0xFFFF:
-            payload_bytes += 3
-        else:
-            payload_bytes += 4
-    return payload_bytes
 
 
 def _prepare_in_filter(

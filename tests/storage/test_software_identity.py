@@ -291,3 +291,47 @@ def test_software_identity_preserves_system_io(
     assert all(handle.closed for handle in handles)
     assert member.read_bytes() == b"synthetic = 1\n"
     assert _identity(package) == expected
+
+
+@pytest.mark.parametrize("boundary", ("file", "directory"))
+@pytest.mark.parametrize("primary_type", (None, OSError, KeyboardInterrupt))
+def test_software_identity_close_preserves_active_primary(
+    tmp_path, monkeypatch, boundary, primary_type
+):
+    from quant_research_platform.storage import software_identity as owner
+
+    package = tmp_path / "package"
+    package.mkdir()
+    (package / "module.py").write_bytes(b"synthetic = 1\n")
+    primary = None if primary_type is None else primary_type("synthetic_primary")
+    secondary = OSError("synthetic_close")
+    closed = []
+    native_scan = owner.filesystem_scandir
+
+    class Handle:
+        def read(self, _size):
+            if primary is not None:
+                raise primary
+            return b""
+
+        def __iter__(self):
+            if primary is not None:
+                raise primary
+            with native_scan(package) as entries:
+                yield from entries
+
+        def close(self):
+            closed.append(True)
+            raise secondary
+
+    monkeypatch.setattr(
+        owner,
+        "open_filesystem_file" if boundary == "file" else "filesystem_scandir",
+        lambda _path: Handle(),
+    )
+    with pytest.raises(type(primary or secondary)) as caught:
+        _identity(package)
+    assert caught.value is (primary or secondary)
+    assert closed == [True]
+    if primary is not None:
+        assert "scratch handle close also failed: OSError" in primary.__notes__

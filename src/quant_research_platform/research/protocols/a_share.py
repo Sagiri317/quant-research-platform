@@ -12,7 +12,13 @@ from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
 from quant_research_platform.catalog.labels import LabelCatalog
 from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.data import DataFrequency, DataGrain
+from quant_research_platform.contracts.data import (
+    DataFrequency,
+    DataGrain,
+    InterimDataSpec,
+    ProcessedDataKind,
+    ProcessedDataSpec,
+)
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import ExperimentFold
@@ -24,7 +30,7 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import TargetSpec
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, is_datetime_window
 from quant_research_platform.markets.implementations.a_share import ids as market_ids
 from quant_research_platform.research.factors.expectations.definitions import (
     EXPECTATIONS_FACTORS,
@@ -364,13 +370,12 @@ class AShareProtocol:
         return base
 
     def target_window(self, action, data_spec, window, target_id=None):
-        from quant_research_platform.contracts.data import (
-            InterimDataSpec,
-            ProcessedDataSpec,
-        )
-
         if action != "research run":
-            return window
+            return (
+                source_history_window(data_spec, window)
+                if isinstance(data_spec, InterimDataSpec)
+                else window
+            )
         if isinstance(data_spec, (InterimDataSpec, ProcessedDataSpec)):
             return TimeWindow(
                 DATA_START,
@@ -762,6 +767,35 @@ def analysis_windows(
     ) in {pd.Timestamp(development.start), pd.Timestamp(factor_history.start)}:
         return factor_history, development
     return requested, requested
+
+
+def source_history_window(data_spec: InterimDataSpec, window: TimeWindow) -> TimeWindow:
+    """Retain the protocol's financial history without widening output targets."""
+    return data_history_window(window) if data_spec.source_id == "choice" else window
+
+
+def processed_input_window(data_spec, window: TimeWindow) -> TimeWindow:
+    """Plan one frozen input envelope for factors with preceding-session inputs."""
+    from quant_research_platform.research.factors.engine import factor_lookback_bars
+
+    if (
+        isinstance(data_spec, ProcessedDataSpec)
+        and data_spec.kind is ProcessedDataKind.FACTOR
+    ):
+        definitions = tuple(
+            definition
+            for definition in factor_catalog().list()
+            if definition.output_column in data_spec.required_columns
+        )
+        if factor_lookback_bars(definitions):
+            return data_history_window(window)
+    return window
+
+
+def data_history_window(window: TimeWindow) -> TimeWindow:
+    """Keep the frozen source-history envelope and the requested knowledge cutoff."""
+    start = pd.Timestamp(DATA_START) if is_datetime_window(window) else DATA_START
+    return TimeWindow(min(start, window.start), window.end)
 
 
 def protocol(

@@ -1280,11 +1280,20 @@ def _filter_arrow_batch(
             del filtered
             continue
         column_values = batch.column(batch.schema.get_field_index(column))
-        scalar = (
-            pa.scalar(value, type=column_values.type)
-            if pa.types.is_timestamp(column_values.type)
-            else value
-        )
+        scalar = value
+        if pa.types.is_timestamp(column_values.type):
+            scalar = pa.scalar(
+                value,
+                type=pa.timestamp(
+                    value.unit if isinstance(value, pd.Timestamp) else "us",
+                    tz=column_values.type.tz,
+                ),
+            )
+            if operator == "==":
+                try:
+                    scalar = scalar.cast(column_values.type, safe=True)
+                except pa.ArrowInvalid:
+                    return batch.slice(0, 0)
         condition = operations[operator](column_values, scalar)
         del column_values, scalar
         filtered = batch.filter(condition)

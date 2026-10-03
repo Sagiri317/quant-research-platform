@@ -21,6 +21,7 @@ from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_family_prediction_frame,
     validate_prediction_output_metadata_shape,
 )
+from quant_research_platform.contracts.json_codec import json_record_working_set_bytes
 from quant_research_platform.contracts.predictions import (
     ALPHA_SCORE_COLUMN,
     prediction_output_columns,
@@ -54,6 +55,7 @@ from quant_research_platform.storage.parquet import (
 def validate_output_bundle(
     root: Path,
     *,
+    lease,
     expected_run_id: str | None = None,
     expected_output_id: str | None = None,
     expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
@@ -90,6 +92,14 @@ def validate_output_bundle(
             else expected_member_identities["manifest.json"]
         ),
     )
+    additional = 2 * json_record_working_set_bytes(manifest_identity.size)
+    policy = current_runtime_resource_policy()
+    cap = policy.explicit_memory_cap_bytes
+    if cap is None or policy.used_memory_bytes + additional <= cap:
+        policy.require_working_set(
+            additional, error="output_manifest_exceeds_memory_capacity"
+        )
+    lease.grow(additional)
     try:
         _manifest_bytes, manifest = read_bounded_qrp_json(
             manifest_path,
@@ -495,13 +505,18 @@ def read_prediction_output_bundle(
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("prediction_output_unreadable") from exc
 
-    with runtime_resource_policy_scope(policy) as policy, closing_iterator(stack):
+    with (
+        runtime_resource_policy_scope(policy) as policy,
+        closing_iterator(stack),
+        policy.lease("artifacts.output.metadata", 0) as metadata_lease,
+    ):
         manifest, _members = validate_output_bundle(
             root,
             expected_output_id=expected_output_id,
             expected_run_id=expected_run_id,
             expected_member_identities=expected_member_identities,
             observer=read_prediction,
+            lease=metadata_lease,
         )
         if lookup is None:
             raise ValueError("prediction_output_unreadable")

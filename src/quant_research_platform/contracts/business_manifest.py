@@ -130,50 +130,59 @@ def validate_business_manifest_envelope(
 ) -> dict[str, object]:
     """Validate one persisted, publishable common envelope."""
 
-    if isinstance(value, BusinessManifestEnvelope):
-        value = value.payload(_admit=_admit)
-    if type(value) is not dict or set(value) != _ENVELOPE_FIELDS:
-        raise ValueError("business_manifest_envelope_fields_invalid")
-    payload = bounded_qrp_json_object_snapshot(
-        value,
-        max_bytes=_MAX_ENVELOPE_BYTES,
-        _admit=_admit,
-    )
-    _require_identifier(payload["logical_artifact_id"], "logical_artifact_id_invalid")
-    _require_hash(payload["instance_identity"], "instance_identity_invalid")
-    _require_hash(payload["schema_identity"], "schema_identity_invalid")
-    _require_hash(
-        payload["protocol_or_spec_identity"],
-        "protocol_or_spec_identity_invalid",
-    )
-    _require_hash(payload["software_identity"], "software_identity_invalid")
-    _validate_research_window(payload["research_window"])
-    payload["research_window"] = _normalise_research_window(payload["research_window"])
-    _validate_upstream_identities(payload["upstream_identities"])
-    if _admit is not None:
-        _admit(
-            json_record_working_set_bytes(2 + 2 * len(payload["upstream_identities"]))
+    try:
+        if isinstance(value, BusinessManifestEnvelope):
+            value = value.payload(_admit=_admit)
+        if type(value) is not dict or set(value) != _ENVELOPE_FIELDS:
+            raise ValueError("business_manifest_envelope_fields_invalid")
+        payload = bounded_qrp_json_object_snapshot(
+            value,
+            max_bytes=_MAX_ENVELOPE_BYTES,
+            _admit=_admit,
         )
-    payload["upstream_identities"] = dict(
-        sorted(payload["upstream_identities"].items())
-    )
-    if payload["status"] != "COMPLETE":
-        raise ValueError("business_manifest_status_invalid")
-    if type(payload["semantic_metadata"]) is not dict:
-        raise ValueError("business_manifest_semantic_metadata_invalid")
-    expected = _identity_payload(
-        logical_artifact_id=payload["logical_artifact_id"],
-        schema_identity=payload["schema_identity"],
-        protocol_or_spec_identity=payload["protocol_or_spec_identity"],
-        software_identity=payload["software_identity"],
-        research_window=payload["research_window"],
-        upstream_identities=payload["upstream_identities"],
-        semantic_metadata=payload["semantic_metadata"],
-        _admit=_admit,
-    )
-    if canonical_json_hash(expected) != payload["instance_identity"]:
-        raise ValueError("business_manifest_instance_identity_mismatch")
-    return {key: payload[key] for key in sorted(payload)}
+        _require_identifier(
+            payload["logical_artifact_id"], "logical_artifact_id_invalid"
+        )
+        _require_hash(payload["instance_identity"], "instance_identity_invalid")
+        _require_hash(payload["schema_identity"], "schema_identity_invalid")
+        _require_hash(
+            payload["protocol_or_spec_identity"],
+            "protocol_or_spec_identity_invalid",
+        )
+        _require_hash(payload["software_identity"], "software_identity_invalid")
+        _validate_research_window(payload["research_window"])
+        payload["research_window"] = _normalise_research_window(
+            payload["research_window"]
+        )
+        _validate_upstream_identities(payload["upstream_identities"])
+        if _admit is not None:
+            _admit(
+                json_record_working_set_bytes(
+                    2 + 2 * len(payload["upstream_identities"])
+                )
+            )
+        payload["upstream_identities"] = dict(
+            sorted(payload["upstream_identities"].items())
+        )
+        if payload["status"] != "COMPLETE":
+            raise ValueError("business_manifest_status_invalid")
+        if type(payload["semantic_metadata"]) is not dict:
+            raise ValueError("business_manifest_semantic_metadata_invalid")
+        expected = _identity_payload(
+            logical_artifact_id=payload["logical_artifact_id"],
+            schema_identity=payload["schema_identity"],
+            protocol_or_spec_identity=payload["protocol_or_spec_identity"],
+            software_identity=payload["software_identity"],
+            research_window=payload["research_window"],
+            upstream_identities=payload["upstream_identities"],
+            semantic_metadata=payload["semantic_metadata"],
+            _admit=_admit,
+        )
+        if canonical_json_hash(expected) != payload["instance_identity"]:
+            raise ValueError("business_manifest_instance_identity_mismatch")
+        return {key: payload[key] for key in sorted(payload)}
+    finally:
+        value = payload = expected = None
 
 
 def _identity_payload(

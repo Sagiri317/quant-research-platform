@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sys
+from bisect import bisect_left, bisect_right
 from contextlib import ExitStack, contextmanager
 from dataclasses import replace
 from statistics import mean
@@ -15,7 +16,10 @@ from quant_research_platform.catalog.processed import (
     ProcessedDataCatalog,
 )
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    time_window_timestamp_interval,
+)
 from quant_research_platform.contracts.validation import (
     clear_exception_frames,
     strict_finite_numeric_series,
@@ -125,7 +129,7 @@ def produce_a_share_processed_data(
                         columns=None,
                         time_window=None
                         if data_id in _FULL_HISTORY_SOURCE_IDS
-                        else time_window,
+                        else a_share.source_history_window(source_spec, time_window),
                         resource_policy=resource_policy,
                     )
                 )
@@ -197,7 +201,7 @@ def produce_a_share_processed_data(
                     open_dataset_session(
                         root,
                         columns=columns,
-                        time_window=time_window,
+                        time_window=a_share.processed_input_window(spec, time_window),
                         resource_policy=resource_policy,
                     )
                 )
@@ -211,6 +215,7 @@ def produce_a_share_processed_data(
 
             data = _processed_frames(
                 spec,
+                time_window=time_window,
                 source=source,
                 source_sessions=source_sessions,
                 dependencies=dependencies,
@@ -269,7 +274,9 @@ def _owned_frame(session, retained):
     return owned.value
 
 
-def _processed_frames(spec, *, source, source_sessions, dependencies, policy, retained):
+def _processed_frames(
+    spec, *, time_window, source, source_sessions, dependencies, policy, retained
+):
     if spec.data_id == "benchmark_weights":
         yield from _benchmark_frames(
             source, source_sessions["index_weights"], policy, retained
@@ -347,10 +354,13 @@ def _processed_frames(spec, *, source, source_sessions, dependencies, policy, re
             - lookahead,
         ),
     )
+    lower, upper, closed = time_window_timestamp_interval(time_window)
+    first = bisect_left(sessions, lower)
+    stop = bisect_right(sessions, upper) if closed else bisect_left(sessions, upper)
     history = None
     with ExitStack() as history_owner:
-        for start in range(0, len(sessions), block_sessions):
-            end = min(len(sessions), start + block_sessions)
+        for start in range(first, stop, block_sessions):
+            end = min(stop, start + block_sessions)
             core = sessions[start:end]
             read_window = TimeWindow(
                 sessions[max(0, start - lookback)],

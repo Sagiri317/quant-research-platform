@@ -120,7 +120,10 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
         "access": "holdout",
     }
     roots, identities = {}, {}
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         for descriptor in bound.execution_targets():
             candidate = descriptor.candidate
             capital = PortfolioCapital(
@@ -246,6 +249,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
             ledger = read_portfolio_ledger_artifact(
                 separated_root,
                 expected_identity=separated_envelope.instance_identity,
+                lease=artifact_lease,
             )
             separated = summarize_crypto_ledger_windows(
                 ledger,
@@ -292,7 +296,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
             finally:
                 owned.release(owner="research.statistics.output")
             artifact = read_statistics_artifact(
-                root, expected_identity=envelope.instance_identity
+                root, expected_identity=envelope.instance_identity, lease=artifact_lease
             )
             with (
                 artifact.table("crypto_portfolio_statistics.parquet") as statistics,
@@ -352,7 +356,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                     assert observed.kind.tolist() == ["oos"]
                     assert observed.funding.iloc[0] == 100.0
                     assert observed.net_pnl.iloc[0] == 350.0
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("scale", (1.0, 2.0**-50))
@@ -402,18 +406,23 @@ def test_inventory_limit_duration_has_exact_execution_boundary(
             )
         economics.mark(duration, 1.0 / scale)
 
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = write_portfolio_ledger_artifact(
             tmp_path / "limit", envelope=envelope, produce=produce
         )
-        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
         _daily, inventory, _drawdown = _crypto_ledger_observations(
             artifact, (("test", window),), scale
         )
         assert inventory["oos"]["duration"] == duration
         assert inventory["oos"]["at_limit"] / duration == expected_fraction
         assert inventory["gap"]["duration"] == 0
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav(
@@ -519,7 +528,10 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
                 produce=ledger,
             )
 
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = write_crypto_episode_artifact(
             layout.semantic_artifact_root("crypto", descriptor.target_id),
             envelope=execution_envelope,
@@ -577,7 +589,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
         finally:
             owned.release(owner="research.statistics.output")
         artifact = read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
+            root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         with artifact.table("crypto_portfolio_statistics.parquet") as frame:
             episode_metrics = frame.loc[frame.episode_id.ne("all")]
@@ -611,7 +623,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
             )
         with artifact.table("crypto_portfolio_daily.parquet") as frame:
             assert frame.empty
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         manifest = bound.manifest()
         references = tuple(
             ResearchRunTargetResult(
@@ -765,7 +777,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
             assert saved["sections"]["portfolio"]["intervals"]["results"]
             assert saved["sections"]["Data/Coverage"]["execution_coverage"]["results"]
             report = saved = candidates = None
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         from quant_research_platform.interfaces import queries
 
         replacement = write_crypto_episode_artifact(
@@ -808,4 +820,4 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
                 target_id=descriptor.target_id,
             )
         assert replaced and consumed == 0
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes

@@ -119,13 +119,17 @@ def test_transform_prediction_publication_and_consumers_share_exact_validity(
         .reset_index(drop=True)
     )
     window = TimeWindow("2019-01-01", "2019-03-31")
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         case = shared_model_case(
             tmp_path,
             specs=(spec,),
             frame=history,
             dataset=dataset,
             development_end="2019-03-31",
+            lease=artifact_lease,
         )
         artifact, dataset = case.artifact, case.dataset
         dataset_root = case.layout.instance_root(
@@ -243,11 +247,13 @@ def test_transform_prediction_publication_and_consumers_share_exact_validity(
                 finally:
                     tables.release(owner="research.statistics.output")
                 restored = read_statistics_artifact(
-                    root, expected_identity=envelope.instance_identity
+                    root,
+                    expected_identity=envelope.instance_identity,
+                    lease=artifact_lease,
                 )
                 with restored.table("model_losses.parquet") as saved:
                     assert saved.observation_count.tolist() == [len(expected)]
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_frozen_prediction_alpha_is_permutation_invariant_and_reader_uses_alpha(
@@ -257,7 +263,10 @@ def test_frozen_prediction_alpha_is_permutation_invariant_and_reader_uses_alpha(
         _iter_prediction_joined_chunks,
     )
 
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         case = shared_model_case(
             tmp_path,
             dataset=make_demo_research_dataset_spec(
@@ -269,6 +278,7 @@ def test_frozen_prediction_alpha_is_permutation_invariant_and_reader_uses_alpha(
                 filter_columns=("eligible",),
                 context_columns=(),
             ),
+            lease=artifact_lease,
         )
         frame = case.frame.iloc[:3].copy()
         frame["timestamp"] = pd.Timestamp("2024-01-02")
@@ -355,7 +365,7 @@ def test_frozen_prediction_alpha_is_permutation_invariant_and_reader_uses_alpha(
                         ValueError, match="misaligned_persisted_prediction_keys"
                     ):
                         list(joined)
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_mixed_rank_and_linear_trials_share_score_keys_but_keep_own_predictions(
@@ -382,8 +392,13 @@ def test_mixed_rank_and_linear_trials_share_score_keys_but_keep_own_predictions(
     frame = shared_model_rows(specs)
     frame.loc[frame.asset_id.eq("asset_0"), "x"] = np.nan
     frame.loc[frame.asset_id.eq("asset_1"), "y"] = np.nan
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path, specs=specs, frame=frame)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(
+            tmp_path, specs=specs, frame=frame, lease=artifact_lease
+        )
         scoring = []
         for family, count in (("linear", 7), ("rank", 8)):
             entry = next(
@@ -417,7 +432,7 @@ def test_mixed_rank_and_linear_trials_share_score_keys_but_keep_own_predictions(
             ):
                 if plan.stage == "selection":
                     assert records[0].metrics["validation_rows"] == 7
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_persisted_ic_rank_keeps_only_defined_weight_columns(tmp_path):
@@ -429,12 +444,17 @@ def test_persisted_ic_rank_keeps_only_defined_weight_columns(tmp_path):
     )
     frame = shared_model_rows((spec,))
     frame["y"] = 1.0
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path, specs=(spec,), frame=frame)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(
+            tmp_path, specs=(spec,), frame=frame, lease=artifact_lease
+        )
         for entry in (*case.artifact.candidate_models, *case.artifact.final_models):
             assert entry["model_metadata"]["input_columns"] == ["x", "y"]
             assert entry["model_metadata"]["rank_parameters"] == {
                 "columns": ["x"],
                 "weights": [1.0],
             }
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes

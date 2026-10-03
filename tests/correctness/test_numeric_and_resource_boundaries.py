@@ -45,6 +45,9 @@ from quant_research_platform.research.portfolios.construction import (
 from quant_research_platform.research.statistics import cross_sectional_rank_ic
 from quant_research_platform.runtime.dataframes import iter_complete_time_sized_frames
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage import semantic_artifacts
 from quant_research_platform.storage.datasets.schema import (
     _typed_category_value_payload,
@@ -282,8 +285,14 @@ def test_semantic_read_rechecks_earlier_members_and_manifest(
         return result
 
     monkeypatch.setattr(semantic_artifacts, "_member_record", record)
-    with pytest.raises(ValueError, match="semantic_artifact_member_identity_changed"):
-        semantic_artifacts.read_semantic_artifact_record(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(
+            ValueError, match="semantic_artifact_member_identity_changed"
+        ):
+            semantic_artifacts.read_semantic_artifact_record(root, lease=artifact_lease)
 
 
 def test_semantic_hash_workspace_uses_active_budget(tmp_path, monkeypatch):
@@ -295,17 +304,29 @@ def test_semantic_hash_workspace_uses_active_budget(tmp_path, monkeypatch):
     root = semantic_artifacts.write_semantic_artifact(tmp_path, _envelope(), writer)
     original = semantic_artifacts._hash_file_content
     observed = []
-    with runtime_resource_policy_scope(explicit_cap_bytes=65536) as policy:
+    from quant_research_platform.contracts.json_codec import (
+        json_record_working_set_bytes,
+    )
+
+    metadata_bytes = 2 * json_record_working_set_bytes(
+        (root / "manifest.json").stat().st_size
+    )
+    capacity = metadata_bytes + 65536
+    with (
+        runtime_resource_policy_scope(explicit_cap_bytes=capacity) as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
 
         def hashing(path, identity, error, *, chunk_size):
             observed.append(chunk_size)
-            assert 0 < chunk_size <= policy.used_memory_bytes <= 65536
+            assert 0 < chunk_size <= 65536
+            assert chunk_size + metadata_bytes <= policy.used_memory_bytes <= capacity
             return original(path, identity, error, chunk_size=chunk_size)
 
         monkeypatch.setattr(semantic_artifacts, "_hash_file_content", hashing)
-        semantic_artifacts.read_semantic_artifact_record(root)
+        semantic_artifacts.read_semantic_artifact_record(root, lease=artifact_lease)
         assert observed
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_real_observations_preserve_nonfinite_domain_handling():
@@ -463,16 +484,27 @@ def test_semantic_hash_io_failure_preserves_error_and_releases_budget(
         raise primary
 
     monkeypatch.setattr(semantic_artifacts, "_hash_file_content", failed_hash)
-    with runtime_resource_policy_scope(explicit_cap_bytes=65536) as policy:
+    from quant_research_platform.contracts.json_codec import (
+        json_record_working_set_bytes,
+    )
+
+    metadata_bytes = 2 * json_record_working_set_bytes(
+        (root / "manifest.json").stat().st_size
+    )
+    capacity = metadata_bytes + 65536
+    with (
+        runtime_resource_policy_scope(explicit_cap_bytes=capacity) as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         missing = error_type in (FileNotFoundError, NotADirectoryError)
         with pytest.raises(ValueError if missing else error_type) as caught:
-            semantic_artifacts.read_semantic_artifact_record(root)
+            semantic_artifacts.read_semantic_artifact_record(root, lease=artifact_lease)
         if missing:
             assert str(caught.value) == "semantic_artifact_member_invalid"
             assert caught.value.__cause__ is primary
         else:
             assert caught.value is primary
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
     assert before == _file_bytes(root)
 
 
@@ -771,7 +803,10 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
             "eligible": True,
         }
     )
-    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024 * 1024) as policy:
+    with (
+        runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024 * 1024) as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         if kind == "trial":
             actual = evaluate_model_trial_metrics_from_chunks(
                 (frame.iloc[:1], frame.iloc[1:]),
@@ -819,7 +854,7 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
                     layout=StorageLayout(tmp_path),
                     n_groups=2,
                 )
-            validate_output_bundle(bundle)
+            validate_output_bundle(bundle, lease=artifact_lease)
             assert pd.read_parquet(
                 native_filesystem_path(bundle / "metrics.parquet")
             ).ic.tolist() == [expected]
@@ -829,7 +864,7 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
             assert filesystem_read_text(
                 bundle / "summary.md", encoding="utf-8"
             ).startswith("# Evaluation Summary")
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_scaler_transform_preserves_representable_extreme_difference():

@@ -82,7 +82,7 @@ def test_action_quantity_stays_inside_limit_after_float_fill_accumulation():
         0, "buy", 0.3, state, _quote(0, book_segment_id="s1"), _maker_config()
     )
     with runtime_resource_policy_scope() as policy:
-        model = MakerCalibration(*inputs, resource_policy=policy)
+        model = MakerCalibration(*inputs, resource_policy=policy, price_unit="0.1")
         try:
             keep, quantity, gain = model.select(
                 state=state,
@@ -119,7 +119,7 @@ def test_query_admits_deep_book_temporaries_before_materialization(monkeypatch, 
     )
     materialized = []
     with runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy:
-        model = MakerCalibration(*inputs, resource_policy=policy)
+        model = MakerCalibration(*inputs, resource_policy=policy, price_unit="0.1")
         original = model._response
 
         def observed_response(*args, **kwargs):
@@ -600,7 +600,9 @@ def test_decisions_reuse_captured_sample_origins_and_read_history_once():
         0, "buy", 0.3, state, _quote(0, book_segment_id="s1"), _maker_config()
     )
     with runtime_resource_policy_scope() as policy:
-        model = MakerCalibration(samples, history, resource_policy=policy)
+        model = MakerCalibration(
+            samples, history, resource_policy=policy, price_unit="0.1"
+        )
         try:
             for prediction in (0.0, 0.01):
                 keep, quantity, gain = model.select(
@@ -787,7 +789,9 @@ def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monke
         }
     )
     with runtime_resource_policy_scope() as policy:
-        shared = MakerCalibration(samples, events, resource_policy=policy)
+        shared = MakerCalibration(
+            samples, events, resource_policy=policy, price_unit="0.1"
+        )
         try:
             answers = [shared.select(**query) for query in queries]
             assert reads == ["samples", "events"]
@@ -803,7 +807,7 @@ def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monke
         assert all(spool.closed for spool in spools) and policy.used_memory_bytes == 0
         for answer, query in zip(answers, queries, strict=True):
             fresh = MakerCalibration(
-                sample_source, event_source, resource_policy=policy
+                sample_source, event_source, resource_policy=policy, price_unit="0.1"
             )
             try:
                 assert fresh.select(**query) == answer
@@ -861,7 +865,9 @@ def test_native_history_failure_closes_files_preserving_primary(
 
     monkeypatch.setattr(execution, "reserved_temporary_file", failing_file)
     with runtime_resource_policy_scope() as policy:
-        model = MakerCalibration(sample_source, events, resource_policy=policy)
+        model = MakerCalibration(
+            sample_source, events, resource_policy=policy, price_unit="0.1"
+        )
         if failure_at == "response":
 
             def interrupted(*args, **kwargs):

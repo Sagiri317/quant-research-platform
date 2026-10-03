@@ -193,7 +193,10 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
         run_type="evaluation",
         scope=OutputScope.LOCAL_ONLY,
     )
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         with evaluation_engine.build_evaluation_result_from_frames(
             (frame,),
             spec=spec,
@@ -212,13 +215,13 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
                 layout=StorageLayout(tmp_path),
                 n_groups=2,
             )
-        validate_output_bundle(root)
+        validate_output_bundle(root, lease=artifact_lease)
         diagnostics = json.loads((root / "manifest.json").read_text(encoding="utf-8"))[
             "metadata"
         ]["evaluation_diagnostics"]
         assert diagnostics["min_timestamp"] == times[0].isoformat()
         assert diagnostics["max_timestamp"] == times[-1].isoformat()
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_evaluation_chunk_producer_does_not_terminal_concat(
@@ -763,7 +766,10 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
             "eligible": [True, False, True, True],
         }
     )
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         write_dataset(
             layout.research_dataset_root(dataset.market_id, dataset.data_id),
             frame,
@@ -810,12 +816,15 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
                     n_groups=2,
                 )
             validate_output_bundle(
-                output, expected_output_id=mode, expected_run_id="test_run"
+                output,
+                expected_output_id=mode,
+                expected_run_id="test_run",
+                lease=artifact_lease,
             )
             metrics = pd.read_parquet(output / "metrics.parquet")
             assert metrics.n_obs.tolist() == [expected_rows]
             assert metrics.ic.tolist() == pytest.approx([1.0])
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize(
@@ -960,7 +969,10 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
         }
     )
     roots = []
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         software = production_software_identity()
         for active in (old_profile, profile):
             current = active.evaluations.get(spec.evaluation_id)
@@ -1012,7 +1024,7 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
             )
             roots.append(root)
             restored = read_semantic_artifact(
-                root, expected_identity=envelope.instance_identity
+                root, expected_identity=envelope.instance_identity, lease=artifact_lease
             )
             persisted = restored["semantic_metadata"]["target_contract"][
                 "evaluation_spec"
@@ -1021,7 +1033,7 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
                 signal.direction for signal in current.signals
             ]
             bundle = root / "outputs" / spec.evaluation_id
-            validate_output_bundle(bundle)
+            validate_output_bundle(bundle, lease=artifact_lease)
             metrics = pd.read_parquet(bundle / "metrics.parquet").set_index("signal")
             expected = [1.0, 1.0, 1.0] if active is old_profile else [-1.0, -1.0, 1.0]
             assert metrics.loc[factors, "ic"].tolist() == pytest.approx(expected)
@@ -1048,7 +1060,7 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
                 assert top.loc[factors, "mean_label_value"].tolist() == pytest.approx(
                     [0.1, 0.1, 0.3]
                 )
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         assert roots[0] != roots[1]
         assert {
             p.relative_to(roots[0]): p.read_bytes()
@@ -1119,7 +1131,10 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
         "skipped_timestamp_count": 0,
     }
     layout = StorageLayout(tmp_path)
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
         try:
             state.consume(metrics, grouped, metadata)
@@ -1140,7 +1155,7 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
                 layout=layout,
                 n_groups=2,
             )
-            manifest, _ = validate_output_bundle(root)
+            manifest, _ = validate_output_bundle(root, lease=artifact_lease)
             diagnostics = manifest["metadata"]["evaluation_diagnostics"]
             for field in ("rows_input", "rows_after_filter_mode", "timestamp_count"):
                 assert type(diagnostics[field]) is int and diagnostics[field] == count
@@ -1170,4 +1185,4 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
             assert not (root.parent / "failed_summary").exists()
         finally:
             state.close()
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes

@@ -46,6 +46,9 @@ from quant_research_platform.research.portfolios.risk import (
 )
 from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.identity import filesystem_mkdir
 from quant_research_platform.storage.layout import StorageLayout
@@ -552,19 +555,22 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
         envelope=envelope,
         ledger_chunks=iter(frames_out),
     )
-    artifact = read_portfolio_ledger_artifact(
-        artifact_root,
-        expected_identity=artifact_root.name,
-    )
-    persisted = list(artifact.iter_chunks())
-    assert len(persisted) == len(frames_out)
-    for expected, batch in zip(frames_out, persisted, strict=True):
-        actual = session_frame(batch)
-        np.testing.assert_array_equal(
-            actual.decision_delta_weight, expected.decision_delta_weight
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_portfolio_ledger_artifact(
+            artifact_root, expected_identity=artifact_root.name, lease=artifact_lease
         )
-        assert abs(float(actual.decision_delta_weight.sum())) < 1e-14
-    assert np.isclose(frames_out[0]["post_trade_notional"].sum(), 100.0 - 0.04)
+        persisted = list(artifact.iter_chunks())
+        assert len(persisted) == len(frames_out)
+        for expected, batch in zip(frames_out, persisted, strict=True):
+            actual = session_frame(batch)
+            np.testing.assert_array_equal(
+                actual.decision_delta_weight, expected.decision_delta_weight
+            )
+            assert abs(float(actual.decision_delta_weight.sum())) < 1e-14
+        assert np.isclose(frames_out[0]["post_trade_notional"].sum(), 100.0 - 0.04)
 
 
 def test_portfolio_stream_count_does_not_scale_with_decision_dates(
@@ -687,17 +693,23 @@ def test_float_cap_roundoff_keeps_nonnegative_persisted_cash_target(tmp_path):
     root = write_test_sessions(
         tmp_path / "ledger", envelope=envelope, ledger_chunks=iter((frame,))
     )
-    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    (batch,) = list(saved.iter_chunks())
-    cash_target = next(
-        row.number
-        for row in batch.diagnostics
-        if row.asset_id == "__cash__" and row.name == "target_notional"
-    )
-    assert cash_target == 0.0
-    assert account.nav_after == pytest.approx(
-        nav + sum(row.amount for row in batch.cashflows if row.kind != "principal")
-    )
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        saved = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
+        (batch,) = list(saved.iter_chunks())
+        cash_target = next(
+            row.number
+            for row in batch.diagnostics
+            if row.asset_id == "__cash__" and row.name == "target_notional"
+        )
+        assert cash_target == 0.0
+        assert account.nav_after == pytest.approx(
+            nav + sum(row.amount for row in batch.cashflows if row.kind != "principal")
+        )
 
 
 def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
@@ -1052,11 +1064,17 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
     root = write_test_sessions(
         tmp_path / "ledger", envelope=envelope, ledger_chunks=iter(sessions)
     )
-    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    loaded = [session_frame(batch) for batch in saved.iter_chunks()]
-    assert len(loaded) == len(sessions)
-    for actual, expected in zip(loaded, sessions, strict=True):
-        pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        saved = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
+        loaded = [session_frame(batch) for batch in saved.iter_chunks()]
+        assert len(loaded) == len(sessions)
+        for actual, expected in zip(loaded, sessions, strict=True):
+            pd.testing.assert_frame_equal(actual, expected, check_exact=True)
 
 
 def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
@@ -1515,7 +1533,10 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         risk_context_target_ids=("risk",),
     )
     assumptions = ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,))
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         account, returns, adv, optimized, delta = production._build_session(
             candidate=candidate,
             decision_timestamp=pd.Timestamp("2023-01-06"),
@@ -1589,10 +1610,12 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         root = write_test_sessions(
             tmp_path / "ledger", envelope=envelope, ledger_chunks=iter((ledger,))
         )
-        saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        saved = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
         (batch,) = tuple(saved.iter_chunks())
         assert set(session_frame(batch).asset_id) == {"a", "b", "__cash__"}
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_simple_producer_terminal_sessions_are_truncated_after_prediction_lookup(
@@ -2285,7 +2308,10 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
 
     monkeypatch.setattr(production, "calibrate_expected_alpha", calibrate)
     final = []
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         chunks, _ = _build_producer(
             tmp_path,
             monkeypatch,
@@ -2334,7 +2360,9 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
             ledger_chunks=batches,
             final_calibration=lambda: final[0],
         )
-        artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=artifact_lease
+        )
         restored, cutoff = production.frozen_alpha_calibration(
             artifact.final_alpha_calibration,
             cutoff=window.end,
@@ -2350,4 +2378,4 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
                 cutoff="2023-01-09",
                 selection_group=candidate.selection_group,
             )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes

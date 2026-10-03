@@ -44,6 +44,9 @@ from quant_research_platform.runtime.resources import (
     OwnedValue,
     runtime_resource_policy_scope,
 )
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.experiments import (
     read_model_trial_ledger_reference,
 )
@@ -799,13 +802,19 @@ def _republish(case, logical, *, mutate, operational=None):
                 payload = json.dumps(document).encode()
             filesystem_write_bytes(destination, payload)
 
-    return write_semantic_artifact(
-        logical,
-        case.envelope,
-        write,
-        operational_metadata=operational
-        or read_semantic_artifact_operational_metadata(case.root),
-    )
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        return write_semantic_artifact(
+            logical,
+            case.envelope,
+            write,
+            operational_metadata=operational
+            or read_semantic_artifact_operational_metadata(
+                case.root, lease=artifact_lease
+            ),
+        )
 
 
 def test_candidates_fit_once_and_both_groups_have_real_final_models(
@@ -845,11 +854,15 @@ def test_candidates_fit_once_and_both_groups_have_real_final_models(
 
     monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", fit)
     preflight_model_specs(specs)
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         case = shared_model_case(
             tmp_path,
             specs=specs,
             protocol=shared_model_protocol(specs, configurations=configurations),
+            lease=artifact_lease,
         )
         assert len(calls) == 6 * 3 + 2 * 2
         assert len(case.artifact.candidate_models) == 18
@@ -900,7 +913,7 @@ def test_candidates_fit_once_and_both_groups_have_real_final_models(
                     assert plan.selection_group in {"global", "quarterly"}
                     assert plan.selection_metric is None
                     assert set(records[0].metrics) == {"n_train"}
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_candidate_own_prediction_rows_survive_shared_scoring_domain(tmp_path):
@@ -915,8 +928,13 @@ def test_candidate_own_prediction_rows_survive_shared_scoring_domain(tmp_path):
     )
     frame = shared_model_rows(specs)
     frame.loc[frame.asset_id.eq("asset_0"), "y"] = np.nan
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path, specs=specs, frame=frame)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(
+            tmp_path, specs=specs, frame=frame, lease=artifact_lease
+        )
         for family, count in (("linear_x", 8), ("linear_y", 7)):
             entry = next(
                 e
@@ -952,13 +970,20 @@ def test_candidate_own_prediction_rows_survive_shared_scoring_domain(tmp_path):
                 if plan.stage == "selection":
                     # Only the first fixture session matures by each fold's last day.
                     assert records[0].metrics["validation_rows"] == 7
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_common_pk_readback_is_independent_of_chunking(tmp_path):
-    with runtime_resource_policy_scope() as policy:
-        first = shared_model_case(tmp_path / "single", chunk_size=1)
-        second = shared_model_case(tmp_path / "whole", chunk_size=1024)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        first = shared_model_case(
+            tmp_path / "single", chunk_size=1, lease=artifact_lease
+        )
+        second = shared_model_case(
+            tmp_path / "whole", chunk_size=1024, lease=artifact_lease
+        )
         for group in ("global", "quarterly"):
             for key, decision in first.artifact.selections[group].items():
                 other = second.artifact.selections[group][key]
@@ -967,7 +992,7 @@ def test_common_pk_readback_is_independent_of_chunking(tmp_path):
                     == other["common_validation_coverage"]
                 )
                 assert decision["families"] == other["families"]
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_future_validation_changes_do_not_change_prior_quarter_selection(tmp_path):
@@ -991,9 +1016,16 @@ def test_future_validation_changes_do_not_change_prior_quarter_selection(tmp_pat
     )
     changed = original.copy()
     changed.loc[changed.timestamp.ge("2019-04-01"), "label"] *= -13.0
-    with runtime_resource_policy_scope() as policy:
-        before = shared_model_case(tmp_path / "before", specs=specs, frame=original)
-        after = shared_model_case(tmp_path / "after", specs=specs, frame=changed)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        before = shared_model_case(
+            tmp_path / "before", specs=specs, frame=original, lease=artifact_lease
+        )
+        after = shared_model_case(
+            tmp_path / "after", specs=specs, frame=changed, lease=artifact_lease
+        )
         for quarter in ("2019Q1", "2019Q2"):
             assert (
                 before.artifact.selections["quarterly"][quarter]
@@ -1003,15 +1035,18 @@ def test_future_validation_changes_do_not_change_prior_quarter_selection(tmp_pat
             before.artifact.selections["global"]["final"]
             != after.artifact.selections["global"]["final"]
         )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("group", ["global", "quarterly"])
 def test_prediction_request_clips_saved_rows_without_retraining(
     tmp_path, monkeypatch, group
 ):
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(tmp_path, lease=artifact_lease)
 
         def forbidden(*args, **kwargs):
             raise AssertionError("development_prediction_refit")
@@ -1025,15 +1060,18 @@ def test_prediction_request_clips_saved_rows_without_retraining(
         assert frame.timestamp.min() >= pd.Timestamp("2019-01-03")
         assert frame.timestamp.max() <= pd.Timestamp("2019-04-02")
         assert frame.model_id.eq("linear_regression").all()
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_prediction_rejects_uncovered_quarter(tmp_path):
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(tmp_path, lease=artifact_lease)
         with pytest.raises(PermissionError, match="a_share_prediction_window_invalid"):
             _prediction_result(case, policy, start="2018-10-01")
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize(
@@ -1058,8 +1096,11 @@ def test_prediction_rejects_uncovered_quarter(tmp_path):
     ],
 )
 def test_reader_rejects_self_consistent_publication_drift(tmp_path, mutation):
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path / "good")
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(tmp_path / "good", lease=artifact_lease)
         old_good = _file_bytes(case.root)
 
         def change(relative, payload):
@@ -1106,16 +1147,21 @@ def test_reader_rejects_self_consistent_publication_drift(tmp_path, mutation):
 
         root = _republish(case, tmp_path / "corrupt", mutate=change)
         with pytest.raises(ValueError):
-            read_quarterly_model_artifact(root, trial_layout=case.layout)
+            read_quarterly_model_artifact(
+                root, trial_layout=case.layout, lease=artifact_lease
+            )
         assert _file_bytes(case.root) == old_good
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_model_member_mutation_is_rejected_before_loading_predictor(
     tmp_path, monkeypatch
 ):
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(tmp_path, lease=artifact_lease)
         path = case.root / "models/final/global/linear_regression.pkl"
         filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
         monkeypatch.setattr(
@@ -1126,7 +1172,7 @@ def test_model_member_mutation_is_rejected_before_loading_predictor(
                 case.artifact, "global", "linear_regression", resource_policy=policy
             ):
                 pytest.fail("mutated member accepted")
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("consumer", ["staged", "persisted", "crypto"])
@@ -1136,8 +1182,11 @@ def test_model_member_mutation_is_rejected_before_loading_predictor(
 def test_model_member_io_preserves_failure_class(
     tmp_path, monkeypatch, consumer, failure
 ):
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path / "good")
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(tmp_path / "good", lease=artifact_lease)
         original_bytes = _file_bytes(case.root)
         metadata = case.artifact.final_models[0]["model_metadata"]
         if consumer == "crypto":
@@ -1161,7 +1210,7 @@ def test_model_member_io_preserves_failure_class(
 
             identities = {}
             _, members = read_semantic_artifact_record(
-                crypto_root, member_identities=identities
+                crypto_root, member_identities=identities, lease=artifact_lease
             )
             crypto = SimpleNamespace(
                 instance_root=crypto_root,
@@ -1211,7 +1260,7 @@ def test_model_member_io_preserves_failure_class(
         invalid = failure in {"missing", "notdir", "corrupt"}
         with pytest.raises(ValueError if invalid else OSError) as caught:
             if consumer == "staged":
-                shared_model_case(tmp_path / "staged")
+                shared_model_case(tmp_path / "staged", lease=artifact_lease)
             else:
                 context = (
                     persisted.read_crypto_model_member(
@@ -1231,7 +1280,7 @@ def test_model_member_io_preserves_failure_class(
         assert all(handle.closed for handle in handles)
         assert _file_bytes(case.root) == original_bytes
         assert not tuple(filesystem_glob(tmp_path / "staged", "**/.a-*"))
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("cancellation", [False, True])
@@ -1262,9 +1311,12 @@ def test_refit_scaler_failure_is_recorded_before_learning(
 
     monkeypatch.setattr(TrialRecorder, "begin", begin)
     monkeypatch.setattr(fitting.ModelMatrixScaler, "fit", fit)
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         with pytest.raises(type(primary)) as caught:
-            shared_model_case(tmp_path)
+            shared_model_case(tmp_path, lease=artifact_lease)
         assert caught.value is primary
         recorder, _ = attempts[-1]
         with read_trial_ledger(recorder.root, recorder.plan) as (_, events):
@@ -1272,14 +1324,17 @@ def test_refit_scaler_failure_is_recorded_before_learning(
             assert events[-1].metrics == {}
             assert events[-1].undefined_reasons == {"failure": type(primary).__name__}
         assert not tuple(filesystem_glob(tmp_path / "models", "**/.a-*"))
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_failed_source_verification_preserves_published_model_and_releases_state(
     tmp_path,
 ):
-    with runtime_resource_policy_scope() as policy:
-        good = shared_model_case(tmp_path / "good")
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        good = shared_model_case(tmp_path / "good", lease=artifact_lease)
         before = _file_bytes(good.root)
         primary = RuntimeError("source_identity_changed")
 
@@ -1287,11 +1342,13 @@ def test_failed_source_verification_preserves_published_model_and_releases_state
             raise primary
 
         with pytest.raises(RuntimeError) as caught:
-            shared_model_case(tmp_path / "failed", verify_source=verify)
+            shared_model_case(
+                tmp_path / "failed", verify_source=verify, lease=artifact_lease
+            )
         assert caught.value is primary
         assert _file_bytes(good.root) == before
         assert not tuple(filesystem_glob(tmp_path / "failed/models", "**/.a-*"))
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("max_train_rows", [None, 12])
@@ -1311,11 +1368,15 @@ def test_final_refit_strength_and_state_follow_actual_rows(tmp_path, max_train_r
         }
     ]
     preflight_model_specs((spec,))
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         case = shared_model_case(
             tmp_path,
             specs=(spec,),
             protocol=shared_model_protocol((spec,), configurations=configuration),
+            lease=artifact_lease,
         )
         for entry in case.artifact.final_models:
             count = entry["model_metadata"]["rows_after_input_label_dropna"]
@@ -1331,14 +1392,17 @@ def test_final_refit_strength_and_state_follow_actual_rows(tmp_path, max_train_r
                 assert np.isfinite(
                     predictor.predict(case.frame.loc[:, list(spec.input_columns)])
                 ).all()
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_disk_admission_precedes_pickle_and_preserves_old_good(tmp_path, monkeypatch):
     from quant_research_platform.runtime import resources
 
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path / "good")
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(tmp_path / "good", lease=artifact_lease)
         before = _file_bytes(case.root)
         calls = []
         monkeypatch.setattr(
@@ -1348,10 +1412,10 @@ def test_disk_admission_precedes_pickle_and_preserves_old_good(tmp_path, monkeyp
             resources.shutil, "disk_usage", lambda _path: SimpleNamespace(free=1)
         )
         with pytest.raises(RuntimeError, match="insufficient_free_disk"):
-            shared_model_case(tmp_path / "failed")
+            shared_model_case(tmp_path / "failed", lease=artifact_lease)
         assert calls == []
         assert _file_bytes(case.root) == before
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize(
@@ -1360,8 +1424,11 @@ def test_disk_admission_precedes_pickle_and_preserves_old_good(tmp_path, monkeyp
 def test_final_model_post_load_stat_preserves_system_error(
     tmp_path, monkeypatch, failure_type
 ):
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(tmp_path, lease=artifact_lease)
         primary = failure_type("model_stat_failure")
         actual_load, actual_stat = persisted.pickle.load, persisted.os.stat
         armed = False
@@ -1392,7 +1459,7 @@ def test_final_model_post_load_stat_preserves_system_error(
                 assert caught.value is primary
             else:
                 assert caught.value.__cause__ is primary
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize(
@@ -1435,7 +1502,10 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
     )
     layout = StorageLayout(tmp_path)
     root = layout.research_dataset_root(dataset.market_id, dataset.data_id)
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         write_dataset(
             root, frame, spec=dataset, resource_policy=policy, borrowed_input=True
         )
@@ -1466,30 +1536,39 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                 )
                 observed.append(True)
                 if mutation == "staged":
-                    good = shared_model_case(
-                        tmp_path / "good-model", verify_source=session.verify
-                    )
-                    old_good = _file_bytes(good.root)
-
-                    def mutate_after_fit(actual):
-                        def results(**callbacks):
-                            yield from actual(**callbacks)
-                            path = root / "spec.json"
-                            filesystem_write_bytes(
-                                path, filesystem_read_bytes(path) + b" "
+                    with policy.lease(
+                        "test.staged.artifact.metadata", 0
+                    ) as staged_lease:
+                        try:
+                            good = shared_model_case(
+                                tmp_path / "good-model",
+                                verify_source=session.verify,
+                                lease=staged_lease,
                             )
+                            old_good = _file_bytes(good.root)
 
-                        return results
+                            def mutate_after_fit(actual):
+                                def results(**callbacks):
+                                    yield from actual(**callbacks)
+                                    path = root / "spec.json"
+                                    filesystem_write_bytes(
+                                        path, filesystem_read_bytes(path) + b" "
+                                    )
 
-                    with pytest.raises(
-                        ValueError, match="dataset_spec_identity_changed"
-                    ):
-                        shared_model_case(
-                            tmp_path / "failed-model",
-                            verify_source=session.verify,
-                            model_results_wrapper=mutate_after_fit,
-                        )
-                    assert _file_bytes(good.root) == old_good
+                                return results
+
+                            with pytest.raises(
+                                ValueError, match="dataset_spec_identity_changed"
+                            ):
+                                shared_model_case(
+                                    tmp_path / "failed-model",
+                                    verify_source=session.verify,
+                                    model_results_wrapper=mutate_after_fit,
+                                    lease=staged_lease,
+                                )
+                            assert _file_bytes(good.root) == old_good
+                        finally:
+                            good = None
                     return ()
                 if mutation in {"cancel", "exception"}:
                     iterator = iter(read())
@@ -1562,7 +1641,7 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
             assert observed == [True]
             assert policy.used_memory_bytes == baseline
         assert not filesystem_exists(scratch)
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize(
@@ -1647,8 +1726,11 @@ def test_publication_rejects_valid_ledger_from_wrong_artifact_scope(tmp_path, mu
 
         return run
 
-    with runtime_resource_policy_scope() as policy:
-        good = shared_model_case(tmp_path / "good")
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        good = shared_model_case(tmp_path / "good", lease=artifact_lease)
         old_good = _file_bytes(good.root)
         expected = (
             "model_trial_fold_binding_invalid"
@@ -1656,11 +1738,13 @@ def test_publication_rejects_valid_ledger_from_wrong_artifact_scope(tmp_path, mu
             else "model_trial_artifact_binding_invalid"
         )
         with pytest.raises(ValueError, match=expected):
-            shared_model_case(tmp_path / "bad", model_results_wrapper=wrap)
+            shared_model_case(
+                tmp_path / "bad", model_results_wrapper=wrap, lease=artifact_lease
+            )
         assert len(substituted) == 1
         assert _file_bytes(good.root) == old_good
         assert not tuple(filesystem_glob(tmp_path / "bad/models", "**/model.json"))
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limit(
@@ -1707,13 +1791,17 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
     for column in validity:
         frame[column] = True
     dataset = a_share.research_dataset_catalog().get("fusion_nf_expectations")
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         case = shared_model_case(
             tmp_path,
             specs=specs,
             frame=frame,
             dataset=dataset,
             development_end="2019-03-31",
+            lease=artifact_lease,
         )
         assert len(case.artifact.candidate_models) == 5 * 8
         assert len(case.artifact.final_models) == 2 * 8
@@ -1769,7 +1857,7 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
                     assert (
                         actual.n_jobs == metadata["resolved_hyperparameters"]["n_jobs"]
                     )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize(
@@ -1784,8 +1872,11 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
     ),
 )
 def test_quarterly_model_core_rejects_contract_drift(tmp_path, field, value):
-    with runtime_resource_policy_scope() as policy:
-        case = shared_model_case(tmp_path / "good")
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(tmp_path / "good", lease=artifact_lease)
         before = _file_bytes(case.root)
 
         def mutate(relative, payload):
@@ -1794,9 +1885,11 @@ def test_quarterly_model_core_rejects_contract_drift(tmp_path, field, value):
 
         root = _republish(case, tmp_path / "bad", mutate=mutate)
         with pytest.raises(ValueError, match="invalid_model_metadata"):
-            read_quarterly_model_artifact(root, trial_layout=case.layout)
+            read_quarterly_model_artifact(
+                root, trial_layout=case.layout, lease=artifact_lease
+            )
         assert _file_bytes(case.root) == before
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_model_metadata_failure_releases_copies_and_preserves_old_good(
@@ -1806,8 +1899,12 @@ def test_model_metadata_failure_releases_copies_and_preserves_old_good(
         available_memory_bytes=256 * 1024**2,
         explicit_cap_bytes=128 * 1024**2,
     )
-    with runtime_resource_policy_scope(policy):
-        good = shared_model_case(tmp_path)
+    with (
+        runtime_resource_policy_scope(policy) as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        good = shared_model_case(tmp_path, lease=artifact_lease)
+        baseline = policy.used_memory_bytes
         before = _file_bytes(good.root)
         instances = set(good.root.parent.iterdir())
         primary = RuntimeError("model_metadata_boundary_primary")
@@ -1841,7 +1938,9 @@ def test_model_metadata_failure_releases_copies_and_preserves_old_good(
             persisted, "write_internal_artifact_manifest", fail_metadata
         )
         with pytest.raises(RuntimeError) as captured:
-            shared_model_case(tmp_path, software_identity="e" * 64)
+            shared_model_case(
+                tmp_path, software_identity="e" * 64, lease=artifact_lease
+            )
         assert captured.value is primary
         assert metadata_validations > 0 and copied_metadata_ids
         traceback = primary.__traceback__
@@ -1859,7 +1958,7 @@ def test_model_metadata_failure_releases_copies_and_preserves_old_good(
                 assert not values.get("selections")
             traceback = traceback.tb_next
         assert failed_frame_cleared
-        assert policy.to_payload()["used_memory_bytes"] == 0
+        assert policy.to_payload()["used_memory_bytes"] == baseline
         with policy.lease("test.after_model_metadata_failure", 64 * 1024**2):
             assert _file_bytes(good.root) == before
         assert set(good.root.parent.iterdir()) == instances

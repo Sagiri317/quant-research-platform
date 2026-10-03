@@ -7,6 +7,9 @@ import pytest
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.identity import (
     filesystem_iterdir,
     filesystem_mkdir,
@@ -57,18 +60,32 @@ def test_semantic_artifact_member_mutation_is_rejected_by_read_and_discovery(
     root = _write_artifact(tmp_path)
     filesystem_write_bytes(root / "model.pkl", b"changed")
 
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        read_semantic_artifact(root)
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        discover_semantic_artifact_instances(tmp_path / "model")
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(
+            ValueError, match="semantic_artifact_member_integrity_invalid"
+        ):
+            read_semantic_artifact(root, lease=artifact_lease)
+        with pytest.raises(
+            ValueError, match="semantic_artifact_member_integrity_invalid"
+        ):
+            discover_semantic_artifact_instances(tmp_path / "model")
 
 
 def test_semantic_artifact_extra_member_is_rejected(tmp_path: Path) -> None:
     root = _write_artifact(tmp_path)
     filesystem_write_bytes(root / "extra.bin", b"extra")
 
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        read_semantic_artifact(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(
+            ValueError, match="semantic_artifact_member_integrity_invalid"
+        ):
+            read_semantic_artifact(root, lease=artifact_lease)
 
 
 def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
@@ -238,9 +255,15 @@ def test_member_limit_precedes_wide_directory_materialization_and_hashing(
 
     monkeypatch.setattr(storage, "filesystem_scandir", lambda _path: Entries())
     monkeypatch.setattr(storage, "_member_record", record)
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        storage.read_semantic_artifact_record(root)
-    assert counts == {"next": 1, "hash": 0, "close": 1}
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(
+            ValueError, match="semantic_artifact_member_integrity_invalid"
+        ):
+            storage.read_semantic_artifact_record(root, lease=artifact_lease)
+        assert counts == {"next": 1, "hash": 0, "close": 1}
 
 
 def test_nested_inventory_descends_before_reading_next_sibling(tmp_path, monkeypatch):
@@ -280,11 +303,17 @@ def test_nested_inventory_descends_before_reading_next_sibling(tmp_path, monkeyp
 
     monkeypatch.setattr(storage, "_member_inventory", inventory)
     root = storage.write_semantic_artifact(tmp_path / "model", _envelope(), writer)
-    envelope, members = storage.read_semantic_artifact_record(root)
-    assert envelope == _envelope().payload()
-    assert [member["path"] for member in members] == ["a.bin", "z/inner/model.bin"]
-    assert [member["size"] for member in members] == [4, 6]
-    assert not opened
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        envelope, members = storage.read_semantic_artifact_record(
+            root, lease=artifact_lease
+        )
+        assert envelope == _envelope().payload()
+        assert [member["path"] for member in members] == ["a.bin", "z/inner/model.bin"]
+        assert [member["size"] for member in members] == [4, 6]
+        assert not opened
 
 
 def test_inventory_closes_all_ancestors_without_replacing_primary(
@@ -323,14 +352,18 @@ def test_inventory_closes_all_ancestors_without_replacing_primary(
 
     monkeypatch.setattr(storage, "filesystem_scandir", Entries)
     monkeypatch.setattr(storage, "_member_record", record)
-    with pytest.raises(KeyboardInterrupt) as caught:
-        storage.read_semantic_artifact_record(root)
-    assert caught.value is primary
-    assert closed == [
-        root / "nested",
-        root,
-    ]
-    assert len(primary.__notes__) == 2
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(KeyboardInterrupt) as caught:
+            storage.read_semantic_artifact_record(root, lease=artifact_lease)
+        assert caught.value is primary
+        assert closed == [
+            root / "nested",
+            root,
+        ]
+        assert len(primary.__notes__) == 2
 
 
 @pytest.mark.parametrize("alias_kind", ("symlink", "junction"))
@@ -379,9 +412,13 @@ def test_inventory_rejects_child_alias_before_scanning_external_content(
         return actual_scandir(path)
 
     monkeypatch.setattr(storage, "filesystem_scandir", scan)
-    with pytest.raises(ValueError, match="semantic_artifact_member_invalid"):
-        storage.read_semantic_artifact_record(root)
-    assert filesystem_read_bytes(payload) == b"external synthetic content"
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        with pytest.raises(ValueError, match="semantic_artifact_member_invalid"):
+            storage.read_semantic_artifact_record(root, lease=artifact_lease)
+        assert filesystem_read_bytes(payload) == b"external synthetic content"
 
 
 def test_inventory_limit_failure_preserves_published_artifact_and_parent(
@@ -606,14 +643,20 @@ def test_member_inventory_round_trips_more_than_256_declared_members(tmp_path):
             filesystem_write_bytes(staging / f"member-{index}.bin", str(index).encode())
 
     root = write_semantic_artifact(tmp_path / "wide", _envelope(), writer)
-    _, members = storage.read_semantic_artifact_record(root)
-    assert len(members) == 265
-    assert {member["path"] for member in members} == {
-        f"member-{i}.bin" for i in range(265)
-    }
-    filesystem_write_bytes(root / "member-264.bin", b"changed")
-    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        storage.read_semantic_artifact_record(root)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        _, members = storage.read_semantic_artifact_record(root, lease=artifact_lease)
+        assert len(members) == 265
+        assert {member["path"] for member in members} == {
+            f"member-{i}.bin" for i in range(265)
+        }
+        filesystem_write_bytes(root / "member-264.bin", b"changed")
+        with pytest.raises(
+            ValueError, match="semantic_artifact_member_integrity_invalid"
+        ):
+            storage.read_semantic_artifact_record(root, lease=artifact_lease)
 
 
 @pytest.mark.parametrize(
@@ -645,15 +688,25 @@ def test_parent_capture_is_preserved_even_for_same_content_replacement(
 
     root = _write_artifact(tmp_path)
     identities = {}
-    read_semantic_artifact_record(root, member_identities=identities)
-    assert set(identities) == {"manifest.json", "model.json", "model.pkl"}
-    read_semantic_artifact_record(root, expected_member_identities=identities)
-    path = root / member
-    replacement = tmp_path / "replacement"
-    filesystem_write_bytes(replacement, filesystem_read_bytes(path))
-    filesystem_replace(replacement, path)
-    with pytest.raises(ValueError, match="identity_changed"):
-        read_semantic_artifact_record(root, expected_member_identities=identities)
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        read_semantic_artifact_record(
+            root, member_identities=identities, lease=artifact_lease
+        )
+        assert set(identities) == {"manifest.json", "model.json", "model.pkl"}
+        read_semantic_artifact_record(
+            root, expected_member_identities=identities, lease=artifact_lease
+        )
+        path = root / member
+        replacement = tmp_path / "replacement"
+        filesystem_write_bytes(replacement, filesystem_read_bytes(path))
+        filesystem_replace(replacement, path)
+        with pytest.raises(ValueError, match="identity_changed"):
+            read_semantic_artifact_record(
+                root, expected_member_identities=identities, lease=artifact_lease
+            )
 
 
 @pytest.mark.parametrize(
@@ -722,20 +775,27 @@ def test_semantic_writer_admits_envelope_projection_before_publication(
 
     if cap is None:
         policy = capture_test_policy(available_memory_bytes=256 * 1024**2)
-        with runtime_resource_policy_scope(policy):
+        with (
+            runtime_resource_policy_scope(policy),
+            policy.lease("test.artifact.metadata", 0) as artifact_lease,
+        ):
             published = storage.write_semantic_artifact(
                 old_root.parent.parent,
                 envelope,
                 lambda staging: filesystem_write_bytes(staging / "member", b"data"),
             )
             assert policy.used_memory_bytes == 0
-        assert writes == 1
-        assert published.name == envelope.instance_identity
-        assert (
-            len(read_semantic_artifact(published)["semantic_metadata"]["counts"])
-            == 20000
-        )
-        assert _immediate_file_bytes(old_root) == old_bytes
+            assert writes == 1
+            assert published.name == envelope.instance_identity
+            assert (
+                len(
+                    read_semantic_artifact(published, lease=artifact_lease)[
+                        "semantic_metadata"
+                    ]["counts"]
+                )
+                == 20000
+            )
+            assert _immediate_file_bytes(old_root) == old_bytes
 
 
 @pytest.mark.parametrize("cap", (None, 128 * 1024**2))
@@ -787,3 +847,184 @@ def test_semantic_writer_failure_releases_metadata_with_retained_exception(
     assert not (
         tmp_path / "candidate" / "instances" / _envelope().instance_identity
     ).exists()
+
+
+@pytest.mark.parametrize("explicit_cap", (None, 128 * 1024))
+def test_semantic_reader_rejects_before_json_decode(
+    tmp_path, monkeypatch, explicit_cap
+):
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage import semantic_artifacts as storage
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    fields = _envelope().payload()
+    fields.pop("instance_identity")
+    fields.pop("status")
+    fields["semantic_metadata"] = {"counts": [{} for _ in range(20000)]}
+    root = storage.write_semantic_artifact(
+        tmp_path / "large",
+        build_business_manifest_envelope(**fields),
+        lambda _path: None,
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024, explicit_cap_bytes=explicit_cap
+    )
+    decoded = False
+
+    def decode(*args, **kwargs):
+        nonlocal decoded
+        decoded = True
+        raise AssertionError("json_decode_preceded_admission")
+
+    monkeypatch.setattr(storage, "read_bounded_qrp_json", decode)
+    expected = ValueError if explicit_cap is None else MemoryError
+    with (
+        runtime_resource_policy_scope(policy),
+        policy.lease("test.metadata", 0) as lease,
+    ):
+        with pytest.raises(expected):
+            storage.read_semantic_artifact_record(root, lease=lease)
+        assert not decoded
+        assert policy.used_memory_bytes == 0
+
+
+def test_semantic_reader_retains_cumulative_metadata_until_consumption(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.contracts.json_codec import (
+        json_record_working_set_bytes,
+    )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage import semantic_artifacts as storage
+
+    root = _write_artifact(tmp_path)
+    bound = 2 * json_record_working_set_bytes(
+        filesystem_stat(root / "manifest.json").st_size
+    )
+    with runtime_resource_policy_scope() as policy:
+        with policy.lease("test.first", 0) as first:
+            envelope, members = storage.read_semantic_artifact_record(root, lease=first)
+            assert first.reserved_bytes == bound
+            assert envelope["instance_identity"] == root.name
+            with policy.lease("test.second", 0) as second:
+                repeated, repeated_members = storage.read_semantic_artifact_record(
+                    root, lease=second
+                )
+                assert policy.used_memory_bytes == 2 * bound
+                assert (envelope, members) == (repeated, repeated_members)
+                repeated = repeated_members = None
+            assert policy.used_memory_bytes == bound
+            envelope = members = None
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("primary_type", (None, KeyboardInterrupt))
+def test_semantic_metadata_release_keeps_primary(tmp_path, monkeypatch, primary_type):
+    from quant_research_platform.runtime.resources import (
+        MemoryLease,
+        runtime_resource_policy_scope,
+    )
+    from quant_research_platform.storage import semantic_artifacts as storage
+
+    root = _write_artifact(tmp_path)
+    native = MemoryLease.close
+    primary = (
+        None if primary_type is None else primary_type("semantic_consumer_primary")
+    )
+    secondary = OSError("semantic_metadata_release")
+    with runtime_resource_policy_scope() as policy:
+        lease = policy.lease("test.metadata", 0)
+
+        def close(value):
+            native(value)
+            if value is lease:
+                raise secondary
+
+        monkeypatch.setattr(MemoryLease, "close", close)
+        with pytest.raises(type(primary or secondary)) as caught:
+            with lease:
+                record = storage.read_semantic_artifact_record(root, lease=lease)
+                assert record[0]["instance_identity"] == root.name
+                record = None
+                if primary is not None:
+                    raise primary
+        assert caught.value is (primary or secondary)
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("operation", ("discovery", "comparison"))
+def test_semantic_metadata_failure_drops_graphs_but_retains_traceback(
+    tmp_path, operation
+):
+    from quant_research_platform.contracts.json_codec import (
+        json_record_working_set_bytes,
+    )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage import semantic_artifacts as storage
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    fields = _envelope().payload()
+    fields.pop("instance_identity")
+    fields.pop("status")
+    fields["semantic_metadata"] = {"counts": [{} for _ in range(20000)]}
+    envelope = build_business_manifest_envelope(**fields)
+
+    def publish(name):
+        return storage.write_semantic_artifact(
+            tmp_path / name,
+            envelope,
+            lambda staging: filesystem_write_bytes(staging / "member.bin", b"data"),
+        )
+
+    left = publish("left")
+    right = publish("right") if operation == "comparison" else None
+    if operation == "discovery":
+        filesystem_write_bytes(left / "extra.bin", b"undeclared")
+    bound = 2 * json_record_working_set_bytes(
+        filesystem_stat(left / "manifest.json").st_size
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=512 * 1024**2,
+        explicit_cap_bytes=4 * bound
+        if operation == "discovery"
+        else bound + bound // 2,
+    )
+    error, message = (
+        (ValueError, "semantic_artifact_member_integrity_invalid")
+        if operation == "discovery"
+        else (MemoryError, "runtime_memory_budget_exceeded")
+    )
+    with runtime_resource_policy_scope(policy):
+        with pytest.raises(error, match=message) as caught:
+            if operation == "discovery":
+                storage.discover_semantic_artifact_instances(left.parent.parent)
+            else:
+                storage.compare_semantic_artifacts(left, right)
+        assert policy.state == "ACTIVE" and policy.used_memory_bytes == 0
+        frames = set()
+        current = caught.value.__traceback__
+        while current is not None:
+            frame = current.tb_frame
+            if frame.f_globals.get("__name__") == storage.__name__:
+                name = frame.f_code.co_name
+                if name == "read_semantic_artifact_record":
+                    assert frame.f_locals["instance_root"] in {left, right}
+                    frames.add(name)
+                elif name == "compare_semantic_artifacts":
+                    assert frame.f_locals["old_root"] == left
+                    frames.add(name)
+                for value in frame.f_locals.values():
+                    if type(value) is not dict:
+                        continue
+                    common = value.get("common_manifest", value)
+                    if type(common) is not dict:
+                        continue
+                    metadata = common.get("semantic_metadata")
+                    counts = metadata.get("counts") if type(metadata) is dict else None
+                    assert not isinstance(counts, list) or not counts
+            current = current.tb_next
+        assert frames == (
+            {"read_semantic_artifact_record"}
+            if operation == "discovery"
+            else {"compare_semantic_artifacts", "read_semantic_artifact_record"}
+        )

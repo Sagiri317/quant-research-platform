@@ -303,8 +303,10 @@ class PortfolioLedgerBatch:
             if row.asset_id == PORTFOLIO_CASH_ASSET_ID
         ):
             raise ValueError("portfolio_ledger_cash_valuation_invalid")
-        scale = max(1.0, sum(abs(row.value) for row in before.values()))
-        tolerance = max(ulp(1.0) * scale * 512.0, 1e-12)
+        tolerance = max(
+            sum(abs(row.value) * (ulp(1.0) * 512.0) for row in before.values()),
+            1e-12,
+        )
         cash_before = before[PORTFOLIO_CASH_ASSET_ID].value
         cash_after = after[PORTFOLIO_CASH_ASSET_ID].value
         if (
@@ -441,42 +443,45 @@ def validate_portfolio_transition(
         ):
             raise ValueError("portfolio_initial_capital_reconciliation_invalid")
     else:
-        for asset in before.keys() | previous.keys():
-            old, current = previous.get(asset), before.get(asset)
-            previous_quantity = (
-                (
-                    old.value
-                    if capital.valuation_method == "adjusted_notional"
-                    else old.quantity
+        try:
+            for asset in before.keys() | previous.keys():
+                old, current = previous.get(asset), before.get(asset)
+                previous_quantity = (
+                    (
+                        old.value
+                        if capital.valuation_method == "adjusted_notional"
+                        else old.quantity
+                    )
+                    if old
+                    else 0.0
                 )
-                if old
-                else 0.0
-            )
-            current_quantity = current.quantity if current else 0.0
-            if not isclose(
-                previous_quantity,
-                current_quantity,
-                rel_tol=0.0,
-                abs_tol=(
-                    tolerance
-                    if capital.valuation_method == "adjusted_notional"
-                    or asset == PORTFOLIO_CASH_ASSET_ID
-                    else _quantity_tolerance(previous_quantity, current_quantity)
-                ),
-            ):
-                raise ValueError("portfolio_ledger_cross_session_state_invalid")
-            if (
-                old is not None
-                and current is not None
-                and current.timestamp_ns < old.timestamp_ns
-            ):
-                raise ValueError("portfolio_ledger_cross_session_timing_invalid")
-            if (
-                old is not None
-                and current is not None
-                and old.cost_basis != current.cost_basis
-            ):
-                raise ValueError("portfolio_ledger_cost_basis_invalid")
+                current_quantity = current.quantity if current else 0.0
+                if not isclose(
+                    previous_quantity,
+                    current_quantity,
+                    rel_tol=0.0,
+                    abs_tol=(
+                        tolerance
+                        if capital.valuation_method == "adjusted_notional"
+                        or asset == PORTFOLIO_CASH_ASSET_ID
+                        else _quantity_tolerance(previous_quantity, current_quantity)
+                    ),
+                ):
+                    raise ValueError("portfolio_ledger_cross_session_state_invalid")
+                if (
+                    old is not None
+                    and current is not None
+                    and current.timestamp_ns < old.timestamp_ns
+                ):
+                    raise ValueError("portfolio_ledger_cross_session_timing_invalid")
+                if (
+                    old is not None
+                    and current is not None
+                    and old.cost_basis != current.cost_basis
+                ):
+                    raise ValueError("portfolio_ledger_cost_basis_invalid")
+        finally:
+            previous = old = None
     trades_by_asset = defaultdict(list)
     flows_by_asset = defaultdict(list)
     diagnostics_by_asset = defaultdict(dict)

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import math
+import sys
 from collections.abc import Callable, Iterable, Mapping
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any
@@ -34,6 +35,7 @@ from quant_research_platform.contracts.features import (
 )
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.json_codec import (
+    _MAX_NESTING_DEPTH,
     bounded_qrp_json_object_snapshot,
     bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
@@ -42,6 +44,7 @@ from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
     render_qrp_json_object,
 )
+from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets.paths import (
     parse_year_partition_label,
     timestamp_column_from_spec_payload,
@@ -632,6 +635,210 @@ def _require_runtime_string_tuple(
     return value
 
 
+def _utf8_payload_length(value: str) -> int:
+    """Return the UTF-8 payload width without allocating an encoded copy."""
+
+    payload_bytes = 0
+    for character in value:
+        codepoint = ord(character)
+        if codepoint <= 0x7F:
+            payload_bytes += 1
+        elif codepoint <= 0x7FF:
+            payload_bytes += 2
+        elif 0xD800 <= codepoint <= 0xDFFF:
+            raise ValueError("invalid_dataset_physical_filter_value")
+        elif codepoint <= 0xFFFF:
+            payload_bytes += 3
+        else:
+            payload_bytes += 4
+    return payload_bytes
+
+
+# A physical field has three entries and its type record has at most four.
+# These are the same record owners used by the recursive payload builder below.
+_PHYSICAL_FIELD_RECORD_BYTES = json_record_working_set_bytes(2 + 2 * 3)
+_PHYSICAL_TYPE_RECORD_BYTES = json_record_working_set_bytes(2 + 2 * 4)
+_PHYSICAL_NODE_BYTES = _PHYSICAL_FIELD_RECORD_BYTES + _PHYSICAL_TYPE_RECORD_BYTES
+
+
+def _schema_text_working_set_bytes(value: str | bytes) -> int:
+    width = len(value) if isinstance(value, bytes) else _utf8_payload_length(value)
+    return json_record_working_set_bytes(width)
+
+
+def _timezone_schema_bytes(value: object) -> int:
+    zone = getattr(value, "zone", None)
+    if zone is None:
+        zone = getattr(value, "key", None)
+    if zone is None and type(value) is timezone:
+        zone = value.tzname(None)
+    return _schema_text_working_set_bytes(zone) if isinstance(zone, str) else 0
+
+
+def _input_schema_extra_bytes(
+    value: object,
+    *,
+    active: list[object],
+    remaining: int,
+) -> tuple[int, int]:
+    if len(active) >= _MAX_NESTING_DEPTH:
+        raise ValueError("qrp_json_recursion_limit")
+    if not isinstance(value, (dict, list, tuple, np.ndarray)):
+        metadata = (
+            _timezone_schema_bytes(value.tzinfo)
+            if isinstance(value, (datetime, pd.Timestamp))
+            else 0
+        )
+        native = 0
+        if isinstance(value, memoryview):
+            native = value.nbytes
+            if not value.c_contiguous:
+                native += value.nbytes
+        if not active:
+            return metadata, native
+        # Nested leaves are absent from pandas' shallow object-cell accounting.
+        # A conversion graph includes its native value and any UTF-8 working copy.
+        native += sys.getsizeof(value)
+        if isinstance(value, str):
+            native += _utf8_payload_length(value)
+        elif isinstance(value, bytes):
+            native += len(value)
+        return metadata, native
+    if any(value is parent for parent in active):
+        raise ValueError("qrp_json_cycle")
+    active.append(value)
+    metadata = native = 0
+    try:
+        if isinstance(value, dict):
+            for name, child in value.items():
+                metadata += _PHYSICAL_NODE_BYTES
+                if isinstance(name, (str, bytes)):
+                    metadata += _schema_text_working_set_bytes(name)
+                if metadata + 2 * native > remaining:
+                    raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+                child_metadata, child_native = _input_schema_extra_bytes(
+                    child, active=active, remaining=remaining - metadata - 2 * native
+                )
+                metadata += child_metadata
+                native += child_native
+        else:
+            levels = max(1, value.ndim) if isinstance(value, np.ndarray) else 1
+            metadata = levels * (
+                _PHYSICAL_NODE_BYTES + _schema_text_working_set_bytes("item")
+            )
+            if isinstance(value, np.ndarray) and value.dtype.kind != "O":
+                # Fixed-width array buffers bound their native values. Iterating
+                # Unicode/bytes arrays would instead allocate scalar copies here.
+                offsets = (value.size + 1) * np.dtype(np.int64).itemsize
+                validity = (value.size + 7) // 8
+                scalar_workspace = 2 * value.dtype.itemsize + sys.getsizeof("")
+                native = value.nbytes + offsets + validity + scalar_workspace
+            else:
+                children = value.flat if isinstance(value, np.ndarray) else value
+                for child in children:
+                    if metadata + 2 * native > remaining:
+                        raise ValueError(
+                            "dataset_working_set_exceeds_task_memory_budget"
+                        )
+                    child_metadata, child_native = _input_schema_extra_bytes(
+                        child,
+                        active=active,
+                        remaining=remaining - metadata - 2 * native,
+                    )
+                    metadata += child_metadata
+                    native += child_native
+        if metadata + 2 * native > remaining:
+            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+        return metadata, native
+    finally:
+        active.pop()
+
+
+def frame_schema_working_set_bounds(
+    frame: pd.DataFrame,
+    *,
+    resource_policy: RuntimeResourcePolicy,
+) -> tuple[int, int, int]:
+    """Bound fixed schema, row schema, and nested native conversion separately.
+
+    Count borrowed structures without a whole-input identity set or an inferred
+    Arrow schema. Per-column row maxima cover any slice; the caller reserves two
+    native graphs for the original Arrow table and the schema-converted table.
+    """
+
+    stack_slots = (
+        len(_input_schema_extra_bytes.__code__.co_varnames)
+        + _input_schema_extra_bytes.__code__.co_stacksize
+    ) * _MAX_NESTING_DEPTH
+    with resource_policy.lease(
+        "storage.dataset.schema.plan", json_record_working_set_bytes(stack_slots)
+    ):
+        limit = resource_policy.operation_headroom_bytes
+        fixed = _PHYSICAL_NODE_BYTES
+        per_row = native_per_row = 0
+        active: list[object] = []
+        column_array = value = None
+        try:
+            for name, column_array in zip(
+                frame.columns, frame._iter_column_arrays(), strict=True
+            ):
+                if type(name) is not str or not name:
+                    raise ValueError("invalid_dataset_column_labels")
+                fixed += _PHYSICAL_NODE_BYTES + _schema_text_working_set_bytes(name)
+                dtype = column_array.dtype
+                if isinstance(dtype, pd.DatetimeTZDtype):
+                    fixed += _timezone_schema_bytes(dtype.tz)
+                if isinstance(dtype, pd.CategoricalDtype):
+                    fixed += 2 * _PHYSICAL_TYPE_RECORD_BYTES
+                    for value in dtype.categories:
+                        fixed += json_record_working_set_bytes(2 + 2 * 2)
+                        if isinstance(value, (str, bytes)):
+                            fixed += _schema_text_working_set_bytes(value)
+                        elif isinstance(value, (datetime, pd.Timestamp)):
+                            fixed += _timezone_schema_bytes(value.tzinfo)
+                        if fixed > limit:
+                            raise ValueError(
+                                "dataset_working_set_exceeds_task_memory_budget"
+                            )
+                if fixed > limit:
+                    raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+                if pd.api.types.is_object_dtype(dtype):
+                    column_max = column_native_max = 0
+                    for value in column_array:
+                        metadata, native = _input_schema_extra_bytes(
+                            value, active=active, remaining=limit - fixed
+                        )
+                        column_max = max(column_max, metadata)
+                        column_native_max = max(column_native_max, native)
+                    per_row += column_max
+                    native_per_row += column_native_max
+                if fixed + per_row + 2 * native_per_row > limit:
+                    raise ValueError("dataset_working_set_exceeds_task_memory_budget")
+            return fixed, per_row, native_per_row
+        finally:
+            column_array = value = None
+            active.clear()
+
+
+def physical_schema_working_set_bytes(schema: pa.Schema) -> int:
+    """Measure the retained schema through the physical schema rule owner.
+
+    The caller must already own the construction workspace. Each field's
+    physical payload is released after counting. Persistence validation remains
+    at the stored-schema boundary, after Parquet normalizes physical types.
+    """
+
+    total = _PHYSICAL_NODE_BYTES
+
+    def charge(size: int) -> None:
+        nonlocal total
+        total += size
+
+    for field in schema:
+        _physical_field_payload(field, _schema_charge=charge)
+    return total
+
+
 def physical_schema_from_schema(schema: pa.Schema) -> list[dict[str, Any]]:
     if not isinstance(schema, pa.Schema):
         raise TypeError("dataset_arrow_schema_required")
@@ -1151,15 +1358,25 @@ def physical_schema_columns(schema: object) -> tuple[str, ...]:
     return tuple(field["name"] for field in schema)
 
 
-def _physical_field_payload(field: pa.Field) -> dict[str, Any]:
+def _physical_field_payload(
+    field: pa.Field, *, _schema_charge: Callable[[int], None] | None = None
+) -> dict[str, Any]:
+    if _schema_charge is not None:
+        _schema_charge(
+            _PHYSICAL_FIELD_RECORD_BYTES + _schema_text_working_set_bytes(field.name)
+        )
     return {
         "name": field.name,
         "nullable": field.nullable,
-        "type": _physical_type_payload(field.type),
+        "type": _physical_type_payload(field.type, _schema_charge=_schema_charge),
     }
 
 
-def _physical_type_payload(data_type: pa.DataType) -> dict[str, Any]:
+def _physical_type_payload(
+    data_type: pa.DataType, *, _schema_charge: Callable[[int], None] | None = None
+) -> dict[str, Any]:
+    if _schema_charge is not None:
+        _schema_charge(_PHYSICAL_TYPE_RECORD_BYTES)
     if pa.types.is_boolean(data_type):
         return {"kind": "bool"}
     if pa.types.is_integer(data_type):
@@ -1182,6 +1399,8 @@ def _physical_type_payload(data_type: pa.DataType) -> dict[str, Any]:
     if pa.types.is_time32(data_type) or pa.types.is_time64(data_type):
         return {"kind": "time", "unit": data_type.unit}
     if pa.types.is_timestamp(data_type):
+        if _schema_charge is not None and data_type.tz is not None:
+            _schema_charge(_schema_text_working_set_bytes(data_type.tz))
         return {
             "kind": "timestamp",
             "unit": data_type.unit,
@@ -1202,36 +1421,53 @@ def _physical_type_payload(data_type: pa.DataType) -> dict[str, Any]:
     if pa.types.is_struct(data_type):
         return {
             "kind": "struct",
-            "fields": [_physical_field_payload(field) for field in data_type],
+            "fields": [
+                _physical_field_payload(field, _schema_charge=_schema_charge)
+                for field in data_type
+            ],
         }
     if pa.types.is_list(data_type):
         return {
             "kind": "list",
-            "value_field": _physical_field_payload(data_type.value_field),
+            "value_field": _physical_field_payload(
+                data_type.value_field, _schema_charge=_schema_charge
+            ),
         }
     if pa.types.is_large_list(data_type):
         return {
             "kind": "large_list",
-            "value_field": _physical_field_payload(data_type.value_field),
+            "value_field": _physical_field_payload(
+                data_type.value_field, _schema_charge=_schema_charge
+            ),
         }
     if pa.types.is_fixed_size_list(data_type):
         return {
             "kind": "fixed_size_list",
             "list_size": data_type.list_size,
-            "value_field": _physical_field_payload(data_type.value_field),
+            "value_field": _physical_field_payload(
+                data_type.value_field, _schema_charge=_schema_charge
+            ),
         }
     if pa.types.is_map(data_type):
         return {
             "kind": "map",
             "keys_sorted": data_type.keys_sorted,
-            "key_field": _physical_field_payload(data_type.key_field),
-            "item_field": _physical_field_payload(data_type.item_field),
+            "key_field": _physical_field_payload(
+                data_type.key_field, _schema_charge=_schema_charge
+            ),
+            "item_field": _physical_field_payload(
+                data_type.item_field, _schema_charge=_schema_charge
+            ),
         }
     if pa.types.is_dictionary(data_type):
         return {
             "kind": "dictionary",
-            "index_type": _physical_type_payload(data_type.index_type),
-            "value_type": _physical_type_payload(data_type.value_type),
+            "index_type": _physical_type_payload(
+                data_type.index_type, _schema_charge=_schema_charge
+            ),
+            "value_type": _physical_type_payload(
+                data_type.value_type, _schema_charge=_schema_charge
+            ),
             "ordered": data_type.ordered,
         }
     raise ValueError("unsupported_dataset_arrow_type")

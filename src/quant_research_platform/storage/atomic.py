@@ -9,6 +9,7 @@ from uuid import uuid4
 
 import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts.json_codec import render_qrp_json_object
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage._scratch_ownership import (
     move_path_no_replace,
     open_owned_scratch_file,
@@ -54,10 +55,14 @@ def atomic_write_chunks(
                 final_path.parent,
                 error="invalid_storage_write_path",
             )
-            for chunk in chunks:
-                if not isinstance(chunk, str):
-                    raise TypeError("atomic_text_chunk_required")
-                handle.write(chunk)
+            with closing_iterator(iter(chunks)) as source:
+                for chunk in source:
+                    try:
+                        if not isinstance(chunk, str):
+                            raise TypeError("atomic_text_chunk_required")
+                        handle.write(chunk)
+                    finally:
+                        chunk = None
             handle.flush()
             os.fsync(handle.fileno())
         require_unaliased_path(final_path.parent, error="invalid_storage_write_path")

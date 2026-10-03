@@ -13,6 +13,7 @@ import pyarrow as pa
 import pyarrow.parquet as pq
 
 from quant_research_platform.contracts.business_manifest import BusinessManifestEnvelope
+from quant_research_platform.contracts.json_codec import json_record_working_set_bytes
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CASH_ASSET_ID,
     ExecutedTrade,
@@ -25,7 +26,10 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import current_runtime_resource_policy
+from quant_research_platform.runtime.resources import (
+    current_runtime_resource_policy,
+    runtime_resource_policy_scope,
+)
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.exact_keys import (
     EXACT_KEY_SQLITE_CACHE_BYTES,
@@ -97,18 +101,23 @@ class PortfolioLedgerArtifact:
     final_alpha_calibration: Mapping[str, object] | None = None
 
     def iter_chunks(self) -> Iterator[PortfolioLedgerBatch]:
-        identities: dict[str, DatasetFileIdentity] = {}
-        envelope, _members = read_semantic_artifact_record(
-            self.root,
-            expected_identity=self.identity,
-            member_identities=identities,
-            expected_member_identities=self.member_identities,
-        )
-        if _capital(envelope) != self.capital:
-            raise ValueError("portfolio_ledger_capital_invalid")
-        yield from _iter_batches(
-            self.root, self.capital, envelope["research_window"], identities
-        )
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("artifacts.portfolio.read_metadata", 0) as lease,
+        ):
+            identities: dict[str, DatasetFileIdentity] = {}
+            envelope, _members = read_semantic_artifact_record(
+                self.root,
+                expected_identity=self.identity,
+                member_identities=identities,
+                expected_member_identities=self.member_identities,
+                lease=lease,
+            )
+            if _capital(envelope) != self.capital:
+                raise ValueError("portfolio_ledger_capital_invalid")
+            yield from _iter_batches(
+                self.root, self.capital, envelope["research_window"], identities
+            )
 
 
 def _capital(envelope: Mapping[str, object]) -> PortfolioCapital:
@@ -249,12 +258,15 @@ def write_portfolio_ledger_artifact(
                             flush(name)
                 sequence += 1
 
-            produce(emit)
-            if not sequence:
-                raise ValueError("portfolio_ledger_empty")
-            for name in writers:
-                flush(name)
-                writers[name].add_key_value_metadata(metadata[name] or {})
+            try:
+                produce(emit)
+                if not sequence:
+                    raise ValueError("portfolio_ledger_empty")
+                for name in writers:
+                    flush(name)
+                    writers[name].add_key_value_metadata(metadata[name] or {})
+            finally:
+                previous = None
         with closing_iterator(
             _iter_batches(staging, capital, envelope.research_window)
         ) as batches:
@@ -278,6 +290,7 @@ def write_portfolio_ledger_artifact(
 def read_portfolio_ledger_artifact(
     instance_root: Path,
     *,
+    lease,
     expected_identity: str,
     consume_batches: Callable[[Iterator[PortfolioLedgerBatch]], object] | None = None,
     expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
@@ -289,6 +302,7 @@ def read_portfolio_ledger_artifact(
         expected_identity=expected_identity,
         member_identities=identities,
         expected_member_identities=expected_member_identities,
+        lease=lease,
     )
     calibration_required = _final_calibration_required(envelope)
     required = {f"{name}.parquet" for name in _TABLE_TYPES}
@@ -296,6 +310,18 @@ def read_portfolio_ledger_artifact(
         required.add("final_alpha_calibration.json")
     if {member["path"] for member in members} != required:
         raise ValueError("portfolio_ledger_member_invalid")
+    if calibration_required:
+        additional = 2 * json_record_working_set_bytes(
+            identities["final_alpha_calibration.json"].size
+        )
+        policy = current_runtime_resource_policy()
+        cap = policy.explicit_memory_cap_bytes
+        if cap is None or policy.used_memory_bytes + additional <= cap:
+            policy.require_working_set(
+                additional,
+                error="portfolio_calibration_metadata_exceeds_memory_capacity",
+            )
+        lease.grow(additional)
     calibration = (
         read_bounded_qrp_json(
             Path(instance_root) / "final_alpha_calibration.json",
@@ -480,131 +506,147 @@ def _iter_batches(
         pending = {name: next(group, None) for name, group in groups.items()}
         sequence = 0
         previous = None
-        while pending["valuations"] is not None:
-            if pending["valuations"][0] != sequence:
-                raise ValueError("portfolio_ledger_sequence_invalid")
-            with handle_preserving_primary(ExitStack()) as retained:
-                lease = (
-                    retained.enter_context(
-                        policy.lease("artifacts.portfolio.transition", 1)
+        try:
+            while pending["valuations"] is not None:
+                if pending["valuations"][0] != sequence:
+                    raise ValueError("portfolio_ledger_sequence_invalid")
+                with handle_preserving_primary(ExitStack()) as retained:
+                    lease = (
+                        retained.enter_context(
+                            policy.lease("artifacts.portfolio.transition", 1)
+                        )
+                        if policy is not None
+                        else None
                     )
-                    if policy is not None
-                    else None
-                )
-                try:
-                    tables = {}
-                    for name, kind in _TABLE_TYPES.items():
-                        group = pending[name]
-                        if group is not None and group[0] < sequence:
-                            raise ValueError("portfolio_ledger_sequence_invalid")
-                        records = []
-                        if group is not None and group[0] == sequence:
-                            for row in group[1]:
-                                if lease is not None:
-                                    lease.grow(
-                                        256
-                                        + 128 * len(row)
-                                        + 4
-                                        * sum(
-                                            len(value)
-                                            for value in row.values()
-                                            if isinstance(value, str)
+                    try:
+                        tables = {}
+                        for name, kind in _TABLE_TYPES.items():
+                            group = pending[name]
+                            if group is not None and group[0] < sequence:
+                                raise ValueError("portfolio_ledger_sequence_invalid")
+                            records = []
+                            if group is not None and group[0] == sequence:
+                                for row in group[1]:
+                                    if lease is not None:
+                                        lease.grow(
+                                            256
+                                            + 128 * len(row)
+                                            + 4
+                                            * sum(
+                                                len(value)
+                                                for value in row.values()
+                                                if isinstance(value, str)
+                                            )
+                                        )
+                                    records.append(
+                                        kind(
+                                            **{
+                                                key: value
+                                                for key, value in row.items()
+                                                if key != "sequence"
+                                            }
                                         )
                                     )
-                                records.append(
-                                    kind(
-                                        **{
-                                            key: value
-                                            for key, value in row.items()
-                                            if key != "sequence"
-                                        }
-                                    )
-                                )
-                            pending[name] = next(groups[name], None)
-                        tables[name] = tuple(records)
-                    batch = PortfolioLedgerBatch(sequence, **tables)
-                    if any(
-                        not bounds[0] <= row.timestamp_ns <= bounds[1]
-                        for row in batch.valuations
-                    ):
-                        raise ValueError("portfolio_ledger_valuation_window_invalid")
-                    if continuity_lease is not None:
-                        bound = max(
-                            1,
-                            sum(
-                                1024 + 8 * len(row.asset_id)
-                                for row in batch.valuations
-                                if row.phase == "end"
-                            ),
-                        )
-                        continuity_lease.grow(bound)
-                    previous = validate_portfolio_transition(batch, capital, previous)
-                    if continuity_lease is not None:
-                        continuity_lease.shrink_to(bound)
-                    inserted = key_index.add_identity_payloads(
-                        namespace="fills",
-                        payloads=(
-                            (row.fill_id.encode("utf-8"), row.asset_id.encode("utf-8"))
-                            for row in batch.trades
-                        ),
-                    )
-                    if inserted != len(batch.trades):
-                        raise ValueError("portfolio_ledger_duplicate_fill")
-                    key_index.add_identity_payloads(
-                        namespace="fill_orders",
-                        payloads=(
-                            (row.fill_id.encode("utf-8"), row.order_id.encode("utf-8"))
-                            for row in batch.trades
-                        ),
-                    )
-                    for diagnostic in batch.diagnostics:
-                        if (
-                            diagnostic.fill_id is not None
-                            and key_index.identity_payload_value(
-                                namespace="fills",
-                                payload=diagnostic.fill_id.encode("utf-8"),
-                            )
-                            != diagnostic.asset_id.encode("utf-8")
+                                pending[name] = next(groups[name], None)
+                            tables[name] = tuple(records)
+                        batch = PortfolioLedgerBatch(sequence, **tables)
+                        if any(
+                            not bounds[0] <= row.timestamp_ns <= bounds[1]
+                            for row in batch.valuations
                         ):
                             raise ValueError(
-                                "portfolio_ledger_diagnostic_fill_mismatch"
+                                "portfolio_ledger_valuation_window_invalid"
                             )
-                        if (
-                            diagnostic.fill_id is not None
-                            and diagnostic.name == "order_id"
-                        ):
-                            order_id = (
-                                diagnostic.text
-                                if diagnostic.text is not None
-                                else format(diagnostic.number, "g")
+                        if continuity_lease is not None:
+                            bound = max(
+                                1,
+                                sum(
+                                    1024 + 8 * len(row.asset_id)
+                                    for row in batch.valuations
+                                    if row.phase == "end"
+                                ),
                             )
-                            if key_index.identity_payload_value(
-                                namespace="fill_orders",
-                                payload=diagnostic.fill_id.encode("utf-8"),
-                            ) != order_id.encode("utf-8"):
-                                raise ValueError(
-                                    "portfolio_ledger_diagnostic_order_mismatch"
+                            continuity_lease.grow(bound)
+                        previous = validate_portfolio_transition(
+                            batch, capital, previous
+                        )
+                        if continuity_lease is not None:
+                            continuity_lease.shrink_to(bound)
+                        inserted = key_index.add_identity_payloads(
+                            namespace="fills",
+                            payloads=(
+                                (
+                                    row.fill_id.encode("utf-8"),
+                                    row.asset_id.encode("utf-8"),
                                 )
-                    inserted = key_index.add_identity_payloads(
-                        namespace="cashflows",
-                        payloads=(
-                            (row.flow_id.encode("utf-8"), row.asset_id.encode("utf-8"))
-                            for row in batch.cashflows
-                        ),
-                    )
-                    if inserted != len(batch.cashflows):
-                        raise ValueError("portfolio_ledger_duplicate_cashflow")
-                    try:
-                        yield batch
-                    except GeneratorExit:
-                        return
-                    sequence += 1
-                except BaseException as error:
-                    clear_exception_frames(error)
-                    raise
-                finally:
-                    batch = tables = records = row = diagnostic = group = order_id = (
-                        None
-                    )
-        if not sequence or any(group is not None for group in pending.values()):
-            raise ValueError("portfolio_ledger_sequence_invalid")
+                                for row in batch.trades
+                            ),
+                        )
+                        if inserted != len(batch.trades):
+                            raise ValueError("portfolio_ledger_duplicate_fill")
+                        key_index.add_identity_payloads(
+                            namespace="fill_orders",
+                            payloads=(
+                                (
+                                    row.fill_id.encode("utf-8"),
+                                    row.order_id.encode("utf-8"),
+                                )
+                                for row in batch.trades
+                            ),
+                        )
+                        for diagnostic in batch.diagnostics:
+                            if (
+                                diagnostic.fill_id is not None
+                                and key_index.identity_payload_value(
+                                    namespace="fills",
+                                    payload=diagnostic.fill_id.encode("utf-8"),
+                                )
+                                != diagnostic.asset_id.encode("utf-8")
+                            ):
+                                raise ValueError(
+                                    "portfolio_ledger_diagnostic_fill_mismatch"
+                                )
+                            if (
+                                diagnostic.fill_id is not None
+                                and diagnostic.name == "order_id"
+                            ):
+                                order_id = (
+                                    diagnostic.text
+                                    if diagnostic.text is not None
+                                    else format(diagnostic.number, "g")
+                                )
+                                if key_index.identity_payload_value(
+                                    namespace="fill_orders",
+                                    payload=diagnostic.fill_id.encode("utf-8"),
+                                ) != order_id.encode("utf-8"):
+                                    raise ValueError(
+                                        "portfolio_ledger_diagnostic_order_mismatch"
+                                    )
+                        inserted = key_index.add_identity_payloads(
+                            namespace="cashflows",
+                            payloads=(
+                                (
+                                    row.flow_id.encode("utf-8"),
+                                    row.asset_id.encode("utf-8"),
+                                )
+                                for row in batch.cashflows
+                            ),
+                        )
+                        if inserted != len(batch.cashflows):
+                            raise ValueError("portfolio_ledger_duplicate_cashflow")
+                        try:
+                            yield batch
+                        except GeneratorExit:
+                            return
+                        sequence += 1
+                    except BaseException as error:
+                        clear_exception_frames(error)
+                        raise
+                    finally:
+                        batch = tables = records = row = diagnostic = group = (
+                            order_id
+                        ) = None
+            if not sequence or any(group is not None for group in pending.values()):
+                raise ValueError("portfolio_ledger_sequence_invalid")
+        finally:
+            previous = None

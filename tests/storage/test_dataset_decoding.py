@@ -2614,3 +2614,42 @@ def test_real_reader_has_monotonic_admission_across_soft_target(tmp_path, offset
                     v for batch in batches for v in batch.column(0).to_pylist()
                 ] == [42]
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("unit", ("ms", "us", "ns"))
+@pytest.mark.parametrize("offset_ns", (0, 1, 1000, 1000000))
+def test_timestamp_equality_keeps_predicate_precision(tmp_path, unit, offset_ns):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    root = make_dataset_artifact_root(tmp_path, "timestamp_equality")
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    origin = pd.Timestamp("2020-01-01").as_unit("ns")
+    frame["value"] = pd.Series(
+        [origin, origin + pd.Timedelta(milliseconds=1)], dtype=f"datetime64[{unit}]"
+    )
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec(
+            "timestamp_equality", value_role=ColumnRole.CONTEXT
+        ),
+    )
+    predicate = origin + pd.Timedelta(offset_ns, unit="ns")
+    with runtime_resource_policy_scope() as policy:
+        with dataset_reading.open_dataset_session(
+            root,
+            columns=("value",),
+            time_window=None,
+            row_filters=(("value", "==", predicate),),
+            resource_policy=policy,
+        ) as session:
+            assert session.arrow_schema.field("value").type == pa.timestamp(unit)
+            rows = 0
+            with closing_iterator(
+                dataset_reading.iter_dataset_chunks(session, target_chunk_bytes=1024**2)
+            ) as chunks:
+                for result in chunks:
+                    rows += len(result)
+                    assert (result["value"] == predicate).all()
+            assert rows == (1 if offset_ns in (0, 1000000) else 0)
+        assert policy.used_memory_bytes == 0

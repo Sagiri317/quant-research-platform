@@ -1188,56 +1188,63 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         layout.semantic_artifact_root("a_share", prediction_id),
         results[prediction_id].instance_identity,
     )
-    manifest, _ = validate_output_bundle(
-        prediction_root / "outputs" / prediction_id,
-        expected_output_id=prediction_id,
-        expected_run_id=f"run_{prediction_id}",
-    )
-    for group, current_prediction_id in zip(
-        ("global", "quarterly"), prediction_ids, strict=True
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("tests.artifact", 0) as artifact_lease,
     ):
-        current_root = layout.instance_root(
-            layout.semantic_artifact_root("a_share", current_prediction_id),
-            results[current_prediction_id].instance_identity,
-        )
-        current_manifest, _ = validate_output_bundle(
-            current_root / "outputs" / current_prediction_id,
-            expected_output_id=current_prediction_id,
-            expected_run_id=f"run_{current_prediction_id}",
-        )
-        metadata = current_manifest["metadata"]["model_metadata"]
-        assert metadata["selection_group"] == group
-        assert {item["quarter_id"] for item in metadata["quarterly_models"]} == {
-            str(period) for period in pd.period_range("2019Q3", "2019Q4", freq="Q")
-        }
-        assert len(metadata["quarterly_models"]) == 2 * len(A_SHARE_MODEL_ALGORITHMS)
-        assert all(
-            item["prediction_source"] == "final"
-            for item in metadata["quarterly_models"]
-        )
+        for group, current_prediction_id in zip(
+            ("global", "quarterly"), prediction_ids, strict=True
+        ):
+            current_root = layout.instance_root(
+                layout.semantic_artifact_root("a_share", current_prediction_id),
+                results[current_prediction_id].instance_identity,
+            )
+            current_manifest, _ = validate_output_bundle(
+                current_root / "outputs" / current_prediction_id,
+                expected_output_id=current_prediction_id,
+                expected_run_id=f"run_{current_prediction_id}",
+                lease=artifact_lease,
+            )
+            metadata = current_manifest["metadata"]["model_metadata"]
+            assert metadata["selection_group"] == group
+            assert {item["quarter_id"] for item in metadata["quarterly_models"]} == {
+                str(period) for period in pd.period_range("2019Q3", "2019Q4", freq="Q")
+            }
+            assert len(metadata["quarterly_models"]) == 2 * len(
+                A_SHARE_MODEL_ALGORITHMS
+            )
+            assert all(
+                item["prediction_source"] == "final"
+                for item in metadata["quarterly_models"]
+            )
+        current_manifest = metadata = _ = None
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
     )
 
-    frozen, blocker = research._frozen_holdout_protocol(
-        profile,
-        layout,
-        profile.protocol("pv_all"),
-        development["run_id"],
-        "2019-07-01",
-        "2019-12-31",
-    )
-    assert blocker is None
-    target_layout = layout.with_target_roots(
-        {
-            item.target_id: layout.instance_root(
-                layout.project_root / item.artifact_root, item.instance_identity
-            )
-            for item in record.target_results
-        }
-    )
-    rebuild_layout = StorageLayout(tmp_path / "prediction_statistics_rebuild")
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("tests.artifact", 0) as artifact_lease,
+    ):
+        frozen, blocker = research._frozen_holdout_protocol(
+            profile,
+            layout,
+            profile.protocol("pv_all"),
+            development["run_id"],
+            "2019-07-01",
+            "2019-12-31",
+            artifact_lease=artifact_lease,
+        )
+        assert blocker is None
+        target_layout = layout.with_target_roots(
+            {
+                item.target_id: layout.instance_root(
+                    layout.project_root / item.artifact_root, item.instance_identity
+                )
+                for item in record.target_results
+            }
+        )
+        rebuild_layout = StorageLayout(tmp_path / "prediction_statistics_rebuild")
         for target_id in (*prediction_ids, *frozen.statistics_target_ids):
             spec = next(
                 item
@@ -1253,8 +1260,10 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 layout=rebuild_layout,
                 spec=spec,
                 planned=target_plan,
-                action="research run",
-                research_window=record.research_window,
+                time_window=research._semantic_target_time_window(
+                    "research run", frozen, spec, None, record.research_window
+                ),
+                access=str(record.research_window["access"]),
                 software_identity=research.production_software_identity(),
                 target_layout=target_layout,
                 policy=policy,
@@ -1272,50 +1281,59 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 ).status
                 == "MATCH"
             )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+        frozen = spec = None
     assert not filesystem_exists(
         rebuild_layout.semantic_artifact_root("a_share", source_model.target_id)
     )
     sources = {"global": [], "quarterly": []}
-    for candidate in profile.protocol("pv_all").portfolio_candidates():
-        target_id = f"pv_all_{candidate.candidate_id}_ledger"
-        artifact = research.read_portfolio_ledger_artifact(
-            layout.instance_root(
-                layout.semantic_artifact_root("a_share", target_id),
-                results[target_id].instance_identity,
-            ),
-            expected_identity=results[target_id].instance_identity,
-        )
-        if candidate.construction == "benchmark_enhanced":
-            values = {
-                row.number
-                for batch in artifact.iter_chunks()
-                for row in batch.diagnostics
-                if row.name == "alpha_slope"
-            }
-            assert len(values) == 1
-            source = next(
-                item
-                for item in development_record.target_results
-                if item.target_id == target_id
-            )
-            original = research.read_portfolio_ledger_artifact(
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("tests.artifact", 0) as artifact_lease,
+    ):
+        for candidate in profile.protocol("pv_all").portfolio_candidates():
+            target_id = f"pv_all_{candidate.candidate_id}_ledger"
+            artifact = research.read_portfolio_ledger_artifact(
                 layout.instance_root(
                     layout.semantic_artifact_root("a_share", target_id),
-                    source.instance_identity,
+                    results[target_id].instance_identity,
                 ),
-                expected_identity=source.instance_identity,
+                expected_identity=results[target_id].instance_identity,
+                lease=artifact_lease,
             )
-            calibration, _ = portfolios.frozen_alpha_calibration(
-                original.final_alpha_calibration,
-                cutoff=pd.Timestamp("2019-06-30"),
-                selection_group=candidate.selection_group,
-            )
-            assert (
-                calibration.valid_rebalance_dates >= 6 and calibration.coverage >= 0.8
-            )
-            assert values == {calibration.slope}
-            sources[candidate.selection_group].append(values)
+            if candidate.construction == "benchmark_enhanced":
+                values = {
+                    row.number
+                    for batch in artifact.iter_chunks()
+                    for row in batch.diagnostics
+                    if row.name == "alpha_slope"
+                }
+                assert len(values) == 1
+                source = next(
+                    item
+                    for item in development_record.target_results
+                    if item.target_id == target_id
+                )
+                original = research.read_portfolio_ledger_artifact(
+                    layout.instance_root(
+                        layout.semantic_artifact_root("a_share", target_id),
+                        source.instance_identity,
+                    ),
+                    expected_identity=source.instance_identity,
+                    lease=artifact_lease,
+                )
+                calibration, _ = portfolios.frozen_alpha_calibration(
+                    original.final_alpha_calibration,
+                    cutoff=pd.Timestamp("2019-06-30"),
+                    selection_group=candidate.selection_group,
+                )
+                assert (
+                    calibration.valid_rebalance_dates >= 6
+                    and calibration.coverage >= 0.8
+                )
+                assert values == {calibration.slope}
+                sources[candidate.selection_group].append(values)
+        artifact = original = calibration = None
     for values in sources.values():
         assert len(values) == 2
         assert values[0] == values[1]
@@ -1545,33 +1563,43 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         ),
         champion_identity,
     )
-    prediction_manifest, _prediction_members = validate_output_bundle(
-        champion_root / "outputs" / prediction_id,
-        expected_output_id=prediction_id,
-        expected_run_id=f"run_{prediction_id}",
-    )
-    assert (
-        prediction_manifest["metadata"]["prediction_metadata"]["test_start"]
-        == "2019-01-01"
-    )
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("tests.artifact", 0) as artifact_lease,
+    ):
+        prediction_manifest, _prediction_members = validate_output_bundle(
+            champion_root / "outputs" / prediction_id,
+            expected_output_id=prediction_id,
+            expected_run_id=f"run_{prediction_id}",
+            lease=artifact_lease,
+        )
+        assert (
+            prediction_manifest["metadata"]["prediction_metadata"]["test_start"]
+            == "2019-01-01"
+        )
+        prediction_manifest = _prediction_members = None
     statistics_root = layout.instance_root(
         layout.semantic_artifact_root("a_share", statistics_id),
         statistics_identity,
     )
-    statistics_artifact = research.read_statistics_artifact(
-        statistics_root,
-        expected_identity=statistics_identity,
-    )
-    with statistics_artifact.table("prediction_diagnostics.parquet") as table:
-        observations = frames["pv_all"]
-        mature_dates = observations.loc[
-            observations.timestamp.between(request["start"], request["end"])
-            & observations.forward_return_20d_available_at.le(
-                pd.Timestamp(request["end"])
-            ),
-            "timestamp",
-        ].nunique()
-        assert table.observation_count.eq(mature_dates).all()
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("tests.artifact", 0) as artifact_lease,
+    ):
+        statistics_artifact = research.read_statistics_artifact(
+            statistics_root, expected_identity=statistics_identity, lease=artifact_lease
+        )
+        with statistics_artifact.table("prediction_diagnostics.parquet") as table:
+            observations = frames["pv_all"]
+            mature_dates = observations.loc[
+                observations.timestamp.between(request["start"], request["end"])
+                & observations.forward_return_20d_available_at.le(
+                    pd.Timestamp(request["end"])
+                ),
+                "timestamp",
+            ].nunique()
+            assert table.observation_count.eq(mature_dates).all()
+        statistics_artifact = None
     from quant_research_platform.artifacts.outputs.bundle_validation import (
         read_prediction_output_bundle,
     )
@@ -1603,14 +1631,9 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
     filesystem_write_text(
         damaged / "manifest.json", json.dumps(manifest), encoding="utf-8"
     )
-    model = research.read_quarterly_model_artifact(
-        layout.instance_root(
-            layout.semantic_artifact_root(
-                "a_share", protocol.model_selection_target_id
-            ),
-            results[protocol.model_selection_target_id]["instance_identity"],
-        ),
-        trial_layout=layout,
+    model_root = layout.instance_root(
+        layout.semantic_artifact_root("a_share", protocol.model_selection_target_id),
+        results[protocol.model_selection_target_id]["instance_identity"],
     )
     data_layout = layout.with_target_roots(
         {
@@ -1630,153 +1653,174 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         narrow_policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
         narrow_global = None
         with runtime_resource_policy_scope(narrow_policy):
-            for index, group in enumerate(("global", "quarterly")):
-                group_prediction_id = protocol.prediction_target_ids[index]
-                group_statistics_id = protocol.statistics_target_ids[index]
-                group_root = layout.instance_root(
-                    layout.semantic_artifact_root("a_share", group_prediction_id),
-                    results[group_prediction_id]["instance_identity"],
+            with narrow_policy.lease("tests.artifact", 0) as artifact_lease:
+                model = research.read_quarterly_model_artifact(
+                    model_root, trial_layout=layout, lease=artifact_lease
                 )
-                with read_prediction_output_bundle(
-                    group_root / "outputs" / group_prediction_id,
-                    expected_output_id=group_prediction_id,
-                    time_window=narrow_window,
-                ) as (_manifest, lookup):
-                    narrow = build_a_share_statistics_tables(
-                        layout=data_layout,
-                        dataset_catalog=profile.research_datasets,
-                        dataset_id="pv_all",
-                        prediction_id=group_prediction_id,
-                        persisted_model=model,
-                        protocol_manifest=protocol.target_manifest(
-                            group_statistics_id, "STATISTIC"
-                        ),
-                        time_window=narrow_window,
-                        prediction_lookup=lookup,
-                        resource_policy=narrow_policy,
-                        global_statistics=narrow_global,
+                for index, group in enumerate(("global", "quarterly")):
+                    group_prediction_id = protocol.prediction_target_ids[index]
+                    group_statistics_id = protocol.statistics_target_ids[index]
+                    group_root = layout.instance_root(
+                        layout.semantic_artifact_root("a_share", group_prediction_id),
+                        results[group_prediction_id]["instance_identity"],
                     )
-                    try:
-                        prediction_diagnostics = narrow.value[
-                            "prediction_diagnostics"
-                        ].iloc[0]
-                        assert prediction_diagnostics["status"] == "UNDEFINED"
-                        if end_date == "2019-01-15":
-                            assert prediction_diagnostics["observation_count"] == 0
-                        else:
-                            assert 0 < prediction_diagnostics["observation_count"] < 20
-                        robustness = narrow.value["robustness"]
-                        assert robustness.status.eq("UNDEFINED").all()
-                        assert robustness.observation_count.lt(20).all()
-                        if group == "global":
-                            reason = "global_development_selection_reuses_validation"
-                            assert prediction_diagnostics["reason"] == reason
-                            assert robustness.reason.eq(reason).all()
-                            narrow_envelope = build_business_manifest_envelope(
-                                **{
-                                    key: value
-                                    for key, value in read_semantic_artifact(
-                                        statistics_root
-                                    ).items()
-                                    if key
-                                    not in {
-                                        "instance_identity",
-                                        "status",
-                                        "logical_artifact_id",
-                                        "research_window",
-                                    }
-                                },
-                                logical_artifact_id=f"pv_all_global_narrow_{end_date}_statistics",
-                                research_window={
-                                    "start": "2019-01-02",
-                                    "end": end_date,
-                                    "access": "development",
-                                },
-                            )
-                            narrow_root = write_statistics_artifact(
-                                tmp_path / f"narrow_global_statistics_{end_date}",
-                                envelope=narrow_envelope,
-                                tables=narrow.value,
-                            )
-                            narrow_global = research.read_statistics_artifact(
-                                narrow_root,
-                                expected_identity=narrow_envelope.instance_identity,
-                            )
-                        else:
-                            assert (
-                                prediction_diagnostics["reason"]
-                                == "hac_lag_exceeds_observations"
-                            )
-                            assert robustness.reason.eq(
-                                "bootstrap_block_exceeds_common_observations"
-                            ).all()
-                            paired = narrow.value["model_group_comparison"]
-                            assert set(paired.family_id) == {
-                                item["model_id"] for item in configuration["models"]
-                            }
+                    with read_prediction_output_bundle(
+                        group_root / "outputs" / group_prediction_id,
+                        expected_output_id=group_prediction_id,
+                        time_window=narrow_window,
+                    ) as (_manifest, lookup):
+                        narrow = build_a_share_statistics_tables(
+                            layout=data_layout,
+                            dataset_catalog=profile.research_datasets,
+                            dataset_id="pv_all",
+                            prediction_id=group_prediction_id,
+                            persisted_model=model,
+                            protocol_manifest=protocol.target_manifest(
+                                group_statistics_id, "STATISTIC"
+                            ),
+                            time_window=narrow_window,
+                            prediction_lookup=lookup,
+                            resource_policy=narrow_policy,
+                            global_statistics=narrow_global,
+                        )
+                        try:
+                            prediction_diagnostics = narrow.value[
+                                "prediction_diagnostics"
+                            ].iloc[0]
+                            assert prediction_diagnostics["status"] == "UNDEFINED"
                             if end_date == "2019-01-15":
-                                assert paired.observation_count.eq(0).all()
-                                assert paired.reason.eq("no_common_observations").all()
-                                assert paired.bootstrap_reason.eq(
-                                    "no_common_observations"
-                                ).all()
-                                assert paired.status.eq("UNDEFINED").all()
-                                narrow_payload = narrow_envelope.payload()
-                                quarterly_envelope = build_business_manifest_envelope(
+                                assert prediction_diagnostics["observation_count"] == 0
+                            else:
+                                assert (
+                                    0 < prediction_diagnostics["observation_count"] < 20
+                                )
+                            robustness = narrow.value["robustness"]
+                            assert robustness.status.eq("UNDEFINED").all()
+                            assert robustness.observation_count.lt(20).all()
+                            if group == "global":
+                                reason = (
+                                    "global_development_selection_reuses_validation"
+                                )
+                                assert prediction_diagnostics["reason"] == reason
+                                assert robustness.reason.eq(reason).all()
+                                narrow_envelope = build_business_manifest_envelope(
                                     **{
                                         key: value
-                                        for key, value in narrow_payload.items()
+                                        for key, value in read_semantic_artifact(
+                                            statistics_root, lease=artifact_lease
+                                        ).items()
                                         if key
                                         not in {
                                             "instance_identity",
                                             "status",
                                             "logical_artifact_id",
+                                            "research_window",
                                         }
                                     },
-                                    logical_artifact_id="pv_all_quarterly_zero_mature_statistics",
+                                    logical_artifact_id=f"pv_all_global_narrow_{end_date}_statistics",
+                                    research_window={
+                                        "start": "2019-01-02",
+                                        "end": end_date,
+                                        "access": "development",
+                                    },
                                 )
-                                quarterly_root = write_statistics_artifact(
-                                    tmp_path / "quarterly_zero_mature_statistics",
-                                    envelope=quarterly_envelope,
+                                narrow_root = write_statistics_artifact(
+                                    tmp_path / f"narrow_global_statistics_{end_date}",
+                                    envelope=narrow_envelope,
                                     tables=narrow.value,
                                 )
-                                quarterly_artifact = research.read_statistics_artifact(
-                                    quarterly_root,
-                                    expected_identity=quarterly_envelope.instance_identity,
+                                narrow_global = research.read_statistics_artifact(
+                                    narrow_root,
+                                    expected_identity=narrow_envelope.instance_identity,
+                                    lease=artifact_lease,
                                 )
-                                with quarterly_artifact.table(
-                                    "model_group_comparison.parquet"
-                                ) as saved:
-                                    assert saved.observation_count.eq(0).all()
-                                    assert saved.status.eq("UNDEFINED").all()
-                                    assert saved.reason.eq(
+                            else:
+                                assert (
+                                    prediction_diagnostics["reason"]
+                                    == "hac_lag_exceeds_observations"
+                                )
+                                assert robustness.reason.eq(
+                                    "bootstrap_block_exceeds_common_observations"
+                                ).all()
+                                paired = narrow.value["model_group_comparison"]
+                                assert set(paired.family_id) == {
+                                    item["model_id"] for item in configuration["models"]
+                                }
+                                if end_date == "2019-01-15":
+                                    assert paired.observation_count.eq(0).all()
+                                    assert paired.reason.eq(
                                         "no_common_observations"
                                     ).all()
-                    finally:
-                        narrow.release(owner="research.statistics.output")
+                                    assert paired.bootstrap_reason.eq(
+                                        "no_common_observations"
+                                    ).all()
+                                    assert paired.status.eq("UNDEFINED").all()
+                                    narrow_payload = narrow_envelope.payload()
+                                    quarter_envelope = build_business_manifest_envelope(
+                                        **{
+                                            key: value
+                                            for key, value in narrow_payload.items()
+                                            if key
+                                            not in {
+                                                "instance_identity",
+                                                "status",
+                                                "logical_artifact_id",
+                                            }
+                                        },
+                                        logical_artifact_id="pv_all_quarterly_zero_mature_statistics",
+                                    )
+                                    quarterly_root = write_statistics_artifact(
+                                        tmp_path / "quarterly_zero_mature_statistics",
+                                        envelope=quarter_envelope,
+                                        tables=narrow.value,
+                                    )
+                                    saved_quarter = research.read_statistics_artifact(
+                                        quarterly_root,
+                                        expected_identity=quarter_envelope.instance_identity,
+                                        lease=artifact_lease,
+                                    )
+                                    with saved_quarter.table(
+                                        "model_group_comparison.parquet"
+                                    ) as saved:
+                                        assert saved.observation_count.eq(0).all()
+                                        assert saved.status.eq("UNDEFINED").all()
+                                        assert saved.reason.eq(
+                                            "no_common_observations"
+                                        ).all()
+                        finally:
+                            narrow.release(owner="research.statistics.output")
+                model = narrow_global = saved_quarter = None
+                narrow_envelope = quarter_envelope = narrow_payload = None
             assert narrow_policy.used_memory_bytes == 0
     failed_policy = capture_test_policy(available_memory_bytes=512 * 1024**2)
     with runtime_resource_policy_scope(failed_policy):
-        with read_prediction_output_bundle(
-            damaged,
-            expected_output_id=prediction_id,
-            time_window=TimeWindow(request["start"], request["end"]),
-        ) as (_manifest, lookup):
-            with pytest.raises(ValueError, match="missing_required_prediction_keys"):
-                build_a_share_statistics_tables(
-                    layout=data_layout,
-                    dataset_catalog=profile.research_datasets,
-                    dataset_id="pv_all",
-                    prediction_id=prediction_id,
-                    persisted_model=model,
-                    protocol_manifest=protocol.target_manifest(
-                        statistics_id, "STATISTIC"
-                    ),
-                    time_window=TimeWindow(request["start"], request["end"]),
-                    prediction_lookup=lookup,
-                    resource_policy=failed_policy,
-                    global_statistics=None,
-                )
+        with failed_policy.lease("tests.artifact", 0) as artifact_lease:
+            model = research.read_quarterly_model_artifact(
+                model_root, trial_layout=layout, lease=artifact_lease
+            )
+            with read_prediction_output_bundle(
+                damaged,
+                expected_output_id=prediction_id,
+                time_window=TimeWindow(request["start"], request["end"]),
+            ) as (_manifest, lookup):
+                with pytest.raises(
+                    ValueError, match="missing_required_prediction_keys"
+                ):
+                    build_a_share_statistics_tables(
+                        layout=data_layout,
+                        dataset_catalog=profile.research_datasets,
+                        dataset_id="pv_all",
+                        prediction_id=prediction_id,
+                        persisted_model=model,
+                        protocol_manifest=protocol.target_manifest(
+                            statistics_id, "STATISTIC"
+                        ),
+                        time_window=TimeWindow(request["start"], request["end"]),
+                        prediction_lookup=lookup,
+                        resource_policy=failed_policy,
+                        global_statistics=None,
+                    )
+            model = None
         assert failed_policy.used_memory_bytes == 0
 
     def forged_writer(staging):
@@ -1795,25 +1839,32 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
             json.dumps(forged), encoding="utf-8"
         )
 
-    forged_root = write_semantic_artifact(
-        tmp_path / "forged",
-        BusinessManifestEnvelope(**read_semantic_artifact(champion_root)),
-        forged_writer,
-    )
-    prediction_target = next(
-        target
-        for target in protocol.target_specs("research run")
-        if target.target_id == prediction_id
-    )
-    with pytest.raises(ValueError, match="prediction_model_lineage_mismatch"):
-        research._validate_semantic_target_root(
-            profile,
-            protocol,
-            prediction_target,
-            forged_root,
-            champion_identity,
-            trial_layout=layout,
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("tests.artifact", 0) as artifact_lease,
+    ):
+        forged_root = write_semantic_artifact(
+            tmp_path / "forged",
+            BusinessManifestEnvelope(
+                **read_semantic_artifact(champion_root, lease=artifact_lease)
+            ),
+            forged_writer,
         )
+        prediction_target = next(
+            target
+            for target in protocol.target_specs("research run")
+            if target.target_id == prediction_id
+        )
+        with pytest.raises(ValueError, match="prediction_model_lineage_mismatch"):
+            research._validate_semantic_target_root(
+                profile,
+                protocol,
+                prediction_target,
+                forged_root,
+                champion_identity,
+                trial_layout=layout,
+                artifact_lease=artifact_lease,
+            )
     from quant_research_platform.artifacts.outputs import (
         prediction as prediction_writer,
     )
@@ -1853,40 +1904,45 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         monkeypatch.context() as patch,
         runtime_resource_policy_scope(interrupt_policy),
     ):
-        patch.setattr(prediction_writer, "write_parquet_chunks", fail_merged_write)
-        pspec = PredictionSpec(
-            prediction_id=prediction_id,
-            model_id=protocol.model_selection_target_id,
-            research_dataset_id="pv_all",
-            train_end=None,
-            test_start="2019-01-01",
-            test_end=request["end"],
-            prediction_mode="a_share_oos",
-            prediction_column="raw_prediction",
-        )
-        output = build_prediction_result_from_persisted_model(
-            layout=data_layout,
-            dataset_catalog=profile.research_datasets,
-            prediction_spec=pspec,
-            persisted_model=model,
-            resource_policy=interrupt_policy,
-            selection_group="global",
-        )
-        with pytest.raises(KeyboardInterrupt) as caught:
-            with output:
-                research.write_prediction_outputs(
-                    spec=pspec,
-                    output_spec=research._output_spec_for_target(
-                        pspec.prediction_id, "a_share", "prediction"
-                    ),
-                    layout=StorageLayout(tmp_path / "interrupted_prediction"),
-                    output_chunks=output.output_chunks,
-                    model_metadata=output.model_metadata,
-                    prediction_metadata_factory=output.prediction_metadata_factory,
-                    resource_policy=interrupt_policy,
-                )
-        assert caught.value is primary
-        assert observed
+        with interrupt_policy.lease("tests.artifact", 0) as artifact_lease:
+            model = research.read_quarterly_model_artifact(
+                model_root, trial_layout=layout, lease=artifact_lease
+            )
+            patch.setattr(prediction_writer, "write_parquet_chunks", fail_merged_write)
+            pspec = PredictionSpec(
+                prediction_id=prediction_id,
+                model_id=protocol.model_selection_target_id,
+                research_dataset_id="pv_all",
+                train_end=None,
+                test_start="2019-01-01",
+                test_end=request["end"],
+                prediction_mode="a_share_oos",
+                prediction_column="raw_prediction",
+            )
+            output = build_prediction_result_from_persisted_model(
+                layout=data_layout,
+                dataset_catalog=profile.research_datasets,
+                prediction_spec=pspec,
+                persisted_model=model,
+                resource_policy=interrupt_policy,
+                selection_group="global",
+            )
+            with pytest.raises(KeyboardInterrupt) as caught:
+                with output:
+                    research.write_prediction_outputs(
+                        spec=pspec,
+                        output_spec=research._output_spec_for_target(
+                            pspec.prediction_id, "a_share", "prediction"
+                        ),
+                        layout=StorageLayout(tmp_path / "interrupted_prediction"),
+                        output_chunks=output.output_chunks,
+                        model_metadata=output.model_metadata,
+                        prediction_metadata_factory=output.prediction_metadata_factory,
+                        resource_policy=interrupt_policy,
+                    )
+            assert caught.value is primary
+            assert observed
+            output = model = None
         assert interrupt_policy.used_memory_bytes == 0
     assert (
         Path(native_filesystem_path(bundle / "prediction.parquet")).read_bytes()
@@ -1899,42 +1955,47 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
             layout.semantic_artifact_root("a_share", target_id),
             identity,
         )
-        artifact = research.read_portfolio_ledger_artifact(
-            root,
-            expected_identity=identity,
-        )
-        requested_years[target_id.removeprefix("pv_all_").removesuffix("_ledger")] = (
-            set()
-        )
-        with closing_iterator(artifact.iter_chunks()) as stream:
-            for batch in stream:
-                demanded = {
-                    item.asset_id
-                    for item in batch.diagnostics
-                    if item.name == "decision_delta_weight"
-                    and item.asset_id != "__cash__"
-                    and item.number != 0.0
-                }
-                requested_years[
-                    target_id.removeprefix("pv_all_").removesuffix("_ledger")
-                ].update(
-                    str(pd.Timestamp(item.text).year)
-                    for item in batch.diagnostics
-                    if item.name == "decision_timestamp" and item.asset_id in demanded
-                )
-        chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
-        assert chunks
-        assert all(
-            tuple(chunk.columns) == CONTINUOUS_EXECUTION_COLUMNS for chunk in chunks
-        )
-        assert all(chunk["asset_id"].iloc[-1] == "__cash__" for chunk in chunks)
-        if "enhanced" in target_id:
-            assert all(
-                chunk.loc[chunk["asset_id"].eq("__cash__"), "decision_reason"]
-                .eq("enhanced_benchmark_only")
-                .all()
-                for chunk in chunks
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("tests.artifact", 0) as artifact_lease,
+        ):
+            artifact = research.read_portfolio_ledger_artifact(
+                root, expected_identity=identity, lease=artifact_lease
             )
+            requested_years[
+                target_id.removeprefix("pv_all_").removesuffix("_ledger")
+            ] = set()
+            with closing_iterator(artifact.iter_chunks()) as stream:
+                for batch in stream:
+                    demanded = {
+                        item.asset_id
+                        for item in batch.diagnostics
+                        if item.name == "decision_delta_weight"
+                        and item.asset_id != "__cash__"
+                        and item.number != 0.0
+                    }
+                    requested_years[
+                        target_id.removeprefix("pv_all_").removesuffix("_ledger")
+                    ].update(
+                        str(pd.Timestamp(item.text).year)
+                        for item in batch.diagnostics
+                        if item.name == "decision_timestamp"
+                        and item.asset_id in demanded
+                    )
+            chunks = [session_frame(batch) for batch in artifact.iter_chunks()]
+            assert chunks
+            assert all(
+                tuple(chunk.columns) == CONTINUOUS_EXECUTION_COLUMNS for chunk in chunks
+            )
+            assert all(chunk["asset_id"].iloc[-1] == "__cash__" for chunk in chunks)
+            if "enhanced" in target_id:
+                assert all(
+                    chunk.loc[chunk["asset_id"].eq("__cash__"), "decision_reason"]
+                    .eq("enhanced_benchmark_only")
+                    .all()
+                    for chunk in chunks
+                )
+            artifact = None
 
     reused = research.research_run(
         profile=profile,
@@ -1992,109 +2053,115 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         layout.semantic_artifact_root("a_share", "pv_all_report_artifact"),
         report_identity,
     )
-    report = research.read_research_report_artifact(
-        report_root,
-        expected_identity=report_identity,
-    )
-    assert set(report["sections"]) == set(REQUIRED_REPORT_SECTIONS)
-    coverage = report["sections"]["Data/Coverage"]
-    assert coverage["row_count"] > 0
-    assert coverage["evaluation"]["rows_input"] > 0
-    dataset_ref = next(
-        item for item in record.target_results if item.target_id == "pv_all"
-    )
-    manifest = research.read_dataset_manifest_evidence(
-        layout.instance_root(
-            layout.project_root / dataset_ref.artifact_root,
-            dataset_ref.instance_identity,
-        )
-    )
-    assert coverage["factor_nan_profile"] == {
-        column: manifest["factor_nan_profile"].get(column, 0)
-        for column in manifest["columns"]
-        if manifest["column_roles"][column] == "factor"
-    }
-    assert coverage["pit"]["raw_completeness"] == "UNDEFINED"
-    assert report["sections"]["factor diagnostics"]["global"]["results"]
-    assert report["sections"]["model selection"]["selections"]
-    assert report["sections"]["model selection"]["configurations"]
-    blocked_ids = {
-        "fundamental_factors",
-        *(target_id for target_id in portfolio_ids if "enhanced" in target_id),
-        "pv_all_portfolio_statistics",
-    }
-    partial = replace(
-        record,
-        status="BLOCKED",
-        target_results=tuple(
-            replace(
-                item,
-                status="BLOCKED",
-                reason="dependency_blocked",
-                instance_identity=None,
-                schema_identity=None,
-                artifact_root=None,
-            )
-            if item.target_id in blocked_ids
-            else item
-            for item in record.target_results
-        ),
-    )
-    from quant_research_platform.artifacts.research import produce_a_share_report
-
     with (
         runtime_resource_policy_scope() as policy,
-        policy.lease("report.partial", 1) as report_lease,
+        policy.lease("tests.artifact", 0) as artifact_lease,
     ):
+        report = research.read_research_report_artifact(
+            report_root, expected_identity=report_identity, report_lease=artifact_lease
+        )
+        assert set(report["sections"]) == set(REQUIRED_REPORT_SECTIONS)
+        coverage = report["sections"]["Data/Coverage"]
+        assert coverage["row_count"] > 0
+        assert coverage["evaluation"]["rows_input"] > 0
+        dataset_ref = next(
+            item for item in record.target_results if item.target_id == "pv_all"
+        )
+        manifest = research.read_dataset_manifest_evidence(
+            layout.instance_root(
+                layout.project_root / dataset_ref.artifact_root,
+                dataset_ref.instance_identity,
+            )
+        )
+        assert coverage["factor_nan_profile"] == {
+            column: manifest["factor_nan_profile"].get(column, 0)
+            for column in manifest["columns"]
+            if manifest["column_roles"][column] == "factor"
+        }
+        assert coverage["pit"]["raw_completeness"] == "UNDEFINED"
+        assert report["sections"]["factor diagnostics"]["global"]["results"]
+        assert report["sections"]["model selection"]["selections"]
+        assert report["sections"]["model selection"]["configurations"]
+        blocked_ids = {
+            "fundamental_factors",
+            *(target_id for target_id in portfolio_ids if "enhanced" in target_id),
+            "pv_all_portfolio_statistics",
+        }
+        partial = replace(
+            record,
+            status="BLOCKED",
+            target_results=tuple(
+                replace(
+                    item,
+                    status="BLOCKED",
+                    reason="dependency_blocked",
+                    instance_identity=None,
+                    schema_identity=None,
+                    artifact_root=None,
+                )
+                if item.target_id in blocked_ids
+                else item
+                for item in record.target_results
+            ),
+        )
+        from quant_research_platform.artifacts.research import produce_a_share_report
+
+        model = research.read_quarterly_model_artifact(
+            model_root, trial_layout=layout, lease=artifact_lease
+        )
         partial_report = produce_a_share_report(
             layout=layout,
             record=partial,
-            report_lease=report_lease,
+            report_lease=artifact_lease,
             selections=model.selections,
         )
-    assert partial_report["report_status"] == "BLOCKED"
-    retained = partial_report["sections"]["portfolio"]["results"]
-    assert len(retained) == 6
-    assert all(
-        row["ledger_identity"] and row["economics"]["nav"] > 0 for row in retained
-    )
-    capacity = report["sections"]["capacity"]
-    assert capacity["status"] == "UNDEFINED"
-    defined_capacity = [
-        row for row in capacity["results"] if row["status"] == "DEFINED"
-    ]
-    undefined_capacity = [
-        row for row in capacity["results"] if row["status"] == "UNDEFINED"
-    ]
-    expected_capacity_keys = {
-        (candidate, participation, period, metric)
-        for candidate, years in requested_years.items()
-        for participation in protocol.manifest()["execution_assumptions"][
-            "adv_sensitivities"
+        assert partial_report["report_status"] == "BLOCKED"
+        retained = partial_report["sections"]["portfolio"]["results"]
+        assert len(retained) == 6
+        assert all(
+            row["ledger_identity"] and row["economics"]["nav"] > 0 for row in retained
+        )
+        capacity = report["sections"]["capacity"]
+        assert capacity["status"] == "UNDEFINED"
+        defined_capacity = [
+            row for row in capacity["results"] if row["status"] == "DEFINED"
         ]
-        for period in {"all", *years}
-        for metric in ("p05", "median", "minimum")
-    }
-    assert {
-        (row["candidate_id"], row["participation"], row["period"], row["metric_id"])
-        for row in capacity["results"]
-    } == expected_capacity_keys
-    assert len(capacity["results"]) == len(expected_capacity_keys)
-    assert len(undefined_capacity) == 4 * 4 * 3
-    assert {row["candidate_id"] for row in undefined_capacity} == {
-        candidate.candidate_id
-        for candidate in protocol.portfolio_candidates()
-        if candidate.construction == "benchmark_enhanced"
-    }
-    assert all(
-        row["value"] is not None and row["reason"] == "" for row in defined_capacity
-    )
-    assert all(
-        row["value"] is None and row["reason"] == "no_rebalance_requests"
-        for row in undefined_capacity
-    )
-    assert report["sections"]["risk"]["status"] == "BLOCKED"
-    assert report["sections"]["attribution"]["status"] == "BLOCKED"
+        undefined_capacity = [
+            row for row in capacity["results"] if row["status"] == "UNDEFINED"
+        ]
+        expected_capacity_keys = {
+            (candidate, participation, period, metric)
+            for candidate, years in requested_years.items()
+            for participation in protocol.manifest()["execution_assumptions"][
+                "adv_sensitivities"
+            ]
+            for period in {"all", *years}
+            for metric in ("p05", "median", "minimum")
+        }
+        assert {
+            (row["candidate_id"], row["participation"], row["period"], row["metric_id"])
+            for row in capacity["results"]
+        } == expected_capacity_keys
+        assert len(capacity["results"]) == len(expected_capacity_keys)
+        assert len(undefined_capacity) == 4 * 4 * 3
+        assert {row["candidate_id"] for row in undefined_capacity} == {
+            candidate.candidate_id
+            for candidate in protocol.portfolio_candidates()
+            if candidate.construction == "benchmark_enhanced"
+        }
+        assert all(
+            row["value"] is not None and row["reason"] == "" for row in defined_capacity
+        )
+        assert all(
+            row["value"] is None and row["reason"] == "no_rebalance_requests"
+            for row in undefined_capacity
+        )
+        assert report["sections"]["risk"]["status"] == "BLOCKED"
+        assert report["sections"]["attribution"]["status"] == "BLOCKED"
+
+        report = partial_report = coverage = retained = capacity = defined_capacity = (
+            undefined_capacity
+        ) = model = None
 
     from tests.interfaces.published_research_test_support import (
         check_published_evidence_views,

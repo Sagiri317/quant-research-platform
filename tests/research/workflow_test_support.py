@@ -218,6 +218,7 @@ def shared_model_rows(specs, *, development_end="2019-06-30", assets=8):
 def shared_model_case(
     tmp_path,
     *,
+    lease,
     specs=None,
     frame=None,
     dataset=None,
@@ -329,6 +330,7 @@ def shared_model_case(
     )
     artifact = read_quarterly_model_artifact(
         root,
+        lease=lease,
         expected_identity=envelope.instance_identity,
         trial_layout=layout,
     )

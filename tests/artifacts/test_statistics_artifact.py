@@ -220,6 +220,7 @@ def maker_calibration_tables():
                 {
                     "fold_id": "fold_1",
                     "side": side,
+                    "price_unit": "0.1",
                     "sample_count": 2,
                     "zero_fill_count": 0 if side == "buy" else 2,
                     "post_only_rejection_count": 0,
@@ -290,6 +291,8 @@ def maker_calibration_tables():
         "level_order",
         "reference",
         "pair",
+        "unit_invalid",
+        "unit_mixed",
     ],
 )
 def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
@@ -308,7 +311,10 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
         read_semantic_artifact_record,
     )
 
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = statistics.write_statistics_artifact(
             tmp_path / "valid",
             envelope=envelope,
@@ -316,11 +322,12 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
             table_group="crypto_maker_calibration",
             validate_tables=validate_maker_calibration,
         )
-        original = read_semantic_artifact_record(root)
+        original = read_semantic_artifact_record(root, lease=artifact_lease)
         artifact = statistics.read_statistics_artifact(
             root,
             expected_identity=envelope.instance_identity,
             validate_tables=validate_maker_calibration,
+            lease=artifact_lease,
         )
         for member in statistics.STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
             with artifact.table(member) as actual:
@@ -347,9 +354,10 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
                         root,
                         expected_identity=envelope.instance_identity,
                         validate_tables=missing_validator,
+                        lease=artifact_lease,
                     )
             assert not filesystem_exists(tmp_path / "missing-validator")
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
             return
         if mutation == "truncate":
             tables["crypto_maker_events"] = (
@@ -369,10 +377,19 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
             tables["crypto_maker_events"].loc[1, "price_index"] = 1000
         elif mutation == "reference":
             tables["crypto_maker_samples"].loc[0, "filled_quantity"] = 0.5
+        elif mutation == "unit_invalid":
+            tables["crypto_maker_calibration"]["price_unit"] = "invalid"
+        elif mutation == "unit_mixed":
+            tables["crypto_maker_calibration"].loc[0, "price_unit"] = "0.01"
         else:
             tables["crypto_maker_samples"].loc[1, "price_prediction"] = 0.001
             tables["crypto_maker_samples"].loc[1, "forecast_error"] = -0.001
-        with pytest.raises(ValueError, match="crypto_calibration_"):
+        with pytest.raises(
+            ValueError,
+            match="order_book_price_unit_invalid"
+            if mutation == "unit_invalid"
+            else "crypto_calibration_",
+        ):
             statistics.write_statistics_artifact(
                 tmp_path / "rejected",
                 envelope=envelope,
@@ -396,14 +413,20 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
         bad = write_semantic_artifact(
             tmp_path / "corrupted", envelope, write_corruption
         )
-        with pytest.raises(ValueError, match="crypto_calibration_"):
+        with pytest.raises(
+            ValueError,
+            match="order_book_price_unit_invalid"
+            if mutation == "unit_invalid"
+            else "crypto_calibration_",
+        ):
             statistics.read_statistics_artifact(
                 bad,
                 expected_identity=envelope.instance_identity,
                 validate_tables=validate_maker_calibration,
+                lease=artifact_lease,
             )
-        assert read_semantic_artifact_record(root) == original
-        assert policy.used_memory_bytes == 0
+        assert read_semantic_artifact_record(root, lease=artifact_lease) == original
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("member", statistics.STATISTICS_TABLE_GROUPS["research"])
@@ -432,7 +455,10 @@ def _assert_rejected_at_write_and_read(
     tmp_path, tables, envelope, member, *, table_group="research"
 ):
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-    with runtime_resource_policy_scope(policy):
+    with (
+        runtime_resource_policy_scope(policy) as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         with pytest.raises(ValueError, match="statistics_table_"):
             statistics.write_statistics_artifact(
                 tmp_path / "rejected",
@@ -440,7 +466,7 @@ def _assert_rejected_at_write_and_read(
                 tables=tables,
                 table_group=table_group,
             )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
         def write_unvalidated(staging):
             for table_name, frame in tables.items():
@@ -458,12 +484,12 @@ def _assert_rejected_at_write_and_read(
             tmp_path / "persisted", envelope, write_unvalidated
         )
         artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
+            root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         with pytest.raises(ValueError, match="statistics_table_"):
             with artifact.table(member):
                 pytest.fail("invalid persisted values must not reach the consumer")
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize(
@@ -566,20 +592,23 @@ def test_research_tables_complete_sequentially_under_16_mib(
     policy = capture_test_policy(
         available_memory_bytes=64 * 1024**2, explicit_cap_bytes=16 * 1024**2
     )
-    with runtime_resource_policy_scope(policy):
+    with (
+        runtime_resource_policy_scope(policy) as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = statistics.write_statistics_artifact(
             tmp_path / "statistics", envelope=envelope, tables=tables
         )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
+            root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         for member in statistics.STATISTICS_TABLE_GROUPS["research"]:
             with artifact.table(member) as actual:
                 pd.testing.assert_frame_equal(
                     actual, tables[member.removesuffix(".parquet")]
                 )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_validation_is_admitted_before_copying(tmp_path, tables, envelope, monkeypatch):
@@ -622,16 +651,19 @@ def test_reader_admits_complete_working_set_before_decode(
 
     monkeypatch.setattr(pq.ParquetFile, "read", not_admitted)
     reader_policy = capture_test_policy(available_memory_bytes=8 * 1024**2)
-    with runtime_resource_policy_scope(reader_policy):
+    with (
+        runtime_resource_policy_scope(reader_policy) as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
+            root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         with pytest.raises(
             ValueError, match="statistics_table_exceeds_task_memory_budget"
         ):
             with artifact.table("factor_diagnostics.parquet"):
                 pytest.fail("oversized full table must not reach the consumer")
-        assert reader_policy.used_memory_bytes == 0
+        assert reader_policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_statistics_plain_dictionary_reader_admits_expansion_before_read(
@@ -664,16 +696,19 @@ def test_statistics_plain_dictionary_reader_admits_expansion_before_read(
         pytest.fail("plain dictionary expansion started before admission")
 
     monkeypatch.setattr(pq.ParquetFile, "read", no_full_read)
-    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
+    with (
+        runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
+            root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         with pytest.raises(
             ValueError, match="statistics_table_exceeds_task_memory_budget"
         ):
             with artifact.table("factor_diagnostics.parquet"):
                 pytest.fail("oversized full table reached the consumer")
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatch):
@@ -799,7 +834,10 @@ def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
         "UNDEFINED",
         "utc_boundary_valuation_missing",
     ]
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = statistics.write_statistics_artifact(
             tmp_path / "crypto",
             envelope=envelope,
@@ -807,7 +845,7 @@ def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
             table_group="crypto_portfolio",
         )
         artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
+            root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         with artifact.table("crypto_execution_diagnostics.parquet") as frame:
             assert frame.loc[0, "status"] == "DEFINED"
@@ -818,7 +856,7 @@ def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
             assert pd.isna(frame.loc[0, "net_return"])
             assert frame.loc[0, "start_nav"] == 100.0
             assert frame.loc[0, "benchmark_return"] == 0.0
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 @pytest.mark.parametrize("finish", ["normal", "writer_failure", "capacity"])
@@ -845,6 +883,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
     coverage = {"s1": (2100000000, 2800000000)}
     run = SimpleNamespace(
         source_identity=source_identity,
+        market_metadata=lambda *_: {"price_unit": "0.1"},
         observation_coverage=lambda **kwargs: {
             "trade-connection-1": (2100000000, 2800000000)
         },
@@ -895,7 +934,10 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
     for budget in (512, 4096, 65536) if finish == "normal" else (512,):
         closed, emitted, frames = [], [], []
         monkeypatch.setattr(portfolio, "_CALIBRATION_BATCH_BYTES", budget)
-        with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy:
+        with (
+            runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy,
+            policy.lease("test.artifact.metadata", 0) as artifact_lease,
+        ):
 
             def books(*_args, closed=closed, **_kwargs):
                 try:
@@ -974,7 +1016,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                     assert str(caught.value) == "runtime_memory_budget_exceeded"
                     assert not emitted
                 assert sorted(closed) == sorted(["books", "trades", *MAKER_MODEL_IDS])
-                assert policy.used_memory_bytes == 0
+                assert policy.used_memory_bytes == artifact_lease.reserved_bytes
                 assert not tuple(filesystem_glob(logical / "instances", "*"))
                 gc.collect()
                 assert all(frame() is None for frame in frames)
@@ -985,6 +1027,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                 root,
                 expected_identity=envelope.instance_identity,
                 validate_tables=portfolio.validate_maker_calibration,
+                lease=artifact_lease,
             )
             for name, frame in expected.items():
                 with artifact.table(f"{name}.parquet") as actual:
@@ -1007,7 +1050,7 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
                 native_filesystem_path(root / "crypto_maker_events.parquet")
             ) as parquet:
                 group_counts.append(parquet.num_row_groups)
-            assert policy.used_memory_bytes == 0
+            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
     assert group_counts[0] > group_counts[1] > group_counts[2]
     assert all(root.name == envelope.instance_identity for root in roots)
     for root in roots[1:]:
@@ -1036,7 +1079,10 @@ def test_incremental_maker_publication_preserves_old_good_and_primary(
         "interrupted": KeyboardInterrupt("synthetic_interruption"),
         "writer_failed": RuntimeError("synthetic_writer_failure"),
     }[failure]
-    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy:
+    with (
+        runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         good = statistics.write_statistics_artifact(
             tmp_path / "good",
             envelope=envelope,
@@ -1044,7 +1090,7 @@ def test_incremental_maker_publication_preserves_old_good_and_primary(
             table_group="crypto_maker_calibration",
             validate_tables=portfolio.validate_maker_calibration,
         )
-        before = read_semantic_artifact_record(good)
+        before = read_semantic_artifact_record(good, lease=artifact_lease)
         native = pq.ParquetWriter.write_table
         written = 0
 
@@ -1065,14 +1111,15 @@ def test_incremental_maker_publication_preserves_old_good_and_primary(
                 validate_tables=portfolio.validate_maker_calibration,
             )
         assert caught.value is primary and written == 2
-        assert read_semantic_artifact_record(good) == before
+        assert read_semantic_artifact_record(good, lease=artifact_lease) == before
         assert not tuple(filesystem_glob(tmp_path / "candidate" / "instances", "*"))
         statistics.read_statistics_artifact(
             good,
             expected_identity=envelope.instance_identity,
             validate_tables=portfolio.validate_maker_calibration,
+            lease=artifact_lease,
         )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
@@ -1136,6 +1183,7 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
     coverage = {"s1": (first * 1000000, (last + 600) * 1000000)}
     run = SimpleNamespace(
         source_identity="d" * 64,
+        market_metadata=lambda *_: {"price_unit": "0.1"},
         observation_coverage=lambda **kwargs: {
             "trade-connection-1": (first * 1000000, (last + 600) * 1000000)
         },
@@ -1187,7 +1235,10 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
         ("crypto_maker_samples", "crypto_maker_events", "crypto_maker_calibration"), 0
     )
     payload = peak_batch = peak_reserved = 0
-    with runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy:
+    with (
+        runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
 
         def produce(on_table):
             def append(name, frame):
@@ -1231,13 +1282,14 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
             root,
             expected_identity=envelope.instance_identity,
             validate_tables=portfolio.validate_maker_calibration,
+            lease=artifact_lease,
         )
         with artifact.table("crypto_maker_calibration.parquet") as summary:
             assert summary.sample_count.tolist() == [count, count]
             assert summary.zero_fill_count.tolist() == [count, count]
         assert artifact._row_counts["crypto_maker_samples.parquet"] == count * 2
         assert artifact._row_counts["crypto_maker_events.parquet"] == count * depth * 2
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
     assert emitted == {
         "crypto_maker_samples": count * 2,
         "crypto_maker_events": count * depth * 2,
@@ -1267,7 +1319,10 @@ def test_streamed_calibration_rechecks_member_bytes_after_consumption(
         for name, frame in tables.items():
             on_table(name, frame)
 
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = statistics.write_statistics_artifact(
             tmp_path / "calibration",
             envelope=envelope,
@@ -1302,8 +1357,9 @@ def test_streamed_calibration_rechecks_member_bytes_after_consumption(
                 root,
                 expected_identity=envelope.instance_identity,
                 validate_tables=portfolio.validate_maker_calibration,
+                lease=artifact_lease,
             )
-        assert changed and policy.used_memory_bytes == 0
+        assert changed and policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_maker_calibration_uses_declared_asset_without_btc_limits(
@@ -1336,7 +1392,10 @@ def test_maker_calibration_uses_declared_asset_without_btc_limits(
         for name, frame in tables.items():
             on_table(name, frame)
 
-    with runtime_resource_policy_scope():
+    with (
+        runtime_resource_policy_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = statistics.write_statistics_artifact(
             tmp_path / "eth",
             envelope=envelope,
@@ -1348,6 +1407,7 @@ def test_maker_calibration_uses_declared_asset_without_btc_limits(
             root,
             expected_identity=envelope.instance_identity,
             validate_tables=validate_maker_calibration,
+            lease=artifact_lease,
         )
 
 
@@ -1376,7 +1436,10 @@ def test_maker_history_reads_real_artifact_once_and_rechecks_source(
         for name, frame in tables.items():
             on_table(name, frame)
 
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = statistics.write_statistics_artifact(
             tmp_path / "calibration",
             envelope=envelope,
@@ -1388,6 +1451,7 @@ def test_maker_history_reads_real_artifact_once_and_rechecks_source(
             root,
             expected_identity=envelope.instance_identity,
             validate_tables=portfolio.validate_maker_calibration,
+            lease=artifact_lease,
         )
         batches = statistics.StatisticsArtifact._batches
         reads = Counter()
@@ -1400,6 +1464,7 @@ def test_maker_history_reads_real_artifact_once_and_rechecks_source(
         model = execution.MakerCalibration(
             partial(portfolio._calibration_samples, artifact, "fold_1"),
             partial(portfolio._calibration_events, artifact, "fold_1"),
+            price_unit="0.1",
             resource_policy=policy,
         )
         primary = KeyboardInterrupt("consumer_cancel")
@@ -1451,7 +1516,7 @@ def test_maker_history_reads_real_artifact_once_and_rechecks_source(
                     raise primary
         except (ValueError, KeyboardInterrupt) as error:
             caught = error
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
         if finish == "normal":
             assert caught is None
         elif finish == "source_changed":
@@ -1478,12 +1543,15 @@ def test_undefined_model_inference_preserves_descriptive_mean(
         "bootstrap_upper",
     ]
     frame.loc[0, inference_columns] = float("nan")
-    with runtime_resource_policy_scope():
+    with (
+        runtime_resource_policy_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         root = statistics.write_statistics_artifact(
             tmp_path / "descriptive", envelope=envelope, tables=tables
         )
         artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
+            root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         with artifact.table(f"{name}.parquet") as result:
             assert result["mean"].iloc[0] == 0.2

@@ -237,3 +237,41 @@ def test_directory_cleanup_regression_kills_noop_mutation(tmp_path, monkeypatch)
     with pytest.raises(AssertionError):
         test_atomic_directory_writer_failure_removes_only_operation_temp(tmp_path)
     assert tuple((tmp_path / "nested").glob(".a-[0-9a-f]*"))
+
+
+def test_atomic_chunk_failure_closes_source_and_preserves_primary(
+    tmp_path, monkeypatch
+):
+    closed = []
+    primary = KeyboardInterrupt("chunk_write_primary")
+    open_file = atomic.open_owned_scratch_file
+
+    class FailingHandle:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def write(self, _text):
+            raise primary
+
+        def close(self):
+            self.handle.close()
+
+    def source():
+        try:
+            yield "owned payload"
+        finally:
+            closed.append(True)
+            raise OSError("iterator_close_secondary")
+
+    monkeypatch.setattr(
+        atomic,
+        "open_owned_scratch_file",
+        lambda *args, **kwargs: FailingHandle(open_file(*args, **kwargs)),
+    )
+    chunks = source()
+    with pytest.raises(KeyboardInterrupt) as caught:
+        atomic.atomic_write_chunks(tmp_path / "failed.txt", chunks)
+    assert caught.value is primary
+    assert closed == [True] and chunks.gi_frame is None
+    assert "iterator close also failed: OSError" in primary.__notes__
+    assert list(tmp_path.iterdir()) == []

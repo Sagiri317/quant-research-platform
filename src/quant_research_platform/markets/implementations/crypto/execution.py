@@ -1445,7 +1445,8 @@ def _maker_new_order(order_id, side, quantity, state, row, config):
 class MakerCalibration:
     """Own one bounded fold history; recompute each decision's economic response."""
 
-    def __init__(self, samples, events, *, resource_policy):
+    def __init__(self, samples, events, *, price_unit, resource_policy):
+        self.price_unit = Fraction(price_unit)
         self._source_samples = samples
         self._source_events = events
         self.policy = resource_policy
@@ -1634,7 +1635,12 @@ class MakerCalibration:
         side = new_order.side
         start = int(sample["decision_at"])
         end = start + lifetime_ns
-        origin = sample["initial_bid_index" if side == "buy" else "initial_ask_index"]
+        # Nested source windows make the current per-asset unit divide the frozen unit.
+        history_scale = (self.price_unit / Fraction(new_order.price_unit)).numerator
+        origin = (
+            sample["initial_bid_index" if side == "buy" else "initial_ask_index"]
+            * history_scale
+        )
         current_origin = (state.bids if side == "buy" else state.asks)[0][0]
         book_context = sample["book_segment_id"]
         trade_context = sample["trade_observation_id"]
@@ -1642,7 +1648,7 @@ class MakerCalibration:
         def mapped(order):
             return replace(
                 order,
-                price_index=int(origin + order.price_index - current_origin),
+                price_index=origin + order.price_index - current_origin,
                 segment_id=book_context
                 if order.segment_id == new_order.segment_id
                 else order.segment_id,
@@ -1682,11 +1688,11 @@ class MakerCalibration:
         current_state = SimpleNamespace(
             segment_id=book_context,
             bids=tuple(
-                (int(origin + tick - current_origin), quantity)
+                (origin + tick - current_origin, quantity)
                 for tick, quantity in state.bids
             ),
             asks=tuple(
-                (int(origin + tick - current_origin), quantity)
+                (origin + tick - current_origin, quantity)
                 for tick, quantity in state.asks
             ),
         )
@@ -1711,7 +1717,17 @@ class MakerCalibration:
                             pending.clear()
                             current_state = None
                         elif kind == "book":
-                            next_state = event
+                            next_state = SimpleNamespace(
+                                segment_id=event.segment_id,
+                                bids=tuple(
+                                    (tick * history_scale, quantity)
+                                    for tick, quantity in event.bids
+                                ),
+                                asks=tuple(
+                                    (tick * history_scale, quantity)
+                                    for tick, quantity in event.asks
+                                ),
+                            )
                             if (
                                 current_state is not None
                                 and next_state.segment_id != current_state.segment_id
@@ -1728,12 +1744,19 @@ class MakerCalibration:
                                 and current_state is not None
                                 and order.segment_id == current_state.segment_id
                             ):
-                                quantity, _reason = _maker_trade_fill(order, event)
+                                trade = SimpleNamespace(
+                                    **(
+                                        vars(event)
+                                        | {
+                                            "price_index": event.price_index
+                                            * history_scale
+                                        }
+                                    )
+                                )
+                                quantity, _reason = _maker_trade_fill(order, trade)
                                 if quantity > 0:
                                     price = index_to_price(
-                                        int(
-                                            current_origin + order.price_index - origin
-                                        ),
+                                        current_origin + order.price_index - origin,
                                         new_order.price_unit,
                                     )
                                     yield (

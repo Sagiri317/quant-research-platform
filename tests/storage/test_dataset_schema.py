@@ -815,7 +815,18 @@ def test_writer_does_not_retain_prepared_empty_frame_across_nonempty_write(
     nonempty = make_default_dataset_frame().iloc[:1].copy()
     empty_refs: list[weakref.ReferenceType[pd.DataFrame]] = []
     alive_at_nonempty: list[bool] = []
+    alive_at_release: list[bool] = []
+    from quant_research_platform.runtime.resources import MemoryLease
+
     original = dataset_writing._WriteStats.prepare_frame
+    original_close = MemoryLease.close
+
+    def close(lease):
+        if lease.active and lease.owner == "storage.dataset.prepare":
+            alive_at_release.append(
+                any(reference() is not None for reference in empty_refs)
+            )
+        return original_close(lease)
 
     def record_prepare(stats, frame):  # noqa: ANN001
         if not frame.empty and empty_refs:
@@ -826,13 +837,16 @@ def test_writer_does_not_retain_prepared_empty_frame_across_nonempty_write(
         return prepared, logical_dtypes
 
     monkeypatch.setattr(dataset_writing._WriteStats, "prepare_frame", record_prepare)
+    monkeypatch.setattr(MemoryLease, "close", close)
     write_dataset(
         make_dataset_artifact_root(tmp_path, name),
         (empty, nonempty),
         spec=make_processed_dataset_spec(name),
     )
 
-    assert alive_at_nonempty == [False]
+    assert empty_refs
+    assert alive_at_nonempty and not any(alive_at_nonempty)
+    assert alive_at_release and not any(alive_at_release)
 
 
 @pytest.mark.parametrize("empty_first", (False, True))

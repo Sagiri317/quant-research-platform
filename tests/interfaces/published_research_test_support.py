@@ -33,6 +33,9 @@ from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
 )
 from quant_research_platform.runtime import resources
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_mkdir,
@@ -92,44 +95,54 @@ def check_published_evidence_views(
     target_id = f"{record.scenario_id}_report_artifact"
     logical = layout.semantic_artifact_root(profile.market_id, target_id)
     root = layout.instance_root(logical, report_identity)
-    envelope = read_semantic_artifact(root, expected_identity=report_identity)
-    payload = report_artifact.read_research_report_artifact(
-        root, expected_identity=report_identity
-    )
-    previous = build_business_manifest_envelope(
-        logical_artifact_id=target_id,
-        schema_identity=envelope["schema_identity"],
-        protocol_or_spec_identity=envelope["protocol_or_spec_identity"],
-        software_identity=canonical_json_hash(
-            {"synthetic_renderer": "archived_report"}
-        ),
-        research_window=envelope["research_window"],
-        upstream_identities=envelope["upstream_identities"],
-        semantic_metadata=envelope["semantic_metadata"],
-    )
-    archived_payload = deepcopy(payload)
-    archived_payload["sections"]["Data/Coverage"]["scale diagnostics"] = {
-        "results": [
-            {"metric_id": "synthetic_metric", "value": 0.1} for _ in range(20000)
-        ]
-    }
-    archived_markdown = "# Archived synthetic evidence\n\nRead the exact report.json.\n"
-
-    def archived_writer(staging):
-        write_json_evidence(staging / "report.json", archived_payload)
-        write_markdown_evidence(staging / "report.md", archived_markdown)
-
-    previous_root = layout.instance_root(logical, previous.instance_identity)
-    if filesystem_exists(previous_root):
-        assert (
-            report_artifact.read_research_report_artifact(
-                previous_root, expected_identity=previous.instance_identity
-            )
-            == archived_payload
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        envelope = read_semantic_artifact(
+            root, expected_identity=report_identity, lease=artifact_lease
         )
-    else:
-        write_semantic_artifact(logical, previous, archived_writer)
-    assert filesystem_stat(previous_root / "report.json").st_size > 1024 * 1024
+        payload = report_artifact.read_research_report_artifact(
+            root, expected_identity=report_identity, report_lease=artifact_lease
+        )
+        previous = build_business_manifest_envelope(
+            logical_artifact_id=target_id,
+            schema_identity=envelope["schema_identity"],
+            protocol_or_spec_identity=envelope["protocol_or_spec_identity"],
+            software_identity=canonical_json_hash(
+                {"synthetic_renderer": "archived_report"}
+            ),
+            research_window=envelope["research_window"],
+            upstream_identities=envelope["upstream_identities"],
+            semantic_metadata=envelope["semantic_metadata"],
+        )
+        archived_payload = deepcopy(payload)
+        archived_payload["sections"]["Data/Coverage"]["scale diagnostics"] = {
+            "results": [
+                {"metric_id": "synthetic_metric", "value": 0.1} for _ in range(20000)
+            ]
+        }
+        archived_markdown = (
+            "# Archived synthetic evidence\n\nRead the exact report.json.\n"
+        )
+
+        def archived_writer(staging):
+            write_json_evidence(staging / "report.json", archived_payload)
+            write_markdown_evidence(staging / "report.md", archived_markdown)
+
+        previous_root = layout.instance_root(logical, previous.instance_identity)
+        if filesystem_exists(previous_root):
+            assert (
+                report_artifact.read_research_report_artifact(
+                    previous_root,
+                    expected_identity=previous.instance_identity,
+                    report_lease=artifact_lease,
+                )
+                == archived_payload
+            )
+        else:
+            write_semantic_artifact(logical, previous, archived_writer)
+        assert filesystem_stat(previous_root / "report.json").st_size > 1024 * 1024
     before = _files(layout.project_root / "data")
     guarded = replace(
         profile,
@@ -178,7 +191,8 @@ def check_published_evidence_views(
                     selected.status_code == 200 and selected.json() == record.payload()
                 )
                 inspection = await client.get(
-                    f"/api/0.1/inspect/{target_id}", params={**params, "run_id": run_id}
+                    f"/api/0.1/inspect/{target_id}",
+                    params={**params, "run_id": run_id},
                 )
                 assert inspection.status_code == 200
                 assert {
@@ -189,7 +203,8 @@ def check_published_evidence_views(
                 }
                 assert inspection.json()["blocker"] == "report_identity_required"
                 view = await client.get(
-                    f"/api/0.1/runs/{run_id}/reports/{report_identity}", params=params
+                    f"/api/0.1/runs/{run_id}/reports/{report_identity}",
+                    params=params,
                 )
                 assert view.status_code == 200 and view.json()["report"] == payload
                 archived = queries.read_report(
@@ -246,13 +261,15 @@ def check_published_evidence_views(
                         params={"profile": wrong_profile},
                     ),
                     await client.get(
-                        f"/api/0.1/runs/{run_id}/portfolios/not_in_run", params=params
+                        f"/api/0.1/runs/{run_id}/portfolios/not_in_run",
+                        params=params,
                     ),
                 ]
                 saved = filesystem_read_bytes(root / "report.json")
                 try:
                     filesystem_write_bytes(
-                        root / "report.json", b"invalid_private_payload_must_not_leak"
+                        root / "report.json",
+                        b"invalid_private_payload_must_not_leak",
                     )
                     failures.append(
                         await client.get(

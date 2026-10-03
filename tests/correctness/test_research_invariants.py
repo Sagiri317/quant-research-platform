@@ -1493,8 +1493,9 @@ def test_alpha_calibration_rejects_nonzero_unrepresentable_coefficients(quantity
         targets = [float(np.ldexp(1.0, -600))] * 6
     else:
         alpha = float(np.ldexp(1.0, 1020))
+        # Residuals exceed row resolution, while the alpha scale underflows the SE.
         targets = [
-            float(np.ldexp(1.0, -20) + group * np.ldexp(1.0, -72)) for group in range(6)
+            float(np.ldexp(1.0, -20) + group * np.ldexp(1.0, -60)) for group in range(6)
         ]
     frame = pd.DataFrame(
         [

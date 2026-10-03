@@ -728,13 +728,26 @@ def calibrate_expected_alpha(
         return undefined("alpha_calibration_rank_deficient")
     slope = (cluster_count * sxy - sx * sy) / determinant
     intercept = (sy - slope * sx) / cluster_count
-    variance = Fraction(0)
-    # A second pass retains one cluster's moments instead of all exact matrices.
-    for x, y, xx, _yy, xy in cluster_averages():
-        score_intercept = y - intercept - slope * x
-        score_slope = xy - intercept * x - slope * xx
-        influence = (cluster_count * score_slope - sx * score_intercept) / determinant
+    variance = residual_variation = Fraction(0)
+    resolution = Fraction(8 * np.finfo(np.float64).eps)
+    # Zero only row residuals within binary64 resolution, never cluster variance.
+    for positions in groups:
+        score_intercept = score_slope = squared_residuals = Fraction(0)
+        for position in positions:
+            x = Fraction(float(left[position]))
+            y = Fraction(float(right[position]))
+            fitted = intercept + slope * x
+            residual = y - fitted
+            if abs(residual) <= resolution * max(abs(y), abs(fitted)):
+                continue
+            score_intercept += residual
+            score_slope += x * residual
+            squared_residuals += residual * residual
+        influence = (cluster_count * score_slope - sx * score_intercept) / (
+            determinant * len(positions)
+        )
         variance += influence * influence
+        residual_variation += squared_residuals / len(positions)
     slope_value = float(slope)
     if slope and slope_value == 0.0:
         raise ValueError("alpha_calibration_slope_unrepresentable")
@@ -763,7 +776,6 @@ def calibrate_expected_alpha(
     else:
         pvalue = ci_low = ci_high = None
     total_variation = syy - sy * sy / cluster_count
-    residual_variation = syy - intercept * sy - slope * sxy
     return AlphaCalibration(
         slope=slope_value,
         intercept=float(intercept),

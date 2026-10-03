@@ -36,6 +36,9 @@ from quant_research_platform.research.protocols.crypto_hft import (
     CryptoTakerCandidate,
 )
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+from quant_research_platform.runtime.resources import (
+    runtime_resource_policy_scope as artifact_resource_scope,
+)
 from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_is_file,
@@ -89,112 +92,137 @@ def run_a_share_acceptance(project_root: Path):
     model_root = layout.instance_root(
         project_root / model.artifact_root, model.instance_identity
     )
-    artifact = read_quarterly_model_artifact(
-        model_root, expected_identity=model.instance_identity, trial_layout=layout
-    )
-    families = {item["model_id"] for item in configuration["models"]}
-    assert len(families) == 8
-    assert {item["family_id"] for item in artifact.candidate_models} == families
-    assert {item["quarter_id"] for item in artifact.candidate_models} == {
-        str(period) for period in pd.period_range("2018Q1", "2019Q2", freq="Q")
-    }
-    assert set(artifact.selections["global"]) == {"final"}
-    assert set(artifact.selections["quarterly"]) == {
-        *(str(period) for period in pd.period_range("2019Q1", "2019Q2", freq="Q")),
-        "final",
-    }
-    assert len(artifact.final_models) == 16
-    assert {
-        (item["selection_group"], item["family_id"]) for item in artifact.final_models
-    } == {(group, family) for group in ("global", "quarterly") for family in families}
-    assert all(
-        pd.Timestamp(item["fit_cutoff"]) == pd.Timestamp("2019-06-30")
-        for item in artifact.final_models
-    )
-    trial_root = layout.trial_ledger_root(record.run_id)
-    trial_before = {
-        path.relative_to(trial_root).as_posix(): sha256(
-            filesystem_read_bytes(path)
-        ).hexdigest()
-        for path in filesystem_glob(trial_root, "**/*")
-        if filesystem_is_file(path)
-    }
-    assert trial_before and record.trial_ledgers
-    development_report = research.report_build(
-        profile=profile, layout=layout, run_id=record.run_id
-    )
-    assert development_report["status"] == "COMPLETE"
-    result = research.research_run(
-        profile=research_profile(),
-        layout=layout,
-        research_plan=configuration,
-        raw_root=raw_root,
-        holdout=True,
-        development_run_id=record.run_id,
-    )
-    assert result["status"] == "COMPLETE", [
-        (row["target_id"], row["status"], row["reason"])
-        for row in result["target_results"]
-        if row["status"] not in {"BUILT", "REUSED"}
-    ]
-    held_record = read_research_run_record(layout.research_run_path(result["run_id"]))
-    targets = {row.target_id: row for row in held_record.target_results}
-    held_model = targets["pv_all_model_selection_refit"]
-    assert held_model.status.value == "REUSED"
-    assert held_model.instance_identity == model.instance_identity
-    assert not held_record.trial_ledgers
-    assert {
-        path.relative_to(trial_root).as_posix(): sha256(
-            filesystem_read_bytes(path)
-        ).hexdigest()
-        for path in filesystem_glob(trial_root, "**/*")
-        if filesystem_is_file(path)
-    } == trial_before
-    assert held_record.research_window["access"] == "holdout"
-    assert held_record.research_window["start"] == "2019-07-01"
-    assert held_record.research_window["end"] == "2019-12-31"
-    record = held_record
-    with runtime_resource_policy_scope() as policy:
-        for candidate in profile.protocol("pv_all").portfolio_candidates():
-            target = targets[f"pv_all_{candidate.candidate_id}_ledger"]
-            root = layout.instance_root(
-                project_root / target.artifact_root, target.instance_identity
-            )
-            ledger = read_portfolio_ledger_artifact(
-                root, expected_identity=target.instance_identity
-            )
-            summary = summarize_portfolio_ledger(ledger)
-            assert summary["fill_events"] > 0
-            if candidate.construction == "benchmark_enhanced":
-                with closing_iterator(ledger.iter_chunks()) as chunks:
-                    diagnostics = [
-                        item for batch in chunks for item in batch.diagnostics
-                    ]
-                assert any(
-                    item.name == "decision_reason"
-                    and item.text == PORTFOLIO_DECISION_REASON_ENHANCED
-                    for item in diagnostics
-                )
-                assert any(
-                    item.name == "alpha_slope" and item.number > 0
-                    for item in diagnostics
-                )
-        assert policy.used_memory_bytes == 0
-    assert (
-        sum(
-            row.producer_kind is ProducerKind.PORTFOLIO for row in record.target_results
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        artifact = read_quarterly_model_artifact(
+            model_root,
+            expected_identity=model.instance_identity,
+            trial_layout=layout,
+            lease=artifact_lease,
         )
-        == 10
-    )
-    for group in ("global", "quarterly"):
-        assert targets[f"pv_all_{group}_persisted_predictions"].status.value == "BUILT"
-        assert targets[f"pv_all_{group}_statistics"].status.value == "BUILT"
-    report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
-    assert report["target_result"]["status"] == "BUILT"
-    assert report["status"] == "COMPLETE", report["report"]["sections"][
-        "readiness/blockers"
-    ]
-    return result, report
+        families = {item["model_id"] for item in configuration["models"]}
+        assert len(families) == 8
+        assert {item["family_id"] for item in artifact.candidate_models} == families
+        assert {item["quarter_id"] for item in artifact.candidate_models} == {
+            str(period) for period in pd.period_range("2018Q1", "2019Q2", freq="Q")
+        }
+        assert set(artifact.selections["global"]) == {"final"}
+        assert set(artifact.selections["quarterly"]) == {
+            *(str(period) for period in pd.period_range("2019Q1", "2019Q2", freq="Q")),
+            "final",
+        }
+        assert len(artifact.final_models) == 16
+        assert {
+            (item["selection_group"], item["family_id"])
+            for item in artifact.final_models
+        } == {
+            (group, family) for group in ("global", "quarterly") for family in families
+        }
+        assert all(
+            pd.Timestamp(item["fit_cutoff"]) == pd.Timestamp("2019-06-30")
+            for item in artifact.final_models
+        )
+        trial_root = layout.trial_ledger_root(record.run_id)
+        trial_before = {
+            path.relative_to(trial_root).as_posix(): sha256(
+                filesystem_read_bytes(path)
+            ).hexdigest()
+            for path in filesystem_glob(trial_root, "**/*")
+            if filesystem_is_file(path)
+        }
+        assert trial_before and record.trial_ledgers
+        development_report = research.report_build(
+            profile=profile, layout=layout, run_id=record.run_id
+        )
+        assert development_report["status"] == "COMPLETE"
+        result = research.research_run(
+            profile=research_profile(),
+            layout=layout,
+            research_plan=configuration,
+            raw_root=raw_root,
+            holdout=True,
+            development_run_id=record.run_id,
+        )
+        assert result["status"] == "COMPLETE", [
+            (row["target_id"], row["status"], row["reason"])
+            for row in result["target_results"]
+            if row["status"] not in {"BUILT", "REUSED"}
+        ]
+        held_record = read_research_run_record(
+            layout.research_run_path(result["run_id"])
+        )
+        targets = {row.target_id: row for row in held_record.target_results}
+        held_model = targets["pv_all_model_selection_refit"]
+        assert held_model.status.value == "REUSED"
+        assert held_model.instance_identity == model.instance_identity
+        assert not held_record.trial_ledgers
+        assert {
+            path.relative_to(trial_root).as_posix(): sha256(
+                filesystem_read_bytes(path)
+            ).hexdigest()
+            for path in filesystem_glob(trial_root, "**/*")
+            if filesystem_is_file(path)
+        } == trial_before
+        assert held_record.research_window["access"] == "holdout"
+        assert held_record.research_window["start"] == "2019-07-01"
+        assert held_record.research_window["end"] == "2019-12-31"
+        record = held_record
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("test.artifact.metadata", 0) as nested_artifact_lease,
+        ):
+            for candidate in profile.protocol("pv_all").portfolio_candidates():
+                target = targets[f"pv_all_{candidate.candidate_id}_ledger"]
+                root = layout.instance_root(
+                    project_root / target.artifact_root, target.instance_identity
+                )
+                ledger = read_portfolio_ledger_artifact(
+                    root,
+                    expected_identity=target.instance_identity,
+                    lease=nested_artifact_lease,
+                )
+                summary = summarize_portfolio_ledger(ledger)
+                assert summary["fill_events"] > 0
+                if candidate.construction == "benchmark_enhanced":
+                    with closing_iterator(ledger.iter_chunks()) as chunks:
+                        diagnostics = [
+                            item for batch in chunks for item in batch.diagnostics
+                        ]
+                    assert any(
+                        item.name == "decision_reason"
+                        and item.text == PORTFOLIO_DECISION_REASON_ENHANCED
+                        for item in diagnostics
+                    )
+                    assert any(
+                        item.name == "alpha_slope" and item.number > 0
+                        for item in diagnostics
+                    )
+            assert (
+                policy.used_memory_bytes
+                == nested_artifact_lease.reserved_bytes + artifact_lease.reserved_bytes
+            )
+        assert (
+            sum(
+                row.producer_kind is ProducerKind.PORTFOLIO
+                for row in record.target_results
+            )
+            == 10
+        )
+        for group in ("global", "quarterly"):
+            assert (
+                targets[f"pv_all_{group}_persisted_predictions"].status.value == "BUILT"
+            )
+            assert targets[f"pv_all_{group}_statistics"].status.value == "BUILT"
+        report = research.report_build(
+            profile=profile, layout=layout, run_id=record.run_id
+        )
+        assert report["target_result"]["status"] == "BUILT"
+        assert report["status"] == "COMPLETE", report["report"]["sections"][
+            "readiness/blockers"
+        ]
+        return result, report
 
 
 def run_crypto_acceptance(project_root: Path):
@@ -316,7 +344,10 @@ def run_crypto_acceptance(project_root: Path):
         if row["metric_id"] == "sharpe"
     )
     assert len(takers) == 12 and len(makers) == 2
-    with runtime_resource_policy_scope() as policy:
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
         for candidate in (*takers, *makers):
             target = targets[execution_targets[candidate.candidate_id].target_id]
             assert target["status"] == "BUILT"
@@ -327,7 +358,9 @@ def run_crypto_acceptance(project_root: Path):
                 target["instance_identity"],
             )
             ledger = read_portfolio_ledger_artifact(
-                root, expected_identity=target["instance_identity"]
+                root,
+                expected_identity=target["instance_identity"],
+                lease=artifact_lease,
             )
             summary = summarize_portfolio_ledger(ledger)
             assert summary["fill_events"] > 0
@@ -352,15 +385,22 @@ def run_crypto_acceptance(project_root: Path):
                     rel_tol=1e-6,
                     abs_tol=1e-12,
                 )
-        assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
     model = targets[model_id]
     root = layout.instance_root(
         layout.semantic_artifact_root("crypto", model_id), model["instance_identity"]
     )
-    saved = read_crypto_model_artifact(
-        root, expected_identity=model["instance_identity"], trial_layout=layout
-    )
-    assert len(saved.models) == 18
-    assert len(saved.final_models) == 9
-    assert {entry["fold_id"] for entry in saved.final_models} == {"fold_2"}
-    return result, report
+    with (
+        artifact_resource_scope() as artifact_policy,
+        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        saved = read_crypto_model_artifact(
+            root,
+            expected_identity=model["instance_identity"],
+            trial_layout=layout,
+            lease=artifact_lease,
+        )
+        assert len(saved.models) == 18
+        assert len(saved.final_models) == 9
+        assert {entry["fold_id"] for entry in saved.final_models} == {"fold_2"}
+        return result, report
