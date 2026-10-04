@@ -142,3 +142,11 @@ def test_bulk_comparison_conflict_rolls_back_then_accepts_valid_rows() -> None:
         assert index._connection.execute(
             "SELECT COUNT(*) FROM comparison_rows"
         ).fetchone() == (0,)
+        kept, duplicate_count = index.classify_comparison_table(
+            pa.table({"asset_id": ["c"], "value": [3]}),
+            namespace="conflict",
+            value_columns=("value",),
+            payload_target_bytes=1024,
+        )
+        assert list(kept) == [0]
+        assert duplicate_count == 0

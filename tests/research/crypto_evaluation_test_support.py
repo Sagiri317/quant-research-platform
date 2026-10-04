@@ -7,7 +7,6 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.artifacts.outputs import validate_output_bundle
-from quant_research_platform.contracts.targets import ProducerBinding
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.evaluations import runner
 from quant_research_platform.research.evaluations.engine import EvaluationResult
@@ -132,6 +131,9 @@ def check_crypto_evaluation_readback(
 def check_crypto_evaluation_old_good(
     *, layout, profile, targets, raw, plan, development_run_id
 ):
+    from quant_research_platform.profiles import research as profiles
+
+    bind = profiles.bind_research_configuration
     target = next(
         spec.evaluation_id
         for spec in profile.evaluations.list()
@@ -145,52 +147,60 @@ def check_crypto_evaluation_old_good(
         artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
     ):
         original = read_semantic_artifact_record(root, lease=artifact_lease)
-        binding = profile.producer_bindings[target]
         primary = KeyboardInterrupt("evaluation_interrupted_after_output")
 
-        def interrupted(**kwargs):
-            result = binding.producer(**kwargs)
+        def bind_with_interruption(*args, **kwargs):
+            rebound = bind(*args, **kwargs)
+            binding = rebound.producer_bindings[target]
 
-            def chunks():
-                with result:
-                    for chunk in result.output_chunks:
-                        yield chunk
-                        raise primary
+            def interrupted(**kwargs):
+                result = binding.producer(**kwargs)
 
-            source = chunks()
+                def chunks():
+                    with result:
+                        for chunk in result.output_chunks:
+                            yield chunk
+                            raise primary
 
-            def close():
-                source.close()
-                raise RuntimeError("evaluation_cleanup_failed")
+                source = chunks()
 
-            return EvaluationResult(source, result.summaries, close)
+                def close():
+                    source.close()
+                    raise RuntimeError("evaluation_cleanup_failed")
 
-        altered = replace(
-            profile,
-            producer_bindings={
-                **profile.producer_bindings,
-                target: ProducerBinding(binding.kind, interrupted),
-            },
-        )
-        with pytest.raises(KeyboardInterrupt) as caught:
-            research.research_run(
-                profile=altered,
-                layout=layout,
-                raw_root=raw,
-                rebuild=True,
-                holdout=True,
-                development_run_id=development_run_id,
-                research_plan=research_configuration(
-                    "crypto",
-                    "baseline",
-                    small_models=True,
-                    development=(
-                        plan["folds"][0]["validation"]["start"],
-                        plan["folds"][-1]["validation"]["end"],
-                    ),
-                    plan=plan,
-                ),
+                return EvaluationResult(source, result.summaries, close)
+
+            return replace(
+                rebound,
+                producer_bindings={
+                    **rebound.producer_bindings,
+                    target: replace(binding, producer=interrupted),
+                },
             )
+
+        with pytest.MonkeyPatch.context() as patch:
+            patch.setattr(
+                profiles, "bind_research_configuration", bind_with_interruption
+            )
+            with pytest.raises(KeyboardInterrupt) as caught:
+                research.research_run(
+                    profile=profile,
+                    layout=layout,
+                    raw_root=raw,
+                    rebuild=True,
+                    holdout=True,
+                    development_run_id=development_run_id,
+                    research_plan=research_configuration(
+                        "crypto",
+                        "baseline",
+                        small_models=True,
+                        development=(
+                            plan["folds"][0]["validation"]["start"],
+                            plan["folds"][-1]["validation"]["end"],
+                        ),
+                        plan=plan,
+                    ),
+                )
         assert caught.value is primary
         assert any("RuntimeError" in note for note in primary.__notes__)
         assert read_semantic_artifact_record(root, lease=artifact_lease) == original
@@ -212,7 +222,7 @@ def check_crypto_evaluation_input_boundaries(
         profile.research_datasets.list()[0].data_id, access_window="holdout"
     ).manifest()
     window = TimeWindow(**plan["test"])
-    original_reader = runner.iter_research_dataset_chunks
+    original_reader = runner.iter_dataset_chunks
     mode = "late_labels"
 
     def changed_reader(*args, **kwargs):
@@ -226,9 +236,7 @@ def check_crypto_evaluation_input_boundaries(
                         label = availability.removesuffix("_available_at")
                         if label in changed:
                             changed.loc[
-                                changed[availability].gt(
-                                    pd.Timestamp(kwargs["time_window"].end)
-                                ),
+                                changed[availability].gt(pd.Timestamp(window.end)),
                                 label,
                             ] = 999.0
             elif mode == "extra_prediction":
@@ -240,7 +248,7 @@ def check_crypto_evaluation_input_boundaries(
             yield changed
 
     with monkeypatch.context() as patch, runtime_resource_policy_scope() as policy:
-        patch.setattr(runner, "iter_research_dataset_chunks", changed_reader)
+        patch.setattr(runner, "iter_dataset_chunks", changed_reader)
 
         def compute(spec):
             with profile.producer_bindings[spec.evaluation_id].producer(

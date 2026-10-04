@@ -147,6 +147,24 @@ def bind_research_selection(profile, library, configuration):
                     raise ValueError("research_model_asset_scope_invalid")
             elif key in item:
                 raise ValueError("research_model_asset_scope_not_supported")
+    from quant_research_platform.research.randomness import ROOT_SEED
+
+    ModelCatalog.from_configuration(config["models"])
+
+    for item in config["models"]:
+        if item.get("random_seed", ROOT_SEED) not in (None, ROOT_SEED):
+            raise ValueError("research_root_seed_must_be_42")
+        parameters = item.get("hyperparameters", {})
+        candidate_parameters = item.get("parameter_candidates", [])
+        for values in (parameters, *candidate_parameters):
+            if "random_state" in values:
+                if (
+                    type(values["random_state"]) is not int
+                    or values["random_state"] != ROOT_SEED
+                ):
+                    raise ValueError("research_native_seed_conflicts_with_protocol")
+                del values["random_state"]
+        item["random_seed"] = ROOT_SEED
     model_catalog = ModelCatalog.from_configuration(config["models"])
     models = model_catalog.list()
     for item in config["models"]:

@@ -27,6 +27,8 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
     _MakerOrder,
+    _nonnegative_integer,
+    _positive,
     replay_maker_calibration,
     simulate_maker,
     simulate_taker,
@@ -90,6 +92,13 @@ def _books_until(run, *, reconstruct_depth, symbol, end_ns):
             yield event
 
 
+def _score_in_label_units(score, calibration):
+    if pd.isna(score):
+        return None
+    value = float(score)
+    return value if calibration is None else calibration[0] + calibration[1] * value
+
+
 def _prediction_rows(
     *,
     layout,
@@ -112,8 +121,15 @@ def _prediction_rows(
         time_window=output_window,
     ) as (manifest, lookup):
         metadata = manifest["metadata"]["prediction_metadata"]
+        calibration = manifest["metadata"]["model_metadata"]["score_to_label"]
         inputs = tuple(metadata["input_columns"])
         scope = protocol_manifest["model_scopes"][model_id]
+        rank_score = scope["model_algorithm"] in {
+            "equal_weight_rank_ensemble",
+            "ic_weighted_rank_ensemble",
+        }
+        if rank_score != (calibration is not None):
+            raise ValueError("crypto_prediction_score_units_invalid")
         assets = tuple(scope["evaluation_asset_ids"])
         columns = tuple(
             dict.fromkeys(
@@ -173,9 +189,9 @@ def _prediction_rows(
                             "trade_observation_id": row.trade_observation_id,
                             "segment_id": row.segment_id,
                             "fold_id": row.fold_id,
-                            "prediction_score": None
-                            if pd.isna(row.prediction_score)
-                            else float(row.prediction_score),
+                            "prediction_score": _score_in_label_units(
+                                row.prediction_score, calibration
+                            ),
                         }
 
 
@@ -204,16 +220,12 @@ def _funding_check(funding, expected_identity, bounds):
     raise PortfolioTargetBlocked("binance_funding_coverage_incomplete")
 
 
-def _maker_config(plan, asset_id, *, calibration=False):
+def _maker_config(plan, asset_id):
     limits = plan["exposure_limits"][asset_id]
     execution = plan["execution"]
     maker = execution["maker"]
     return MakerConfig(
-        order_quantity=min(
-            limits["max_order_quantity"], 2 * limits["max_position_quantity"]
-        )
-        if calibration
-        else limits["max_order_quantity"],
+        order_quantity=limits["max_order_quantity"],
         max_position=limits["max_position_quantity"],
         maker_fee_bps=maker["maker_fee_bps"],
         inventory_target=maker["inventory_target"],
@@ -576,12 +588,31 @@ def produce_taker_ledger(
 
 
 def _validation_rows(artifact, *, fold_id, model_id, asset_id):
+    entry = next(
+        entry
+        for entry in artifact.models
+        if entry["fold_id"] == fold_id and entry["model_id"] == model_id
+    )
+    metadata = entry["model_metadata"]
+    calibration = (
+        metadata["rank_parameters"]["label_calibration"]
+        if metadata["model_algorithm"]
+        in {
+            "equal_weight_rank_ensemble",
+            "ic_weighted_rank_ensemble",
+        }
+        else None
+    )
     rows = artifact.validation_chunks(fold_id=fold_id, model_id=model_id)
     with closing_iterator(rows):
         for frame in rows:
             for row in frame.itertuples(index=False):
                 if row.asset_id == asset_id:
-                    yield row
+                    yield row._replace(
+                        prediction_score=_score_in_label_units(
+                            row.prediction_score, calibration
+                        )
+                    )
 
 
 def _paired_validation(artifact, fold_id, asset_id, model_ids):
@@ -652,7 +683,7 @@ def produce_maker_calibration(
         "crypto.maker.calibration.metadata", 0
     ) as metadata_lease:
         plan = protocol_manifest["research_plan"]
-        config = _maker_config(plan, asset_id, calibration=True)
+        calibration = plan["execution"]["maker"]
         panel = _panel(layout, upstream_identities)
         model_target = f"{protocol_manifest['scenario_id']}_models"
         models = read_model_artifact(
@@ -904,7 +935,8 @@ def produce_maker_calibration(
                         _paired_validation(
                             models, fold["fold_id"], asset_id, model_ids
                         ),
-                        config=config,
+                        order_quantity=calibration["order_quantity"],
+                        latency_ms=calibration["latency_ms"],
                         observed_coverage=coverage,
                         trade_coverage=trade_coverage,
                         cutoff_ns=cutoff,
@@ -998,10 +1030,21 @@ def produce_maker_ledger(
             with artifact.table("crypto_maker_calibration.parquet") as summary:
                 try:
                     price_unit = summary.price_unit.iloc[0]
-                    if not summary.status.eq("DEFINED").all():
+                    required = {fold_id for fold_id, _window in windows}
+                    selected = summary.loc[summary.fold_id.isin(required)]
+                    if (
+                        set(zip(selected.fold_id, selected.side, strict=True))
+                        != {
+                            (fold, side)
+                            for fold in required
+                            for side in ("buy", "sell")
+                        }
+                        or not selected.status.eq("DEFINED").all()
+                    ):
                         raise PortfolioTargetBlocked(
                             "maker_calibration_insufficient_samples"
                         )
+                    selected = None
                 finally:
                     summary = None
             resources.callback(artifact._verify)
@@ -1337,7 +1380,9 @@ def validate_maker_calibration(artifact, envelope):
         or candidates[0].calibration_target_id != envelope["logical_artifact_id"]
     ):
         raise ValueError("crypto_calibration_candidate_invalid")
-    reference_config = _maker_config(plan, candidates[0].asset_id, calibration=True)
+    reference = plan["execution"]["maker"]
+    _positive(reference["order_quantity"], "hft_maker_order_quantity_invalid")
+    _nonnegative_integer(reference["latency_ms"], "hft_maker_latency_invalid")
     policy = current_runtime_resource_policy()
     with artifact.table("crypto_maker_calibration.parquet") as summary:
         try:
@@ -1429,7 +1474,7 @@ def validate_maker_calibration(artifact, envelope):
                         or row.forecast_error
                         != row.observed_return - row.price_prediction
                         or not 0 <= row.filled_quantity <= row.quote_quantity
-                        or row.quote_quantity != reference_config.order_quantity
+                        or row.quote_quantity != reference["order_quantity"]
                         or not row.book_segment_id
                         or not row.trade_observation_id
                     ):
@@ -1507,7 +1552,7 @@ def validate_maker_calibration(artifact, envelope):
                                 price_unit,
                                 decision,
                                 expiry,
-                                decision + reference_config.latency_ms * 1000000,
+                                decision + reference["latency_ms"] * 1000000,
                             )
                             remaining = row.quote_quantity
                             with closing_iterator(

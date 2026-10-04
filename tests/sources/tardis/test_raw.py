@@ -415,11 +415,24 @@ def test_native_trade_batches_keep_spilled_and_pending_exact_identities(
     indexes = []
     original = replay.ExactPrimaryKeyIndex
 
+    def assert_index_covered():
+        assert any(
+            lease.active
+            and lease.owner == "binance.native_trade_identities"
+            and lease.reserved_bytes >= 1024 * 1024
+            for lease in policy._leases
+        )
+
     class ObservedIndex(original):
         def __enter__(self):
+            assert_index_covered()
             result = super().__enter__()
             indexes.append((self, self.database_path.parent))
             return result
+
+        def close(self):
+            assert_index_covered()
+            return super().close()
 
         def add_identity_payload_rows(self, *, rows):
             batches.append(len(rows))
@@ -490,3 +503,92 @@ def test_native_trade_batch_failure_closes_index_and_preserves_primary(monkeypat
     assert all(
         index._connection is None and not path.exists() for index, path in indexes
     )
+
+
+def test_trade_order_failure_retains_safe_source_coordinates(tmp_path):
+    from tests.sources.tardis.test_replay import _line
+
+    def trade(identifier):
+        return _line(
+            1,
+            "aggTrade",
+            {
+                "e": "aggTrade",
+                "E": 1788220801000,
+                "T": 1788220801000,
+                "s": "BTCUSDT",
+                "st": 1,
+                "a": identifier,
+                "f": identifier,
+                "l": identifier,
+                "p": "100",
+                "q": "1",
+                "nq": "1",
+                "m": False,
+            },
+        )
+
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(
+            ValueError, match="binance_native_sequence_non_monotonic"
+        ) as caught:
+            import_slices(
+                tmp_path / "published",
+                date="2026-09-01",
+                slices=_slices(tmp_path / "native", trade(10) + trade(9), count=1),
+                byte_budget=1024**2,
+                resource_policy=policy,
+            )
+        note = " ".join(caught.value.__notes__)
+        assert all(
+            value in note
+            for value in (
+                "channel=aggTrade",
+                "slice_offset=0",
+                "line=2",
+                "previous_id=10",
+                "current_id=9",
+            )
+        )
+        assert "payload" not in note and "price" not in note
+        assert not (tmp_path / "published").exists()
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_import_iterator_close_preserves_first_failure(
+    tmp_path, monkeypatch, body_fails
+):
+    import quant_research_platform.sources.tardis.raw as raw
+
+    primary = ValueError("synthetic_observation_failure")
+    secondary = OSError("synthetic_close_failure")
+    original = raw.iter_native_slice
+
+    def records(*args, **kwargs):
+        with raw.closing_iterator(original(*args, **kwargs)) as source:
+            try:
+                yield from source
+            finally:
+                raise secondary
+
+    def observe(*args):
+        raise primary
+
+    monkeypatch.setattr(raw, "iter_native_slice", records)
+    if body_fails:
+        monkeypatch.setattr(raw._ObservedStreams, "observe", observe)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError if body_fails else OSError) as caught:
+            import_slices(
+                tmp_path / "published",
+                date="2026-09-01",
+                slices=_slices(tmp_path / "native", _snapshot(), count=1),
+                byte_budget=1024**2,
+                resource_policy=policy,
+            )
+        assert caught.value is (primary if body_fails else secondary)
+        if body_fails:
+            assert any("OSError" in note for note in primary.__notes__)
+        assert not (tmp_path / "published").exists()
+        assert policy.used_memory_bytes == 0

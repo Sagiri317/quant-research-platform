@@ -2,6 +2,8 @@
 
 from types import SimpleNamespace
 
+import pytest
+
 from quant_research_platform.contracts.targets import (
     ProducerKind,
     RunStatus,
@@ -193,12 +195,15 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
     assert evidence["portfolio_statistics"]["reason"] == "not_requested"
 
 
-def test_report_rebuild_uses_run_configuration_instead_of_current_selection(tmp_path):
+def test_report_rebuild_uses_run_configuration_instead_of_current_selection(
+    tmp_path, monkeypatch
+):
     from dataclasses import replace
     from types import SimpleNamespace
 
     import pytest
 
+    from quant_research_platform.profiles import research as profiles
     from quant_research_platform.profiles.research import (
         CRYPTO_PROFILE_ID,
         bind_research_configuration,
@@ -225,14 +230,21 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(tmp_
         assert kwargs["execution_targets"] == ()
         raise RuntimeError("frozen_report_selection_verified")
 
-    profile = replace(
-        profile,
-        producer_bindings={
-            **profile.producer_bindings,
-            report_id: replace(
-                profile.producer_bindings[report_id], producer=capture_report
-            ),
-        },
+    def bind_with_report_capture(*args, **kwargs):
+        rebound = bind_research_configuration(*args, **kwargs)
+        assert rebound.protocol(frozen["scenario_id"]).configuration() == frozen
+        return replace(
+            rebound,
+            producer_bindings={
+                **rebound.producer_bindings,
+                report_id: replace(
+                    rebound.producer_bindings[report_id], producer=capture_report
+                ),
+            },
+        )
+
+    monkeypatch.setattr(
+        profiles, "bind_research_configuration", bind_with_report_capture
     )
     record = SimpleNamespace(
         scenario_id=frozen["scenario_id"],
@@ -250,7 +262,8 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(tmp_
     assert len(calls) == 1
 
 
-def test_crypto_report_keeps_segment_results_when_continuous_is_blocked():
+@pytest.mark.parametrize("candidate_id", ["candidate", "candidate_latency_200ms"])
+def test_crypto_report_keeps_segment_results_when_continuous_is_blocked(candidate_id):
     from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_GROUPS
 
     run = record()
@@ -266,7 +279,7 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked():
     }
     tables["crypto_portfolio_intervals"] = [
         {
-            "candidate_id": "candidate",
+            "candidate_id": candidate_id,
             "execution_mode": "independent_segments",
             "episode_id": "a" * 64,
             "net_pnl": 99.0,
@@ -276,13 +289,13 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked():
         {"kind": "missing", "reason": "not_covered_by_qualified_episode"}
     ]
     blocked = {
-        "target_id": "candidate_continuous_statistics",
+        "target_id": f"{candidate_id}_continuous_statistics",
         "status": "BLOCKED",
         "reason": "book_gap",
     }
     segmented = {
-        "target_id": "candidate_independent_segments_statistics",
-        "candidate_id": "candidate",
+        "target_id": f"{candidate_id}_independent_segments_statistics",
+        "candidate_id": candidate_id,
         "execution_mode": "independent_segments",
         "status": "DEFINED",
         "identity": "b" * 64,
@@ -300,11 +313,15 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked():
             "calibrations": [],
             "portfolios": [
                 {
+                    "candidate_id": candidate_id,
+                    "asset_id": "btc_usdt",
                     "status": "BLOCKED",
                     "execution_mode": "continuous",
                     "reason": "book_gap",
                 },
                 {
+                    "candidate_id": candidate_id,
+                    "asset_id": "btc_usdt",
                     "status": "DEFINED",
                     "execution_mode": "independent_segments",
                     "episodes": [{"episode_id": "a" * 64, "termination": "TRUNCATED"}],
@@ -322,3 +339,8 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked():
         == tables["crypto_portfolio_coverage"]
     )
     assert portfolio["candidates"][1]["episodes"][0]["termination"] == "TRUNCATED"
+    coverage = portfolio["coverage_comparison"][0]
+    assert coverage["asset_id"] == "btc_usdt"
+    assert coverage["groups"][0]["candidates"] == [
+        {"candidate_id": candidate_id, "execution_mode": "independent_segments"}
+    ]

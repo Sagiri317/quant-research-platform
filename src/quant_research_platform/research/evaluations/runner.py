@@ -13,7 +13,10 @@ from quant_research_platform.contracts.experiments import label_maturity_mask
 from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
+from quant_research_platform.research.datasets.io import (
+    _research_dataset_access_window,
+    iter_research_dataset_chunks,
+)
 from quant_research_platform.research.datasets.validation import (
     validate_evaluation_input,
 )
@@ -32,6 +35,10 @@ from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
+)
+from quant_research_platform.storage.datasets.reading import (
+    iter_dataset_chunks,
+    open_dataset_session,
 )
 from quant_research_platform.storage.layout import StorageLayout
 
@@ -123,25 +130,44 @@ def build_crypto_evaluation_result(
             )
         )
 
+        dataset_root = layout.target_root(
+            dataset.data_id,
+            layout.research_dataset_root(dataset.market_id, dataset.data_id),
+        )
+        session = operation.enter_context(
+            open_dataset_session(
+                dataset_root,
+                columns=columns,
+                time_window=_research_dataset_access_window(
+                    dataset.market_id, time_window
+                ),
+                resource_policy=policy,
+            )
+        )
+
         def source():
             for window in windows:
-                chunks = iter_research_dataset_chunks(
-                    layout,
-                    market_id=dataset.market_id,
-                    dataset_id=dataset.data_id,
-                    time_window=window,
-                    columns=columns,
-                )
-                with closing_iterator(chunks):
-                    for chunk in chunks:
-                        if assets:
-                            with policy.lease(
-                                "research.evaluation.asset_scope",
-                                max(1, pandas_frame_payload_bytes(chunk) + len(chunk)),
-                            ):
-                                yield chunk.loc[chunk.asset_id.isin(assets)]
-                        else:
-                            yield chunk
+                with session.filtered_view(window) as view:
+                    chunks = iter_dataset_chunks(
+                        view, target_chunk_bytes=max(1, policy.planning_headroom_bytes)
+                    )
+                    with closing_iterator(chunks):
+                        for chunk in chunks:
+                            try:
+                                if assets:
+                                    with policy.lease(
+                                        "research.evaluation.asset_scope",
+                                        max(
+                                            1,
+                                            pandas_frame_payload_bytes(chunk)
+                                            + len(chunk),
+                                        ),
+                                    ):
+                                        yield chunk.loc[chunk.asset_id.isin(assets)]
+                                else:
+                                    yield chunk
+                            finally:
+                                chunk = None
 
         chunks = source()
         if common:
@@ -168,25 +194,28 @@ def build_crypto_evaluation_result(
                         * pandas_frame_payload_bytes(chunk),
                     ),
                 ):
-                    prepared = chunk.copy()
-                    for window in windows:
-                        scoped = chunk.loc[
-                            chunk.timestamp.between(
-                                pd.Timestamp(window.start), pd.Timestamp(window.end)
-                            )
-                        ]
-                        for (
-                            label,
-                            availability,
-                        ) in spec.label_availability_columns.items():
-                            mature = label_maturity_mask(
-                                scoped,
-                                fitting_cutoff=window.end,
-                                availability_column=availability,
-                                target_column=label,
-                            )
-                            prepared.loc[scoped.index[~mature], label] = pd.NA
-                    yield prepared
+                    try:
+                        prepared = chunk.copy()
+                        for window in windows:
+                            scoped = chunk.loc[
+                                chunk.timestamp.between(
+                                    pd.Timestamp(window.start), pd.Timestamp(window.end)
+                                )
+                            ]
+                            for (
+                                label,
+                                availability,
+                            ) in spec.label_availability_columns.items():
+                                mature = label_maturity_mask(
+                                    scoped,
+                                    fitting_cutoff=window.end,
+                                    availability_column=availability,
+                                    target_column=label,
+                                )
+                                prepared.loc[scoped.index[~mature], label] = pd.NA
+                        yield prepared
+                    finally:
+                        prepared = scoped = mature = chunk = None
 
         result = build_evaluation_result_from_frames(
             mature_chunks(),

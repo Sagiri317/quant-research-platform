@@ -1184,3 +1184,148 @@ def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
                 ),
             },
         )
+
+
+@pytest.mark.parametrize("damage", ("missing", "cycle", "conflict"))
+def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
+    tmp_path, damage
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
+
+    dates = pd.bdate_range("2020-01-02", periods=3)
+    source = _synthetic_interim_frames(dates)
+    dictionary = source["industry_classification_sets"]
+    if damage == "missing":
+        source["industry_classification_sets"] = dictionary.iloc[:0].copy()
+    elif damage == "cycle":
+        source["industry_classification_sets"] = pd.concat(
+            [
+                dictionary.assign(industry_level="2", parent_industry_code="B"),
+                dictionary.assign(
+                    industry_code="B", industry_level="2", parent_industry_code="A01"
+                ),
+            ],
+            ignore_index=True,
+        )
+    else:
+        source["industry_classification_sets"] = pd.concat(
+            [dictionary, dictionary.assign(industry_name="conflict")], ignore_index=True
+        )
+    spec = research_profile().processed.get("market_panel_1d")
+
+    def compute():
+        return producer._compute_processed_frame(
+            spec, source=source, dependencies={}, trading_sessions=dates
+        )
+
+    if damage != "missing":
+        error = (
+            "industry_hierarchy_cycle"
+            if damage == "cycle"
+            else "industry_dictionary_key_duplicate"
+        )
+        with pytest.raises(ValueError, match=error):
+            compute()
+    else:
+        frame = compute()
+        from quant_research_platform.storage.layout import StorageLayout
+
+        root = StorageLayout(tmp_path).processed_data_root(
+            spec.market_id, spec.kind, spec.data_id
+        )
+        write_dataset(root, frame, spec=spec)
+        restored = read_dataset(root)
+        assert len(restored) == 9
+        assert (
+            restored[
+                [
+                    "industry_standard_id",
+                    "industry_level1_code",
+                    "industry_level1_name",
+                    "is_nonfinancial_industry",
+                ]
+            ]
+            .isna()
+            .all()
+            .all()
+        )
+        assert restored.close.notna().all()
+
+
+def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.workflows import research
+    from tests.markets.a_share.test_target_dag_chain import (
+        _synthetic_interim_frames,
+        _windowed_source_profile,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=9).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    bars = frames["market_bars_1d"]
+    asset = bars.source_asset_id.eq("000001")
+    prices = ["open", "high", "low", "close", "adj_open", "adj_close"]
+    bars.loc[asset, prices] = 100.0
+    suspended = asset & bars.timestamp.between(dates[2], dates[4])
+    bars.loc[suspended, "filling_flag"] = 1
+    bars.loc[suspended, prices] = 50.0
+    bars.loc[asset & bars.timestamp.ge(dates[5]), prices] = 120.0
+    profile = _windowed_source_profile(frames, [])
+    layout = StorageLayout(tmp_path)
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=tmp_path / "raw",
+        start_date=str(dates[0].date()),
+        end_date=str(dates[-1].date()),
+        data_ids=("forward_returns",),
+    )
+    assert result["status"] == "COMPLETE", result["blockers"]
+    item = next(
+        row for row in result["target_results"] if row["target_id"] == "forward_returns"
+    )
+    spec = profile.processed.get("forward_returns")
+    saved = read_dataset(
+        layout.instance_root(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            item["instance_identity"],
+        )
+    )
+    row = saved.loc[saved.asset_id.eq("000001") & saved.timestamp.eq(dates[0])].iloc[0]
+    assert row.forward_return_1d == 0.0
+    assert row.forward_return_1d_available_at == dates[2]
+    assert row.forward_return_5d == pytest.approx(0.2)
+    assert row.forward_return_5d_available_at == dates[6]
+
+
+def test_listing_age_keeps_unavailable_master_date_unknown():
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        compute_listing_age_trading_days,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=3)
+    calendar = pd.DataFrame(
+        {"calendar_date": dates, "source_market_type": 1, "is_trading_day": True}
+    )
+    observed = pd.DataFrame(
+        {
+            "timestamp": dates[1],
+            "market_type": 1,
+            "listing_date": [pd.NaT, dates[0], dates[2]],
+        }
+    )
+    ages = compute_listing_age_trading_days(
+        observed,
+        calendar,
+        observation_date_column="timestamp",
+        listing_date_column="listing_date",
+        market_type_column="market_type",
+    )
+    assert pd.isna(ages.iloc[0])
+    assert ages.iloc[1:].tolist() == [2, 0]

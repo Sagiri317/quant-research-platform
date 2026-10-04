@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from functools import cache, partial
 from types import MappingProxyType
 
@@ -76,6 +76,9 @@ class ResearchProfile:
     evaluations: EvaluationCatalog
     models: ModelCatalog
     producer_bindings: Mapping[str, ProducerBinding]
+    _configuration_source: ResearchProfile | None = field(
+        default=None, repr=False, compare=False
+    )
 
     def __post_init__(self) -> None:
         if type(self.profile_id) is not str or not self.profile_id:
@@ -391,6 +394,7 @@ def bind_research_configuration(
     from quant_research_platform.contracts.signals import SignalSpec
     from quant_research_platform.research.protocols import bind_research_selection
 
+    profile = profile._configuration_source or profile
     library = research_profile(profile.profile_id)
     bound, dataset, model_catalog = bind_research_selection(
         profile, library, configuration
@@ -446,15 +450,13 @@ def bind_research_configuration(
     if str(profile.market_id) == "crypto":
         from quant_research_platform.artifacts.crypto_hft import (
             read_crypto_episode_artifact,
-            summarize_crypto_execution,
-            summarize_crypto_ledger_windows,
+            summarize_crypto_ledger,
         )
         from quant_research_platform.artifacts.outputs import (
             read_prediction_output_bundle,
         )
         from quant_research_platform.artifacts.portfolio_ledger import (
             read_portfolio_ledger_artifact,
-            summarize_portfolio_ledger,
         )
         from quant_research_platform.artifacts.statistics import (
             STATISTICS_TABLE_COLUMNS,
@@ -591,9 +593,7 @@ def bind_research_configuration(
                         build_crypto_portfolio_statistics_tables,
                         read_ledger=read_portfolio_ledger_artifact,
                         read_episodes=read_crypto_episode_artifact,
-                        summarize_ledger=summarize_portfolio_ledger,
-                        summarize_windows=summarize_crypto_ledger_windows,
-                        summarize_execution=summarize_crypto_execution,
+                        summarize_ledger=summarize_crypto_ledger,
                         table_columns=STATISTICS_TABLE_COLUMNS,
                     ),
                 )
@@ -959,6 +959,7 @@ def bind_research_configuration(
         )
     return replace(
         profile,
+        _configuration_source=profile,
         processed=processed,
         protocol=lambda scenario_id, access_window="development": replace(
             bound, scenario_id=scenario_id, access_window=access_window

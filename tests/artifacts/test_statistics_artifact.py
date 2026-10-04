@@ -132,9 +132,6 @@ def maker_calibration_tables():
     from quant_research_platform.markets.implementations.crypto.ids import (
         HFT_RESEARCH_DATASET_ID,
     )
-    from quant_research_platform.markets.implementations.crypto.portfolio import (
-        _maker_config,
-    )
     from quant_research_platform.research.protocols.crypto_hft import (
         CryptoMakerCandidate,
         protocol,
@@ -148,6 +145,23 @@ def maker_calibration_tables():
         "start": "1970-01-01T00:00:02.100000",
         "end": "1970-01-01T00:00:03.500000",
     }
+    research_protocol = replace(
+        protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan),
+        configuration_json=json.dumps(
+            research_configuration("crypto", "baseline", plan=plan)
+        ),
+    )
+    candidate = next(
+        candidate
+        for candidate in research_protocol.portfolio_candidates()
+        if isinstance(candidate, CryptoMakerCandidate)
+        and candidate.asset_id == "btc_usdt"
+        and candidate.model_ids == MAKER_MODEL_IDS
+    )
+    manifest = research_protocol.target_manifest(
+        candidate.calibration_target_id, "STATISTIC"
+    )
+    reference = manifest["research_plan"]["execution"]["maker"]
     samples, events = [], []
 
     def on_sample(**sample):
@@ -197,7 +211,8 @@ def maker_calibration_tables():
                 }
                 for stamp in (2100, 2200)
             ],
-            config=_maker_config(plan, "btc_usdt", calibration=True),
+            order_quantity=reference["order_quantity"],
+            latency_ms=reference["latency_ms"],
             observed_coverage={"s1": (2100000000, 2800000000)},
             trade_coverage={"trade-connection-1": (2100000000, 2800000000)},
             cutoff_ns=3500000000,
@@ -248,22 +263,6 @@ def maker_calibration_tables():
     assert frames["crypto_maker_samples"].loc[
         lambda frame: frame.side.eq("buy"), "filled_quantity"
     ].tolist() == [1.0, 1.0]
-    research_protocol = replace(
-        protocol(HFT_RESEARCH_DATASET_ID, research_plan=plan),
-        configuration_json=json.dumps(
-            research_configuration("crypto", "baseline", plan=plan)
-        ),
-    )
-    candidate = next(
-        candidate
-        for candidate in research_protocol.portfolio_candidates()
-        if isinstance(candidate, CryptoMakerCandidate)
-        and candidate.asset_id == "btc_usdt"
-        and candidate.model_ids == MAKER_MODEL_IDS
-    )
-    manifest = research_protocol.target_manifest(
-        candidate.calibration_target_id, "STATISTIC"
-    )
     envelope = build_business_manifest_envelope(
         logical_artifact_id=candidate.calibration_target_id,
         schema_identity="a" * 64,
@@ -452,14 +451,20 @@ def test_research_table_rejects_invalid_values_at_write_and_read(
 
 
 def _assert_rejected_at_write_and_read(
-    tmp_path, tables, envelope, member, *, table_group="research"
+    tmp_path,
+    tables,
+    envelope,
+    member,
+    *,
+    table_group="research",
+    error="statistics_table_",
 ):
     policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
     with (
         runtime_resource_policy_scope(policy) as artifact_policy,
         artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
     ):
-        with pytest.raises(ValueError, match="statistics_table_"):
+        with pytest.raises(ValueError, match=error):
             statistics.write_statistics_artifact(
                 tmp_path / "rejected",
                 envelope=envelope,
@@ -486,7 +491,7 @@ def _assert_rejected_at_write_and_read(
         artifact = statistics.read_statistics_artifact(
             root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
-        with pytest.raises(ValueError, match="statistics_table_"):
+        with pytest.raises(ValueError, match=error):
             with artifact.table(member):
                 pytest.fail("invalid persisted values must not reach the consumer")
         assert policy.used_memory_bytes == artifact_lease.reserved_bytes
@@ -918,7 +923,21 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
         finally:
             closed.append(model_id)
 
-    models = SimpleNamespace(validation_chunks=validation_chunks)
+    models = SimpleNamespace(
+        models=tuple(
+            {
+                "fold_id": "fold_1",
+                "model_id": model_id,
+                "model_metadata": {
+                    "model_algorithm": manifest["model_scopes"][model_id][
+                        "model_algorithm"
+                    ]
+                },
+            }
+            for model_id in MAKER_MODEL_IDS
+        ),
+        validation_chunks=validation_chunks,
+    )
     primary = KeyboardInterrupt("synthetic_maker_writer_failure")
     if finish == "writer_failure":
         close = MemoryLease.close
@@ -1221,7 +1240,21 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
                 }
             )
 
-    models = SimpleNamespace(validation_chunks=validation_chunks)
+    models = SimpleNamespace(
+        models=tuple(
+            {
+                "fold_id": "fold_1",
+                "model_id": model_id,
+                "model_metadata": {
+                    "model_algorithm": manifest["model_scopes"][model_id][
+                        "model_algorithm"
+                    ]
+                },
+            }
+            for model_id in MAKER_MODEL_IDS
+        ),
+        validation_chunks=validation_chunks,
+    )
     bids = tuple((995 - index, 1.0) for index in range(depth))
     asks = tuple((1005 + index, 1.0) for index in range(depth))
     table_read = statistics.StatisticsArtifact.table
@@ -1376,8 +1409,6 @@ def test_maker_calibration_uses_declared_asset_without_btc_limits(
     candidate = contract["portfolio_candidates"][0]
     candidate["asset_id"] = "eth_usdt"
     candidate["candidate_id"] = "eth_fixture_maker"
-    limits = contract["research_plan"]["exposure_limits"]
-    limits["eth_usdt"] = limits.pop("btc_usdt")
     envelope = build_business_manifest_envelope(
         logical_artifact_id="eth_fixture_maker_calibration",
         schema_identity=payload["schema_identity"],
@@ -1486,7 +1517,7 @@ def test_maker_history_reads_real_artifact_once_and_rechecks_source(
                                 1.0,
                                 state,
                                 _quote(0, book_segment_id="s1"),
-                                _maker_config(),
+                                _maker_config().latency_ms,
                             ),
                             active_order=None,
                             commands=(),
@@ -1587,3 +1618,66 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
     else:
         frame.loc[0, "observation_count"] = 0
     _assert_rejected_at_write_and_read(tmp_path, tables, envelope, f"{name}.parquet")
+
+
+@pytest.mark.parametrize(
+    "corruption",
+    ("none", "global_mean", "quarterly_mean", "mean_difference", "observation_count"),
+)
+def test_defined_group_comparison_requires_descriptive_facts(
+    tmp_path, tables, envelope, corruption
+):
+    row = dict(
+        family_id="family",
+        access_window="holdout",
+        status="DEFINED",
+        reason="",
+        fdr_method="BY",
+        bootstrap_status="UNDEFINED",
+        bootstrap_reason="insufficient_blocks",
+        observation_count=64,
+        calendar_count=64,
+        fdr_family_size=1,
+        hac_lag=19,
+        bootstrap_block_size=20,
+        bootstrap_repetitions=10000,
+        bootstrap_seed=42,
+        global_mean=0.2,
+        quarterly_mean=0.3,
+        mean_difference=0.1,
+        standard_error=0.1,
+        t_statistic=1.0,
+        p_value=0.3,
+        ci_lower=-0.1,
+        ci_upper=0.3,
+        fdr_adjusted_p_value=0.3,
+        fdr_alpha=0.05,
+        confidence=0.95,
+        bootstrap_lower=float("nan"),
+        bootstrap_upper=float("nan"),
+    )
+    if corruption != "none":
+        row[corruption] = 0 if corruption == "observation_count" else float("nan")
+    tables["model_group_comparison"] = pd.DataFrame([row])
+    if corruption != "none":
+        _assert_rejected_at_write_and_read(
+            tmp_path,
+            tables,
+            envelope,
+            "model_group_comparison.parquet",
+            error="statistics_group_comparison_invalid",
+        )
+    else:
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("test.group.metadata", 0) as lease,
+        ):
+            root = statistics.write_statistics_artifact(
+                tmp_path / "group", envelope=envelope, tables=tables
+            )
+            artifact = statistics.read_statistics_artifact(
+                root, expected_identity=envelope.instance_identity, lease=lease
+            )
+            with artifact.table("model_group_comparison.parquet") as frame:
+                assert frame.global_mean.iloc[0] == 0.2
+                assert frame.observation_count.iloc[0] == 64

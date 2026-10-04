@@ -475,23 +475,25 @@ class ExactPrimaryKeyIndex:
                     for position, (namespace, identity, value) in enumerate(rows)
                 ),
             )
-            matches = connection.execute(
-                "SELECT incoming.position, existing.value "
-                "FROM comparison_rows AS incoming "
-                "LEFT JOIN exact_keys AS existing "
-                "ON existing.namespace = ? "
-                "AND existing.payload = incoming.payload "
-                "ORDER BY incoming.position",
-                (source_namespace,),
-            )
-            for position, payload in matches:
-                if payload is None:
-                    continue
-                encoded = bytes(payload)
-                if len(encoded) != 8:
-                    raise ValueError("invalid_exact_float_value")
-                values[int(position)] = struct.unpack(">d", encoded)[0]
-                found[int(position)] = 1
+            with handle_preserving_primary(
+                connection.execute(
+                    "SELECT incoming.position, existing.value "
+                    "FROM comparison_rows AS incoming "
+                    "LEFT JOIN exact_keys AS existing "
+                    "ON existing.namespace = ? "
+                    "AND existing.payload = incoming.payload "
+                    "ORDER BY incoming.position",
+                    (source_namespace,),
+                )
+            ) as matches:
+                for position, payload in matches:
+                    if payload is None:
+                        continue
+                    encoded = bytes(payload)
+                    if len(encoded) != 8:
+                        raise ValueError("invalid_exact_float_value")
+                    values[int(position)] = struct.unpack(">d", encoded)[0]
+                    found[int(position)] = 1
             if matched_namespace is not None:
                 with (
                     handle_preserving_primary(
@@ -601,20 +603,22 @@ class ExactPrimaryKeyIndex:
             ).fetchone()
             if incoming_conflict is not None or existing_conflict is not None:
                 raise ValueError("conflicting_exact_primary_key_payload")
-            admitted = connection.execute(
-                "SELECT incoming.position FROM comparison_rows AS incoming "
-                "WHERE NOT EXISTS (SELECT 1 FROM comparison_rows AS earlier "
-                "WHERE earlier.namespace = incoming.namespace "
-                "AND earlier.payload = incoming.payload "
-                "AND earlier.position < incoming.position) "
-                "AND NOT EXISTS (SELECT 1 FROM exact_keys AS existing "
-                "WHERE existing.namespace = incoming.namespace "
-                "AND existing.payload = incoming.payload) "
-                "ORDER BY incoming.position"
-            )
-            for (position,) in admitted:
-                position_state[keep_count] = int(position)
-                keep_count += 1
+            with handle_preserving_primary(
+                connection.execute(
+                    "SELECT incoming.position FROM comparison_rows AS incoming "
+                    "WHERE NOT EXISTS (SELECT 1 FROM comparison_rows AS earlier "
+                    "WHERE earlier.namespace = incoming.namespace "
+                    "AND earlier.payload = incoming.payload "
+                    "AND earlier.position < incoming.position) "
+                    "AND NOT EXISTS (SELECT 1 FROM exact_keys AS existing "
+                    "WHERE existing.namespace = incoming.namespace "
+                    "AND existing.payload = incoming.payload) "
+                    "ORDER BY incoming.position"
+                )
+            ) as admitted:
+                for (position,) in admitted:
+                    position_state[keep_count] = int(position)
+                    keep_count += 1
             with handle_preserving_primary(
                 connection.execute(
                     "SELECT incoming.namespace, incoming.payload, MIN(incoming.value) "
@@ -776,19 +780,17 @@ class ExactPrimaryKeyIndex:
         if connection is None:
             raise RuntimeError("exact_primary_key_index_not_open")
         missing = connection.execute(
-            "SELECT COUNT(*) FROM ("
-            "SELECT payload FROM exact_keys WHERE namespace = ? "
-            "EXCEPT "
-            "SELECT payload FROM exact_keys WHERE namespace = ?"
-            ")",
+            "SELECT COUNT(*) FROM exact_keys AS expected "
+            "WHERE expected.namespace = ? AND NOT EXISTS ("
+            "SELECT 1 FROM exact_keys AS actual WHERE actual.namespace = ? "
+            "AND actual.payload = expected.payload)",
             (expected_namespace, actual_namespace),
         ).fetchone()
         extra = connection.execute(
-            "SELECT COUNT(*) FROM ("
-            "SELECT payload FROM exact_keys WHERE namespace = ? "
-            "EXCEPT "
-            "SELECT payload FROM exact_keys WHERE namespace = ?"
-            ")",
+            "SELECT COUNT(*) FROM exact_keys AS expected "
+            "WHERE expected.namespace = ? AND NOT EXISTS ("
+            "SELECT 1 FROM exact_keys AS actual WHERE actual.namespace = ? "
+            "AND actual.payload = expected.payload)",
             (actual_namespace, expected_namespace),
         ).fetchone()
         assert missing is not None and extra is not None
@@ -807,17 +809,15 @@ class ExactPrimaryKeyIndex:
             expected_namespace=expected_namespace,
             actual_namespace=actual_namespace,
         )
-        pair_difference = connection.execute(
-            "SELECT COUNT(*) FROM ("
-            "SELECT payload, value FROM exact_keys WHERE namespace = ? "
-            "EXCEPT "
-            "SELECT payload, value FROM exact_keys WHERE namespace = ?"
-            ")",
-            (expected_namespace, actual_namespace),
+        changed = connection.execute(
+            "SELECT COUNT(*) FROM exact_keys AS expected "
+            "JOIN exact_keys AS actual ON actual.namespace = ? "
+            "AND actual.payload = expected.payload "
+            "WHERE expected.namespace = ? AND expected.value IS NOT actual.value",
+            (actual_namespace, expected_namespace),
         ).fetchone()
-        assert pair_difference is not None
-        changed_count = int(pair_difference[0]) - missing_count
-        assert changed_count >= 0
+        assert changed is not None
+        changed_count = int(changed[0])
         return missing_count, extra_count, changed_count
 
     def _payload_rows(

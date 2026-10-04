@@ -380,3 +380,22 @@ def test_funding_tail_io_error_retains_original_exception(tmp_path, monkeypatch)
                 monkeypatch.setattr(identity, "filesystem_stat", failed_stat)
         assert caught.value is failure
         assert policy.used_memory_bytes == 0
+
+
+def test_funding_numeric_strings_are_normalized_through_persisted_reader(tmp_path):
+    _write(
+        tmp_path / "raw",
+        rows=(
+            ("settlement", 50, None, "0.01", "100", None),
+            ("forecast", 0, 100, None, None, [[50, "-1"]]),
+        ),
+    )
+    with read_funding_observations(
+        (tmp_path / "funding" / "BTCUSDT",), symbol="BTCUSDT"
+    ) as source:
+        event = source.events[0]
+        forecast = next(source.forecasts)
+        assert type(event.rate) is float and type(event.mark_price) is float
+        assert -event.rate * event.mark_price == -1.0
+        assert forecast.cashflows == ((50, -1.0),)
+        assert type(forecast.cashflows[0][1]) is float

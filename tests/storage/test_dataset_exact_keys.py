@@ -735,3 +735,112 @@ def test_write_dataset_rejects_writer_scratch_name_as_final_artifact_root(
         )
 
     assert not filesystem_exists(root)
+
+
+@pytest.mark.parametrize(
+    "operation", ["lookup_float_values", "classify_comparison_table"]
+)
+def test_exact_key_active_cursor_closes_before_connection_on_interrupt(operation):
+    import gc
+    import os
+    import sys
+
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+
+    if not Path("/proc/self/fd").exists():
+        pytest.skip("requires Linux descriptor inspection")
+    primary = KeyboardInterrupt("cursor_primary")
+    table = pa.table({"key": ["a", "b"], "value": [1.0, 2.0]})
+    interrupted = False
+
+    def trace(frame, event, _arg):
+        nonlocal interrupted
+        if (
+            event == "line"
+            and frame.f_code.co_name == operation
+            and "position" in frame.f_locals
+        ):
+            interrupted = True
+            raise primary
+        return trace
+
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with runtime_resource_policy_scope() as policy:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                with ExactPrimaryKeyIndex(primary_key=("key",)) as index:
+                    path = index.database_path
+                    if operation == "lookup_float_values":
+                        index.add_float_value_table(
+                            table,
+                            namespace="source",
+                            value_column="value",
+                            payload_target_bytes=1024**2,
+                        )
+                    try:
+                        sys.settrace(trace)
+                        if operation == "lookup_float_values":
+                            index.lookup_float_values(
+                                table,
+                                source_namespace="source",
+                                matched_namespace=None,
+                                payload_target_bytes=1024**2,
+                            )
+                        else:
+                            index.classify_comparison_table(
+                                table,
+                                namespace="source",
+                                value_columns=("value",),
+                                payload_target_bytes=1024**2,
+                            )
+                    finally:
+                        sys.settrace(None)
+            assert interrupted and caught.value is primary
+            targets = []
+            for descriptor in Path("/proc/self/fd").iterdir():
+                try:
+                    targets.append(os.readlink(descriptor))
+                except FileNotFoundError:
+                    pass
+            assert not any(str(path) in target for target in targets)
+            assert not path.exists()
+            assert policy.used_memory_bytes == 0
+    finally:
+        sys.settrace(None)
+        if enabled:
+            gc.enable()
+
+
+def test_exact_difference_uses_primary_key_probes_without_temporary_trees():
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+
+    with runtime_resource_policy_scope() as policy:
+        with ExactPrimaryKeyIndex(primary_key=("key",)) as index:
+            connection = index._connection
+            with index._transaction():
+                connection.executemany(
+                    "INSERT INTO exact_keys(namespace,payload,value) VALUES (?,?,?)",
+                    [
+                        ("left", b"same", None),
+                        ("right", b"same", None),
+                        ("left", b"changed", None),
+                        ("right", b"changed", b"value"),
+                        ("left", b"missing", b"value"),
+                        ("right", b"extra", b"value"),
+                    ],
+                )
+            queries = []
+            connection.set_trace_callback(queries.append)
+            assert index.comparison_counts(
+                expected_namespace="left", actual_namespace="right"
+            ) == (1, 1, 1)
+            connection.set_trace_callback(None)
+            selects = [query for query in queries if query.startswith("SELECT")]
+            assert selects and all("EXCEPT" not in query.upper() for query in selects)
+            for query in selects:
+                plan = list(connection.execute("EXPLAIN QUERY PLAN " + query))
+                assert not any("TEMP B-TREE" in str(row).upper() for row in plan)
+        assert policy.used_memory_bytes == 0

@@ -18,7 +18,7 @@ def test_latest_declaration_keeps_same_day_median_and_next_session_gate():
             ),
             "forecast_end_date": pd.Timestamp("2025-12-31"),
             "institution_id": ["A", "A", "A", "B", "C"],
-            "forecast_eps": [2.0, 18.0, 22.0, 12.0, 13.0],
+            "forecast_eps": [2.0, 8.0, 12.0, 9.0, 11.0],
         }
     )
     sessions = pd.bdate_range("2025-01-03", "2025-01-07").as_unit("ns")
@@ -29,7 +29,8 @@ def test_latest_declaration_keeps_same_day_median_and_next_session_gate():
         records, observations, trading_sessions=sessions
     )
     assert actual.iloc[0, 2:].isna().all()
-    assert actual.loc[1, "forward_earnings_yield_fy1"] == 1.3
+    # Latest institution estimates are A=10, B=9, C=11; consensus is 10.
+    assert actual.loc[1, "forward_earnings_yield_fy1"] == 1.0
     assert actual.loc[1, "forecast_dispersion_fy1"] == 1.0
     assert actual.loc[1, "log_analyst_coverage"] == pytest.approx(np.log(3.0))
     future = records.iloc[[0]].assign(
@@ -168,7 +169,7 @@ def test_expectations_processed_producer_persists_latest_declaration(
             ),
             "forecast_end_date": pd.Timestamp("2025-12-31"),
             "institution_id": ["A", "A", "A", "B", "C"],
-            "forecast_eps": [2.0, 18.0, 22.0, 12.0, 13.0],
+            "forecast_eps": [2.0, 8.0, 12.0, 9.0, 11.0],
         }
     )
     if nonannual:
@@ -198,10 +199,14 @@ def test_expectations_processed_producer_persists_latest_declaration(
         )
         saved = read_dataset(root, resource_policy=policy)
         pd.testing.assert_frame_equal(saved, actual, check_exact=True)
-        assert saved.loc[1, "forward_earnings_yield_fy1"] == 1.3
+        for position in (1, 4):
+            assert saved.loc[position, "forward_earnings_yield_fy1"] == 1.0
+            assert saved.loc[position, "forecast_dispersion_fy1"] == 1.0
+            assert saved.loc[position, "log_analyst_coverage"] == pytest.approx(
+                np.log(3.0)
+            )
         assert saved.iloc[0, 3:].isna().all()
         assert saved.iloc[2:4, 3:].isna().all().all()
-        assert saved.loc[4, "forward_earnings_yield_fy1"] == 1.3
         assert policy.used_memory_bytes == 0
 
 
@@ -341,3 +346,60 @@ def test_fiscal_year_coverage_is_independent_in_persisted_producer(
         else:
             assert pd.isna(saved.loc[1, "forward_earnings_yield_fy2"])
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("scale", (1e308, np.nextafter(0.0, 1.0)))
+@pytest.mark.parametrize("symmetric", (False, True))
+def test_extreme_finite_eps_medians_and_mad_persist_without_intermediate_overflow(
+    tmp_path, scale, symmetric
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    values = [-scale, -scale, scale, scale] if symmetric else [scale] * 4
+    dates = pd.bdate_range("2020-01-02", periods=3).as_unit("ns")
+    records = pd.DataFrame(
+        {
+            "source_asset_id": "asset",
+            "declare_date": dates[0],
+            "forecast_end_date": pd.Timestamp("2020-12-31"),
+            "institution_id": list("abcd"),
+            "forecast_eps": values,
+        }
+    )
+    records = pd.concat(
+        [
+            records,
+            records,
+            records.assign(forecast_end_date=pd.Timestamp("2021-12-31")),
+        ],
+        ignore_index=True,
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "asset",
+            "timestamp": dates,
+            "close": scale,
+        }
+    )
+    spec = research_profile().processed.get("expectations_factors")
+    actual = producer._compute_processed_frame(
+        spec,
+        source={"analyst_forecast": records},
+        dependencies={"market_panel_1d": panel},
+        trading_sessions=dates,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, actual, spec=spec)
+    saved = read_dataset(root)
+    assert saved.forward_earnings_yield_fy1.iloc[-1] == (0.0 if symmetric else 1.0)
+    assert saved.forward_earnings_yield_fy2.iloc[-1] == (0.0 if symmetric else 1.0)
+    assert saved.forecast_dispersion_fy1.iloc[-1] == (scale if symmetric else 0.0)

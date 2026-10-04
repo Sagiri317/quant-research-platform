@@ -3,6 +3,7 @@ from __future__ import annotations
 import datetime as dt
 import gzip
 import hashlib
+import io
 import json
 from functools import wraps
 from pathlib import Path
@@ -455,7 +456,13 @@ def write_binance_hft_run(
         },
     ]
     sidecar = root / "connection_intervals.jsonl.gz"
-    with gzip.open(native_filesystem_path(sidecar), "wt", encoding="utf-8") as handle:
+    with (
+        open(native_filesystem_path(sidecar), "wb") as raw_handle,
+        gzip.GzipFile(
+            filename="", mode="wb", fileobj=raw_handle, mtime=0
+        ) as compressed,
+        io.TextIOWrapper(compressed, encoding="utf-8", newline="\n") as handle,
+    ):
         for interval in connection_intervals:
             handle.write(json.dumps(interval, separators=(",", ":")))
             handle.write("\n")
@@ -538,7 +545,10 @@ def _write_file(
     )
     filesystem_mkdir(path.parent, parents=True, exist_ok=True)
     maximum = 0
-    with gzip.open(native_filesystem_path(path), "wb") as handle:
+    with (
+        open(native_filesystem_path(path), "wb") as raw_handle,
+        gzip.GzipFile(filename="", mode="wb", fileobj=raw_handle, mtime=0) as handle,
+    ):
         for row in rows:
             line = json.dumps(row, separators=(",", ":")).encode() + b"\n"
             maximum = max(maximum, len(line))

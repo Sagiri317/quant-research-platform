@@ -112,7 +112,7 @@ def test_native_null_revisions_preserve_history_and_next_session_visibility(
         result = interim.materialize_interim_data(
             layout=layout,
             start_date="2019-01-01",
-            end_date="2019-12-31",
+            end_date="2020-02-02",
             resource_policy=policy,
         )
         frames = _read(result, policy)
@@ -170,7 +170,7 @@ def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_pat
             layout=layout,
             data_ids=("financial_balance",),
             start_date="2019-01-01",
-            end_date="2019-12-31",
+            end_date="2020-02-02",
             resource_policy=policy,
         )
         frame = _read(result, policy)["financial_balance"]
@@ -262,7 +262,7 @@ def test_partial_disclosure_completeness_obeys_requested_report_period(tmp_path,
         result = interim.materialize_interim_data(
             layout=layout,
             start_date="2019-01-01",
-            end_date="2019-12-31",
+            end_date="2020-02-02",
             resource_policy=policy,
         )
         frames = _read(result, policy)
@@ -573,26 +573,41 @@ def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
                 first=first,
                 events="2020-02-01" if period == "2019-12-31" else None,
             )
-            _snapshot(
-                session, layout, first, [values[name] for name in names], period=period
+            native = [values[name] for name in names]
+            native[FIELDS.index("TINCOMESTATEMENT_60")] = 8.0
+            native[FIELDS.index("TINCOMESTATEMENT_61")] = (
+                6.0 if period == "2018-12-31" else 7.0
             )
+            _snapshot(session, layout, first, native, period=period)
         _snapshot(session, layout, "2020-01-30", [None] * 14, branch="3")
-        _snapshot(
-            session,
-            layout,
-            "2020-02-01",
-            [None if name == "parent_net_income" else current[name] for name in names],
-        )
+        correction = [current[name] for name in names]
+        correction[FIELDS.index("TINCOMESTATEMENT_60")] = 8.0
+        correction[FIELDS.index("TINCOMESTATEMENT_61")] = None
+        _snapshot(session, layout, "2020-02-01", correction)
         _snapshot(session, layout, "2020-02-01", [None] * 14, branch="3")
 
     with runtime_resource_policy_scope() as policy:
         imported = interim.materialize_interim_data(
             layout=layout,
             start_date="2018-01-01",
-            end_date="2019-12-31",
+            end_date="2020-02-02",
             resource_policy=policy,
         )
         persisted = _read(imported, policy)
+        original = (
+            persisted["financial_income"]
+            .loc[
+                persisted["financial_income"].report_period.eq(
+                    pd.Timestamp("2019-12-31")
+                )
+                & persisted["financial_income"].version_identity.eq("original")
+            ]
+            .iloc[0]
+        )
+        assert (original.consolidated_net_income, original.parent_net_income) == (
+            8.0,
+            7.0,
+        )
         sessions = pd.bdate_range("2018-01-01", "2020-02-04")
         calendar_spec = profile.interim.get("trading_calendar")
         calendar = pd.DataFrame(
@@ -965,11 +980,11 @@ def test_choice_fatal_io_is_not_source_blocked(tmp_path, monkeypatch, error, bou
     with choice_session(SDK(response())) as session:
         _disclosure(session, layout)
 
-    def fail(_path):
+    def fail(_path, **_kwargs):
         raise error
 
     if boundary == "metadata":
-        monkeypatch.setattr(interim, "read_manifest", fail)
+        monkeypatch.setattr(interim, "read_bounded_qrp_json", fail)
     else:
         original = interim.filesystem_scandir
 
@@ -989,3 +1004,115 @@ def test_choice_fatal_io_is_not_source_blocked(tmp_path, monkeypatch, error, bou
             data_ids=("financial_first_disclosure",),
         )
     assert caught.value is error
+
+
+@pytest.mark.parametrize("entry", ("identity", "materialize"))
+@pytest.mark.parametrize("capacity", ("captured", "explicit"))
+def test_choice_discovery_admission_precedes_metadata_decode(
+    tmp_path, monkeypatch, entry, capacity
+):
+    from quant_research_platform.runtime import resources
+
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout)
+    if capacity == "captured":
+        monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 4096)
+    decoded = []
+    reader = interim.read_bounded_qrp_json
+
+    def observed(*args, **kwargs):
+        decoded.append(True)
+        return reader(*args, **kwargs)
+
+    monkeypatch.setattr(interim, "read_bounded_qrp_json", observed)
+    with runtime_resource_policy_scope(
+        explicit_cap_bytes=4096 if capacity == "explicit" else None
+    ) as policy:
+        with pytest.raises(
+            ValueError, match="choice_discovery_exceeds_task_memory_budget"
+        ):
+            if entry == "identity":
+                interim.source_content_identity(
+                    layout.raw_source_root("choice"), "financial_first_disclosure"
+                )
+            else:
+                interim.materialize_interim_data(
+                    layout=layout,
+                    data_ids=("financial_first_disclosure",),
+                    resource_policy=policy,
+                )
+        assert not decoded
+        assert policy.used_memory_bytes == 0
+
+
+def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revisions(
+    tmp_path,
+):
+    layout = StorageLayout(tmp_path)
+    profile = research_profile()
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout, events="2020-02-01")
+        _disclosure(session, layout, period="2019-09-30", first="2020-02-03")
+        _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
+        _snapshot(session, layout, "2020-01-30", [None] * len(FIELDS), branch="3")
+
+    arguments = dict(
+        profile=profile,
+        layout=layout,
+        raw_root=None,
+        start_date="2019-01-01",
+        data_ids=("financial_balance", "financial_first_disclosure"),
+    )
+    earlier = research.data_materialize(**arguments, end_date="2020-01-31")
+    assert earlier["status"] == "COMPLETE"
+    roots = {
+        item["target_id"]: layout.instance_root(
+            layout.interim_data_root("choice", item["target_id"]),
+            item["instance_identity"],
+        )
+        for item in earlier["target_results"]
+    }
+    with runtime_resource_policy_scope() as policy:
+        saved = {
+            name: read_dataset(root, resource_policy=policy)
+            for name, root in roots.items()
+        }
+        assert policy.used_memory_bytes == 0
+    assert saved["financial_balance"].total_assets.tolist() == [100.0]
+    assert saved["financial_balance"].report_period.tolist() == [
+        pd.Timestamp("2019-12-31")
+    ]
+    assert saved["financial_first_disclosure"].first_disclosure_date.tolist() == [
+        pd.Timestamp("2020-01-30")
+    ]
+    old_hashes = {name: _file_hashes(root) for name, root in roots.items()}
+
+    later = research.data_materialize(**arguments, end_date="2020-02-02")
+    results = {item["target_id"]: item for item in later["target_results"]}
+    assert results["financial_balance"]["status"] == "BLOCKED"
+    assert results["financial_balance"]["reason"] == "choice_revision_snapshot_missing"
+    assert results["financial_first_disclosure"]["status"] == "BUILT"
+    assert all(_file_hashes(root) == old_hashes[name] for name, root in roots.items())
+
+    with choice_session(SDK(response())) as session:
+        for branch in ("1", "3"):
+            _snapshot(
+                session, layout, "2020-02-01", [200.0] * len(FIELDS), branch=branch
+            )
+    complete = research.data_materialize(**arguments, end_date="2020-02-02")
+    assert complete["status"] == "COMPLETE"
+    identity = next(
+        item["instance_identity"]
+        for item in complete["target_results"]
+        if item["target_id"] == "financial_balance"
+    )
+    root = layout.instance_root(
+        layout.interim_data_root("choice", "financial_balance"), identity
+    )
+    with runtime_resource_policy_scope() as policy:
+        frame = read_dataset(root, resource_policy=policy)
+        assert frame.total_assets.tolist() == [100.0, 200.0]
+        assert frame.correction_disclosure_date.iloc[1] == pd.Timestamp("2020-02-01")
+        assert policy.used_memory_bytes == 0
+    assert all(_file_hashes(root) == old_hashes[name] for name, root in roots.items())

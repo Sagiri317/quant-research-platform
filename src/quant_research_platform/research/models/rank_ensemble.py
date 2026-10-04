@@ -21,6 +21,7 @@ from quant_research_platform.contracts.validation import (
 @dataclass(frozen=True)
 class RankEnsemblePredictor:
     columns: tuple[str, ...]
+    label_calibration: tuple[float, float]
     directions: tuple[float, ...] = ()
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
@@ -46,9 +47,17 @@ class EqualWeightRankEnsembleFactory:
             label_column=self.label_column,
             sample_weight=sample_weight,
         )
+        scores = (
+            _rank_frame_columns(frame, self.columns)
+            @ np.asarray(directions)
+            / len(self.columns)
+        )
         return RankEnsemblePredictor(
             columns=self.columns,
             directions=directions,
+            label_calibration=_label_calibration(
+                scores, frame[self.label_column], sample_weight
+            ),
         )
 
 
@@ -72,6 +81,7 @@ class ICWeightedRankEnsembleFactory:
 class ICWeightedRankEnsemble:
     columns: tuple[str, ...]
     weights: tuple[float, ...]
+    label_calibration: tuple[float, float]
 
     @classmethod
     def fit(
@@ -96,14 +106,57 @@ class ICWeightedRankEnsemble:
         normalizer = float(np.sum(np.abs(values)))
         if normalizer == 0.0:
             raise ValueError("all_ensemble_correlations_zero")
+        columns = tuple(defined_columns)
+        normalized = values / normalizer
+        scores = _rank_frame_columns(frame, columns) @ normalized
         return cls(
-            columns=tuple(defined_columns),
-            weights=tuple(float(value) for value in values / normalizer),
+            columns=columns,
+            weights=tuple(float(value) for value in normalized),
+            label_calibration=_label_calibration(
+                scores, frame[label_column], sample_weight
+            ),
         )
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         ranks = _rank_frame_columns(frame, self.columns)
         return ranks @ np.asarray(self.weights, dtype="float64")
+
+
+def rank_model_parameters(
+    predictor: RankEnsemblePredictor | ICWeightedRankEnsemble,
+) -> dict[str, list]:
+    parameters = {
+        "columns": list(predictor.columns),
+        "label_calibration": list(predictor.label_calibration),
+    }
+    key = "directions" if isinstance(predictor, RankEnsemblePredictor) else "weights"
+    parameters[key] = list(getattr(predictor, key))
+    return parameters
+
+
+def _label_calibration(scores, labels, sample_weight) -> tuple[float, float]:
+    from quant_research_platform.research.models.scaler import _weights
+
+    weights = _weights(sample_weight, len(scores))
+    labels = np.asarray(labels, dtype="float64")
+    scale = float(np.max(np.abs(labels)))
+    if scale == 0.0:
+        return 0.0, 0.0
+    scaled = labels / scale
+    score_mean = float(np.average(scores, weights=weights))
+    label_mean = float(np.average(scaled, weights=weights))
+    centered = scores - score_mean
+    variance = float(np.average(centered * centered, weights=weights))
+    slope = (
+        0.0
+        if variance == 0.0
+        else float(np.average(centered * (scaled - label_mean), weights=weights))
+        / variance
+    )
+    result = ((label_mean - slope * score_mean) * scale, slope * scale)
+    if not all(np.isfinite(value) for value in result):
+        raise ValueError("rank_label_calibration_nonfinite")
+    return result
 
 
 def _rank_frame_columns(frame: pd.DataFrame, columns: tuple[str, ...]) -> np.ndarray:

@@ -120,6 +120,7 @@ def build_a_share_report(
         },
         "risk": {
             "status": portfolio_statistics["status"],
+            "exposures": portfolio_statistics.get("exposures", {}),
             "results": [
                 row
                 for row in portfolio_statistics.get("performance", [])
@@ -137,6 +138,7 @@ def build_a_share_report(
         "capacity": {
             "status": portfolio_statistics["status"],
             "results": portfolio_statistics.get("capacity", []),
+            "detail": portfolio_statistics.get("capacity_detail", {}),
         },
         "attribution": {
             "status": portfolio_statistics["status"],

@@ -33,6 +33,9 @@ from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
 )
 from quant_research_platform.research.experiments import TrialRecorder
+from quant_research_platform.research.features.transforms import (
+    model_input_validity_columns,
+)
 from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.fitting import (
     iter_legal_training_chunks,
@@ -115,7 +118,6 @@ def build_model_selection_result(
     model_catalog: ModelCatalog,
     dataset_id: str,
     model_ids: tuple[str, ...],
-    tie_break_order: tuple[str, ...],
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy,
     protocol_manifest: Mapping[str, object],
@@ -130,7 +132,7 @@ def build_model_selection_result(
     select_models,
     on_observation,
 ) -> Iterable[FinalModelResult | OwnedValue[FinalModelResult]]:
-    if not model_ids or set(model_ids) != set(tie_break_order):
+    if not model_ids:
         raise ValueError("model_selection_model_ids_invalid")
     dataset_spec = dataset_catalog.get(dataset_id)
     if protocol_manifest.get("protocol_id") != "a_share_low_frequency":
@@ -178,7 +180,6 @@ def build_model_selection_result(
         model_catalog=model_catalog,
         dataset_id=dataset_id,
         model_ids=model_ids,
-        tie_break_order=tie_break_order,
         time_window=time_window,
         chunks=chunks,
         sessions=_dataset_sessions(
@@ -216,7 +217,6 @@ def _build_a_share_models(
     model_catalog,
     dataset_id,
     model_ids,
-    tie_break_order,
     time_window,
     chunks,
     sessions,
@@ -316,7 +316,7 @@ def _build_a_share_models(
                         target_column=label,
                     )
                     coverage.add(legal)
-                    del legal
+                    del legal, frame
         if not coverage.row_count:
             raise PortfolioTargetBlocked("a_share_validation_scoring_coverage_missing")
         for family_id in model_ids:
@@ -764,7 +764,6 @@ def build_crypto_fold_models(
     model_catalog,
     dataset_id,
     model_ids,
-    tie_break_order,
     time_window,
     resource_policy,
     protocol_manifest,
@@ -871,11 +870,13 @@ def build_crypto_fold_models(
                             availability_column=training_availability_columns(
                                 spec.label_column
                             )[0],
-                            feature_columns=spec.input_columns,
+                            feature_columns=model_input_validity_columns(
+                                spec.input_columns, spec.model_algorithm
+                            ),
                             target_column=spec.label_column,
                         )
                         validation_coverage.add(legal)
-                        del legal
+                        del legal, frame
             if validation_coverage.row_count == 0:
                 raise PortfolioTargetBlocked(
                     "crypto_model_validation_legal_rows_missing"

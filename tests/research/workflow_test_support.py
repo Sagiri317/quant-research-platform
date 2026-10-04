@@ -12,7 +12,6 @@ from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
 from quant_research_platform.contracts.experiments import (
-    ExperimentFold,
     training_availability_columns,
 )
 from quant_research_platform.contracts.json_codec import canonical_json_hash
@@ -141,15 +140,6 @@ def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
                 }
             )
     return pd.DataFrame(rows)
-
-
-def _fold(quarter: int, *, year: int = 2019) -> ExperimentFold:
-    start = pd.Timestamp(year=year, month=1 + (quarter - 1) * 3, day=1)
-    return ExperimentFold(
-        fold_id=f"{year}-q{quarter}",
-        train=TimeWindow("2014-01-01", (start - pd.Timedelta(days=1)).date()),
-        validation=TimeWindow(start.date(), (start + pd.offsets.QuarterEnd()).date()),
-    )
 
 
 def shared_model_protocol(specs, *, development_end="2019-06-30", configurations=None):
@@ -303,7 +293,6 @@ def shared_model_case(
         model_catalog=ModelCatalog(specs),
         dataset_id=dataset.data_id,
         model_ids=tuple(spec.model_id for spec in specs),
-        tie_break_order=tuple(spec.model_id for spec in specs),
         time_window=TimeWindow("2018-01-01", development_end),
         chunks=chunks,
         sessions=pd.DatetimeIndex(sorted(frame.timestamp.unique())),

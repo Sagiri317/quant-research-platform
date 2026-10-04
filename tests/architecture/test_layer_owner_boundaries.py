@@ -10,12 +10,17 @@ from tests.helpers.import_graph import (
     ImportEdge,
     _import_edges_from_trees,
     import_edges_under,
+    is_ids_contract_import,
 )
 
 SOURCE_ROOT = Path("src/quant_research_platform")
 PACKAGE_PREFIX = "quant_research_platform"
 LAYER_BOUNDARIES = {
     "contracts": (
+        "quant_research_platform.artifacts",
+        "quant_research_platform.catalog",
+        "quant_research_platform.profiles",
+        "quant_research_platform.research",
         "quant_research_platform.compute",
         "quant_research_platform.interfaces",
         "quant_research_platform.markets",
@@ -101,10 +106,13 @@ def test_owner_layer_import_boundaries_are_enforced(
     violations: list[str] = []
     for root, forbidden_prefixes in LAYER_BOUNDARIES.items():
         for edge in import_edges_under(import_edges, SOURCE_ROOT / root):
-            if root == "research" and edge.module in {
-                "quant_research_platform.markets.implementations.a_share.ids",
-                "quant_research_platform.markets.implementations.crypto.ids",
-            }:
+            if (
+                root == "research"
+                and edge.module.startswith(
+                    "quant_research_platform.markets.implementations."
+                )
+                and is_ids_contract_import(edge.module)
+            ):
                 continue
             if any(edge.module.startswith(prefix) for prefix in forbidden_prefixes):
                 violations.append(f"{edge.path.as_posix()}:{edge.lineno}:{edge.module}")
@@ -329,3 +337,32 @@ def test_relative_import_edges_match_python_package_resolution(
         any(edge.module.startswith(prefix) for prefix in LAYER_BOUNDARIES["contracts"])
         is forbidden
     )
+
+
+@pytest.mark.parametrize("owner", ("artifacts", "catalog", "profiles", "research"))
+def test_contract_direction_gate_rejects_each_high_level_owner(owner):
+    edges = _import_edges_from_trees(
+        {
+            SOURCE_ROOT / "contracts" / "probe.py": ast.parse(
+                f"from quant_research_platform.{owner} import value"
+            )
+        }
+    )
+    with pytest.raises(AssertionError):
+        test_owner_layer_import_boundaries_are_enforced(tuple(edges))
+
+
+@pytest.mark.parametrize(
+    "module",
+    (
+        "quant_research_platform.markets.implementations.crypto.ids.VALUE",
+        "quant_research_platform.markets.implementations.a_share.ids.VALUE",
+        "quant_research_platform.sources.binance.ids.VALUE",
+        "quant_research_platform.sources.choice.ids.VALUE",
+        "quant_research_platform.sources.csmar.ids.VALUE",
+    ),
+)
+def test_ids_contract_symbols_are_legal_but_owner_implementation_is_not(module):
+    assert is_ids_contract_import(module)
+    assert not is_ids_contract_import(module.replace(".ids.VALUE", ".replay.VALUE"))
+    assert not is_ids_contract_import(module + ".member")

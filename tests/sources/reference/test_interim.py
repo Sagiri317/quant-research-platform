@@ -550,7 +550,9 @@ def test_industry_reference_admission_precedes_decode(tmp_path, monkeypatch):
 
     monkeypatch.setattr(interim, "read_bounded_qrp_json", observed)
     with runtime_resource_policy_scope(explicit_cap_bytes=4096) as policy:
-        with pytest.raises(MemoryError, match="^runtime_memory_budget_exceeded$"):
+        with pytest.raises(
+            ValueError, match="^industry_metadata_exceeds_task_memory_budget$"
+        ):
             interim.materialize_interim_data(
                 layout=StorageLayout(tmp_path),
                 raw_root=root.parent,
@@ -622,3 +624,116 @@ def test_industry_reference_preserves_table_row_locator(tmp_path, document_suffi
     )
     assert frame["source_locator"].tolist() == ["table:2;row:7"]
     assert "source_page" not in frame
+
+
+def test_industry_snapshot_capture_admission_precedes_candidate_decode(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.contracts.json_codec import (
+        json_record_working_set_bytes,
+    )
+    from quant_research_platform.runtime import resources
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    observations = _industry_observations()
+    rows = [{**observations[0][-1][0], "code": f"{index:06d}"} for index in range(1024)]
+    observations = ((*observations[0][:-1], rows),)
+    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
+    metadata = json.loads(
+        filesystem_read_text(root / "metadata.json", encoding="utf-8")
+    )
+    candidate_name = metadata["snapshots"][0]["candidate_file"]
+    budget = (
+        2 * json_record_working_set_bytes((root / "metadata.json").stat().st_size)
+        + 1024 * 1024
+    )
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: budget)
+    original = interim.read_bounded_qrp_json
+    decoded = []
+
+    def observed(path, **kwargs):
+        decoded.append(path.name)
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(interim, "read_bounded_qrp_json", observed)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(
+            ValueError, match="industry_snapshot_exceeds_task_memory_budget"
+        ):
+            interim.materialize_interim_data(
+                layout=StorageLayout(tmp_path),
+                raw_root=root.parent,
+                data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
+                resource_policy=policy,
+            )
+        assert candidate_name not in decoded
+        assert policy.used_memory_bytes == 0
+
+
+def test_fee_csv_header_is_rejected_before_decode_and_preserves_previous_artifact(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.sources.reference import a_share_fees as owner
+
+    raw = _write_reference_root(tmp_path / "raw") / "reference"
+    layout = StorageLayout(project_root=tmp_path / "project")
+    result = interim.materialize_interim_data(layout=layout, raw_root=raw)
+    root = result.artifact_roots[A_SHARE_FEE_SCHEDULE_DATA_ID]
+    before = _file_bytes(root)
+    source = raw / "a_share_fee_schedule"
+    csv_path = source / A_SHARE_FEE_CSV_NAME
+    original = csv_path.read_bytes()
+    hostile = b"," * 150000 + original
+    csv_path.write_bytes(hostile)
+    sidecar = source / A_SHARE_FEE_SIDECAR_NAME
+    metadata = json.loads(sidecar.read_text())
+    metadata["file_sha256"] = hashlib.sha256(hostile).hexdigest()
+    metadata["file_bytes"] = len(hostile)
+    sidecar.write_text(json.dumps(metadata), encoding="utf-8")
+    decoded_lines = 0
+    native_reader = owner.csv.reader
+
+    def reader(lines, *args, **kwargs):
+        def observe():
+            nonlocal decoded_lines
+            for text in lines:
+                decoded_lines += 1
+                yield text
+
+        return native_reader(observe(), *args, **kwargs)
+
+    monkeypatch.setattr(owner.csv, "reader", reader)
+    with runtime_resource_policy_scope(explicit_cap_bytes=2 * 1024**2) as policy:
+        with pytest.raises(
+            ValueError, match="a_share_fee_source_record_exceeds_capacity"
+        ):
+            interim.materialize_interim_data(
+                layout=layout, raw_root=raw, resource_policy=policy
+            )
+        assert decoded_lines == 0
+        assert policy.used_memory_bytes == 0
+    assert _file_bytes(root) == before
+
+
+def test_fee_csv_bounded_decoder_preserves_quoted_multiline_fields(tmp_path):
+    raw = _write_reference_root(tmp_path / "raw") / "reference"
+    source = raw / "a_share_fee_schedule"
+    path = source / A_SHARE_FEE_CSV_NAME
+    with path.open(encoding="utf-8-sig", newline="") as handle:
+        rows = list(csv.DictReader(handle))
+    rows[0]["说明"] = 'synthetic, quoted "field"\nsecond line'
+    with path.open("w", encoding="utf-8-sig", newline="") as handle:
+        writer = csv.DictWriter(handle, fieldnames=FEE_CSV_COLUMNS)
+        writer.writeheader()
+        writer.writerows(rows)
+    sidecar = source / A_SHARE_FEE_SIDECAR_NAME
+    metadata = json.loads(sidecar.read_text())
+    payload = path.read_bytes()
+    metadata.update(
+        file_bytes=len(payload), file_sha256=hashlib.sha256(payload).hexdigest()
+    )
+    sidecar.write_text(json.dumps(metadata), encoding="utf-8")
+    with runtime_resource_policy_scope(explicit_cap_bytes=2 * 1024**2) as policy:
+        result = load_a_share_fee_source(reference_root=raw)
+        assert len(result.rows) == 5
+        assert policy.used_memory_bytes == 0

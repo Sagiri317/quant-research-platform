@@ -357,7 +357,9 @@ def read_prediction_output_bundle(
                 test_end = metadata.get("test_end")
                 effective_test_end = None
                 decoded_row_bytes, decode_fixed_bytes = (
-                    parquet_decoded_working_set_bounds(parquet, expected_columns)
+                    parquet_decoded_working_set_bounds(
+                        parquet, expected_columns, handle=_handle
+                    )
                 )
                 filter_row_bytes = 0 if time_window is None else decoded_row_bytes + 3
                 batch_row_bytes = 4 * decoded_row_bytes + filter_row_bytes

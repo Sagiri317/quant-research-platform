@@ -36,7 +36,7 @@ Windows 使用当前 PowerShell 原生命令；不得未经授权修改全局配
 
 运行最窄且真实覆盖行为的检查，并通过 python -m ruff format --check .。
 默认 pytest -q 为全量；用户明确调整范围时记录实际检查和豁免，不宣称未执行项通过。
-包验收遵循 docs/architecture.md 的干净 sdist→解包 wheel→隔离安装→空目录入口链。
+不执行安装包验证；研究行为通过源码环境中的必要测试验收。
 
 禁止 force push、rebase、amend、reset、restore、clean、stash；仅在明确授权时合并 main。
 清理仅针对已确认的任务资源；验证绝对路径与归属，不丢弃 WIP 或重写历史。

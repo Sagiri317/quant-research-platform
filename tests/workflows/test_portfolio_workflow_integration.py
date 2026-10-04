@@ -5,6 +5,7 @@ import shutil
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 import pytest
@@ -651,165 +652,202 @@ def test_factor_and_model_windows_keep_separate_formal_boundaries(
         )
 
 
-def test_holdout_evidence_uses_full_registered_window_and_actual_identities(tmp_path):
-    from quant_research_platform.contracts.json_codec import canonical_json_hash
-    from quant_research_platform.contracts.targets import (
-        ResearchRunRecord,
-        ResearchRunTargetResult,
-        unmeasured_operation_evidence,
-    )
-
-    layout = StorageLayout(tmp_path)
-    profile = _profile(_frames())
-    protocol = replace(
-        profile.protocol("pv_all"),
-        access_window="holdout",
-        frozen_development={
-            "run_id": "run_development",
-            "targets": {},
-            "alpha_sources": [
-                {
-                    "reference": {
-                        "target_id": "alpha_ledger",
-                        "instance_identity": "a" * 64,
-                    },
-                    "observed_at": "2023-12-29",
-                }
-            ],
-        },
-    )
-    window = {"start": "2024-01-01", "end": "2024-03-31", "access": "holdout"}
-    facts = (
-        ("pv_all", ProducerKind.DATASET, "b" * 64),
-        (protocol.model_selection_target_id, ProducerKind.MODEL, "c" * 64),
-        *(
-            (target, ProducerKind.PREDICTION, identity * 64)
-            for target, identity in zip(
-                protocol.prediction_target_ids, ("d", "1"), strict=True
-            )
-        ),
-    )
-    results = tuple(
-        ResearchRunTargetResult(
-            target_id=target,
-            producer_kind=kind,
-            status="BUILT",
-            instance_identity=identity,
-            schema_identity="e" * 64,
-            artifact_root=f"data/artifacts/a_share/{target}",
+def test_holdout_evidence_uses_full_registered_window_and_actual_identities(
+    tmp_path, monkeypatch
+):
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.holdout.retained", 0) as retained,
+    ):
+        from quant_research_platform.contracts.json_codec import canonical_json_hash
+        from quant_research_platform.contracts.targets import (
+            ResearchRunRecord,
+            ResearchRunTargetResult,
+            unmeasured_operation_evidence,
         )
-        for target, kind, identity in facts
-    )
-    record = ResearchRunRecord(
-        run_id="run_first",
-        profile_id=profile.profile_id,
-        scenario_id="pv_all",
-        protocol=protocol.manifest(),
-        protocol_identity=canonical_json_hash(protocol.manifest()),
-        research_window=window,
-        software_identity="f" * 64,
-        terminal_targets=protocol.prediction_target_ids,
-        target_results=results,
-        status="COMPLETE",
-        operation_evidence=unmeasured_operation_evidence("fixture"),
-        holdout_evidence={"qualification": "HOLDOUT_FIRST_EVIDENCE", "prior_runs": []},
-    )
-    research.write_research_run_record(layout.research_run_path(record.run_id), record)
-    forged = record.payload()
-    forged["holdout_evidence"]["qualification"] = "HOLDOUT_NOT_ACCESSED"
-    import json
 
-    forged_path = layout.research_run_path("run_forged_not_accessed")
-    forged["run_id"] = "run_forged_not_accessed"
-    filesystem_write_text(forged_path, json.dumps(forged), encoding="utf-8")
-    with pytest.raises(ValueError, match="research_run_record_invalid"):
-        read_research_run_record(forged_path)
-    filesystem_unlink(forged_path)
-    with pytest.raises(ValueError, match="research_run_holdout_evidence_invalid"):
-        replace(
-            record,
-            status="BLOCKED",
-            holdout_evidence=forged["holdout_evidence"],
-            target_results=(
+        layout = StorageLayout(tmp_path)
+        profile = _profile(_frames())
+        protocol = replace(
+            profile.protocol("pv_all"),
+            access_window="holdout",
+            frozen_development={
+                "run_id": "run_development",
+                "targets": {},
+                "alpha_sources": [
+                    {
+                        "reference": {
+                            "target_id": "alpha_ledger",
+                            "instance_identity": "a" * 64,
+                        },
+                        "observed_at": "2023-12-29",
+                    }
+                ],
+            },
+        )
+        window = {"start": "2024-01-01", "end": "2024-03-31", "access": "holdout"}
+        facts = (
+            ("pv_all", ProducerKind.DATASET, "b" * 64),
+            (protocol.model_selection_target_id, ProducerKind.MODEL, "c" * 64),
+            *(
+                (target, ProducerKind.PREDICTION, identity * 64)
+                for target, identity in zip(
+                    protocol.prediction_target_ids, ("d", "1"), strict=True
+                )
+            ),
+        )
+        results = tuple(
+            ResearchRunTargetResult(
+                target_id=target,
+                producer_kind=kind,
+                status="BUILT",
+                instance_identity=identity,
+                schema_identity="e" * 64,
+                artifact_root=f"data/artifacts/a_share/{target}",
+            )
+            for target, kind, identity in facts
+        )
+        record = ResearchRunRecord(
+            run_id="run_first",
+            profile_id=profile.profile_id,
+            scenario_id="pv_all",
+            protocol=protocol.manifest(),
+            protocol_identity=canonical_json_hash(protocol.manifest()),
+            research_window=window,
+            software_identity="f" * 64,
+            terminal_targets=protocol.prediction_target_ids,
+            target_results=results,
+            status="COMPLETE",
+            operation_evidence=unmeasured_operation_evidence("fixture"),
+            holdout_evidence={
+                "qualification": "HOLDOUT_FIRST_EVIDENCE",
+                "prior_runs": [],
+            },
+        )
+        research.write_research_run_record(
+            layout.research_run_path(record.run_id), record
+        )
+        forged = record.payload()
+        forged["holdout_evidence"]["qualification"] = "HOLDOUT_NOT_ACCESSED"
+        import json
+
+        forged_path = layout.research_run_path("run_forged_not_accessed")
+        forged["run_id"] = "run_forged_not_accessed"
+        filesystem_write_text(forged_path, json.dumps(forged), encoding="utf-8")
+        with pytest.raises(ValueError, match="research_run_record_invalid"):
+            read_research_run_record(forged_path)
+        filesystem_unlink(forged_path)
+        with pytest.raises(ValueError, match="research_run_holdout_evidence_invalid"):
+            replace(
+                record,
+                status="BLOCKED",
+                holdout_evidence=forged["holdout_evidence"],
+                target_results=(
+                    replace(
+                        results[0],
+                        status="BLOCKED",
+                        reason="dependency_blocked",
+                        instance_identity=None,
+                        schema_identity=None,
+                        artifact_root=None,
+                    ),
+                    *results[1:],
+                ),
+            )
+        arguments = dict(
+            layout=layout,
+            profile=profile,
+            protocol=protocol,
+            research_window=window,
+            software_identity="f" * 64,
+            target_results=results,
+            retained=retained,
+        )
+        emitted = []
+        read_paths = []
+        original_glob = research.filesystem_glob
+        original_read = research.read_research_run_record
+
+        def incremental_glob(*args):
+            for path in original_glob(*args):
+                emitted.append(path)
+                yield path
+                assert path in read_paths
+
+        def tracked_read(path, **kwargs):
+            assert "lease" in kwargs
+            read_paths.append(path)
+            return original_read(path, **kwargs)
+
+        monkeypatch.setattr(research, "filesystem_glob", incremental_glob)
+        monkeypatch.setattr(research, "read_research_run_record", tracked_read)
+        assert research._holdout_evidence(**arguments)["qualification"] == "REUSE"
+        assert emitted and len(emitted) == len(read_paths)
+        assert retained.reserved_bytes > 0
+        for status in ("FAILED", "BLOCKED"):
+            partial_results = (
+                *results[:-1],
                 replace(
-                    results[0],
-                    status="BLOCKED",
-                    reason="dependency_blocked",
+                    results[-1],
+                    status=status,
+                    reason="prediction_unavailable",
                     instance_identity=None,
                     schema_identity=None,
                     artifact_root=None,
                 ),
-                *results[1:],
-            ),
+            )
+            assert (
+                research._holdout_evidence(
+                    **{**arguments, "target_results": partial_results}
+                )["qualification"]
+                != "REUSE"
+            )
+            partial = replace(record, status=status, target_results=partial_results)
+            partial_layout = StorageLayout(tmp_path / status.lower())
+            research.write_research_run_record(
+                partial_layout.research_run_path(partial.run_id), partial
+            )
+            prior = research._holdout_evidence(
+                **{**arguments, "layout": partial_layout}
+            )
+            assert prior["qualification"] == "POST_HOLDOUT_CORRECTED"
+            assert [row["run_id"] for row in prior["prior_runs"]] == [partial.run_id]
+        other_window = {"start": "2025-01-01", "end": "2025-03-31", "access": "holdout"}
+        assert (
+            research._holdout_evidence(
+                **{**arguments, "research_window": other_window}
+            )["qualification"]
+            == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
         )
-    arguments = dict(
-        layout=layout,
-        profile=profile,
-        protocol=protocol,
-        research_window=window,
-        software_identity="f" * 64,
-        target_results=results,
-    )
-    assert research._holdout_evidence(**arguments)["qualification"] == "REUSE"
-    for status in ("FAILED", "BLOCKED"):
-        partial_results = (
+        new_protocol = replace(
+            protocol,
+            frozen_development={
+                **protocol.frozen_development,
+                "run_id": "run_other_development",
+            },
+        )
+        assert (
+            research._holdout_evidence(**{**arguments, "protocol": new_protocol})[
+                "qualification"
+            ]
+            == "REUSE"
+        )
+        changed_output = (
             *results[:-1],
-            replace(
-                results[-1],
-                status=status,
-                reason="prediction_unavailable",
-                instance_identity=None,
-                schema_identity=None,
-                artifact_root=None,
-            ),
+            replace(results[-1], instance_identity="3" * 64),
         )
         assert (
             research._holdout_evidence(
-                **{**arguments, "target_results": partial_results}
+                **{**arguments, "target_results": changed_output}
             )["qualification"]
-            != "REUSE"
+            == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
         )
-        partial = replace(record, status=status, target_results=partial_results)
-        partial_layout = StorageLayout(tmp_path / status.lower())
-        research.write_research_run_record(
-            partial_layout.research_run_path(partial.run_id), partial
+        assert (
+            research._holdout_evidence(
+                **{**arguments, "protocol": new_protocol, "software_identity": "2" * 64}
+            )["qualification"]
+            == "POST_HOLDOUT_CORRECTED"
         )
-        prior = research._holdout_evidence(**{**arguments, "layout": partial_layout})
-        assert prior["qualification"] == "POST_HOLDOUT_CORRECTED"
-        assert [row["run_id"] for row in prior["prior_runs"]] == [partial.run_id]
-    other_window = {"start": "2025-01-01", "end": "2025-03-31", "access": "holdout"}
-    assert (
-        research._holdout_evidence(**{**arguments, "research_window": other_window})[
-            "qualification"
-        ]
-        == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
-    )
-    new_protocol = replace(
-        protocol,
-        frozen_development={
-            **protocol.frozen_development,
-            "run_id": "run_other_development",
-        },
-    )
-    assert (
-        research._holdout_evidence(**{**arguments, "protocol": new_protocol})[
-            "qualification"
-        ]
-        == "REUSE"
-    )
-    changed_output = (*results[:-1], replace(results[-1], instance_identity="3" * 64))
-    assert (
-        research._holdout_evidence(**{**arguments, "target_results": changed_output})[
-            "qualification"
-        ]
-        == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
-    )
-    assert (
-        research._holdout_evidence(
-            **{**arguments, "protocol": new_protocol, "software_identity": "2" * 64}
-        )["qualification"]
-        == "POST_HOLDOUT_CORRECTED"
-    )
 
 
 def test_portfolio_statistics_target_identity_tracks_its_consumed_contract(
@@ -848,6 +886,14 @@ def test_portfolio_statistics_target_identity_tracks_its_consumed_contract(
 
 
 @compact_a_share_windows()
+@patch.multiple(
+    a_share,
+    DATA_END=pd.Timestamp("2019-10-31").date(),
+    FORMAL_DATASET_END=pd.Timestamp("2019-10-31").date(),
+    DEVELOPMENT_END=pd.Timestamp("2019-08-30").date(),
+    HOLDOUT_START=pd.Timestamp("2019-09-02").date(),
+    HOLDOUT_END=pd.Timestamp("2019-10-31").date(),
+)
 def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -874,8 +920,33 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
 
     import numpy as np
 
+    # Model backends have their own real ladder tests; the raw complete chain
+    # retains the 252-by-100 risk gate. This test keeps all ten live portfolios.
     configuration = compact_a_share_configuration()
-    dates = pd.bdate_range("2017-10-01", "2019-12-31")
+    for candidate in configuration["portfolios"]:
+        if candidate["benchmark_id"] == "csi1000":
+            candidate["rebalance_schedule"] = "monthly-last-trading-day"
+    configuration["models"] = [
+        model
+        for model in configuration["models"]
+        if model["model_algorithm"]
+        in {"equal_weight_rank_ensemble", "ridge_regression"}
+    ]
+    model_count = len(configuration["models"])
+    assert model_count == 2
+    assert len(configuration["portfolios"]) == 5
+    history = pd.bdate_range("2017-10-02", periods=5)
+    for quarter in pd.period_range("2018Q1", "2018Q4", freq="Q"):
+        history = history.append(pd.bdate_range(quarter.start_time, periods=10))
+    development_dates = pd.bdate_range("2019-01-01", "2019-08-30")
+    holdout_dates = pd.bdate_range("2019-09-02", "2019-10-31")
+    dates = history.append(development_dates).append(holdout_dates)
+    assert dates.is_unique
+    assert len(holdout_dates) == 44
+    assert set(holdout_dates.to_period("Q")) == {
+        pd.Period("2019Q3"),
+        pd.Period("2019Q4"),
+    }
     frames = _frames(dates)
     # Avoid a perfectly interpolated two-point target with zero Huber residual scale.
     dataset = frames["pv_all"]
@@ -1013,7 +1084,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
             dataset_id="pv_all",
             columns=("timestamp",),
         ):
-            assert chunk.timestamp.max() <= pd.Timestamp("2019-06-30")
+            assert chunk.timestamp.max() <= pd.Timestamp("2019-08-30")
         with pytest.raises(
             PermissionError, match="research_dataset_access_window_forbidden"
         ):
@@ -1021,7 +1092,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 dataset_layout,
                 market_id="a_share",
                 dataset_id="pv_all",
-                time_window=TimeWindow("2019-07-01", "2019-07-02"),
+                time_window=TimeWindow("2019-09-02", "2019-09-03"),
             )
         assert policy.used_memory_bytes == 0
     source_model = next(
@@ -1150,7 +1221,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     previous = len(captured)
     holdout = research.research_run(**request)
     assert holdout["status"] == "COMPLETE", holdout
-    assert len(loaded_sources) == 2 * len(A_SHARE_MODEL_ALGORITHMS)
+    assert len(loaded_sources) == 2 * model_count
     assert len(set(loaded_sources)) == len(loaded_sources)
     assert_one_capture(previous)
     record = read_research_run_record(layout.research_run_path(holdout["run_id"]))
@@ -1210,9 +1281,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
             assert {item["quarter_id"] for item in metadata["quarterly_models"]} == {
                 str(period) for period in pd.period_range("2019Q3", "2019Q4", freq="Q")
             }
-            assert len(metadata["quarterly_models"]) == 2 * len(
-                A_SHARE_MODEL_ALGORITHMS
-            )
+            assert len(metadata["quarterly_models"]) == 2 * model_count
             assert all(
                 item["prediction_source"] == "final"
                 for item in metadata["quarterly_models"]
@@ -1231,8 +1300,8 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
             layout,
             profile.protocol("pv_all"),
             development["run_id"],
-            "2019-07-01",
-            "2019-12-31",
+            "2019-09-02",
+            "2019-10-31",
             artifact_lease=artifact_lease,
         )
         assert blocker is None
@@ -1324,7 +1393,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 )
                 calibration, _ = portfolios.frozen_alpha_calibration(
                     original.final_alpha_calibration,
-                    cutoff=pd.Timestamp("2019-06-30"),
+                    cutoff=pd.Timestamp("2019-08-30"),
                     selection_group=candidate.selection_group,
                 )
                 assert (
@@ -1332,11 +1401,26 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                     and calibration.coverage >= 0.8
                 )
                 assert values == {calibration.slope}
-                sources[candidate.selection_group].append(values)
+                sources[candidate.selection_group].append(
+                    (
+                        candidate.rebalance_schedule,
+                        calibration.valid_rebalance_dates,
+                        values,
+                    )
+                )
         artifact = original = calibration = None
     for values in sources.values():
         assert len(values) == 2
-        assert values[0] == values[1]
+        by_schedule = {schedule: (count, slopes) for schedule, count, slopes in values}
+        assert set(by_schedule) == {
+            "weekly-last-trading-day",
+            "monthly-last-trading-day",
+        }
+        assert (
+            by_schedule["weekly-last-trading-day"][0]
+            > by_schedule["monthly-last-trading-day"][0]
+            >= 6
+        )
     report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
     assert (
         report["report"]["sections"]["development vs holdout"]["evidence"][
@@ -1364,7 +1448,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     assert new_development["status"] == "COMPLETE", new_development
     assert_one_capture(previous)
     assert new_development["run_id"] != development["run_id"]
-    future = frames["pv_all"].timestamp.ge("2019-07-01")
+    future = frames["pv_all"].timestamp.ge("2019-09-02")
     frames["pv_all"].loc[
         future, ["label", "forward_return_1d", "forward_return_20d"]
     ] *= -100.0
@@ -1437,19 +1521,51 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
 
 
 @compact_a_share_windows()
+@patch.multiple(a_share, DEVELOPMENT_END=pd.Timestamp("2019-03-01").date())
 def test_both_groups_build_and_reuse_one_real_persisted_chain(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import numpy as np
 
+    # This integration proves persisted seams; backend and portfolio matrices
+    # are covered by model, execution and five-ledger statistical regressions.
     configuration = compact_a_share_configuration()
-    frames = _frames(pd.bdate_range("2017-10-01", "2019-06-30"))
-    # Avoid a perfectly interpolated two-point target with zero Huber residual scale.
+    configuration["models"] = [
+        model
+        for model in configuration["models"]
+        if model["model_algorithm"]
+        in {"equal_weight_rank_ensemble", "ridge_regression"}
+    ]
+    configuration["portfolios"] = [
+        candidate
+        for candidate in configuration["portfolios"]
+        if candidate["candidate_id"]
+        in {
+            "ew_rank_top20_equal_weight",
+            "champion_top20_equal_weight",
+            "champion_csi500_enhanced",
+        }
+    ]
+    # Every required walk-forward quarter remains represented. The formal
+    # quarter has 44 sessions and 23 mature twenty-day labels, including the
+    # existing zero-mature and short-HAC nested windows.
+    history = pd.bdate_range("2017-10-02", periods=5)
+    for quarter in pd.period_range("2018Q1", "2018Q4", freq="Q"):
+        history = history.append(pd.bdate_range(quarter.start_time, periods=10))
+    dates = history.append(pd.bdate_range("2019-01-01", "2019-03-01"))
+    frames = _frames(dates)
     dataset = frames["pv_all"]
     day = (dataset.timestamp - pd.Timestamp("2017-10-01")).dt.days
     dataset["label"] += 0.002 * np.sin(day * 0.173 + dataset.asset_id.eq("b") * 0.71)
     profile = _profile(frames)
+    model_ids = {model["model_id"] for model in configuration["models"]}
+    profile = replace(
+        profile,
+        models=ModelCatalog(
+            tuple(spec for spec in profile.models.list() if spec.model_id in model_ids)
+        ),
+    )
     layout = StorageLayout(project_root=tmp_path)
     for spec in profile.interim.list():
         marker = (
@@ -1462,7 +1578,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         filesystem_write_bytes(marker, spec.data_id.encode("utf-8"))
     request = {
         "start": "2019-01-01",
-        "end": "2019-06-30",
+        "end": "2019-03-01",
         "access": "development",
     }
     from functools import partial
@@ -1551,7 +1667,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         if results[target_id]["status"] not in {"BUILT", "REUSED"}
     }
     assert not failed, failed
-    assert len(portfolio_ids) == 10
+    assert len(portfolio_ids) == 6
     statistics_identity = results[statistics_id]["instance_identity"]
     assert statistics_identity is not None
     assert results[prediction_id]["status"] == "BUILT"
@@ -1598,6 +1714,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
                 ),
                 "timestamp",
             ].nunique()
+            assert mature_dates == 23
             assert table.observation_count.eq(mature_dates).all()
         statistics_artifact = None
     from quant_research_platform.artifacts.outputs.bundle_validation import (
@@ -1635,6 +1752,34 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         layout.semantic_artifact_root("a_share", protocol.model_selection_target_id),
         results[protocol.model_selection_target_id]["instance_identity"],
     )
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("tests.model.evidence", 0) as artifact_lease,
+    ):
+        model = research.read_quarterly_model_artifact(
+            model_root, trial_layout=layout, lease=artifact_lease
+        )
+        global_decision = model.selections["global"]["final"]
+        quarterly_decision = model.selections["quarterly"]["2019Q1"]
+        assert global_decision["validation_start"] == "2019-01-01"
+        assert global_decision["validation_end"] == "2019-03-01"
+        assert pd.Timestamp(quarterly_decision["validation_end"]) < pd.Timestamp(
+            "2019-01-01"
+        )
+        for decision in (global_decision, quarterly_decision):
+            assert set(decision["candidate_family_ids"]) == model_ids
+            assert decision["common_validation_coverage"]["row_count"] > 0
+            assert len(decision["families"]) == 2
+            assert all(family["trial_metrics"] for family in decision["families"])
+        assert len(model.candidate_models) == 10
+        assert len(model.final_models) == 4
+        for entry in (*model.candidate_models, *model.final_models):
+            assert entry["model_metadata"]["rows_after_input_label_dropna"] > 0
+        for entry in model.candidate_models:
+            assert pd.Timestamp(entry["model_metadata"]["train_end"]) < pd.Timestamp(
+                entry["validation_window"]["start"]
+            )
+        model = global_decision = quarterly_decision = None
     data_layout = layout.with_target_roots(
         {
             "pv_all": layout.instance_root(
@@ -2019,7 +2164,17 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         item["target_id"]: item["instance_identity"]
         for item in reused["target_results"]
     }
+    from quant_research_platform.artifacts import portfolio_ledger
+
+    scanned = []
+    original_batches = portfolio_ledger._iter_batches
+
+    def count_batches(root, *args):
+        scanned.append(root)
+        yield from original_batches(root, *args)
+
     with monkeypatch.context() as report_only:
+        report_only.setattr(portfolio_ledger, "_iter_batches", count_batches)
         report_only.setattr(
             research,
             "_plan_targets",
@@ -2044,6 +2199,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
             layout=layout,
             run_id=result["run_id"],
         )
+    assert scanned and len(scanned) == len(set(scanned))
     report_identity = report_result["target_result"]["instance_identity"]
     assert report_result["source_run_status"] == "COMPLETE"
     assert report_result["status"] == "BLOCKED"
@@ -2117,7 +2273,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         )
         assert partial_report["report_status"] == "BLOCKED"
         retained = partial_report["sections"]["portfolio"]["results"]
-        assert len(retained) == 6
+        assert len(retained) == 4
         assert all(
             row["ledger_identity"] and row["economics"]["nav"] > 0 for row in retained
         )
@@ -2143,7 +2299,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
             for row in capacity["results"]
         } == expected_capacity_keys
         assert len(capacity["results"]) == len(expected_capacity_keys)
-        assert len(undefined_capacity) == 4 * 4 * 3
+        assert len(undefined_capacity) == 2 * 4 * 3
         assert {row["candidate_id"] for row in undefined_capacity} == {
             candidate.candidate_id
             for candidate in protocol.portfolio_candidates()
@@ -2202,7 +2358,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         scenario_id="pv_all",
         research_window={
             "start": "2019-01-03",
-            "end": "2019-06-30",
+            "end": "2019-03-01",
             "access": "development",
         },
     )
@@ -2228,3 +2384,83 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         first[prediction_id]["requested_identity"]
         == second[prediction_id]["requested_identity"]
     )
+
+
+def test_holdout_prior_growth_is_admitted_before_append(tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from quant_research_platform.contracts.json_codec import (
+        canonical_json_hash,
+        json_record_working_set_bytes,
+    )
+    from quant_research_platform.contracts.targets import (
+        ResearchRunRecord,
+        ResearchRunTargetResult,
+        unmeasured_operation_evidence,
+    )
+    from quant_research_platform.runtime.resources import MemoryLease
+    from tests.helpers.runtime_resources import capture_test_policy
+
+    protocol_payload = {"scenario_id": "scenario", "access_window": "holdout"}
+    record = ResearchRunRecord(
+        run_id="run_prior",
+        profile_id="profile",
+        scenario_id="scenario",
+        protocol=protocol_payload,
+        protocol_identity=canonical_json_hash(protocol_payload),
+        research_window={
+            "start": "2024-01-01",
+            "end": "2024-03-31",
+            "access": "holdout",
+        },
+        software_identity="f" * 64,
+        terminal_targets=("target",),
+        target_results=(
+            ResearchRunTargetResult(
+                target_id="target",
+                producer_kind=ProducerKind.MODEL,
+                status="FAILED",
+                reason="synthetic_failure",
+            ),
+        ),
+        status="FAILED",
+        operation_evidence=unmeasured_operation_evidence("fixture"),
+        failure_reason="synthetic_failure",
+        holdout_evidence={"qualification": "HOLDOUT_FIRST_EVIDENCE", "prior_runs": []},
+    )
+    layout = StorageLayout(tmp_path)
+    path = layout.research_run_path(record.run_id)
+    research.write_research_run_record(path, record)
+    from quant_research_platform.storage.identity import filesystem_stat
+
+    required = json_record_working_set_bytes(filesystem_stat(path).st_size)
+    policy = capture_test_policy(
+        available_memory_bytes=16 * 1024**2, explicit_cap_bytes=required + 512
+    )
+    grow = MemoryLease.grow
+    growths = []
+
+    def observed(lease, size):
+        if lease.owner == "test.prior.retained":
+            growths.append(size)
+        return grow(lease, size)
+
+    monkeypatch.setattr(MemoryLease, "grow", observed)
+    protocol = SimpleNamespace(access_window="holdout", scenario_id="scenario")
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("test.prior.retained", 0) as retained:
+            with pytest.raises(
+                ValueError, match="research_run_evidence_exceeds_memory_capacity"
+            ):
+                research._holdout_evidence(
+                    layout=layout,
+                    profile=SimpleNamespace(profile_id="profile"),
+                    protocol=protocol,
+                    research_window=record.research_window,
+                    software_identity=record.software_identity,
+                    target_results=(),
+                    retained=retained,
+                )
+            assert not growths
+            assert policy.used_memory_bytes == 0
+        assert policy.used_memory_bytes == 0

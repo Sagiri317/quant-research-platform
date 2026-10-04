@@ -45,27 +45,7 @@ from quant_research_platform.storage.identity import (
     filesystem_write_text,
     open_filesystem_file,
 )
-
-
-def execute_continuous_target(*args, **kwargs):
-    def totals(assets, amounts, adv):
-        return np.asarray(
-            [
-                kwargs["cost_for_trade"](
-                    kwargs["execution_date"],
-                    asset,
-                    "buy",
-                    float(amount),
-                    float(volume),
-                    kwargs["assumptions"],
-                ).total_cost
-                if amount > 0
-                else 0.0
-                for asset, amount, volume in zip(assets, amounts, adv, strict=True)
-            ]
-        )
-
-    return _execute_continuous_target(*args, cost_totals_for_buys=totals, **kwargs)
+from tests.helpers.portfolio_ledger import execute_continuous_target
 
 
 def _cash_constrained_inputs(

@@ -325,9 +325,6 @@ class _BoundedCsvRecords:
             self._record_lease: MemoryLease | None = None
             self._decoded_fields: list[str] | None = None
             self._parser_lease: MemoryLease | None = None
-            read_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
-            validation_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
-            field_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
             self._source_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
             self._owner_read_result_span_bytes = io.DEFAULT_BUFFER_SIZE
             self._spool_buffer_span_bytes = io.DEFAULT_BUFFER_SIZE
@@ -345,11 +342,6 @@ class _BoundedCsvRecords:
                 + self._validation_input_copy_span_bytes
                 + self._validation_decoded_output_span_bytes
                 + self._field_buffer_span_bytes
-            )
-            self._fast_control_span_bytes = (
-                read_buffer_span_bytes
-                + validation_buffer_span_bytes
-                + field_buffer_span_bytes
             )
             self._buffer = b""
             self._buffer_position = 0

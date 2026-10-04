@@ -6,12 +6,14 @@ import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from datetime import date, datetime, time
+from functools import cached_property
 from math import isfinite
 from types import MappingProxyType
 from typing import Literal
 
 import pandas as pd
 
+from quant_research_platform.contracts.business_manifest import _freeze_json_value
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.json_codec import (
     bounded_qrp_json_object_snapshot,
@@ -220,7 +222,7 @@ class ExperimentPlan:
             or parameters[self.candidate_ids[0]].get("random_seed") != self.random_seed
         ):
             raise ValueError("experiment_refit_plan_invalid")
-        object.__setattr__(self, "candidate_parameters", _freeze_json(parameters))
+        object.__setattr__(self, "candidate_parameters", _freeze_json_value(parameters))
         object.__setattr__(
             self, "backend_versions", _freeze_string_mapping(self.backend_versions)
         )
@@ -242,7 +244,7 @@ class ExperimentPlan:
             else ("refit",)
         )
 
-    @property
+    @cached_property
     def protocol_hash(self) -> str:
         return canonical_json_hash(self.protocol_payload())
 
@@ -626,7 +628,7 @@ class TrialRecord:
             snapshot = bounded_qrp_json_object_snapshot(
                 _thaw_json(value), max_bytes=_MAX_TRIAL_RECORD_BYTES
             )
-            object.__setattr__(self, field_name, _freeze_json(snapshot))
+            object.__setattr__(self, field_name, _freeze_json_value(snapshot))
         if evidence_json_value_unsafe_reason(self.payload()) is not None:
             raise ValueError("trial_evidence_unsafe")
 
@@ -768,16 +770,6 @@ def validate_trial_ledger_reference(value: object) -> dict[str, str]:
         if type(value[key]) is not str or _PROTOCOL_HASH.fullmatch(value[key]) is None:
             raise ValueError("trial_ledger_reference_invalid")
     return dict(value)
-
-
-def _freeze_json(value: object) -> object:
-    if type(value) is dict:
-        return MappingProxyType(
-            {key: _freeze_json(item) for key, item in value.items()}
-        )
-    if type(value) is list:
-        return tuple(_freeze_json(item) for item in value)
-    return value
 
 
 def _thaw_json(value: object) -> object:

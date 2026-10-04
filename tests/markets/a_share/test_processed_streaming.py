@@ -23,6 +23,8 @@ from quant_research_platform.research.portfolios import (
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 from quant_research_platform.runtime.resources import (
     MemoryLease,
+    OwnedValue,
+    RuntimeResourcePolicy,
     pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
@@ -242,7 +244,7 @@ def test_financial_event_builder_is_admitted_before_expansion(monkeypatch, bound
     source = _synthetic_financial_frames()
     dates = pd.bdate_range("2019-01-01", "2022-01-01")
     source["trading_calendar"] = pd.DataFrame(
-        {"calendar_date": dates, "is_trading_day": True}
+        {"calendar_date": dates, "source_market_type": 4, "is_trading_day": True}
     )
     event_rows = sum(
         len(source[name]) * len(columns)
@@ -1067,3 +1069,375 @@ def test_processed_narrow_output_uses_existing_panel_history(
     )
     assert input_sessions and max(input_sessions) <= lookback + len(core)
     assert max(input_sessions) < len(dates)
+
+
+@pytest.mark.parametrize(
+    "boundary", ("captured", "explicit", "soft", "ample", "explicit_soft")
+)
+def test_first_processed_block_admits_full_workspace_before_lease_and_compute(
+    tmp_path, monkeypatch, boundary
+):
+    bound = 16 * 1024**2
+    retained_bytes = 4 * 1024**2
+    total = retained_bytes + bound
+    available = (
+        total - 1
+        if boundary == "captured"
+        else total * 4
+        if boundary in {"explicit", "ample"}
+        else total * 5 // 4
+    )
+    cap = (
+        total - 1
+        if boundary == "explicit"
+        else total
+        if boundary == "explicit_soft"
+        else None
+    )
+    policy = capture_test_policy(
+        available_memory_bytes=available, explicit_cap_bytes=cap
+    )
+    profile = research_profile()
+    spec = replace(
+        profile.processed.get("expectations_factors"),
+        source_input_data_ids=(),
+        processed_input_data_ids=(),
+    )
+    timestamp = pd.Timestamp("2020-01-02")
+    expected = pd.DataFrame(
+        {
+            "market_id": ["a_share"],
+            "asset_id": ["000001"],
+            "timestamp": [timestamp],
+            "forward_earnings_yield_fy1": [0.1],
+            "forward_earnings_yield_fy2": [0.2],
+            "forecast_dispersion_fy1": [0.03],
+            "log_analyst_coverage": [np.log(3.0)],
+        }
+    )
+    expected["timestamp"] = expected["timestamp"].dt.as_unit("ns")
+    computed = []
+    leases = []
+    transfers = []
+    create_lease = RuntimeResourcePolicy.lease
+    transfer = MemoryLease.transfer
+
+    def observed_lease(self, owner, reserved_bytes):
+        lease = create_lease(self, owner, reserved_bytes)
+        if owner == "a_share.processed.output":
+            leases.append(lease)
+        return lease
+
+    def observed_transfer(self, owner):
+        if any(self is lease for lease in leases):
+            transfers.append((self, owner))
+        return transfer(self, owner)
+
+    def blocks(*args, **kwargs):
+        # Isolate the existing bound-first seam; admission owns the first lease.
+        lease = yield bound
+        computed.append(True)
+        assert lease.reserved_bytes == bound
+        assert policy.used_memory_bytes == total
+        output = expected.copy()
+        lease.shrink_to(pandas_frame_payload_bytes(output))
+        yield OwnedValue(output, lease)
+
+    monkeypatch.setattr(RuntimeResourcePolicy, "lease", observed_lease)
+    monkeypatch.setattr(MemoryLease, "transfer", observed_transfer)
+    monkeypatch.setattr(producer, "_processed_frames", blocks)
+    layout = StorageLayout(tmp_path)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+
+    def publish():
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(timestamp, timestamp),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+            resource_policy=policy,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                resource_policy=policy,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+
+    with runtime_resource_policy_scope(policy):
+        with policy.lease("test.processed.retained_input", retained_bytes):
+            if boundary in {"captured", "explicit"}:
+                assert policy.working_set_headroom_bytes == bound - 1
+                with pytest.raises(
+                    ValueError,
+                    match="a_share_processed_output_exceeds_task_memory_budget",
+                ):
+                    publish()
+                assert computed == leases == transfers == []
+                assert not root.exists()
+            else:
+                if boundary in {"soft", "explicit_soft"}:
+                    assert total > policy.memory_budget_bytes
+                publish()
+                actual = read_dataset(root, resource_policy=policy)
+                pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+                assert computed == [True]
+                assert len(leases) == 1
+                assert any(
+                    lease is leases[0] and owner == "storage.dataset.producer"
+                    for lease, owner in transfers
+                )
+                assert not leases[0].active
+            assert policy.used_memory_bytes == retained_bytes
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("fail_tail", (False, True))
+def test_first_processed_value_released_before_following_block(
+    tmp_path, monkeypatch, fail_tail
+):
+    profile = research_profile()
+    spec = replace(
+        profile.processed.get("expectations_factors"),
+        source_input_data_ids=(),
+        processed_input_data_ids=(),
+    )
+    dates = pd.date_range("2020-01-02", periods=2).as_unit("ns")
+    expected = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 2,
+            "asset_id": ["000001"] * 2,
+            "timestamp": dates,
+            "forward_earnings_yield_fy1": [0.1, 0.2],
+            "forward_earnings_yield_fy2": [0.2, 0.3],
+            "forecast_dispersion_fy1": [0.03, 0.04],
+            "log_analyst_coverage": [np.log(3.0)] * 2,
+        }
+    )
+    references = []
+    leases = []
+    primary = KeyboardInterrupt("processed_tail_interrupted")
+
+    def blocks(*args, **kwargs):
+        for index in range(2):
+            if references:
+                assert references[0]() is None
+                assert not leases[0].active
+                if fail_tail:
+                    raise primary
+            lease = yield 1024**2
+            output = expected.iloc[index : index + 1].reset_index(drop=True)
+            references.append(weakref.ref(output))
+            leases.append(lease)
+            lease.shrink_to(pandas_frame_payload_bytes(output))
+            yield OwnedValue(output, lease)
+            del output
+
+    monkeypatch.setattr(producer, "_processed_frames", blocks)
+    layout = StorageLayout(tmp_path)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
+
+        def publish():
+            with producer.produce_a_share_processed_data(
+                spec,
+                layout=layout,
+                time_window=TimeWindow(dates[0], dates[-1]),
+                processed_catalog=profile.processed,
+                source_catalog=profile.interim,
+                resource_policy=policy,
+            ) as (frames, metadata, verify):
+                write_dataset(
+                    root,
+                    frames,
+                    spec=spec,
+                    resource_policy=policy,
+                    instance_metadata=metadata,
+                    staged_validator=verify,
+                )
+
+        if fail_tail:
+            with pytest.raises(KeyboardInterrupt) as caught:
+                publish()
+            assert caught.value is primary
+            assert not root.exists()
+        else:
+            publish()
+            actual = read_dataset(root, resource_policy=policy)
+            pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+        assert references and all(reference() is None for reference in references)
+        assert all(not lease.active for lease in leases)
+        assert policy.used_memory_bytes == 0
+
+
+def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_path):
+    from hashlib import sha256
+
+    from quant_research_platform.sources.choice import interim as choice_interim
+    from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
+    from quant_research_platform.sources.choice.raw_exports import choice_session
+    from quant_research_platform.sources.csmar import interim as csmar_interim
+    from quant_research_platform.storage.identity import (
+        filesystem_mkdir,
+        filesystem_read_bytes,
+        filesystem_walk,
+        filesystem_write_text,
+    )
+    from tests.helpers.choice_raw import SDK, response, write_css
+
+    dates = pd.DatetimeIndex(["2019-01-30", "2019-01-31", "2019-02-01"])
+    codes = ("000001.SZ", "000002.SZ", "000003.SZ")
+    fields = tuple(field for columns in FINANCIAL_FIELDS.values() for field in columns)
+    profile = research_profile()
+    cases = {
+        "ordered": ((0, 1), (2,)),
+        "single": ((2, 0, 1),),
+        "reversed": ((2,), (0, 1)),
+    }
+    calendars, panels, outputs = [], [], []
+    calendar_hashes, panel_hashes = [], []
+    with runtime_resource_policy_scope(explicit_cap_bytes=256 * 1024**2) as policy:
+        for name, groups in cases.items():
+            layout = StorageLayout(tmp_path / name)
+            raw = layout.raw_source_root("csmar")
+            filesystem_mkdir(raw, parents=True)
+            originals = {}
+            for number, positions in enumerate(groups, start=1):
+                path = raw / f"TRDNEW_Cale{number}.csv"
+                filesystem_write_text(
+                    path,
+                    "Markettype,Clddt,Daywk,State\n"
+                    + "".join(
+                        f"4,{dates[index].date()},{index + 3},O\n"
+                        for index in positions
+                    ),
+                    encoding="utf-8",
+                )
+                originals[path] = filesystem_read_bytes(path)
+            imported = csmar_interim.materialize_interim_data(
+                layout=layout,
+                data_ids=("trading_calendar",),
+                resource_policy=policy,
+            )
+            calendar = read_dataset(
+                imported.artifact_roots["trading_calendar"], resource_policy=policy
+            )
+            assert len(calendar) == 3
+            logical = calendar.sort_values(
+                ["calendar_date", "source_market_type"]
+            ).reset_index(drop=True)
+            calendars.append(logical)
+            calendar_hashes.append(
+                sha256(
+                    pd.util.hash_pandas_object(logical, index=False)
+                    .to_numpy()
+                    .tobytes()
+                ).hexdigest()
+            )
+            assert calendar.calendar_date.is_monotonic_increasing == (
+                name != "reversed"
+            )
+
+            source = _synthetic_interim_frames(dates)
+            source["market_bars_1d"]["market_type"] = 4
+            panel_spec = profile.processed.get("market_panel_1d")
+            for data_id in panel_spec.source_input_data_ids:
+                if data_id == "trading_calendar":
+                    continue
+                source_spec = profile.interim.get(data_id)
+                write_dataset(
+                    layout.interim_data_root(source_spec.source_id, data_id),
+                    source[data_id],
+                    spec=source_spec,
+                    resource_policy=policy,
+                    borrowed_input=True,
+                )
+
+            with choice_session(SDK(response())) as session:
+                write_css(
+                    session,
+                    layout,
+                    period="2018-12-31",
+                    end_date="2019-01-29",
+                    indicators=(
+                        "STMTACTDATE",
+                        "ACTUALISSUINGDATE",
+                        "ITEMVALUECHANGEDATE",
+                        *fields,
+                    ),
+                    data={
+                        code: ["2019-01-29", None, None, *([100.0] * len(fields))]
+                        for code in codes
+                    },
+                    branch="1",
+                )
+            choice_interim.materialize_interim_data(
+                layout=layout,
+                end_date="2019-02-01",
+                resource_policy=policy,
+            )
+
+            for data_id in ("market_panel_1d", "fundamental_pit"):
+                spec = profile.processed.get(data_id)
+                root = layout.processed_data_root(spec.market_id, spec.kind, data_id)
+                with producer.produce_a_share_processed_data(
+                    spec,
+                    layout=layout,
+                    time_window=TimeWindow(dates[0], dates[-1]),
+                    processed_catalog=profile.processed,
+                    source_catalog=profile.interim,
+                    resource_policy=policy,
+                ) as (frames, metadata, verify):
+                    write_dataset(
+                        root,
+                        frames,
+                        spec=spec,
+                        resource_policy=policy,
+                        instance_metadata=metadata,
+                        staged_validator=verify,
+                    )
+                saved = read_dataset(root, resource_policy=policy)
+                assert tuple(saved.columns) == spec.required_columns
+                assert (
+                    len(saved) == 9
+                    and not saved.duplicated(list(spec.primary_key)).any()
+                )
+                if data_id == "market_panel_1d":
+                    panels.append(saved)
+                    panel_hashes.append(
+                        tuple(
+                            (
+                                str((parent / file).relative_to(root)),
+                                sha256(
+                                    filesystem_read_bytes(parent / file)
+                                ).hexdigest(),
+                            )
+                            for parent, _directories, files in filesystem_walk(
+                                root / "data"
+                            )
+                            for file in sorted(files)
+                            if file.endswith(".parquet")
+                        )
+                    )
+                else:
+                    assert saved.has_legal_fundamental_pit.all()
+                    for columns in FINANCIAL_FIELDS.values():
+                        for column in columns.values():
+                            assert saved[column].eq(100.0).all()
+                    outputs.append(saved)
+            assert all(
+                filesystem_read_bytes(path) == payload
+                for path, payload in originals.items()
+            )
+            assert policy.used_memory_bytes == 0
+        for frames in (calendars, panels, outputs):
+            assert len(frames) == 3
+            for frame in frames[1:]:
+                pd.testing.assert_frame_equal(frame, frames[0], check_exact=True)
+        assert all(panel_hashes)
+        assert len(set(calendar_hashes)) == len(set(panel_hashes)) == 1
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"

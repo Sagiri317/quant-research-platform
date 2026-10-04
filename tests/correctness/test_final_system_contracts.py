@@ -692,3 +692,32 @@ def test_prepared_costs_are_bit_exact_for_201_random_cases():
                 }
             )
         )
+
+
+@pytest.mark.parametrize("count", [32, 1080])
+def test_decay_normalizes_before_float64_underflow(count):
+    from quant_research_platform.research.models.scaler import ModelMatrixScaler
+
+    timestamps = pd.date_range("2020-01-01", periods=count)
+    actual = equal_timestamp_sample_weights(timestamps, TrainingWeighting(half_life=1))
+    normalizer = 2 - Fraction(1, 2 ** (count - 1))
+    expected = np.array(
+        [
+            float(count * Fraction(1, 2**age) / normalizer)
+            for age in range(count - 1, -1, -1)
+        ]
+    )
+    assert (actual > 0).all()
+    np.testing.assert_allclose(actual, expected, rtol=2e-13, atol=0)
+    assert actual.sum() == pytest.approx(count)
+    frame = pd.DataFrame({"x": np.arange(count, dtype="float64")})
+    scaler = ModelMatrixScaler.fit(frame, sample_weight=actual)
+    assert np.isfinite(scaler.transform(frame).to_numpy()).all()
+
+
+def test_decay_rejects_truly_unrepresentable_positive_weights():
+    with pytest.raises(ValueError, match="sample_weights_unrepresentable"):
+        equal_timestamp_sample_weights(
+            pd.date_range("2020-01-01", periods=2000),
+            TrainingWeighting(half_life=1),
+        )

@@ -450,6 +450,14 @@ def materialize_pit_fundamentals(
         ["asset_id", "metric_id", "report_period", "available_at"], keep=False
     ).any():
         raise ValueError("pit_revision_order_ambiguous")
+    if right.empty:
+        result = left.iloc[:0].copy()
+        for column in required_events.difference({"asset_id"}):
+            result[column] = right[column]
+        for prefix in ("beginning", "prior_year", "prior_fy"):
+            result[f"{prefix}_report_period"] = pd.Series(dtype="datetime64[ns]")
+            result[f"{prefix}_value"] = pd.Series(dtype="float64")
+        return result
     frames: list[pd.DataFrame] = []
     observation_positions = left.groupby("asset_id", sort=False).indices
     for (asset_id, metric_id), stream in right.groupby(

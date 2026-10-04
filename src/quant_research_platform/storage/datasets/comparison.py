@@ -20,6 +20,7 @@ from quant_research_platform.runtime.resources import (
 )
 from quant_research_platform.storage.datasets.fingerprinting import (
     _fingerprint_dataset_session_owned,
+    comparison_schema,
     dataset_fingerprint_retained_memory_bytes,
 )
 from quant_research_platform.storage.datasets.reading import (
@@ -185,6 +186,7 @@ def _compare_datasets_under_policy(
             if (
                 left.schema_hash != right.schema_hash
                 or left.column_names != right.column_names
+                or comparison_schema(left_context) != comparison_schema(right_context)
             ):
                 status = "SCHEMA_MISMATCH"
             elif left.row_count != right.row_count:

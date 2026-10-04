@@ -131,10 +131,13 @@ def test_model_scaler_uses_equal_timestamp_weights_and_zero_variance_zero() -> N
     weights = equal_timestamp_sample_weights(
         pd.to_datetime(["2024-01-01", "2024-01-01", "2024-01-02"])
     )
+    assert weights.tolist() == pytest.approx([0.75, 0.75, 1.5])
     assert weights.sum() == pytest.approx(3.0)
     scaler = ModelMatrixScaler.fit(frame, sample_weight=weights)
     transformed = scaler.transform(frame)
     assert transformed["constant"].tolist() == [0.0, 0.0, 0.0]
+    assert scaler.mean_[0] == pytest.approx(3.5)
+    assert scaler.scale_[0] == pytest.approx(np.sqrt(11.0) / 2.0)
 
 
 def test_training_eligibility_is_label_availability_not_a_fixed_gap() -> None:
@@ -1077,6 +1080,16 @@ def test_enhanced_optimizer_is_deterministic_and_hard_constraint_only() -> None:
     assert result.weights.sum() == pytest.approx(1.0)
     assert result.target_turnover <= 0.20 + 1e-8
     assert result.maximum_adv_participation <= 0.05 + 1e-8
+    np.testing.assert_allclose(
+        result.weights.reindex(list("abcd")),
+        [0.255, 0.255, 0.245, 0.245],
+        atol=1e-9,
+        rtol=0,
+    )
+    active_alpha = (
+        result.weights.reindex(list("abcd")).to_numpy() - 0.25
+    ) @ assets.expected_alpha.to_numpy()
+    assert active_alpha == pytest.approx(0.0002, abs=1e-11)
     cash_assets = assets.copy()
     cash_assets["current_weight"] = 0.225
     cash_assets["is_cash"] = False
@@ -1664,3 +1677,96 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
         )
     )
     assert chunks[0].asset_id.tolist() == ["a", "b"]
+
+
+@pytest.mark.parametrize(
+    "capacity_case", ["physical", "explicit", "retained", "accepted"]
+)
+@pytest.mark.parametrize("fixed", [False, True])
+def test_optimizer_admits_native_workspace_before_solver_entry(
+    monkeypatch, capacity_case, fixed
+):
+    from scipy.optimize import _slsqp_py
+
+    from quant_research_platform.research.portfolios import optimizer
+    from quant_research_platform.runtime import resources
+
+    rows = 8 if capacity_case == "accepted" else 128
+    assets = pd.DataFrame(
+        {
+            "asset_id": [f"asset_{index}" for index in range(rows)],
+            "expected_alpha": np.linspace(-0.01, 0.01, rows),
+            "current_weight": 1.0 / rows,
+            "benchmark_weight": 1.0 / rows,
+            "specific_variance": 0.01,
+            "adv": 1e10,
+            "industry": 1.0,
+            "eligible": [not fixed or index % 2 == 0 for index in range(rows)],
+        }
+    )
+    covariance = pd.DataFrame([[0.0]], index=["industry"], columns=["industry"])
+    available = 64 * 1024 if capacity_case == "physical" else 4 * 1024**2
+    explicit = 64 * 1024 if capacity_case == "explicit" else None
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: available)
+    original_minimize = optimizer.minimize
+    native_slsqp = _slsqp_py.slsqp
+    entered = False
+    observed_native = False
+    retained = 0
+
+    def minimize(*args, **kwargs):
+        nonlocal entered
+        entered = True
+        return original_minimize(*args, **kwargs)
+
+    def slsqp(*args, **kwargs):
+        nonlocal observed_native
+        observed_native = True
+        arrays = {id(value): value for value in args if isinstance(value, np.ndarray)}
+        native_bytes = sum(value.nbytes for value in arrays.values())
+        assert policy.used_memory_bytes - retained >= native_bytes
+        assert policy.used_memory_bytes <= available
+        return native_slsqp(*args, **kwargs)
+
+    monkeypatch.setattr(optimizer, "minimize", minimize)
+    monkeypatch.setattr(_slsqp_py, "slsqp", slsqp)
+
+    def optimize():
+        return optimizer.optimize_portfolio(
+            assets,
+            factor_covariance=covariance,
+            industry_columns=("industry",),
+            expected_transaction_cost=lambda _weights: 0.0,
+            nav=1e9,
+            assumptions=EXECUTION_ASSUMPTIONS,
+            eligibility_column="eligible",
+        )
+
+    with resources.runtime_resource_policy_scope(explicit_cap_bytes=explicit) as policy:
+        retained = (
+            available - 64 * 1024
+            if capacity_case == "retained"
+            else policy.memory_budget_bytes
+            if capacity_case == "accepted"
+            else 0
+        )
+        with policy.lease("tests.optimizer.existing", retained):
+            if capacity_case == "accepted":
+                assert policy.planning_headroom_bytes == 0
+                result = optimize()
+                assert entered and observed_native
+                assert result.weights.sum() == pytest.approx(1.0)
+                assert result.predicted_tracking_error <= 0.05 + 1e-8
+                assert result.target_turnover <= 0.2 + 1e-8
+                assert result.maximum_adv_participation <= 0.05 + 1e-8
+                if fixed:
+                    np.testing.assert_allclose(result.weights.iloc[1::2], 1.0 / rows)
+            else:
+                with pytest.raises(
+                    ValueError, match="optimizer_working_set_exceeds_memory_capacity"
+                ):
+                    optimize()
+                assert not entered and not observed_native
+            assert policy.used_memory_bytes == retained
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"

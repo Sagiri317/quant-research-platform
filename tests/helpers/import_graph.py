@@ -14,6 +14,21 @@ class ImportEdge:
     module: str
 
 
+def is_ids_contract_import(module: str) -> bool:
+    owners = (
+        "quant_research_platform.markets.implementations.a_share.ids",
+        "quant_research_platform.markets.implementations.crypto.ids",
+        "quant_research_platform.sources.binance.ids",
+        "quant_research_platform.sources.choice.ids",
+        "quant_research_platform.sources.csmar.ids",
+    )
+    return any(
+        module == owner
+        or (module.startswith(owner + ".") and module[len(owner) + 1 :].isidentifier())
+        for owner in owners
+    )
+
+
 def python_files_under(
     roots: Iterable[Path],
     *,
@@ -38,14 +53,6 @@ def import_edges_for_roots(roots: Iterable[Path]) -> tuple[ImportEdge, ...]:
         for path in python_files_under(roots)
     }
     return _import_edges_from_trees(trees)
-
-
-def is_relative_to(path: Path, root: Path) -> bool:
-    try:
-        path.relative_to(root)
-    except ValueError:
-        return False
-    return True
 
 
 def _import_edges_from_trees(ast_trees: dict[Path, ast.AST]) -> tuple[ImportEdge, ...]:

@@ -589,11 +589,20 @@ class DatasetSessionInventory:
         selected: bool,
         path_selection: int | None = None,
     ) -> Iterator[Path]:
-        for path, _ in self.iter_entries(
+        join, where, parameters = self._path_selection_query(
             selected=selected,
             path_selection=path_selection,
-        ):
-            yield path
+        )
+        cursor = self._require_connection().execute(
+            "SELECT parts.relative_path FROM parts"
+            f"{join}{where} ORDER BY partition_kind, partition_year, part_index",
+            parameters,
+        )
+        try:
+            for (relative,) in cursor:
+                yield self.data_root / str(relative)
+        finally:
+            _close_cursor_preserving_primary(cursor)
 
     def path_count(
         self,

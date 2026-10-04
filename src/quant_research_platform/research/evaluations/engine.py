@@ -548,7 +548,6 @@ def _iter_single_asset_time_series_output_chunks(
     }
     rows_input = 0
     rows_after_filter = 0
-    rows_after_signal_label_dropna = 0
     filter_columns_used = tuple(required_filter_columns(spec.filter_mode))
     filter_definition_value = filter_definition(spec.filter_mode)
     asset: object | None = None
@@ -559,7 +558,6 @@ def _iter_single_asset_time_series_output_chunks(
     owned_output: OwnedValue[_EvaluationOutputChunk] | None = None
 
     def consume_values(values: np.ndarray) -> None:
-        nonlocal rows_after_signal_label_dropna
         label_offset = len(signal_columns)
         for signal_index, signal in enumerate(signal_columns):
             left = values[:, signal_index]
@@ -569,7 +567,6 @@ def _iter_single_asset_time_series_output_chunks(
                 moments = stats[(signal, label)]
                 for x, y in zip(left[valid], right[valid], strict=True):
                     moments.update(float(x), float(y))
-                rows_after_signal_label_dropna += int(valid.sum())
 
     try:
         for chunk in _iter_evaluation_work_frames(
@@ -781,37 +778,43 @@ def _iter_evaluation_output_chunks(
 
     from quant_research_platform.research.filtering import _filter_mode_scope
 
-    for chunk in _iter_evaluation_work_frames(
+    work_frames = _iter_evaluation_work_frames(
         frames,
         spec=spec,
         label_columns=label_columns,
         asset_column=asset_column,
         source_columns_by_kind=source_columns_by_kind,
         resource_policy=resource_policy,
-    ):
-        with _filter_mode_scope(
-            chunk,
-            mode=spec.filter_mode,
-            metadata_key="filter_mode",
-        ) as (filtered, filter_metadata):
-            try:
-                for output in _iter_evaluation_filtered_chunks(
-                    filtered,
-                    filter_metadata,
-                    signal_columns=signal_columns,
-                    label_columns=label_columns,
-                    n_groups=n_groups,
-                    asset_column=asset_column,
-                    resource_policy=resource_policy,
-                ):
-                    if summary_state is not None:
-                        summary_state.consume(*output.value)
-                    try:
-                        yield output
-                    finally:
-                        output = None
-            finally:
-                filtered = chunk = None
+    )
+    with closing_iterator(work_frames):
+        for chunk in work_frames:
+            with _filter_mode_scope(
+                chunk,
+                mode=spec.filter_mode,
+                metadata_key="filter_mode",
+            ) as (filtered, filter_metadata):
+                try:
+                    filtered_chunks = _iter_evaluation_filtered_chunks(
+                        filtered,
+                        filter_metadata,
+                        signal_columns=signal_columns,
+                        label_columns=label_columns,
+                        n_groups=n_groups,
+                        asset_column=asset_column,
+                        resource_policy=resource_policy,
+                    )
+                    with closing_iterator(filtered_chunks):
+                        for output in filtered_chunks:
+                            if summary_state is not None:
+                                summary_state.consume(*output.value)
+                            try:
+                                yield output
+                            except GeneratorExit:
+                                return
+                            finally:
+                                output = None
+                finally:
+                    filtered = chunk = None
 
 
 def _iter_evaluation_filtered_chunks(

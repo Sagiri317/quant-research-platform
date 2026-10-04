@@ -34,11 +34,13 @@ from quant_research_platform.storage.identity import (
     filesystem_read_text,
     filesystem_write_text,
 )
-from tests.helpers.runtime_resources import capture_test_policy
+from tests.helpers.runtime_resources import (
+    capture_storage_test_policy,
+    capture_test_policy,
+)
 from tests.storage.dataset_test_support import (
     _bound_first_frames,
     _input_dataset_identity_payload,
-    _writer_test_policy,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -295,6 +297,15 @@ def test_write_dataset_accepts_dataframe_and_dataframe_chunks(tmp_path: Path) ->
         fingerprint_dataset(materialized_root).content_hash
         == fingerprint_dataset(chunked_root).content_hash
     )
+    pd.testing.assert_frame_equal(
+        materialized.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+            drop=True
+        ),
+        frame.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+            drop=True
+        ),
+        check_dtype=False,
+    )
 
 
 def test_writer_reserves_complete_fixed_owner_before_sqlite_or_input(
@@ -363,7 +374,7 @@ def test_private_writer_admits_producer_bound_before_data_pull(
 def test_private_writer_rejects_actual_frame_above_declared_bound(
     tmp_path: Path,
 ) -> None:
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
 
     def producer():
         lease = yield 1
@@ -431,7 +442,7 @@ def test_private_writer_transfers_one_lease_and_clears_before_close(
 def test_private_writer_handoffs_pending_lease_without_second_reservation(
     tmp_path: Path,
 ) -> None:
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
     frame = make_default_dataset_frame()
     events: list[tuple[bool, bool]] = []
 
@@ -475,7 +486,7 @@ def test_private_writer_keeps_same_producer_lease_across_chunks(
     empty_last: bool,
     request_after_last: bool,
 ) -> None:
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
     expected = make_default_dataset_frame()
     expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
     expected[["market_id", "asset_id"]] = expected[["market_id", "asset_id"]].astype(
@@ -557,7 +568,7 @@ def test_private_writer_closes_continuous_producer_before_its_lease_on_failure(
     error_type: type[BaseException],
     message: str,
 ) -> None:
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
     holder = {}
     events = []
     primary = error_type(message)
@@ -623,7 +634,7 @@ def test_private_writer_rejects_invalid_pending_lease_handoff(
     tmp_path: Path,
     handoff_kind: str,
 ) -> None:
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
     foreign_policy: RuntimeResourcePolicy | None = None
     foreign_lease: runtime_resources.MemoryLease | None = None
     if handoff_kind == "foreign":
@@ -944,7 +955,7 @@ def test_writer_close_failure_precedes_publish_but_preserves_primary(
     if exit_mode == "target_exists":
         target_source = _bound_first_frames(facade)
         next(target_source)
-        first_policy = _writer_test_policy()
+        first_policy = capture_storage_test_policy()
         dataset_writing.write_dataset(
             root,
             _bound_first_frames((frame,)),
@@ -955,7 +966,7 @@ def test_writer_close_failure_precedes_publish_but_preserves_primary(
         input_data = target_source
     else:
         input_data = _bound_first_frames(facade)
-    issued_policy = _writer_test_policy()
+    issued_policy = capture_storage_test_policy()
     cleanup_policies.append(issued_policy)
 
     with pytest.raises(expected_error, match=expected_message):
@@ -1481,7 +1492,7 @@ def test_writer_rejects_when_single_row_and_complete_footer_do_not_fit(tmp_path)
 def test_writer_footer_preview_failure_drops_owned_objects_before_release(
     tmp_path, monkeypatch, failure_stage
 ):
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
     root = make_dataset_artifact_root(tmp_path, "preview_failure")
     frame_refs = []
     table_refs = []
@@ -2020,6 +2031,88 @@ def test_public_writer_rejects_nonnull_object_schema_drift(tmp_path, drift_kind)
     assert list(root.parent.iterdir()) == []
 
 
+@pytest.mark.parametrize("cap_mib,nonnull_first", ((64, False), (7, False), (7, True)))
+def test_public_writer_uses_complete_object_string_facts_before_bounded_schema(
+    tmp_path, monkeypatch, cap_mib, nonnull_first
+):
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.columns import ColumnRole
+    from quant_research_platform.contracts.data import ProcessedDataKind
+
+    rows = 6000
+    frame = pd.DataFrame(
+        {
+            "asset_id": pd.Series(
+                [f"synthetic_{index:04d}" for index in range(rows)], dtype=object
+            ),
+            "timestamp": pd.date_range("2024-01-01", periods=rows, freq="D").astype(
+                "datetime64[ns]"
+            ),
+            **{
+                f"factor_{index:02d}": np.arange(rows, dtype=np.float64)
+                for index in range(34)
+            },
+            "note": pd.Series(
+                [None] * 5500 + [f"note_{index:04d}" for index in range(5500, rows)],
+                dtype=object,
+            ),
+        }
+    )
+    expected = frame.copy(deep=True)
+    if nonnull_first:
+        frame = pd.concat((frame.iloc[5500:], frame.iloc[:5500]), ignore_index=True)
+    before = frame.copy(deep=True)
+    spec = replace(
+        make_processed_dataset_spec(
+            "null_prefix_string",
+            kind=ProcessedDataKind.PANEL,
+            primary_key=("asset_id", "timestamp"),
+        ),
+        column_roles={
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            **{f"factor_{index:02d}": ColumnRole.FACTOR for index in range(34)},
+            "note": ColumnRole.CONTEXT,
+        },
+    )
+    root = make_dataset_artifact_root(
+        tmp_path, spec.data_id, kind=ProcessedDataKind.PANEL
+    )
+    original_capture = runtime_resources._capture_runtime_resource_policy
+    policies = []
+
+    def capture_policy(*, explicit_cap_bytes=None):
+        assert explicit_cap_bytes is None
+        policy = original_capture(explicit_cap_bytes=cap_mib * 1024**2)
+        policies.append(policy)
+        return policy
+
+    with monkeypatch.context() as bounded:
+        bounded.setattr(
+            runtime_resources, "_capture_runtime_resource_policy", capture_policy
+        )
+        write_dataset(root, frame, spec=spec)
+    assert len(policies) == 1
+    assert policies[0].used_memory_bytes == 0
+    assert policies[0].state == "CLOSED"
+
+    # Readback uses its own default actual-capacity root, not the write cap.
+    actual = (
+        read_dataset(root).sort_values(list(spec.primary_key)).reset_index(drop=True)
+    )
+    expected = expected.sort_values(list(spec.primary_key)).reset_index(drop=True)
+    pd.testing.assert_frame_equal(
+        actual.drop(columns="note"), expected.drop(columns="note")
+    )
+    assert actual["note"].dtype == expected["note"].dtype
+    pd.testing.assert_series_equal(actual["note"].isna(), expected["note"].isna())
+    pd.testing.assert_series_equal(actual["note"].dropna(), expected["note"].dropna())
+    assert len(actual) == 6000
+    assert actual["note"].isna().sum() == 5500
+    pd.testing.assert_frame_equal(frame, before)
+
+
 @pytest.mark.parametrize("failure_stage", ("plan", "view"))
 def test_writer_admission_failure_clears_owned_item_before_input_release(
     tmp_path, monkeypatch, failure_stage
@@ -2029,7 +2122,7 @@ def test_writer_admission_failure_clears_owned_item_before_input_release(
     class WeakMapping(dict):
         pass
 
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
     primary = MemoryError("input_view_admission_primary")
     holder = {}
     references = []
@@ -2162,3 +2255,46 @@ def test_public_writer_root_memoryview_admission_preserves_binary_values(
         policy.used_memory_bytes == 0 and policy.state == "CLOSED"
         for policy in policies
     )
+
+
+@pytest.mark.parametrize("rows", [2, 1024])
+def test_incremental_native_footer_is_admitted_after_final_batch_selection(
+    tmp_path, monkeypatch, rows
+):
+    import io
+
+    from quant_research_platform.storage import parquet as owner
+
+    monkeypatch.setattr(
+        runtime_resources, "_available_memory_bytes", lambda: 32 * 1024**2
+    )
+    table = pa.table({f"column_{index}": range(rows) for index in range(4)})
+    reached = False
+    original = owner.pq.ParquetWriter
+
+    def construct(*args, **kwargs):
+        nonlocal reached
+        reached = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(owner.pq, "ParquetWriter", construct)
+    with runtime_resources.runtime_resource_policy_scope() as policy:
+        with policy.lease("tests.existing", policy.memory_budget_bytes):
+            assert policy.planning_headroom_bytes == 0
+            handle = io.BytesIO()
+            if rows == 1024:
+                with pytest.raises(ValueError, match="runtime_memory_budget_exceeded"):
+                    with owner.parquet_table_writer(
+                        handle, parent=tmp_path, compression="NONE"
+                    ) as write:
+                        write(table)
+                assert not reached
+            else:
+                with owner.parquet_table_writer(
+                    handle, parent=tmp_path, compression="NONE"
+                ) as write:
+                    write(table)
+                assert reached
+                assert owner.pq.read_table(io.BytesIO(handle.getvalue())).equals(table)
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"

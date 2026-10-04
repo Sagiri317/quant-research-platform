@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import struct
+import sys
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
@@ -46,6 +47,7 @@ from quant_research_platform.research.protocols.crypto_hft import (
 from quant_research_platform.runtime.resources import (
     OwnedValue,
     RuntimeResourcePolicy,
+    _close_lease_preserving_primary,
 )
 from quant_research_platform.storage._scratch_ownership import (
     handle_preserving_primary,
@@ -369,6 +371,31 @@ class _PendingMarkouts:
                 del fill
                 self._pop()
 
+    def advance(
+        self,
+        timestamp_ns: int,
+        state: BookState | None,
+        coverage: Mapping[str, tuple[int, int]],
+    ) -> None:
+        """Mature fills at a reached clock using only the last observed book."""
+        while (fill := self._peek()) is not None:
+            target = fill["markout_target_time_ns"]
+            if target > timestamp_ns:
+                break
+            future_mid = (
+                _mid(state)
+                if state is not None
+                and state.segment_id == fill["segment_id"]
+                and state.observed_time_ns <= target
+                and _covered(coverage, fill["segment_id"], target)
+                else None
+            )
+            try:
+                self._finalize(fill, future_mid=future_mid)
+            finally:
+                del fill
+                self._pop()
+
     def expire_all(self, *, reason=None) -> None:
         while (fill := self._peek()) is not None:
             try:
@@ -431,6 +458,29 @@ class _PendingMarkouts:
         owned, self._read_offset = self._next
         self._next = None
         owned.release(owner="crypto.execution.pending_markout")
+        if sys.exception() is not None:
+            return
+        end = self._file.seek(0, 2)
+        remaining = end - self._read_offset
+        if self._read_offset >= remaining:
+            block_bytes = min(64 * 1024, remaining)
+            with self._resource_policy.lease(
+                "crypto.execution.pending_markout.compact", block_bytes
+            ):
+                offset = 0
+                while offset < remaining:
+                    self._file.seek(self._read_offset + offset)
+                    block = self._file.read(min(block_bytes, remaining - offset))
+                    if not block:
+                        raise RuntimeError("hft_pending_markout_record_invalid")
+                    self._file.seek(offset)
+                    self._file.write(block)
+                    offset += len(block)
+                    block = None
+                self._file.truncate(remaining)
+                self._file.flush()
+            self._read_offset = 0
+            self._reservation.resize(remaining)
 
     def _discard_next(self) -> None:
         if self._next is None:
@@ -551,6 +601,7 @@ def _resolve_observed_markouts(
     *,
     previous_state: BookState | None,
 ) -> None:
+    pending.advance(state.observed_time_ns - 1, previous_state, coverage)
     bounds = coverage.get(state.segment_id)
     if bounds is None or state.observed_time_ns >= bounds[1]:
         pending.expire_all()
@@ -767,6 +818,9 @@ def simulate_taker(
                 terminal_timestamp = _book_key(event)[0]
                 apply_funding(terminal_timestamp)
                 if isinstance(event, BookBoundary):
+                    pending.advance(
+                        event.observed_time_ns - 1, latest_state, observed_coverage
+                    )
                     if latest_owned is not None:
                         latest_owned.release(owner="crypto.execution.book")
                     latest_owned = None
@@ -1242,6 +1296,11 @@ def simulate_taker(
                 end_timestamp = max(
                     action_timestamp, terminal_timestamp, economics.last_timestamp
                 )
+            pending.advance(
+                observation_stop - 1 if truncated else end_timestamp,
+                latest_state,
+                observed_coverage,
+            )
             pending.expire_all(reason="observation_truncated" if truncated else None)
             terminal_mid = (
                 _mid(latest_state)
@@ -1423,7 +1482,7 @@ def _maker_apply_command(active, command, state, observed_coverage, trade_covera
     return old_order, reason
 
 
-def _maker_new_order(order_id, side, quantity, state, row, config):
+def _maker_new_order(order_id, side, quantity, state, row, latency_ms):
     timestamp = row["timestamp_ms"] * _NANOSECONDS_PER_MILLISECOND
     return _MakerOrder(
         order_id=order_id,
@@ -1438,7 +1497,7 @@ def _maker_new_order(order_id, side, quantity, state, row, config):
         created_time_ns=timestamp,
         valid_until_ns=timestamp
         + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND,
-        effective_at_ns=timestamp + config.latency_ms * _NANOSECONDS_PER_MILLISECOND,
+        effective_at_ns=timestamp + latency_ms * _NANOSECONDS_PER_MILLISECOND,
     )
 
 
@@ -1609,7 +1668,9 @@ class MakerCalibration:
                     event = None
                 finally:
                     if lease is not None:
-                        lease.close()
+                        _close_lease_preserving_primary(
+                            lease, owner="crypto.calibration.event_decode"
+                        )
         finally:
             if active is not None:
                 active.release(owner="crypto.calibration.event")
@@ -2002,7 +2063,8 @@ def replay_maker_calibration(
     trades,
     decisions,
     *,
-    config,
+    order_quantity,
+    latency_ms,
     observed_coverage,
     trade_coverage,
     cutoff_ns,
@@ -2011,6 +2073,8 @@ def replay_maker_calibration(
     on_event,
 ):
     """Capture one shared mature validation tape and independent reference quotes."""
+    _positive(order_quantity, "hft_maker_order_quantity_invalid")
+    _nonnegative_integer(latency_ms, "hft_maker_latency_invalid")
     events = iter(_market_events(book_events, trades))
     rows = iter(_checked_quote_schedule(decisions))
     latest_state = latest_owned = next_event = latest_book_id = None
@@ -2050,8 +2114,8 @@ def replay_maker_calibration(
                 available_ns=sample["available_ns"],
                 prediction=sample["prediction"],
                 observed_return=sample["observed_return"],
-                filled=config.order_quantity - order.remaining,
-                quote_quantity=config.order_quantity,
+                filled=order_quantity - order.remaining,
+                quote_quantity=order_quantity,
                 terminal_reason=sample["terminal_reason"] or "expired",
                 book_segment_id=order.segment_id,
                 trade_observation_id=order.trade_observation_id,
@@ -2172,10 +2236,10 @@ def replay_maker_calibration(
                     order = _maker_new_order(
                         counts[side],
                         side,
-                        config.order_quantity,
+                        order_quantity,
                         latest_state,
                         row,
-                        config,
+                        latency_ms,
                     )
                     samples.append(
                         {
@@ -2461,6 +2525,9 @@ def simulate_maker(
         def process_book(event):
             nonlocal latest_state, latest_owned
             if isinstance(event, BookBoundary):
+                pending.advance(
+                    event.observed_time_ns - 1, latest_state, observed_coverage
+                )
                 cancel_all(event.observed_time_ns)
                 if latest_owned is not None:
                     latest_owned.release(owner="crypto.execution.book")
@@ -2872,7 +2939,7 @@ def simulate_maker(
                                 else 0.0,
                                 latest_state,
                                 row,
-                                config,
+                                config.latency_ms,
                             )
                             keep, quantity, gain = calibrations[row["fold_id"]].select(
                                 state=latest_state,
@@ -2900,7 +2967,7 @@ def simulate_maker(
                                     quantity,
                                     latest_state,
                                     row,
-                                    config,
+                                    config.latency_ms,
                                 )
                             effective = (
                                 decision_time_ns
@@ -3014,6 +3081,11 @@ def simulate_maker(
                 for order in active.values():
                     finish_order(order, order.valid_until_ns, cancelled=True)
                 active.clear()
+            pending.advance(
+                observation_stop - 1 if truncated else end_timestamp,
+                latest_state,
+                observed_coverage,
+            )
             pending.expire_all(reason="observation_truncated" if truncated else None)
             terminal_mid = observed_mark(end_timestamp)
             marked = (

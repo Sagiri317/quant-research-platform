@@ -87,13 +87,15 @@ def compute_listing_age_trading_days(
     listing_dates = strict_timestamp_series(
         frame[listing_date_column],
         error="invalid_listing_age_timestamp",
+        allow_null=True,
     ).dt.normalize()
     valid = (
         listing_dates.notna()
         & observation_dates.notna()
         & observation_dates.ge(listing_dates)
     )
-    result = pd.Series(0, index=frame.index, dtype="int64")
+    result = pd.Series(0, index=frame.index, dtype="Int64")
+    result.loc[listing_dates.isna()] = pd.NA
     if not bool(valid.any()):
         return result
 

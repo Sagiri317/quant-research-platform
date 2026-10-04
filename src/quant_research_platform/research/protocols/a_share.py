@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, replace
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 
@@ -32,6 +32,9 @@ from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import TargetSpec
 from quant_research_platform.contracts.time import TimeWindow, is_datetime_window
 from quant_research_platform.markets.implementations.a_share import ids as market_ids
+from quant_research_platform.research.factors.expectations.calculations import (
+    FORECAST_FRESHNESS_DAYS,
+)
 from quant_research_platform.research.factors.expectations.definitions import (
     EXPECTATIONS_FACTORS,
     expectations_factor_definitions,
@@ -118,7 +121,7 @@ class AShareProtocol:
     access_window: str = "development"
     root_seed: int = ROOT_SEED
     frozen_development: dict[str, object] | None = None
-    frozen_alpha: tuple[tuple[str, AlphaCalibration], ...] = ()
+    frozen_alpha: tuple[tuple[tuple[str, str], AlphaCalibration], ...] = ()
     configuration_json: str | None = None
     risk_config: FactorRiskConfig = FactorRiskConfig()
     optimizer_config: OptimizerConfig = OptimizerConfig()
@@ -430,11 +433,10 @@ class AShareProtocol:
             for entry in persisted.final_models
         } != expected:
             raise ValueError("holdout_development_final_models_incomplete")
-        calibrations = []
+        calibrations = {}
         sources = {}
         blocker = None
         for group in ("global", "quarterly"):
-            calibration = calibration_date = None
             sources[group] = []
             for candidate in self.portfolio_candidates():
                 if (
@@ -455,11 +457,10 @@ class AShareProtocol:
                 except PortfolioTargetBlocked as exc:
                     blocker = str(exc)
                     break
-                if calibration is not None and (
-                    current != calibration or observed_at != calibration_date
-                ):
+                key = (group, candidate.rebalance_schedule)
+                if key in calibrations and calibrations[key] != (current, observed_at):
                     raise ValueError("holdout_alpha_sources_disagree")
-                calibration, calibration_date = current, observed_at
+                calibrations[key] = (current, observed_at)
                 sources[group].append(
                     {
                         "selection_group": group,
@@ -467,8 +468,6 @@ class AShareProtocol:
                         "observed_at": observed_at,
                     }
                 )
-            if calibration is not None:
-                calibrations.append((group, calibration))
             if blocker is not None:
                 break
         frozen["alpha_sources"] = sources
@@ -476,7 +475,7 @@ class AShareProtocol:
             self,
             access_window="holdout",
             frozen_development=frozen,
-            frozen_alpha=tuple(calibrations),
+            frozen_alpha=tuple((key, value[0]) for key, value in calibrations.items()),
         ), blocker
 
     def target_specs(self, action: str) -> tuple[TargetSpec, ...]:
@@ -770,8 +769,14 @@ def analysis_windows(
 
 
 def source_history_window(data_spec: InterimDataSpec, window: TimeWindow) -> TimeWindow:
-    """Retain the protocol's financial history without widening output targets."""
-    return data_history_window(window) if data_spec.source_id == "choice" else window
+    """Bind actual preceding state without widening the knowledge cutoff."""
+    if data_spec.source_id == "choice" or data_spec.data_id == "market_bars_1d":
+        return data_history_window(window)
+    if data_spec.data_id == "analyst_forecast":
+        return TimeWindow(
+            window.start - timedelta(days=FORECAST_FRESHNESS_DAYS), window.end
+        )
+    return window
 
 
 def processed_input_window(data_spec, window: TimeWindow) -> TimeWindow:

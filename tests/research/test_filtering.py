@@ -176,7 +176,9 @@ def test_filter_mode_scope_uses_formal_bound_before_materialization(
     assert rejected.used_memory_bytes == 0
 
 
-def test_filter_mode_scope_drops_its_filtered_alias_before_close() -> None:
+def test_filter_mode_scope_drops_its_filtered_alias_before_close(monkeypatch) -> None:
+    from quant_research_platform.runtime.resources import MemoryLease
+
     frame = pd.DataFrame(
         {
             "eligible": [True, False],
@@ -187,17 +189,32 @@ def test_filter_mode_scope_drops_its_filtered_alias_before_close() -> None:
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=1 * 1024**2,
     )
+    original_close = MemoryLease.close
+    close_checks = 0
+
+    def observe_close(lease):
+        nonlocal close_checks
+        try:
+            if lease.owner == "research.filter.output":
+                assert filtered_ref() is None, "filtered_alias_alive_at_lease_close"
+                close_checks += 1
+        finally:
+            original_close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", observe_close)
     with runtime_resource_policy_scope(policy):
         with _filter_mode_scope(
             frame,
             mode="eligible",
             metadata_key="filter_mode",
         ) as (filtered, _metadata):
+            assert filtered["value"].tolist() == [10.0]
             filtered_ref = weakref.ref(filtered)
             assert policy.used_memory_bytes > 0
             del filtered
         assert policy.used_memory_bytes == 0
         assert filtered_ref() is None
+    assert close_checks == 1
 
 
 def test_filter_mode_scope_releases_empty_filtered_frame() -> None:
@@ -253,3 +270,60 @@ def test_filter_mode_scope_closes_lease_if_metadata_fails(
 
     assert raised.value is primary
     assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "capacity_case", ["physical", "explicit", "retained", "accepted"]
+)
+def test_filter_scope_checks_physical_capacity_before_materialization(
+    monkeypatch, capacity_case
+):
+    from quant_research_platform.runtime import resources
+
+    rows = 4 if capacity_case == "accepted" else 8192
+    frame = pd.DataFrame(
+        {"eligible": [True, False] * (rows // 2), "value": range(rows)}
+    )
+    available = 64 * 1024 if capacity_case == "physical" else 4 * 1024**2
+    explicit = 64 * 1024 if capacity_case == "explicit" else None
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: available)
+    original = filtering_owner.apply_filter_mode
+    entered = False
+
+    def materialize(*args, **kwargs):
+        nonlocal entered
+        entered = True
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(filtering_owner, "apply_filter_mode", materialize)
+    with resources.runtime_resource_policy_scope(explicit_cap_bytes=explicit) as policy:
+        retained = (
+            available - 64 * 1024
+            if capacity_case == "retained"
+            else policy.memory_budget_bytes
+            if capacity_case == "accepted"
+            else 0
+        )
+        with policy.lease("tests.filter.existing", retained):
+            if capacity_case == "accepted":
+                assert policy.planning_headroom_bytes == 0
+                with _filter_mode_scope(
+                    frame, mode="eligible", metadata_key="mode"
+                ) as (filtered, metadata):
+                    assert filtered["value"].tolist() == [0, 2]
+                    assert metadata["rows_after_filter_mode"] == 2
+                    assert policy.used_memory_bytes > retained
+                assert entered
+            else:
+                with pytest.raises(
+                    ValueError,
+                    match="research_filter_working_set_exceeds_task_memory_budget",
+                ):
+                    with _filter_mode_scope(
+                        frame, mode="eligible", metadata_key="mode"
+                    ):
+                        pytest.fail("filter allocation exceeded physical capacity")
+                assert not entered
+            assert policy.used_memory_bytes == retained
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"

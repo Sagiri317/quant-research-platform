@@ -47,11 +47,14 @@ from quant_research_platform.storage.identity import (
     filesystem_write_bytes,
     native_filesystem_path,
 )
-from tests.helpers.runtime_resources import capture_test_policy
+from tests.helpers.runtime_resources import (
+    capture_storage_test_policy,
+    capture_test_policy,
+)
 from tests.storage.dataset_test_support import (
     _bound_first_frames,
     _issued_test_policy,
-    _writer_test_policy,
+    prepared_in_filter,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -344,15 +347,15 @@ def test_physical_membership_compute_scales_with_domain_depth(
     )
     values = pa.array(range(1024), type=pa.int64())
     prepared = dataset_physical.PreparedMembershipValues(values, 8, values.nbytes)
-    equality_calls = 0
-    original_equal = dataset_physical.pc.equal
+    comparison_calls = 0
+    original_less_equal = dataset_physical.pc.less_equal
 
-    def count_equal(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        nonlocal equality_calls
-        equality_calls += 1
-        return original_equal(*args, **kwargs)
+    def count_less_equal(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
+        nonlocal comparison_calls
+        comparison_calls += 1
+        return original_less_equal(*args, **kwargs)
 
-    monkeypatch.setattr(dataset_physical.pc, "equal", count_equal)
+    monkeypatch.setattr(dataset_physical.pc, "less_equal", count_less_equal)
     filtered = dataset_physical._filter_arrow_batch(
         batch,
         [("value", "in", prepared)],
@@ -360,7 +363,11 @@ def test_physical_membership_compute_scales_with_domain_depth(
     )
 
     assert filtered.column(0).to_pylist() == list(range(32))
-    assert equality_calls <= math.ceil(math.log2(len(values) + 1)) + 1
+    maximum_calls = math.ceil(math.log2(len(values) + 1))
+    assert 0 < comparison_calls <= maximum_calls, (
+        f"membership_comparison_depth_exceeded: comparisons={comparison_calls}, "
+        f"maximum={maximum_calls}"
+    )
 
 
 @pytest.mark.parametrize(
@@ -400,24 +407,24 @@ def test_physical_membership_preserves_generic_exact_scalar_semantics(
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
-    prepared = dataset_reading._prepare_in_filter(
+    with prepared_in_filter(
         pa.field("value", data_type),
         members,
         resource_policy=policy,
-    )
-    batch = pa.RecordBatch.from_arrays(
-        [pa.array(source, type=data_type)],
-        names=["value"],
-    )
+    ) as prepared:
+        batch = pa.RecordBatch.from_arrays(
+            [pa.array(source, type=data_type)],
+            names=["value"],
+        )
 
-    filtered = dataset_physical._filter_arrow_batch(
-        batch,
-        [("value", "in", prepared)],
-        operation_headroom_bytes=16 * 1024,
-    )
+        filtered = dataset_physical._filter_arrow_batch(
+            batch,
+            [("value", "in", prepared)],
+            operation_headroom_bytes=16 * 1024,
+        )
 
-    assert filtered.num_rows == expected
-    assert filtered.column(0).null_count == 0
+        assert filtered.num_rows == expected
+        assert filtered.column(0).null_count == 0
 
 
 def test_physical_membership_rejects_null_filter_member_before_sort() -> None:
@@ -426,11 +433,12 @@ def test_physical_membership_rejects_null_filter_member_before_sort() -> None:
     )
 
     with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
-        dataset_reading._prepare_in_filter(
+        with prepared_in_filter(
             pa.field("value", pa.int64()),
             (1, None),
             resource_policy=policy,
-        )
+        ):
+            pass
 
 
 def test_physical_in_filter_does_not_treat_soft_headroom_as_hard_cap() -> None:
@@ -754,7 +762,7 @@ def test_writer_checks_actual_arrow_headroom_after_conversion(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = _writer_test_policy(working_headroom_bytes=5 * 256 * 1024)
+    policy = capture_storage_test_policy(working_headroom_bytes=5 * 256 * 1024)
     monkeypatch.setattr(
         dataset_writing,
         "pandas_frame_payload_bytes",
@@ -786,7 +794,7 @@ def test_writer_deducts_other_live_root_reservations_before_allocation(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
     allocations = 0
 
     def forbid_prepare(*_args, **_kwargs):  # noqa: ANN002, ANN003
@@ -820,7 +828,7 @@ def test_writer_rejects_before_pandas_conversion_overlap(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = _writer_test_policy(working_headroom_bytes=200_000)
+    policy = capture_storage_test_policy(working_headroom_bytes=200_000)
     monkeypatch.setattr(
         dataset_writing,
         "pandas_frame_payload_bytes",
@@ -865,7 +873,7 @@ def test_writer_rejects_timestamp_prepare_before_large_temporary_graph(
             )
         }
     )
-    policy = _writer_test_policy(working_headroom_bytes=200_000)
+    policy = capture_storage_test_policy(working_headroom_bytes=200_000)
     spec = replace(
         make_processed_dataset_spec("writer_timestamp_admission"),
         column_roles={"timestamp": ColumnRole.TIMESTAMP},
@@ -911,7 +919,7 @@ def test_writer_rejects_before_native_parquet_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     native_table = pa.table({"payload": [b"x" * 600_000]})
-    policy = _writer_test_policy(working_headroom_bytes=native_table.nbytes + 7)
+    policy = capture_storage_test_policy(working_headroom_bytes=native_table.nbytes + 7)
     monkeypatch.setattr(
         dataset_writing,
         "pandas_frame_payload_bytes",
@@ -958,7 +966,7 @@ def test_dataset_parquet_disk_preflight_precedes_native_write(
 ) -> None:
     table = pa.table({"value": [1]})
     path = tmp_path / "part.parquet"
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
     captured: dict[str, int] = {}
     native_writes = 0
 
@@ -1003,7 +1011,7 @@ def test_qrp_parquet_reader_bounded_completes_with_physical_page_admission(
     page_headroom = (
         table.nbytes + 2 * dataset_physical._PARQUET_NATIVE_METADATA_PAGE_BYTES
     )
-    policy = _writer_test_policy(working_headroom_bytes=page_headroom)
+    policy = capture_storage_test_policy(working_headroom_bytes=page_headroom)
     with runtime_resource_policy_scope(policy):
         dataset_writing.write_parquet_file(table, path)
         batches = tuple(
@@ -1075,7 +1083,7 @@ def test_writer_bounded_completes_under_task_wide_copy_and_arrow_headroom(
             "value": ["x" * 1_500] * row_count,
         }
     )
-    policy = _writer_test_policy(working_headroom_bytes=2 * 1024**2)
+    policy = capture_storage_test_policy(working_headroom_bytes=2 * 1024**2)
     root = make_dataset_artifact_root(tmp_path, "writer_task_headroom")
     result = dataset_writing.write_dataset(
         root,
@@ -1104,7 +1112,7 @@ def test_writer_persisted_readback_preserves_schema_and_rows(
         frame = frame.iloc[:0].copy()
     elif variant == "override":
         frame["value"] = pd.Series(frame["value"], dtype="Int64")
-    policy = _writer_test_policy()
+    policy = capture_storage_test_policy()
     root = make_dataset_artifact_root(tmp_path, f"writer_readback_{variant}")
 
     dataset_writing.write_dataset(
@@ -1123,6 +1131,15 @@ def test_writer_persisted_readback_preserves_schema_and_rows(
         assert sorted(
             zip(persisted["asset_id"], persisted["timestamp"], strict=True)
         ) == sorted(zip(frame["asset_id"], frame["timestamp"], strict=True))
+    pd.testing.assert_frame_equal(
+        persisted.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+            drop=True
+        ),
+        frame.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
+            drop=True
+        ),
+        check_dtype=False,
+    )
 
 
 @pytest.mark.parametrize("offset", (-1, 0, 1))

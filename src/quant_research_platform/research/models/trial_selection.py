@@ -9,7 +9,6 @@ import tempfile
 from collections.abc import Callable, Collection, Iterable
 from contextlib import closing, contextmanager
 from fractions import Fraction
-from math import log
 from pathlib import Path
 
 import numpy as np
@@ -25,7 +24,6 @@ from quant_research_platform.contracts.experiments import (
     resolve_training_availability_column,
     training_availability_columns,
 )
-from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -365,13 +363,10 @@ def evaluate_model_trial_metrics_from_chunks(
         source = iter(chunks)
         with closing_iterator(source):
             for item in source:
-                owned_lease = item.lease if isinstance(item, OwnedValue) else None
                 frame = item.value if isinstance(item, OwnedValue) else item
-                if frame.empty:
-                    if owned_lease is not None:
-                        owned_lease.close()
-                    continue
                 try:
+                    if frame.empty:
+                        continue
                     if coverage is not None:
                         coverage.add(frame)
                     _admit_model_selection_storage(
@@ -388,19 +383,11 @@ def evaluate_model_trial_metrics_from_chunks(
                         prediction_column=prediction_column,
                     )
                     row_count += len(frame)
-                except BaseException as primary:
-                    if owned_lease is not None:
-                        try:
-                            owned_lease.close()
-                        except BaseException as cleanup_error:
-                            primary.add_note(
-                                "metric chunk lease release also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                    raise
-                else:
-                    if owned_lease is not None:
-                        owned_lease.close()
+                finally:
+                    frame = None
+                    if isinstance(item, OwnedValue):
+                        item.release(owner="model selection metric chunk")
+                    item = None
         if coverage is not None and (
             coverage.semantic_identity != expected_coverage.semantic_identity
             or coverage.row_count != expected_coverage.row_count
@@ -566,11 +553,6 @@ class _ScaledSquareAccumulator:
         if count <= 0 or self.scale == 0.0:
             return 0.0
         mean_scaled_square = self.scaled_sum / count
-        log_result = 2.0 * log(self.scale) + log(mean_scaled_square)
-        if log_result > log(float(np.finfo(np.float64).max)) or log_result < log(
-            float(np.nextafter(0.0, 1.0))
-        ):
-            raise ValueError("model_selection_mse_unrepresentable")
         result = self.scale * (self.scale * mean_scaled_square)
         if result == 0.0 or not np.isfinite(result):
             raise ValueError("model_selection_mse_unrepresentable")
@@ -768,15 +750,11 @@ def fit_validation_candidates(
         validation_read_columns = tuple(
             dict.fromkeys(
                 (
-                    *dataset_spec.primary_key,
+                    *train_read_columns,
                     *common_validation_input_columns,
-                    *candidate_spec.input_columns,
                     *model_input_validity_columns(
                         candidate_spec.input_columns, candidate_spec.model_algorithm
                     ),
-                    label_column,
-                    *training_availability_columns(label_column),
-                    *required_filter_columns(candidate_spec.sample_filter_mode),
                 )
             )
         )
@@ -859,10 +837,16 @@ def fit_validation_candidates(
                                 )
                                 & frame["score_eligible"]
                             ]
-                            if isinstance(item, OwnedValue):
-                                yield OwnedValue(mature, item.lease)
-                            else:
-                                yield mature
+                            try:
+                                if isinstance(item, OwnedValue):
+                                    yield OwnedValue(mature, item.lease)
+                                else:
+                                    yield mature
+                            finally:
+                                mature = frame = None
+                                if isinstance(item, OwnedValue):
+                                    item.release(owner="model validation input")
+                                item = None
 
             trial_metrics = evaluate_model_trial_metrics_from_chunks(
                 observed_chunks(),

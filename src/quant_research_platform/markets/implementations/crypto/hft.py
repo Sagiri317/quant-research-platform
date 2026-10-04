@@ -83,14 +83,11 @@ def iter_panel_frames(
     book_coverage: Mapping[str, tuple[int, int]],
     trade_coverage: Callable[[int, int], tuple[str, ...]],
     batch_rows: int,
-    interval_ms: int = HFT_GRID_MS,
 ) -> Iterator[pd.DataFrame]:
     """Sample one fully covered depth segment and trade connection per grid."""
 
     if type(start_ms) is not int or type(end_ms) is not int or end_ms < start_ms:
         raise ValueError("hft_panel_window_invalid")
-    if interval_ms != HFT_GRID_MS:
-        raise ValueError("hft_panel_interval_invalid")
     if type(batch_rows) is not int or batch_rows <= 0:
         raise ValueError("hft_panel_batch_rows_invalid")
     if (
@@ -114,11 +111,11 @@ def iter_panel_frames(
         try:
             next_book = next(active_books, None)
             next_trade = next(active_trades, None)
-            interval_ns = interval_ms * _NANOSECONDS_PER_MILLISECOND
-            last_grid_ms = start_ms + (end_ms - start_ms) // interval_ms * interval_ms
-            grid_time = start_ms - interval_ms
+            interval_ns = HFT_GRID_MS * _NANOSECONDS_PER_MILLISECOND
+            last_grid_ms = start_ms + (end_ms - start_ms) // HFT_GRID_MS * HFT_GRID_MS
+            grid_time = start_ms - HFT_GRID_MS
             while grid_time < last_grid_ms:
-                grid_time += interval_ms
+                grid_time += HFT_GRID_MS
                 interval_start = max(0, grid_time - HFT_GRID_MS)
                 grid_time_ns = grid_time * _NANOSECONDS_PER_MILLISECOND
                 interval_start_ns = interval_start * _NANOSECONDS_PER_MILLISECOND
@@ -249,7 +246,7 @@ def iter_panel_frames(
                         next_time_ns = min(next_time_ns, book_bounds[0] + interval_ns)
                     grid_time += (
                         max(0, (next_time_ns - grid_time_ns - 1) // interval_ns)
-                        * interval_ms
+                        * HFT_GRID_MS
                     )
                     continue
                 if len(trade_connections) != 1:
@@ -749,17 +746,21 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
                         last_liquidation = None
                         count = invalid = 0
                     active_epoch = epoch
+                    if channel is None:
+                        event = next(events, None)
+                        continue
                     states[channel] = (observed_ns, payload)
                     if channel == "forceOrder":
                         # z is observed cumulative filled base quantity, not order q.
                         order = payload["o"]
                         quantity = float(order["z"])
-                        liquidations.append(
-                            (
-                                observed_ns,
-                                quantity if order["S"] == "BUY" else -quantity,
+                        if observed_ns > decision_ns - 30_000_000_000:
+                            liquidations.append(
+                                (
+                                    observed_ns,
+                                    quantity if order["S"] == "BUY" else -quantity,
+                                )
                             )
-                        )
                         last_liquidation = observed_ns
                     event = next(events, None)
                 fresh = {}

@@ -79,7 +79,12 @@ def test_action_quantity_stays_inside_limit_after_float_fill_accumulation():
     )
     inputs = calibration_inputs([([state], trades)], [0.0])
     new_order = _maker_new_order(
-        0, "buy", 0.3, state, _quote(0, book_segment_id="s1"), _maker_config()
+        0,
+        "buy",
+        0.3,
+        state,
+        _quote(0, book_segment_id="s1"),
+        _maker_config().latency_ms,
     )
     with runtime_resource_policy_scope() as policy:
         model = MakerCalibration(*inputs, resource_policy=policy, price_unit="0.1")
@@ -115,7 +120,12 @@ def test_query_admits_deep_book_temporaries_before_materialization(monkeypatch, 
         [0.0],
     )
     new_order = _maker_new_order(
-        0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
+        0,
+        "buy",
+        1.0,
+        state,
+        _quote(0, book_segment_id="s1"),
+        _maker_config().latency_ms,
     )
     materialized = []
     with runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy:
@@ -338,7 +348,12 @@ def test_many_known_funding_offsets_complete_under_one_small_query_budget():
     with runtime_resource_policy_scope(policy):
         model = calibration_from_paths(paths, [-0.002, 0.003], policy)
         new_order = _maker_new_order(
-            0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
+            0,
+            "buy",
+            1.0,
+            state,
+            _quote(0, book_segment_id="s1"),
+            _maker_config().latency_ms,
         )
         try:
             model._load()
@@ -380,7 +395,12 @@ def test_paired_event_response_has_interior_optimum_and_keeps_zero_samples(
     with runtime_resource_policy_scope() as policy:
         model = calibration_from_paths(paths, errors, policy)
         new_order = _maker_new_order(
-            0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
+            0,
+            "buy",
+            1.0,
+            state,
+            _quote(0, book_segment_id="s1"),
+            _maker_config().latency_ms,
         )
         query = dict(
             state=state,
@@ -445,7 +465,8 @@ def test_delayed_post_only_rejection_preserves_decision_quantity_and_zero_sample
                 books,
                 [trade],
                 [row],
-                config=config,
+                order_quantity=config.order_quantity,
+                latency_ms=config.latency_ms,
                 observed_coverage=coverage,
                 trade_coverage=trades_coverage,
                 cutoff_ns=500_000_000,
@@ -586,7 +607,19 @@ def test_calibrated_maker_compares_old_expiry_with_real_cancel_replace(
         assert policy.used_memory_bytes == 0
 
 
-def test_decisions_reuse_captured_sample_origins_and_read_history_once():
+def test_decisions_reuse_captured_sample_origins_and_read_history_once(monkeypatch):
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    decoded = {"book": 0, "trade": 0}
+    native_events = MakerCalibration.events
+
+    def observed_events(model, start, stop):
+        with closing_iterator(native_events(model, start, stop)) as events:
+            for event in events:
+                decoded[event.kind] += 1
+                yield event
+
+    monkeypatch.setattr(MakerCalibration, "events", observed_events)
     state = _state(0)
     paths = [([state], [_trade(100, price="99.5", quantity="5", maker_buyer=True)])] * 3
     samples, events = calibration_inputs(paths, [0.0] * 3)
@@ -597,7 +630,12 @@ def test_decisions_reuse_captured_sample_origins_and_read_history_once():
         yield from events()
 
     order = _maker_new_order(
-        0, "buy", 0.3, state, _quote(0, book_segment_id="s1"), _maker_config()
+        0,
+        "buy",
+        0.3,
+        state,
+        _quote(0, book_segment_id="s1"),
+        _maker_config().latency_ms,
     )
     with runtime_resource_policy_scope() as policy:
         model = MakerCalibration(
@@ -622,6 +660,7 @@ def test_decisions_reuse_captured_sample_origins_and_read_history_once():
             model.close()
         assert policy.used_memory_bytes == 0
     assert reads == [True]
+    assert decoded == {"book": 0, "trade": 12}
 
 
 def test_unknown_historical_visible_quantity_blocks_maker_without_faking_fill():
@@ -645,7 +684,7 @@ def test_unknown_historical_visible_quantity_blocks_maker_without_faking_fill():
                 1.0,
                 _state(0),
                 _quote(0, book_segment_id="s1"),
-                _maker_config(),
+                _maker_config().latency_ms,
             )
             with pytest.raises(
                 PortfolioTargetBlocked, match="visible_quantity_unknown"
@@ -735,6 +774,18 @@ def test_future_coverage_end_cannot_change_earlier_maker_decision(
 
 
 def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monkeypatch):
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    decoded = {"book": 0, "trade": 0}
+    native_events = MakerCalibration.events
+
+    def observed_events(model, start, stop):
+        with closing_iterator(native_events(model, start, stop)) as events:
+            for event in events:
+                decoded[event.kind] += 1
+                yield event
+
+    monkeypatch.setattr(MakerCalibration, "events", observed_events)
     from contextlib import contextmanager
 
     from quant_research_platform.markets.implementations.crypto import execution
@@ -764,7 +815,12 @@ def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monke
 
     monkeypatch.setattr(execution, "reserved_temporary_file", observed_file)
     order = _maker_new_order(
-        0, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
+        0,
+        "buy",
+        1.0,
+        state,
+        _quote(0, book_segment_id="s1"),
+        _maker_config().latency_ms,
     )
     queries = [
         dict(
@@ -784,7 +840,12 @@ def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monke
         {
             **queries[0],
             "new_order": _maker_new_order(
-                0, "sell", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
+                0,
+                "sell",
+                1.0,
+                state,
+                _quote(0, book_segment_id="s1"),
+                _maker_config().latency_ms,
             ),
         }
     )
@@ -814,6 +875,7 @@ def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monke
             finally:
                 fresh.close()
         assert policy.used_memory_bytes == 0
+    assert decoded == {"book": 0, "trade": 44}
 
 
 @pytest.mark.parametrize("failure_at", ["source", "response", "write", "read"])
@@ -884,7 +946,7 @@ def test_native_history_failure_closes_files_preserving_primary(
                     1.0,
                     state,
                     _quote(0, book_segment_id="s1"),
-                    _maker_config(),
+                    _maker_config().latency_ms,
                 ),
                 active_order=None,
                 commands=(),
@@ -925,7 +987,7 @@ def test_native_history_truncation_is_rejected_and_all_files_close(member):
                     1.0,
                     state,
                     _quote(0, book_segment_id="s1"),
-                    _maker_config(),
+                    _maker_config().latency_ms,
                 ),
                 active_order=None,
                 commands=(),

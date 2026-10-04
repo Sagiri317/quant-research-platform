@@ -30,7 +30,10 @@ from quant_research_platform.contracts.models import (
     _thaw_model_hyperparameters,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
-from quant_research_platform.contracts.validation import strict_timestamp_series
+from quant_research_platform.contracts.validation import (
+    clear_exception_frames,
+    strict_timestamp_series,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     canonical_feature_validity_columns,
@@ -42,6 +45,7 @@ from quant_research_platform.research.filtering import (
 from quant_research_platform.research.models.rank_ensemble import (
     ICWeightedRankEnsemble,
     RankEnsemblePredictor,
+    rank_model_parameters,
 )
 from quant_research_platform.research.models.scaler import (
     LinearScaledPredictor,
@@ -133,13 +137,11 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         )
         if type(predictor) is not expected_type:
             raise ValueError("model_state_metadata_mismatch")
-        parameters = {"columns": list(predictor.columns)}
+        parameters = rank_model_parameters(predictor)
         if isinstance(predictor, RankEnsemblePredictor):
-            parameters["directions"] = list(predictor.directions)
             if any(direction not in (-1.0, 1.0) for direction in predictor.directions):
                 raise ValueError("model_state_metadata_mismatch")
         else:
-            parameters["weights"] = list(predictor.weights)
             if not np.isclose(
                 sum(abs(weight) for weight in predictor.weights),
                 1.0,
@@ -507,6 +509,8 @@ def _fit_estimator_model_result_owned_from_frames(
                 predictor.scaler if isinstance(predictor, ScaledPredictor) else None
             ),
         )
+        if isinstance(predictor, (RankEnsemblePredictor, ICWeightedRankEnsemble)):
+            metadata["rank_parameters"] = rank_model_parameters(predictor)
         result = ModelFitResult(
             metadata=metadata,
             prediction_model=predictor,
@@ -525,8 +529,8 @@ def _fit_estimator_model_result_owned_from_frames(
         model_lease.shrink_to(model_state_bytes)
         return OwnedValue(result, model_lease)
     except BaseException as primary:
-        if y is not None:
-            y = None
+        clear_exception_frames(primary)
+        y = None
         predictor = None
         metadata = None
         resolved_hyperparameters = None
@@ -1014,10 +1018,12 @@ def _estimator_fit_working_set_bytes(
     )
     return (
         feature_frame
-        + dense_features
+        # Scaler peak: values, differences, normalized, squared and weighted
+        # arrays coexist; row weights and timestamp grouping remain live too.
+        + 5 * dense_features
         + backend_feature_copy
-        + label_copy
-        + row_index
+        + 8 * label_copy
+        + 4 * row_index
         + coefficient_workspace
         + parallel_workspace
     )

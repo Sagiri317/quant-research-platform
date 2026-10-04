@@ -276,9 +276,11 @@ def _industry_source(reference_root, policy):
     root = Path(reference_root) / A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     path = root / _INDUSTRY_MANIFEST_NAME
     expected = dataset_file_identity(path)
-    with policy.lease(
-        "reference.industry.metadata", 2 * json_record_working_set_bytes(expected.size)
-    ):
+    bound = 2 * json_record_working_set_bytes(expected.size)
+    policy.require_working_set(
+        bound, error="industry_metadata_exceeds_task_memory_budget"
+    )
+    with policy.lease("reference.industry.metadata", bound):
         raw, metadata = read_bounded_qrp_json(
             path, expected_identity=expected, max_bytes=128 * 1024
         )
@@ -377,12 +379,12 @@ def _industry_frame(metadata, members, policy, retained):
     frames = []
     for snapshot in metadata["snapshots"]:
         path, expected = members[snapshot["candidate_file"]]
-        retained.enter_context(
-            policy.lease(
-                "reference.industry.snapshot",
-                2 * json_record_working_set_bytes(expected.size),
-            )
+        bound = 2 * json_record_working_set_bytes(expected.size)
+        policy.require_working_set(
+            bound, error="industry_snapshot_exceeds_task_memory_budget"
         )
+        # Keep both decoded-frame and concatenation capacity until writer return.
+        retained.enter_context(policy.lease("reference.industry.snapshot", bound))
         raw, candidate = read_bounded_qrp_json(path, expected_identity=expected)
         if (
             hashlib.sha256(raw).hexdigest()

@@ -70,10 +70,10 @@ from quant_research_platform.runtime.resources import (
     _close_lease_preserving_primary,
     current_runtime_resource_policy,
     pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets.reading import (
+    iter_dataset_file_batches,
     open_dataset_session,
     read_dataset,
 )
@@ -393,18 +393,6 @@ def build_portfolio_ledger(
             candidate.benchmark_weights_target_id or "",
         )
 
-    risk_inputs: dict[Path, tuple[str, ...]] = {}
-    if enhanced:
-        risk_inputs = _risk_context_input_columns(
-            roots=tuple(
-                _required_input_root(layout, upstream_identities, target_id)
-                for target_id in candidate.risk_context_target_ids
-            ),
-            style_columns=risk_style_columns,
-            timestamp=sessions[0],
-            resource_policy=resource_policy,
-        )
-
     holdings = pd.Series(dtype="float64")
     cash = float(assumptions.initial_nav)
     nav = cash
@@ -420,6 +408,10 @@ def build_portfolio_ledger(
     pending_calibration: tuple[pd.Series, pd.Series, pd.Timestamp] | None = None
     waiting_alpha: tuple[pd.Series, pd.Timestamp] | None = None
     calibration_dates = calibration_intervals.set_index("timestamp")
+    calibration_column_bytes = int(
+        calibration_intervals.memory_usage(index=False, deep=True).sum()
+        + calibration_dates.memory_usage(index=False, deep=True).sum()
+    )
     previous_benchmark_assets: frozenset[str] | None = None
     emitted = False
     sequence = 0
@@ -440,9 +432,12 @@ def build_portfolio_ledger(
         )
         if enhanced:
             retained_bytes += max(65536, (len(risk_assets) + extra_assets) * 16384)
-        retained_bytes += pandas_frame_payload_bytes(
-            calibration_intervals
-        ) + pandas_frame_payload_bytes(calibration_dates)
+        # Column payloads are fixed; index lookup engines can grow during the run.
+        retained_bytes += (
+            calibration_column_bytes
+            + calibration_intervals.index.memory_usage(deep=True)
+            + calibration_dates.index.memory_usage(deep=True)
+        )
         if previous_risk_cross is not None:
             retained_bytes += pandas_frame_payload_bytes(previous_risk_cross)
         if waiting_alpha is not None:
@@ -475,28 +470,39 @@ def build_portfolio_ledger(
                     )
                 )
             )
-            context_frames = {
-                root: input_channels.enter_context(
-                    closing_iterator(
-                        _iter_input_sessions(root, columns, history, resource_policy)
-                    )
+            risk_inputs = (
+                _risk_context_input_sessions(
+                    roots=tuple(
+                        _required_input_root(layout, upstream_identities, target_id)
+                        for target_id in candidate.risk_context_target_ids
+                    ),
+                    style_columns=risk_style_columns,
+                    time_window=history,
+                    resource_policy=resource_policy,
+                    retained=input_channels,
                 )
-                for root, columns in risk_inputs.items()
-            }
-            next_panel_frames = input_channels.enter_context(
-                closing_iterator(
-                    _iter_input_sessions(
-                        panel_root, panel_columns, history, resource_policy
-                    )
-                )
+                if enhanced
+                else {}
             )
-            endpoint_panel_frames = input_channels.enter_context(
-                closing_iterator(
-                    _iter_input_sessions(
-                        panel_root, panel_columns, history, resource_policy
-                    )
-                )
-            )
+            panel_window = {}
+
+            def release_panels(before=None):
+                expired = ExitStack()
+                for timestamp in tuple(panel_window):
+                    if before is None or timestamp < before:
+                        expired.push(panel_window.pop(timestamp)[1])
+                expired.__exit__(*sys.exc_info())
+
+            def panel_at(timestamp):
+                if timestamp not in panel_window:
+                    with ExitStack() as owner:
+                        frame = _read_next_session(
+                            panel_frames, panel_columns, timestamp, owner
+                        )
+                        panel_window[timestamp] = (frame, owner.pop_all())
+                return panel_window[timestamp][0]
+
+            input_channels.callback(release_panels)
             execution_frames = input_channels.enter_context(
                 closing_iterator(
                     _iter_input_sessions(
@@ -525,12 +531,9 @@ def build_portfolio_ledger(
                         if position + 1 < len(sessions)
                         else decision_timestamp
                     )
-                    panel = _read_next_session(
-                        panel_frames,
-                        panel_columns,
-                        decision_timestamp,
-                        retained,
-                    )
+                    panel = next_panel = endpoint_panel = None
+                    release_panels(decision_timestamp)
+                    panel = panel_at(decision_timestamp)
                     if panel.empty:
                         raise PortfolioTargetBlocked("portfolio_panel_session_missing")
                     resize_state(extra_assets=len(panel))
@@ -545,9 +548,9 @@ def build_portfolio_ledger(
                     if enhanced:
                         assert factor_risk is not None
                         risk_frames = []
-                        for root, columns in risk_inputs.items():
+                        for columns, context_frames in risk_inputs.values():
                             context = _read_next_session(
-                                context_frames[root],
+                                context_frames,
                                 columns,
                                 decision_timestamp,
                                 retained,
@@ -722,22 +725,12 @@ def build_portfolio_ledger(
                         endpoint_timestamp = output_intervals.loc[
                             decision_timestamp, "end_at"
                         ]
-                        next_panel = _read_next_session(
-                            next_panel_frames,
-                            panel_columns,
-                            next_timestamp,
-                            retained,
-                        )
+                        next_panel = panel_at(next_timestamp)
                         if next_panel.empty:
                             raise PortfolioTargetBlocked(
                                 "portfolio_market_session_missing"
                             )
-                        endpoint_panel = _read_next_session(
-                            endpoint_panel_frames,
-                            panel_columns,
-                            endpoint_timestamp,
-                            retained,
-                        )
+                        endpoint_panel = panel_at(endpoint_timestamp)
                         if endpoint_panel.empty:
                             raise PortfolioTargetBlocked(
                                 "portfolio_market_session_missing"
@@ -957,19 +950,31 @@ def _iter_input_sessions(
     time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy | None,
 ) -> Iterator[pd.DataFrame]:
+    with open_dataset_session(
+        root,
+        columns=columns,
+        time_window=time_window,
+        resource_policy=resource_policy,
+    ) as session:
+        yield from _iter_input_session_frames(session, columns)
+
+
+def _iter_input_session_frames(session, columns):
     from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 
-    with runtime_resource_policy_scope(resource_policy) as policy:
-        source = read_dataset(
-            root,
+    with closing_iterator(
+        iter_dataset_file_batches(
+            session,
             columns=columns,
-            time_window=time_window,
-            mode=DatasetReadMode.CHUNKED,
-            resource_policy=policy,
+            target_chunk_bytes=max(1, session.resource_policy.planning_headroom_bytes),
         )
+    ) as batches:
+        source = (frame for _, frame in batches)
         with closing_iterator(
             iter_complete_session_frames(
-                source, timestamp_column="timestamp", resource_policy=policy
+                source,
+                timestamp_column="timestamp",
+                resource_policy=session.resource_policy,
             )
         ) as frames:
             for frame in frames:
@@ -1055,32 +1060,39 @@ def _retain_session_workspace(
         yield
 
 
-def _risk_context_input_columns(
+def _risk_context_input_sessions(
     *,
     roots: tuple[Path, ...],
     style_columns: tuple[str, ...],
-    timestamp: pd.Timestamp,
+    time_window: TimeWindow,
     resource_policy: RuntimeResourcePolicy | None,
-) -> dict[Path, tuple[str, ...]]:
+    retained: ExitStack,
+):
     required = set(style_columns)
     available: set[str] = set()
     inputs = {}
     for root in roots:
-        with open_dataset_session(
-            root,
-            columns=None,
-            time_window=TimeWindow(timestamp, timestamp),
-            resource_policy=resource_policy,
-        ) as session:
-            columns = tuple(
-                column
-                for column in style_columns
-                if column in session.arrow_schema.names
+        session = retained.enter_context(
+            open_dataset_session(
+                root,
+                columns=None,
+                time_window=time_window,
+                resource_policy=resource_policy,
             )
+        )
+        columns = tuple(
+            column for column in style_columns if column in session.arrow_schema.names
+        )
         if available.intersection(columns):
             raise ValueError("portfolio_risk_context_owner_duplicate")
         available.update(columns)
-        inputs[root] = (*_SESSION_KEY, *columns)
+        projection = (*_SESSION_KEY, *columns)
+        inputs[root] = (
+            projection,
+            retained.enter_context(
+                closing_iterator(_iter_input_session_frames(session, projection))
+            ),
+        )
     if available != required:
         raise ValueError("portfolio_risk_context_schema_invalid")
     return inputs
@@ -1378,13 +1390,7 @@ def _build_session(
 ) -> tuple[
     ExecutionAccounting, pd.Series, pd.Series, OptimizationResult | None, pd.Series
 ]:
-    panel_columns = _ENHANCED_PANEL_COLUMNS if enhanced_decision else _PANEL_COLUMNS
-    panel = _session_frame(panel, panel_columns)
-    dataset = _session_frame(dataset, _DATASET_COLUMNS).set_index(
-        "asset_id",
-        drop=False,
-    )
-    execution = _session_frame(execution, _EXECUTION_COLUMNS)
+    dataset = dataset.set_index("asset_id", drop=False)
     if not np.isclose(
         float(holdings.sum()) + cash,
         nav,
@@ -1589,12 +1595,7 @@ def _prediction_alpha(
     prediction_lookup: object,
     validity_columns: tuple[str, ...],
 ) -> pd.Series:
-    dataset = _session_frame(
-        dataset, tuple(dict.fromkeys((*_DATASET_COLUMNS, *validity_columns)))
-    ).set_index(
-        "asset_id",
-        drop=False,
-    )
+    dataset = dataset.set_index("asset_id", drop=False)
     eligible = _bool_series(dataset["eligible"], "portfolio_eligibility_invalid")
     prediction_eligible = eligible & dataset.loc[:, list(validity_columns)].notna().all(
         axis=1

@@ -89,31 +89,35 @@ def _iter_prediction_joined_chunks(
                             + output_frame_bytes,
                         )
                     )
-                values, _found = chunk_state.enter_context(
-                    prediction_lookup.values_for_frame(
-                        chunk,
-                        mark_matched=False,
-                    )
-                )
-                required = _required_prediction_rows(
-                    chunk,
-                    input_columns=input_columns,
-                    model_algorithm=model_algorithm,
-                    sample_filter_mode=sample_filter_mode,
-                    test_start=test_start,
-                    test_end=test_end,
-                )
-                if not required.empty:
-                    _required_values, required_found = chunk_state.enter_context(
+                try:
+                    values, _found = chunk_state.enter_context(
                         prediction_lookup.values_for_frame(
-                            required,
-                            mark_matched=True,
+                            chunk,
+                            mark_matched=False,
                         )
                     )
-                    missing_required |= 0 in required_found
-                output = chunk.copy()
-                output[prediction_lookup.prediction_column] = values
-                yield output
+                    required = _required_prediction_rows(
+                        chunk,
+                        input_columns=input_columns,
+                        model_algorithm=model_algorithm,
+                        sample_filter_mode=sample_filter_mode,
+                        test_start=test_start,
+                        test_end=test_end,
+                    )
+                    if not required.empty:
+                        _required_values, required_found = chunk_state.enter_context(
+                            prediction_lookup.values_for_frame(
+                                required,
+                                mark_matched=True,
+                            )
+                        )
+                        missing_required |= 0 in required_found
+                    output = chunk.copy()
+                    output[prediction_lookup.prediction_column] = values
+                    yield output
+                finally:
+                    chunk = values = _found = required = output = None
+                    _required_values = required_found = None
     unexpected, extra = prediction_lookup.coverage_counts()
     if extra:
         raise RuntimeError("persisted_prediction_match_state_invalid")
@@ -139,12 +143,15 @@ def _iter_common_prediction_chunks(chunks, *, prediction_lookups):
                             + len(chunk) * (16 * len(prediction_lookups) + 32),
                         )
                     )
-                common = np.ones(len(chunk), dtype=bool)
-                output = chunk.copy()
-                for column, lookup in prediction_lookups.items():
-                    values, found = state.enter_context(
-                        lookup.values_for_frame(chunk, mark_matched=False)
-                    )
-                    common &= np.asarray(found, dtype=bool) & np.isfinite(values)
-                    output[column] = values
-                yield output.loc[common]
+                try:
+                    common = np.ones(len(chunk), dtype=bool)
+                    output = chunk.copy()
+                    for column, lookup in prediction_lookups.items():
+                        values, found = state.enter_context(
+                            lookup.values_for_frame(chunk, mark_matched=False)
+                        )
+                        common &= np.asarray(found, dtype=bool) & np.isfinite(values)
+                        output[column] = values
+                    yield output.loc[common]
+                finally:
+                    chunk = common = output = values = found = None

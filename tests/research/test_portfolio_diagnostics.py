@@ -332,6 +332,14 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
                     (rows.nav_end - rows.nav_before).sum(),
                     (rows.cost_drag * rows.nav_before).sum(),
                 ) == pytest.approx((65.0, 35.0, 30.0))
+            with artifact.table("portfolio_performance.parquet") as performance:
+                cagr = performance.loc[performance.metric_id.eq("cagr")]
+                assert len(cagr) == len(candidates)
+                assert cagr.status.eq("DEFINED").all()
+                assert cagr.observation_count.eq(3).all()
+                np.testing.assert_allclose(
+                    cagr.value, float(Fraction(207, 200) ** 84 - 1), rtol=1e-12
+                )
             with artifact.table("portfolio_attribution.parquet") as attribution:
                 assert attribution.status.eq("DEFINED").all()
                 actual = (
@@ -567,7 +575,36 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
                 "portfolio_statistics"
             ]
             assert evidence["portfolio_statistics"]["artifact_status"] == "DEFINED"
+            capacity_detail = report["sections"]["capacity"]["detail"]
+            assert capacity_detail == {
+                "artifact_identity": envelope.instance_identity,
+                "table": "portfolio_capacity.parquet",
+                "key_columns": ["candidate_id", "entry_at", "participation"],
+                "value_column": "bottleneck_asset_id",
+            }
+            with artifact.table(capacity_detail["table"]) as capacity_table:
+                assert set(capacity_detail["key_columns"]) | {
+                    capacity_detail["value_column"]
+                } <= set(capacity_table.columns)
             assert report["sections"]["risk"]["status"] == "BLOCKED"
+            exposures = report["sections"]["risk"]["exposures"]
+            assert exposures["artifact_identity"] == envelope.instance_identity
+            assert exposures["table"] == "portfolio_exposures.parquet"
+            with artifact.table(exposures["table"]) as exposure_table:
+                expected = exposure_table.loc[
+                    exposure_table.entry_at.eq(
+                        exposure_table.groupby("candidate_id").entry_at.transform("max")
+                    )
+                ]
+                actual = pd.DataFrame(exposures["latest"])
+                assert len(actual) == len(expected)
+                if not actual.empty:
+                    keys = ["candidate_id", "factor_id"]
+                    np.testing.assert_allclose(
+                        actual.sort_values(keys).value, expected.sort_values(keys).value
+                    )
+                    assert actual.factor_id.str.startswith("industry_").any()
+                    assert (~actual.factor_id.str.startswith("industry_")).any()
             assert report["source_run_status"] == "COMPLETE"
             blocker = "global_development_selection_reuses_validation"
             sections = report["sections"]

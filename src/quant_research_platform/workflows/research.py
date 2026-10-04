@@ -93,6 +93,7 @@ from quant_research_platform.contracts.time import (
     is_datetime_window,
     time_value_isoformat,
 )
+from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.markets.implementations.crypto.portfolio import (
     validate_maker_calibration,
 )
@@ -989,18 +990,21 @@ def status(
         records = []
         with policy.lease("queries.run_records", 1) as retained:
             for path in filesystem_glob(root, "*.json"):
-                record = read_research_run_record(path)
-                if record.profile_id != profile.profile_id:
-                    continue
-                retained.grow(4096)
-                records.append(
-                    {
-                        "run_id": record.run_id,
-                        "scenario_id": record.scenario_id,
-                        "status": record.status.value,
-                        "research_window": dict(record.research_window),
-                    }
-                )
+                try:
+                    record = read_research_run_record(path)
+                    if record.profile_id != profile.profile_id:
+                        continue
+                    retained.grow(4096)
+                    records.append(
+                        {
+                            "run_id": record.run_id,
+                            "scenario_id": record.scenario_id,
+                            "status": record.status.value,
+                            "research_window": dict(record.research_window),
+                        }
+                    )
+                finally:
+                    record = None
             records.sort(key=lambda item: item["run_id"])
             return {"profile_id": profile.profile_id, "runs": records}
 
@@ -1272,10 +1276,10 @@ def _execute_action_with_policy(
                     ),
                 )
                 continue
-            if planned["decision"] == PlanDecision.REUSE.value:
-                record_result(
-                    request,
-                    _reuse_target(
+            is_candidate = rebuild and planned["matching_instance_identity"] is not None
+            try:
+                if planned["decision"] == PlanDecision.REUSE.value:
+                    result = _reuse_target(
                         profile=profile,
                         protocol=protocol,
                         layout=layout,
@@ -1284,53 +1288,50 @@ def _execute_action_with_policy(
                         policy=policy,
                         raw_root=source_root,
                         time_window=request.time_window,
-                    ),
-                )
-                continue
-            is_candidate = rebuild and planned["matching_instance_identity"] is not None
-            if is_candidate and candidate_workspace is None:
-                candidate_workspace = operation.enter_context(
-                    rebuild_candidate_workspace(layout)
-                )
-            output_layout = layout
-            output_root: Path | None = None
-            if candidate_workspace is not None and is_candidate:
-                output_layout = candidate_workspace.layout
-                output_root = _target_instance_root(
-                    profile,
-                    output_layout,
-                    spec.target_id,
-                    planned["requested_identity"],
-                )
-            target_layout = _target_layout(
-                profile=profile,
-                layout=layout,
-                spec=spec,
-                plans={
-                    dependency: plans[(dependency, dependency_window)]
-                    for dependency, dependency_window in request.dependencies
-                }
-                | {spec.target_id: planned},
-            )
-            if output_root is not None:
-                target_layout = target_layout.with_target_roots(
-                    {spec.target_id: output_root}
-                )
-            try:
-                result = _build_target(
-                    run_id=run_id,
-                    profile=profile,
-                    protocol=protocol,
-                    layout=output_layout,
-                    spec=spec,
-                    planned=planned,
-                    time_window=request.time_window,
-                    access=str(window["access"]),
-                    software_identity=software,
-                    target_layout=target_layout,
-                    policy=policy,
-                    raw_root=source_root,
-                )
+                    )
+                else:
+                    if is_candidate and candidate_workspace is None:
+                        candidate_workspace = operation.enter_context(
+                            rebuild_candidate_workspace(layout)
+                        )
+                    output_layout = layout
+                    output_root: Path | None = None
+                    if candidate_workspace is not None and is_candidate:
+                        output_layout = candidate_workspace.layout
+                        output_root = _target_instance_root(
+                            profile,
+                            output_layout,
+                            spec.target_id,
+                            planned["requested_identity"],
+                        )
+                    target_layout = _target_layout(
+                        profile=profile,
+                        layout=layout,
+                        spec=spec,
+                        plans={
+                            dependency: plans[(dependency, dependency_window)]
+                            for dependency, dependency_window in request.dependencies
+                        }
+                        | {spec.target_id: planned},
+                    )
+                    if output_root is not None:
+                        target_layout = target_layout.with_target_roots(
+                            {spec.target_id: output_root}
+                        )
+                    result = _build_target(
+                        run_id=run_id,
+                        profile=profile,
+                        protocol=protocol,
+                        layout=output_layout,
+                        spec=spec,
+                        planned=planned,
+                        time_window=request.time_window,
+                        access=str(window["access"]),
+                        software_identity=software,
+                        target_layout=target_layout,
+                        policy=policy,
+                        raw_root=source_root,
+                    )
             except PortfolioTargetBlocked as exc:
                 result = TargetResult(
                     target_id=spec.target_id,
@@ -1759,8 +1760,9 @@ def _build_semantic_target(
                 ),
             )
 
-            def write(staging: Path) -> None:
-                with evaluation_result as result:
+            with evaluation_result as result:
+
+                def write(staging: Path) -> None:
                     write_evaluation_outputs_from_chunks(
                         result.output_chunks,
                         summary_factory=result.summaries,
@@ -1775,12 +1777,12 @@ def _build_semantic_target(
                         resource_policy=policy,
                     )
 
-            try:
-                write_semantic_artifact(logical_root, envelope, write)
-            except (KeyError, TypeError, ValueError) as exc:
-                raise ValueError(
-                    f"evaluation_write_failed:{_semantic_failure_code(exc)}"
-                ) from exc
+                try:
+                    write_semantic_artifact(logical_root, envelope, write)
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise ValueError(
+                        f"evaluation_write_failed:{_semantic_failure_code(exc)}"
+                    ) from exc
         elif binding.kind is ProducerKind.MODEL:
             if run_id is None:
                 raise ValueError("model_run_id_required")
@@ -1820,7 +1822,6 @@ def _build_semantic_target(
                     model_catalog=profile.models,
                     dataset_id=protocol.scenario_id,
                     model_ids=model_ids,
-                    tie_break_order=model_ids,
                     time_window=time_window,
                     resource_policy=policy,
                     protocol_manifest=target_protocol,
@@ -2148,7 +2149,7 @@ def _build_semantic_target(
                         formal_dataset_window=protocol.formal_dataset_window,
                         prediction_window=prediction_window,
                         frozen_calibration=dict(protocol.frozen_alpha).get(
-                            candidate.selection_group
+                            (candidate.selection_group, candidate.rebalance_schedule)
                         ),
                         on_final_calibration=final_calibrations.append,
                         prediction_lookup=prediction_lookup,
@@ -2262,33 +2263,60 @@ def _write_research_run_record(
             )
         )
     protocol_snapshot = protocol.manifest()
-    with research_run_trial_references(layout, run_id) as trial_ledgers:
-        record = ResearchRunRecord(
-            run_id=run_id,
-            trial_ledgers=trial_ledgers,
-            profile_id=profile.profile_id,
-            scenario_id=protocol.scenario_id,
-            protocol=protocol_snapshot,
-            protocol_identity=canonical_json_hash(protocol_snapshot),
-            research_window=research_window,
-            software_identity=software_identity.identity_hash,
-            terminal_targets=terminal_targets,
-            target_results=tuple(references),
-            status=status,
-            operation_evidence=operation_evidence,
-            failure_reason=failure_reason,
-            holdout_evidence={"qualification": "HOLDOUT_NOT_ACCESSED", "prior_runs": []}
-            if holdout_not_accessed
-            else _holdout_evidence(
-                layout=layout,
-                profile=profile,
-                protocol=protocol,
+    policy = current_runtime_resource_policy()
+    with (
+        research_run_trial_references(layout, run_id) as trial_ledgers,
+        policy.lease("research.run.evidence", 0) as retained,
+    ):
+        record = holdout = values = None
+        try:
+            holdout = (
+                {"qualification": "HOLDOUT_NOT_ACCESSED", "prior_runs": []}
+                if holdout_not_accessed
+                else _holdout_evidence(
+                    layout=layout,
+                    profile=profile,
+                    protocol=protocol,
+                    research_window=research_window,
+                    software_identity=software_identity.identity_hash,
+                    target_results=tuple(references),
+                    retained=retained,
+                )
+            )
+            values = dict(
+                run_id=run_id,
+                trial_ledgers=trial_ledgers,
+                profile_id=profile.profile_id,
+                scenario_id=protocol.scenario_id,
+                protocol=protocol_snapshot,
+                protocol_identity=canonical_json_hash(protocol_snapshot),
                 research_window=research_window,
                 software_identity=software_identity.identity_hash,
+                terminal_targets=terminal_targets,
                 target_results=tuple(references),
-            ),
-        )
-        write_research_run_record(layout.research_run_path(run_id), record)
+                status=status,
+                operation_evidence=operation_evidence,
+                failure_reason=failure_reason,
+                holdout_evidence=holdout,
+            )
+            required = report_payload_working_set(
+                {
+                    **values,
+                    "target_results": [item.payload() for item in references],
+                    "status": status.value,
+                }
+            )
+            policy.require_working_set(
+                required, error="research_run_evidence_exceeds_memory_capacity"
+            )
+            retained.grow(required)
+            record = ResearchRunRecord(**values)
+            write_research_run_record(layout.research_run_path(run_id), record)
+        except BaseException as primary:
+            clear_exception_frames(primary)
+            raise
+        finally:
+            record = holdout = values = references = trial_ledgers = None
 
 
 def _holdout_evidence(
@@ -2299,6 +2327,7 @@ def _holdout_evidence(
     research_window: Mapping[str, object],
     software_identity: str,
     target_results: tuple[ResearchRunTargetResult, ...],
+    retained,
 ) -> dict[str, object]:
     if protocol.access_window != "holdout":
         return {}
@@ -2331,40 +2360,56 @@ def _holdout_evidence(
             ProducerKind.MODEL,
         }
     )
-    for path in sorted(
-        filesystem_glob(layout.research_run_path("run_probe").parent, "*.json")
-    ):
-        record = read_research_run_record(path)
-        if (
-            record.profile_id != profile.profile_id
-            or record.scenario_id != protocol.scenario_id
-            or record.research_window["access"] != "holdout"
-            or record.holdout_evidence.get("qualification") == "HOLDOUT_NOT_ACCESSED"
-        ):
-            continue
-        prior.append(
-            {"run_id": record.run_id, "identity": canonical_json_hash(record.payload())}
-        )
-        old = {
-            item.target_id: item.instance_identity
-            for item in record.target_results
-            if item.status in {TargetStatus.BUILT, TargetStatus.REUSED}
-        }
-        if (
-            record.status is RunStatus.COMPLETE
-            and protocol.scenario_id in current
-            and all(key in current for key in protocol.frozen_target_ids())
-            and record.software_identity == software_identity
-            and all(old.get(key) == current[key] for key in evidence_targets)
-        ):
-            if frozen_inputs(
-                record.payload()["protocol"]["frozen_development"]
-            ) == frozen_inputs(protocol.frozen_development):
-                same_inputs = True
-                same_evidence |= (
-                    dict(record.research_window) == dict(research_window)
-                    and old == current
+    policy = current_runtime_resource_policy()
+    for path in filesystem_glob(layout.research_run_path("run_probe").parent, "*.json"):
+        with policy.lease("research.run.prior", 0) as current_record:
+            record = old = None
+            try:
+                record = read_research_run_record(path, lease=current_record)
+                if (
+                    record.profile_id != profile.profile_id
+                    or record.scenario_id != protocol.scenario_id
+                    or record.research_window["access"] != "holdout"
+                    or record.holdout_evidence.get("qualification")
+                    == "HOLDOUT_NOT_ACCESSED"
+                ):
+                    continue
+                growth = report_payload_working_set(
+                    {"run_id": record.run_id, "identity": "0" * 64}
                 )
+                policy.require_working_set(
+                    growth, error="research_run_evidence_exceeds_memory_capacity"
+                )
+                retained.grow(growth)
+                prior.append(
+                    {
+                        "run_id": record.run_id,
+                        "identity": canonical_json_hash(record.payload()),
+                    }
+                )
+                old = {
+                    item.target_id: item.instance_identity
+                    for item in record.target_results
+                    if item.status in {TargetStatus.BUILT, TargetStatus.REUSED}
+                }
+                if (
+                    record.status is RunStatus.COMPLETE
+                    and protocol.scenario_id in current
+                    and all(key in current for key in protocol.frozen_target_ids())
+                    and record.software_identity == software_identity
+                    and all(old.get(key) == current[key] for key in evidence_targets)
+                ):
+                    if frozen_inputs(
+                        record.payload()["protocol"]["frozen_development"]
+                    ) == frozen_inputs(protocol.frozen_development):
+                        same_inputs = True
+                        same_evidence |= (
+                            dict(record.research_window) == dict(research_window)
+                            and old == current
+                        )
+            finally:
+                record = old = None
+    prior.sort(key=lambda item: item["run_id"])
     return {
         "qualification": "REUSE"
         if same_evidence

@@ -358,26 +358,26 @@ def test_maker_uses_local_observation_order_for_same_time_events() -> None:
         100,
         bid_index=994,
         ask_index=1008,
-        source_sequence=2,
+        source_sequence=3,
         receive_monotonic_ns=20,
     )
     book_first_trade = _trade(
         100,
         quantity=3.0,
-        source_sequence=3,
+        source_sequence=2,
         receive_monotonic_ns=30,
     )
     trade_first_book = _state(
         100,
         bid_index=994,
         ask_index=1008,
-        source_sequence=3,
+        source_sequence=2,
         receive_monotonic_ns=30,
     )
     trade_first = _trade(
         100,
         quantity=3.0,
-        source_sequence=2,
+        source_sequence=3,
         receive_monotonic_ns=20,
     )
 
@@ -733,3 +733,174 @@ def test_maker_observed_trade_gap_discards_active_and_pending_before_new_quote(
     assert result["fill_quantity"] == 0
     assert result["created_orders"] == 4
     assert result["average_order_lifetime_ms"] == 97.5
+
+
+@pytest.mark.parametrize("kind", ["maker", "taker"])
+@pytest.mark.parametrize("stop_ms,expected", [(200, True), (100, False)])
+def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
+    tmp_path, kind, stop_ms, expected
+):
+    from dataclasses import asdict, replace
+
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    capital = PortfolioCapital("quiet_tail", 1000.0, "USDT", "linear_perpetual")
+    comparisons = []
+    with runtime_resource_policy_scope() as policy:
+        for has_later_book in (False, True):
+            books = [_state(0)]
+            if has_later_book:
+                books.append(_state(175))
+            fills = []
+            results = []
+            envelope = build_business_manifest_envelope(
+                logical_artifact_id="quiet_tail",
+                schema_identity="a" * 64,
+                protocol_or_spec_identity="b" * 64,
+                software_identity="c" * 64,
+                research_window={
+                    "start": "1970-01-01T00:00:00",
+                    "end": "1970-01-01T00:00:00.180",
+                    "access": "holdout",
+                },
+                upstream_identities={},
+                semantic_metadata={"portfolio_capital": asdict(capital)},
+            )
+
+            def produce(emit, books=books, fills=fills, results=results):
+                common = dict(
+                    observed_coverage={"book-1": _coverage(0, stop_ms)},
+                    resource_policy=policy,
+                    capital=capital,
+                    asset_id="btc_usdt",
+                    funding_events=(),
+                    funding_forecasts=KNOWN_NO_FUNDING,
+                    decision_windows_ns=((0, 180_000_000),),
+                    observation_window_ns=(0, stop_ms * 1_000_000),
+                    on_fill=lambda fill: fills.append(dict(fill)),
+                    on_ledger=emit,
+                )
+                if kind == "taker":
+                    result = _simulate_taker(
+                        books,
+                        [{"timestamp_ms": 0, "prediction": 0.1}],
+                        prediction_column="prediction",
+                        prediction_horizon_ms=500,
+                        config=_taker_config(),
+                        **common,
+                    )
+                else:
+                    result = _simulate_maker(
+                        books,
+                        [_trade(10, quantity=3)],
+                        [_quote(0)],
+                        config=replace(_maker_config(), markout_horizon_ms=90),
+                        trade_coverage={"trade-connection-1": _coverage(0, stop_ms)},
+                        **common,
+                    )
+                results.append(result)
+
+            root = write_portfolio_ledger_artifact(
+                tmp_path / str(has_later_book),
+                envelope=envelope,
+                produce=produce,
+            )
+            with policy.lease("tests.quiet_tail.artifact", 0) as lease:
+                artifact = read_portfolio_ledger_artifact(
+                    root, expected_identity=envelope.instance_identity, lease=lease
+                )
+                trades, cashflows, markouts = [], [], []
+                for batch in artifact.iter_chunks():
+                    trades.extend(batch.trades)
+                    cashflows.extend(batch.cashflows)
+                    markouts.extend(
+                        row.number
+                        for row in batch.diagnostics
+                        if row.name == "markout_per_unit"
+                    )
+                assert len(trades) == 1 and len(markouts) == 1
+                assert (markouts[0] is not None) is expected
+                assert fills[0]["markout_per_unit"] == markouts[0]
+                comparisons.append((trades, cashflows, results[0]["net_pnl"], markouts))
+        assert comparisons[0] == comparisons[1]
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "quantity,visible,expected_fill",
+    [(3.0, 2.0, 0.0), (3.0, 2.25, 0.25), (3.0, 3.0, 1.0)],
+)
+def test_maker_visible_quantity_controls_persisted_fill_and_nav(
+    tmp_path, quantity, visible, expected_fill
+):
+    from dataclasses import asdict
+
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
+
+    capital = PortfolioCapital("visible_quantity", 1000.0, "USDT", "linear_perpetual")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="visible_quantity",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "1970-01-01T00:00:00",
+            "end": "1970-01-01T00:00:00.200",
+            "access": "holdout",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+    with runtime_resource_policy_scope() as policy:
+        result = []
+
+        def produce(emit):
+            result.append(
+                _simulate_maker(
+                    [_state(0), _state(200)],
+                    [_trade(50, quantity=quantity, visible_quantity=visible)],
+                    [_quote(0)],
+                    config=_maker_config(),
+                    observed_coverage={"book-1": _coverage(0, 300)},
+                    trade_coverage={"trade-connection-1": _coverage(0, 300)},
+                    resource_policy=policy,
+                    capital=capital,
+                    asset_id="btc_usdt",
+                    funding_events=(),
+                    on_ledger=emit,
+                )
+            )
+
+        root = write_portfolio_ledger_artifact(
+            tmp_path / "ledger", envelope=envelope, produce=produce
+        )
+        with policy.lease("tests.visible_quantity.artifact", 0) as lease:
+            artifact = read_portfolio_ledger_artifact(
+                root, expected_identity=envelope.instance_identity, lease=lease
+            )
+            trades = []
+            persisted_nav = None
+            for batch in artifact.iter_chunks():
+                trades.extend(batch.trades)
+                endings = [row for row in batch.valuations if row.phase == "end"]
+                if endings:
+                    persisted_nav = sum(row.value for row in endings)
+            assert sum(trade.quantity for trade in trades) == expected_fill
+            assert result[0]["net_pnl"] == pytest.approx(0.5 * expected_fill)
+            assert result[0]["nav"] == pytest.approx(1000.0 + 0.5 * expected_fill)
+            assert persisted_nav == pytest.approx(1000.0 + 0.5 * expected_fill)
+        assert policy.used_memory_bytes == 0

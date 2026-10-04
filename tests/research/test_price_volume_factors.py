@@ -918,3 +918,51 @@ def test_market_model_residual_volatility_matches_decimal_oracle(scale):
     assert observed.residual_volatility["a"] == pytest.approx(
         expected, rel=1e-12, abs=0
     )
+
+
+def test_trend_efficiency_extreme_normal_price_path_persists_finite_ratio(tmp_path):
+    from dataclasses import replace
+
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    exponents = [0]
+    for _ in range(2):
+        exponents.append(exponents[-1] + 1023)
+        for _ in range(29):
+            exponents.append(exponents[-1] - 51)
+    prices = np.ldexp(np.ones(61), exponents)
+    returns = prices[1:] / prices[:-1] - 1.0
+    assert np.isfinite(prices).all() and (prices >= np.finfo(float).tiny).all()
+    np.testing.assert_array_equal(prices[:-1] * (1 + returns), prices[1:])
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "synthetic",
+            "timestamp": pd.bdate_range("2020-01-02", periods=60).as_unit("ns"),
+            "period_return": returns,
+        }
+    )
+    calculated = calculate_price_volume_factors(
+        frame, factor_columns=("trend_efficiency_60d",)
+    )
+    calculated.insert(0, "market_id", "a_share")
+    base = research_profile().processed.get("price_volume_facts")
+    spec = replace(
+        base,
+        column_roles={
+            key: value
+            for key, value in base.column_roles.items()
+            if key in calculated.columns
+        },
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, calculated, spec=spec)
+    saved = read_dataset(root)
+    assert len(saved) == 60
+    assert saved.trend_efficiency_60d.iloc[-1] == 1.0
+    assert saved.trend_efficiency_60d.iloc[:-1].isna().all()

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import re
 import struct
 import sys
 from array import array
@@ -25,6 +26,7 @@ _MAX_INTEGER_BITS = 13_607
 _MAX_NESTING_DEPTH = 64
 _JSON_INDENT = 2
 _TEXT_CHUNK_CHARACTERS = 16 * 1024
+_JSON_ESCAPE_PATTERN = re.compile(r'["\\\x00-\x1f]')
 _TUPLE_BASE_BYTES = ().__sizeof__()
 _POINTER_BYTES = struct.calcsize("P")
 
@@ -805,6 +807,9 @@ def _require_bounded_json_value_preflight(
         claim(2)
         for offset in range(0, len(text), _TEXT_CHUNK_CHARACTERS):
             chunk = text[offset : offset + _TEXT_CHUNK_CHARACTERS]
+            if _JSON_ESCAPE_PATTERN.search(chunk) is None:
+                claim(len(_utf8_bytes(chunk)))
+                continue
             segment_start = 0
             for index, character in enumerate(chunk):
                 codepoint = ord(character)

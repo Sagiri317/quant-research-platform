@@ -564,6 +564,7 @@ def _asof_industry(
     if industry_sets is not None:
         known = history["_industry_known"]
         resolved = _resolve_industry_hierarchy(history.loc[known], industry_sets)
+        history.loc[known, "_industry_known"] = resolved["industry_level1_code"].notna()
         for column in (
             "industry_level1_code",
             "industry_level1_name",
@@ -890,7 +891,9 @@ def _resolve_industry_hierarchy(
             seen.add(code)
             entry = lookup.get((standard, code))
             if entry is None:
-                raise ValueError("industry_history_code_missing")
+                resolved_codes.append(None)
+                resolved_names.append(None)
+                break
             if str(entry.industry_level) == "1":
                 resolved_codes.append(code)
                 resolved_names.append(
@@ -907,8 +910,10 @@ def _resolve_industry_hierarchy(
     result["industry_level1_name"] = pd.Series(
         resolved_names, index=result.index, dtype="string"
     )
-    result["is_nonfinancial_industry"] = ~result["industry_level1_code"].isin(
-        FINANCIAL_INDUSTRY_LEVEL1_CODES
+    result["is_nonfinancial_industry"] = (
+        (~result["industry_level1_code"].isin(FINANCIAL_INDUSTRY_LEVEL1_CODES))
+        .astype("boolean")
+        .where(result["industry_level1_code"].notna())
     )
     return result
 
@@ -1018,7 +1023,7 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
             )
             for column in price_columns:
                 result.loc[positions, column] = values[column].where(
-                    ~suspended | values[column].notna(), last_close
+                    ~suspended, last_close
                 )
         result.loc[positions, "period_return"] = result.loc[
             positions, "period_return"

@@ -234,6 +234,15 @@ def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) 
         panel[wrong_identity] = "wrong-raw-identity"
 
     class ValidationArtifact:
+        models = tuple(
+            {
+                "fold_id": "fold",
+                "model_id": model_id,
+                "model_metadata": {"model_algorithm": "linear_regression"},
+            }
+            for model_id in ("price_model", "pressure_model")
+        )
+
         def validation_chunks(self, *, fold_id, model_id):
             yield panel
 
@@ -1179,7 +1188,7 @@ def test_pending_markout_truncate_failure_closes_file_and_preserves_primary(
                     def __getattr__(self, name):
                         return getattr(handle, name)
 
-                    def truncate(self):
+                    def truncate(self, *args):
                         assert pending._reservation.reserved_bytes > 0
                         raise primary
 
@@ -1286,3 +1295,113 @@ def test_execution_markout_scratch_is_bounded_and_history_is_released(
             assert 0 < peak_bytes < 1024
         assert policy.used_memory_bytes == 0
     assert handles and all(handle.closed for handle in handles)
+
+
+def test_pending_markout_fifo_compacts_consumed_prefix_with_live_suffix():
+    with runtime_resource_policy_scope() as policy:
+        completed = []
+        with _PendingMarkouts(
+            _Metrics(), lambda fill: completed.append(fill["ordinal"]), policy
+        ) as pending:
+
+            def add(index):
+                pending.add(
+                    {
+                        "ordinal": index,
+                        "fill_qty": 1.0,
+                        "fill_price": 100.0,
+                        "side": "buy",
+                        "segment_id": "s1",
+                        "markout_target_time_ns": index,
+                    }
+                )
+
+            for index in range(10):
+                add(index)
+            largest = 0
+            for index in range(1000):
+                pending.advance(index, None, {})
+                add(index + 10)
+                size = pending._file.seek(0, 2)
+                largest = max(largest, size)
+                assert pending._reservation.reserved_bytes == size
+            assert completed == list(range(1000))
+            assert largest < 5000
+            pending.expire_all()
+            assert completed == list(range(1010))
+            assert pending._file.seek(0, 2) == 0
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "finish", ["dual_interrupt", "dual_value", "close_only", "normal"]
+)
+def test_maker_event_decode_lease_cleanup_preserves_primary(monkeypatch, finish):
+    from quant_research_platform.runtime.resources import MemoryLease
+    from tests.markets.crypto.calibration_test_support import calibration_from_paths
+
+    primary = (
+        KeyboardInterrupt("calibration_decode_primary")
+        if finish == "dual_interrupt"
+        else ValueError("calibration_decode_primary")
+        if finish == "dual_value"
+        else None
+    )
+    secondary = OSError("calibration_decode_close")
+    decode = execution.parse_qrp_json_object
+    close = MemoryLease.close
+    closed = []
+
+    def decode_event(payload):
+        event = decode(payload)
+        assert event["kind"] == "trade"
+        if primary is not None:
+            raise primary
+        return event
+
+    def close_event(lease):
+        close(lease)
+        if lease.owner == "crypto.calibration.event_decode":
+            closed.append(lease)
+            if finish != "normal":
+                raise secondary
+
+    with runtime_resource_policy_scope() as policy:
+        model = calibration_from_paths(
+            [
+                (
+                    [_state(0)],
+                    [_trade(100, price="99.5", quantity="1", maker_buyer=True)],
+                )
+            ],
+            [0.0],
+            policy,
+        )
+        try:
+            model._load()
+            retained = policy.used_memory_bytes
+            with monkeypatch.context() as fault:
+                fault.setattr(execution, "parse_qrp_json_object", decode_event)
+                fault.setattr(MemoryLease, "close", close_event)
+                if primary is not None:
+                    with pytest.raises(type(primary)) as caught:
+                        list(model.events(1, 2))
+                    assert caught.value is primary
+                    assert primary.__notes__ == [
+                        "crypto.calibration.event_decode lease close also failed: "
+                        "OSError"
+                    ]
+                elif finish == "close_only":
+                    with pytest.raises(OSError) as caught:
+                        list(model.events(1, 2))
+                    assert caught.value is secondary
+                else:
+                    events = list(model.events(1, 2))
+                    assert [(event.event_id, event.kind) for event in events] == [
+                        (1, "trade")
+                    ]
+            assert len(closed) == 1 and not closed[0].active
+            assert policy.used_memory_bytes == retained
+        finally:
+            model.close()
+        assert policy.used_memory_bytes == 0

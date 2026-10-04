@@ -46,7 +46,7 @@ def test_single_selected_model_has_no_invented_comparison():
                 "timestamp": pd.date_range("2023-01-01", periods=3),
                 "chosen": [0.1, 0.2, 0.3],
             }
-        ),
+        ).set_index("timestamp"),
         family_ids=("chosen",),
         benchmark_id="chosen",
         access_window="development",

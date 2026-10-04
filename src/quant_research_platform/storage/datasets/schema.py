@@ -758,12 +758,13 @@ def frame_schema_working_set_bounds(
     frame: pd.DataFrame,
     *,
     resource_policy: RuntimeResourcePolicy,
-) -> tuple[int, int, int]:
+) -> tuple[int, int, int, tuple[str, ...]]:
     """Bound fixed schema, row schema, and nested native conversion separately.
 
     Count borrowed structures without a whole-input identity set or an inferred
     Arrow schema. Per-column row maxima cover any slice; the caller reserves two
     native graphs for the original Arrow table and the schema-converted table.
+    The same scan records object columns with observed strings and only nulls.
     """
 
     stack_slots = (
@@ -777,6 +778,7 @@ def frame_schema_working_set_bounds(
         fixed = _PHYSICAL_NODE_BYTES
         per_row = native_per_row = 0
         active: list[object] = []
+        object_strings: list[str] = []
         column_array = value = None
         try:
             for name, column_array in zip(
@@ -804,17 +806,25 @@ def frame_schema_working_set_bounds(
                     raise ValueError("dataset_working_set_exceeds_task_memory_budget")
                 if pd.api.types.is_object_dtype(dtype):
                     column_max = column_native_max = 0
+                    has_string = False
+                    strings_or_nulls = True
                     for value in column_array:
                         metadata, native = _input_schema_extra_bytes(
                             value, active=active, remaining=limit - fixed
                         )
                         column_max = max(column_max, metadata)
                         column_native_max = max(column_native_max, native)
+                        if isinstance(value, str):
+                            has_string = True
+                        elif not pd.api.types.is_scalar(value) or not pd.isna(value):
+                            strings_or_nulls = False
                     per_row += column_max
                     native_per_row += column_native_max
+                    if has_string and strings_or_nulls:
+                        object_strings.append(name)
                 if fixed + per_row + 2 * native_per_row > limit:
                     raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-            return fixed, per_row, native_per_row
+            return fixed, per_row, native_per_row, tuple(object_strings)
         finally:
             column_array = value = None
             active.clear()
@@ -1143,7 +1153,12 @@ def merge_logical_dtype_payloads(
                 _typed_category_identity(item): item
                 for item in [*expected["categories"], *current["categories"]]
             }
-            expected["categories"] = [domains[key] for key in sorted(domains)]
+            expected["categories"] = list(domains.values())
+    for descriptor in merged:
+        if descriptor["kind"] == "categorical" and not descriptor["ordered"]:
+            descriptor["categories"] = sorted(
+                descriptor["categories"], key=_typed_category_identity
+            )
     return {"schema_id": first["schema_id"], "columns": merged}
 
 

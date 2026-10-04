@@ -13,10 +13,12 @@ from types import MappingProxyType
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.identity import (
+    DatasetFileIdentity,
     filesystem_scandir,
     filesystem_stat,
     open_filesystem_file,
     require_unaliased_path,
+    verified_file_handle,
 )
 
 NUMERICAL_MODEL_DISTRIBUTIONS = (
@@ -104,7 +106,15 @@ def _package_content_hash(root: Path) -> str:
             digest.update(len(relative_bytes).to_bytes(8, "big"))
             digest.update(relative_bytes)
             digest.update(expected_identity[2].to_bytes(8, "big"))
-            with handle_preserving_primary(open_filesystem_file(path)) as handle:
+            with (
+                handle_preserving_primary(open_filesystem_file(path)) as handle,
+                verified_file_handle(
+                    path,
+                    handle,
+                    expected_identity=DatasetFileIdentity(*expected_identity),
+                    error="production_package_identity_changed",
+                ),
+            ):
                 while content := handle.read(1024 * 1024):
                     digest.update(content)
         except (FileNotFoundError, NotADirectoryError) as exc:
@@ -126,7 +136,9 @@ def _package_inventory(root: Path):
         try:
             with handle_preserving_primary(filesystem_scandir(directory)) as entries:
                 for entry in entries:
-                    entry_path = directory / entry.name
+                    entry_path = require_unaliased_path(
+                        directory / entry.name, error="production_package_alias"
+                    )
                     if entry.is_symlink():
                         raise ValueError("production_package_alias")
                     relative = (

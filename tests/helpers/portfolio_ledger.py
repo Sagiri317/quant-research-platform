@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import numpy as np
 import pandas as pd
 
 from quant_research_platform.artifacts.portfolio_ledger import (
@@ -14,6 +15,30 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.research.portfolios.accounting import (
     continuous_ledger_batch,
 )
+from quant_research_platform.research.portfolios.accounting import (
+    execute_continuous_target as _execute_continuous_target,
+)
+
+
+def execute_continuous_target(*args, **kwargs):
+    def totals(assets, amounts, adv):
+        return np.asarray(
+            [
+                kwargs["cost_for_trade"](
+                    kwargs["execution_date"],
+                    asset,
+                    "buy",
+                    float(amount),
+                    float(volume),
+                    kwargs["assumptions"],
+                ).total_cost
+                if amount > 0
+                else 0.0
+                for asset, amount, volume in zip(assets, amounts, adv, strict=True)
+            ]
+        )
+
+    return _execute_continuous_target(*args, cost_totals_for_buys=totals, **kwargs)
 
 
 def session_frame(batch):

@@ -61,6 +61,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
+from tests.helpers.runtime_resources import disabled_gc
 from tests.storage.test_semantic_artifacts import _envelope
 
 
@@ -205,6 +206,7 @@ def test_evaluation_counts_keep_exact_int64_identity(dtype):
 
 
 @pytest.mark.parametrize("count", [1000, 10000])
+@disabled_gc()
 def test_complete_frame_releases_consumed_concat_before_next_output(count):
     def inputs():
         for dates in ([1] * count, [1] * count + [2], [3, 4]):
@@ -226,7 +228,6 @@ def test_complete_frame_releases_consumed_concat_before_next_output(count):
             del first
             second = next(stream)
             assert len(second) == 1
-            gc.collect()
             assert reference() is None
             del second
         finally:
@@ -1115,11 +1116,13 @@ def test_execution_rejected_book_releases_transferred_ownership(kind, failure):
                         **options,
                     )
                 elif kind == "calibration":
+                    calibration = _maker_config()
                     execution.replay_maker_calibration(
                         books(),
                         (),
                         (),
-                        config=_maker_config(),
+                        order_quantity=calibration.order_quantity,
+                        latency_ms=calibration.latency_ms,
                         observed_coverage=options["observed_coverage"],
                         trade_coverage={"trade-connection-1": (0, 300_000_000)},
                         cutoff_ns=300_000_000,

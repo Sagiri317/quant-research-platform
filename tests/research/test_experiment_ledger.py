@@ -178,8 +178,9 @@ def test_trial_ledger_uses_exact_bounded_storage_membership(tmp_path: Path) -> N
             pass
 
 
+@pytest.mark.parametrize("filter_mode", ("eligible", "unfiltered"))
 def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, filter_mode
 ) -> None:
     import pandas as pd
 
@@ -203,6 +204,7 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
             label_column="label",
             random_seed=7,
             hyperparameters={"alpha": alpha},
+            sample_filter_mode=filter_mode,
         )
         for name, alpha in (("ridge", 1.0), ("ridge_other", 0.1))
     )

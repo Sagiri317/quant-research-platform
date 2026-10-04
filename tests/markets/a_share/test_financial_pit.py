@@ -848,6 +848,7 @@ def test_last_session_revision_preserves_processed_pit_ttm_and_factor_prefix():
         source["trading_calendar"] = pd.DataFrame(
             {
                 "calendar_date": sessions,
+                "source_market_type": 4,
                 "is_trading_day": True,
             }
         )
@@ -936,3 +937,51 @@ def test_financial_ttm_rejects_unrepresentable_final_value() -> None:
     )
     with pytest.raises(ValueError, match="invalid_ttm_value"):
         construct_ttm_events(events)
+
+
+def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    events = pd.DataFrame(
+        columns=(
+            "asset_id",
+            "metric_id",
+            "report_period",
+            "available_at",
+            "is_corrected",
+            "version_identity",
+            "value",
+        )
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": [asset for _ in range(3) for asset in ("a", "b", "c")],
+            "timestamp": np.repeat(
+                pd.bdate_range("2020-01-02", periods=3).as_unit("ns"), 3
+            ),
+        }
+    )
+    spec = research_profile().processed.get("fundamental_pit")
+    actual = producer._fundamental_pit_frame(
+        spec, source={}, panel=panel, events=construct_ttm_events(events)
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, actual, spec=spec)
+    restored = read_dataset(root)
+    pd.testing.assert_frame_equal(restored[list(panel.columns)], panel)
+    assert not restored.has_legal_fundamental_pit.any()
+    assert (
+        restored.drop(columns=[*panel.columns, "has_legal_fundamental_pit"])
+        .isna()
+        .all()
+        .all()
+    )

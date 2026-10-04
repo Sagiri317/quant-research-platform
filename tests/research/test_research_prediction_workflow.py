@@ -65,7 +65,6 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
                 tmp_path,
                 (frame,),
                 prediction_spec,
-                np.asarray(model_result.prediction_model.coefficients),
                 model_spec.input_columns,
                 prediction_model=model_result.prediction_model,
                 model_metadata=model_result.metadata,
@@ -76,7 +75,8 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
             assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
             assert output_bundle.as_posix().endswith("outputs/pred_demo")
         finally:
-            model_result_owned.lease.close()
+            model_result = None
+            model_result_owned.release(owner="test.prediction_model")
 
 
 def test_a_share_prediction_requires_persisted_quarter_lineage() -> None:
@@ -193,7 +193,8 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
                 assert len(prediction) == len(frame)
                 assert pd.Series(prediction).notna().all()
             finally:
-                owned.lease.close()
+                result = prediction = None
+                owned.release(owner="test.model_ladder")
 
 
 @pytest.mark.parametrize(
@@ -265,4 +266,5 @@ def test_prediction_builder_binds_backend_package_to_actual_model_owner(
                     model_metadata=wrong_metadata,
                 )
         finally:
-            model_result_owned.lease.close()
+            model_result = None
+            model_result_owned.release(owner="test.prediction_model")

@@ -308,11 +308,19 @@ def test_software_identity_close_preserves_active_primary(
     closed = []
     native_scan = owner.filesystem_scandir
 
+    native_open = owner.open_filesystem_file
+
     class Handle:
+        def __init__(self):
+            self.handle = native_open(package / "module.py")
+
+        def fileno(self):
+            return self.handle.fileno()
+
         def read(self, _size):
             if primary is not None:
                 raise primary
-            return b""
+            return self.handle.read(_size)
 
         def __iter__(self):
             if primary is not None:
@@ -321,6 +329,7 @@ def test_software_identity_close_preserves_active_primary(
                 yield from entries
 
         def close(self):
+            self.handle.close()
             closed.append(True)
             raise secondary
 
@@ -335,3 +344,60 @@ def test_software_identity_close_preserves_active_primary(
     assert closed == [True]
     if primary is not None:
         assert "scratch handle close also failed: OSError" in primary.__notes__
+
+
+def test_package_hash_rejects_open_fd_from_swapped_ancestor(tmp_path, monkeypatch):
+    from quant_research_platform.storage import software_identity as owner
+
+    package, foreign, saved = (
+        tmp_path / name for name in ("package", "foreign", "saved")
+    )
+    package.mkdir()
+    foreign.mkdir()
+    (package / "module.py").write_bytes(b"baseline")
+    (foreign / "module.py").write_bytes(b"foreign!")
+    baseline = _identity(package)
+    native_open = owner.open_filesystem_file
+    handles = []
+
+    def swapped(path):
+        package.rename(saved)
+        foreign.rename(package)
+        try:
+            handle = native_open(path)
+            handles.append(handle)
+        finally:
+            package.rename(foreign)
+            saved.rename(package)
+        return handle
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(owner, "open_filesystem_file", swapped)
+        with pytest.raises(ValueError, match="production_package_identity_changed"):
+            _identity(package)
+    assert handles and all(handle.closed for handle in handles)
+    assert _identity(package).identity_hash == baseline.identity_hash
+
+
+def test_package_inventory_rejects_child_junction_on_windows(tmp_path):
+    import os
+    import subprocess
+
+    if os.name != "nt":
+        pytest.skip("requires a real Windows junction")
+    package, external = tmp_path / "package", tmp_path / "external"
+    package.mkdir()
+    external.mkdir()
+    (external / "module.py").write_bytes(b"synthetic")
+    junction = package / "child"
+    subprocess.run(
+        ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
+        check=True,
+        capture_output=True,
+    )
+    try:
+        with pytest.raises(ValueError, match="production_package_alias"):
+            _identity(package)
+    finally:
+        junction.rmdir()
+    assert (external / "module.py").read_bytes() == b"synthetic"

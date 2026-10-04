@@ -126,11 +126,23 @@ def test_strict_integer_series_rejects_out_of_range_before_integer_allocation() 
         )
 
 
-@pytest.mark.parametrize("value", [float("nan"), math.inf, -math.inf, True, []])
+@pytest.mark.parametrize(
+    "value",
+    [
+        float("nan"),
+        math.inf,
+        -math.inf,
+        True,
+        [],
+        pytest.param(10**400, id="huge-positive-integer"),
+        pytest.param(-(10**400), id="huge-negative-integer"),
+        pytest.param(Decimal("1e400"), id="huge-decimal"),
+    ],
+)
 def test_strict_finite_numeric_series_rejects_invalid_values(value: object) -> None:
     with pytest.raises(ValueError, match="invalid_contract_numeric"):
         validation.strict_finite_numeric_series(
-            pd.Series([value]),
+            pd.Series([value], dtype=object),
             error="invalid_contract_numeric",
         )
 

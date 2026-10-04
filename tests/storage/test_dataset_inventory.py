@@ -47,11 +47,14 @@ from quant_research_platform.storage.identity import (
     filesystem_write_text,
     native_filesystem_path,
 )
-from tests.helpers.runtime_resources import capture_test_policy
+from tests.helpers.runtime_resources import (
+    capture_storage_test_policy,
+    capture_test_policy,
+)
 from tests.storage.dataset_test_support import (
     _bound_first_frames,
     _issued_test_policy,
-    _writer_test_policy,
+    prepared_in_filter,
 )
 from tests.storage.low_level_fixtures import (
     fixture_dataset_content_hash,
@@ -421,7 +424,7 @@ def test_dataset_inventory_selected_count_is_selection_index_driven(
 ) -> None:
     from quant_research_platform.storage._scratch_ownership import _memory_filesystem
 
-    if _memory_filesystem(tmp_path):
+    if _memory_filesystem(Path(dataset_inventory.gettempdir())):
         pytest.skip("disk spill contract requires a non-memory TMPDIR")
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with (
@@ -978,11 +981,19 @@ def test_private_writer_releases_result_when_publish_loses_race(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "publish_race")
-    policy = _writer_test_policy()
+    filesystem_mkdir(root.parent, parents=True, exist_ok=True)
+    unrelated = root.parent / ".a-unrelated"
+    filesystem_mkdir(unrelated)
+    filesystem_write_bytes(unrelated / "old-good", b"old-good")
+    before_staging = set(filesystem_glob(root.parent, ".a-*"))
+    staging_paths = []
+    policy = capture_storage_test_policy()
     real_atomic_write_directory = dataset_writing.atomic_write_directory
 
     def publish_after_writer(final_root, writer):  # noqa: ANN001
         def race_writer(temp_root):  # noqa: ANN001
+            assert temp_root.parent == root.parent
+            staging_paths.append(temp_root)
             result = writer(temp_root)
             filesystem_mkdir(final_root)
             filesystem_write_text(final_root / "winner", "winner", encoding="utf-8")
@@ -1012,7 +1023,36 @@ def test_private_writer_releases_result_when_publish_loses_race(
         )
 
     assert filesystem_read_text(root / "winner", encoding="utf-8") == "winner"
-    assert not list(filesystem_glob(tmp_path, ".a-*"))
+    assert filesystem_read_bytes(unrelated / "old-good") == b"old-good"
+    assert set(filesystem_glob(root.parent, ".a-*")) == before_staging, (
+        "publication_staging_not_cleaned"
+    )
+    assert staging_paths and all(not filesystem_exists(path) for path in staging_paths)
+
+
+def test_publish_race_cleanup_assertion_detects_retained_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from quant_research_platform.storage import atomic
+
+    remove = atomic.remove_owned_scratch
+    retained = []
+
+    def leave_staging(path):
+        retained.append(path)
+
+    monkeypatch.setattr(atomic, "remove_owned_scratch", leave_staging)
+    try:
+        with pytest.raises(AssertionError, match="publication_staging_not_cleaned"):
+            test_private_writer_releases_result_when_publish_loses_race(
+                tmp_path, monkeypatch
+            )
+        assert len(retained) == 1 and filesystem_exists(retained[0])
+    finally:
+        for path in retained:
+            remove(path)
+    assert all(not filesystem_exists(path) for path in retained)
 
 
 def test_compare_uses_one_fingerprint_lease_per_side(
@@ -1133,11 +1173,12 @@ def test_string_filter_grammar_precedes_capacity_for_surrogate(
     )
 
     with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
-        dataset_reading._prepare_in_filter(
+        with prepared_in_filter(
             pa.field("value", pa.large_string()),
             ("\ud800",),
             resource_policy=policy,
-        )
+        ):
+            pass
 
 
 @pytest.mark.parametrize(
@@ -1155,18 +1196,18 @@ def test_string_filter_compact_utf8_sizing_matches_arrow(
         available_memory_bytes=16 * 1024**2,
         explicit_cap_bytes=8 * 1024 * 1024,
     )
-    prepared = dataset_reading._prepare_in_filter(
+    with prepared_in_filter(
         field,
         values,
         resource_policy=policy,
-    )
-    expected = pa.array(sorted(set(values)), type=field.type)
-    assert prepared.values.equals(expected)
-    assert prepared.retained_memory_bytes == expected.nbytes
-    assert (
-        sum(dataset_reading._utf8_payload_length(value) for value in set(values))
-        == expected.buffers()[2].size
-    )
+    ) as prepared:
+        expected = pa.array(sorted(set(values)), type=field.type)
+        assert prepared.values.equals(expected)
+        assert prepared.retained_memory_bytes == expected.nbytes
+        assert (
+            sum(dataset_reading._utf8_payload_length(value) for value in set(values))
+            == expected.buffers()[2].size
+        )
 
 
 def test_writer_releases_previous_publication_before_requesting_next(
@@ -1301,7 +1342,7 @@ def test_sqlite_temporary_root_is_private_and_owns_disk_admission(
 def test_dataset_inventory_tmpfs_growth_rejects_captured_capacity(tmp_path):
     from quant_research_platform.storage._scratch_ownership import _memory_filesystem
 
-    if not _memory_filesystem(tmp_path):
+    if not _memory_filesystem(Path(dataset_inventory.gettempdir())):
         pytest.skip("requires an actual memory filesystem")
     policy = capture_test_policy(available_memory_bytes=64 * 1024)
     with runtime_resource_policy_scope(policy):

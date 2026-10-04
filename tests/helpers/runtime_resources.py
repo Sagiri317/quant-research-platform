@@ -1,9 +1,22 @@
 from __future__ import annotations
 
+import gc
+from contextlib import contextmanager
 from unittest.mock import patch
 
 import quant_research_platform.runtime.resources as resources
 from quant_research_platform.runtime.resources import RuntimeResourcePolicy
+
+
+@contextmanager
+def disabled_gc():
+    enabled = gc.isenabled()
+    gc.disable()
+    try:
+        yield
+    finally:
+        if enabled:
+            gc.enable()
 
 
 class _TestMachineLock:
@@ -37,7 +50,7 @@ def capture_test_policy(
 
 def capture_storage_test_policy(
     *,
-    working_headroom_bytes: int,
+    working_headroom_bytes: int = 1024**2,
 ) -> RuntimeResourcePolicy:
     from quant_research_platform.storage import parquet
     from quant_research_platform.storage.datasets import writing

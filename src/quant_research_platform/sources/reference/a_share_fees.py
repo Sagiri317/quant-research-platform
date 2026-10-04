@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import csv
 import hashlib
-import io
 import json
 import math
 import os
@@ -13,7 +12,9 @@ from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
 
+from quant_research_platform.contracts.json_codec import json_record_working_set_bytes
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.identity import (
     content_hash_for_files,
     dataset_file_identity,
@@ -185,13 +186,54 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
     seen: set[tuple[object, ...]] = set()
     data_row_count = 0
     try:
-        with closing_iterator(open_filesystem_file(path)) as binary:
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease("source.reference.fees.csv.record", 0) as record_lease,
+            closing_iterator(open_filesystem_file(path)) as binary,
+        ):
             if dataset_file_identity_from_stat(os.fstat(binary.fileno())) != expected:
                 raise ValueError("a_share_fee_source_identity_changed")
-            handle = io.TextIOWrapper(binary, encoding="utf-8-sig", newline="")
-            reader = csv.DictReader(handle)
+            first_line = True
+            record_bytes = 0
+            record_limit = len(FEE_CSV_COLUMNS) * (8 * _MAX_FIELD_CHARS + 3) + 3
+            fixed_bytes = json_record_working_set_bytes(0)
+            per_byte = json_record_working_set_bytes(1) - fixed_bytes
+
+            def lines():
+                nonlocal first_line, record_bytes
+                while binary.tell() < expected.size:
+                    capacity = policy.operation_headroom_bytes
+                    limit = min(
+                        expected.size - binary.tell(),
+                        record_limit - record_bytes,
+                        (capacity - fixed_bytes) // per_byte - 1,
+                    )
+                    if limit <= 0:
+                        raise ValueError("a_share_fee_source_record_exceeds_capacity")
+                    before = record_lease.reserved_bytes
+                    reserve = json_record_working_set_bytes(limit + 1)
+                    policy.require_working_set(
+                        reserve, error="a_share_fee_source_record_exceeds_capacity"
+                    )
+                    record_lease.grow(reserve)
+                    raw = binary.readline(limit + 1)
+                    if len(raw) > limit:
+                        raise ValueError("a_share_fee_source_record_exceeds_capacity")
+                    record_bytes += len(raw)
+                    record_lease.shrink_to(
+                        before + json_record_working_set_bytes(len(raw))
+                    )
+                    text = raw.decode("utf-8-sig" if first_line else "utf-8")
+                    first_line = False
+                    raw = None
+                    yield text
+                    text = None
+
+            reader = csv.DictReader(lines(), strict=True)
             if tuple(reader.fieldnames or ()) != FEE_CSV_COLUMNS:
                 raise ValueError("a_share_fee_source_schema_invalid")
+            header_bound = record_lease.reserved_bytes
+            record_bytes = 0
             for row_number, row in enumerate(reader, start=2):
                 data_row_count += 1
                 if row_number > _MAX_ROWS + 1:
@@ -253,7 +295,9 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
                             included_in=included_in,
                         )
                     )
-            handle.detach()
+                row = values = value = None
+                record_bytes = 0
+                record_lease.shrink_to(header_bound)
             final = dataset_file_identity_from_stat(os.fstat(binary.fileno()))
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("a_share_fee_source_unavailable") from exc

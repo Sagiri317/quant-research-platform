@@ -24,6 +24,7 @@ from quant_research_platform.contracts.order_book import (
     validate_price_unit,
 )
 from quant_research_platform.contracts.validation import clear_exception_frames
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
     runtime_resource_policy_scope,
@@ -357,6 +358,9 @@ class _ObservedStreams:
         if value is None:
             closed.extend(self.active.values())
             self.active.clear()
+            self.previous = {
+                key: value for key, value in self.previous.items() if key[1] != "depth"
+            }
             self.epoch += 1
             return None, closed, {"reason": "vendor_disconnect"}
         symbol, channel, *_ = value["stream"].split("@")
@@ -370,13 +374,21 @@ class _ObservedStreams:
             current = native["a" if channel == "aggTrade" else "u"]
             previous = self.previous.get(key)
             if channel == "aggTrade":
-                accepted, _ = self.observe_trade(
-                    FUTURES_MARKET_TYPE
-                    if self.exchange == EXCHANGE
-                    else SPOT_MARKET_TYPE,
-                    symbol.upper(),
-                    native,
-                )
+                try:
+                    accepted, _ = self.observe_trade(
+                        FUTURES_MARKET_TYPE
+                        if self.exchange == EXCHANGE
+                        else SPOT_MARKET_TYPE,
+                        symbol.upper(),
+                        native,
+                    )
+                except ValueError as error:
+                    error.add_note(
+                        f"channel={channel}; slice_offset={offset}; line={number}; "
+                        f"previous_id={None if previous is None else previous[0]}; "
+                        f"current_id={current}"
+                    )
+                    raise
                 if not accepted:
                     return None, closed, None
             if previous is not None:
@@ -520,67 +532,70 @@ def _publish_slices(
                     symbols=symbols,
                     channels=channels,
                 )
-                try:
-                    for number, timestamp, value in records:
-                        rows = number
-                        _, closed, gap = tracker.observe(
-                            offset, number, timestamp, value
-                        )
-                        for interval in closed:
-                            write_row(intervals, interval)
-                            interval_count += 1
-                        if value is None:
-                            disconnects += 1
-                        else:
-                            stream = value["stream"]
-                            symbol, channel, *_ = stream.split("@")
-                            symbol = symbol.upper()
-                            native = value["data"]
-                            if channel in ("depth", "depthSnapshot"):
-                                names = (
-                                    ("b", "a")
-                                    if channel == "depth"
-                                    else ("bids", "asks")
-                                )
-                                for name in names:
-                                    for level in native[name]:
-                                        if type(level) is not list or len(level) != 2:
-                                            raise ValueError(
-                                                "tardis_price_level_invalid"
-                                            )
-                                        precision = price_decimal_places(level[0])
-                                        decimal_places[symbol] = max(
-                                            decimal_places.get(symbol, 0), precision
-                                        )
-                                if channel == "depthSnapshot":
-                                    snapshot_limits[symbol] = max(
-                                        snapshot_limits.get(symbol, 0),
-                                        *(len(native[name]) for name in names),
-                                    )
-                            elif channel == "aggTrade":
-                                decimal_places[symbol] = max(
-                                    decimal_places.get(symbol, 0),
-                                    price_decimal_places(native["p"]),
-                                )
-                            counts[stream] = counts.get(stream, 0) + 1
-                            if first is None:
-                                first = timestamp
-                            last = timestamp
-                        if gap is not None:
-                            gap.update(
-                                offset_minutes=offset,
-                                line=number,
-                                observed_utc=timestamp,
+                with closing_iterator(records):
+                    try:
+                        for number, timestamp, value in records:
+                            rows = number
+                            _, closed, gap = tracker.observe(
+                                offset, number, timestamp, value
                             )
-                            write_row(gaps, gap)
-                            gap_count += 1
-                        value = native = gap = interval = closed = None
-                except BaseException as error:
-                    clear_exception_frames(error)
-                    raise
-                finally:
-                    value = native = gap = interval = closed = level = None
-                    records.close()
+                            for interval in closed:
+                                write_row(intervals, interval)
+                                interval_count += 1
+                            if value is None:
+                                disconnects += 1
+                            else:
+                                stream = value["stream"]
+                                symbol, channel, *_ = stream.split("@")
+                                symbol = symbol.upper()
+                                native = value["data"]
+                                if channel in ("depth", "depthSnapshot"):
+                                    names = (
+                                        ("b", "a")
+                                        if channel == "depth"
+                                        else ("bids", "asks")
+                                    )
+                                    for name in names:
+                                        for level in native[name]:
+                                            if (
+                                                type(level) is not list
+                                                or len(level) != 2
+                                            ):
+                                                raise ValueError(
+                                                    "tardis_price_level_invalid"
+                                                )
+                                            precision = price_decimal_places(level[0])
+                                            decimal_places[symbol] = max(
+                                                decimal_places.get(symbol, 0), precision
+                                            )
+                                    if channel == "depthSnapshot":
+                                        snapshot_limits[symbol] = max(
+                                            snapshot_limits.get(symbol, 0),
+                                            *(len(native[name]) for name in names),
+                                        )
+                                elif channel == "aggTrade":
+                                    decimal_places[symbol] = max(
+                                        decimal_places.get(symbol, 0),
+                                        price_decimal_places(native["p"]),
+                                    )
+                                counts[stream] = counts.get(stream, 0) + 1
+                                if first is None:
+                                    first = timestamp
+                                last = timestamp
+                            if gap is not None:
+                                gap.update(
+                                    offset_minutes=offset,
+                                    line=number,
+                                    observed_utc=timestamp,
+                                )
+                                write_row(gaps, gap)
+                                gap_count += 1
+                            value = native = gap = interval = closed = None
+                    except BaseException as error:
+                        clear_exception_frames(error)
+                        raise
+                    finally:
+                        value = native = gap = interval = closed = level = None
                 member = {
                     "path": target.name,
                     "offset_minutes": offset,

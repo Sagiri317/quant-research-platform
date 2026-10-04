@@ -25,6 +25,7 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as _connect_websocket
 
 from quant_research_platform.contracts.json_codec import (
+    bounded_rendered_qrp_json_object_size,
     json_record_working_set_bytes,
     parse_qrp_json_object,
 )
@@ -222,7 +223,6 @@ class _RunWriter:
     _interval_raw_handle: Any | None = field(default=None, init=False, repr=False)
     _interval_gzip_handle: Any | None = field(default=None, init=False, repr=False)
     _interval_record_count: int = field(default=0, init=False, repr=False)
-    _interval_max_record_bytes: int = field(default=0, init=False, repr=False)
     _disk_bytes_remaining: int = field(default=0, init=False, repr=False)
 
     def write(
@@ -366,10 +366,6 @@ class _RunWriter:
             assert self._interval_gzip_handle is not None
             self._interval_gzip_handle.write(line)
             self._interval_record_count += 1
-            self._interval_max_record_bytes = max(
-                self._interval_max_record_bytes,
-                len(line),
-            )
 
     def _open_interval_file(self) -> None:
         if self._interval_gzip_handle is not None:
@@ -528,13 +524,13 @@ def _writer_lifecycle(
     writer: _RunWriter,
     policy: RuntimeResourcePolicy,
     files: list[dict[str, Any]],
-    cleanup_errors: list[str],
     capture_stats: _CaptureStats | None = None,
 ) -> Iterator[None]:
     try:
         yield
     finally:
         primary = sys.exception()
+        failure = None
         try:
             if not writer._aborted:  # noqa: SLF001
                 writer.close()
@@ -550,7 +546,7 @@ def _writer_lifecycle(
                     f"{type(cleanup_error).__name__}"
                 )
             else:
-                cleanup_errors.append(type(cleanup_error).__name__)
+                failure = cleanup_error
         finally:
             if capture_stats is not None:
                 try:
@@ -561,8 +557,15 @@ def _writer_lifecycle(
                             "Binance capture stats cleanup also failed: "
                             f"{type(cleanup_error).__name__}"
                         )
+                    elif failure is None:
+                        failure = cleanup_error
                     else:
-                        cleanup_errors.append(type(cleanup_error).__name__)
+                        failure.add_note(
+                            "Binance capture stats cleanup also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+        if failure is not None:
+            raise failure
 
 
 @dataclass
@@ -865,7 +868,8 @@ class _StreamReader(threading.Thread):
                     )
                 except (UnicodeError, ValueError):
                     self.stats.invalid()
-                    freeze_close()
+                    closed_at = receive_time
+                    closed_monotonic_ns = receive_monotonic_ns
                     raise _InvalidPayload() from None
                 capture_seq = self.writer.write(
                     symbol=self.stream.symbol,
@@ -1022,26 +1026,22 @@ def _record_market_metadata(
     symbols: tuple[str, ...],
 ) -> dict[str, dict[str, dict[str, Any]]]:
     requests = {
-        SPOT_MARKET_TYPE: (
-            SPOT_MARKET_TYPE,
-            SPOT_REST_BASE_URL,
-            "/api/v3/exchangeInfo",
-            None,
-        ),
-        FUTURES_MARKET_TYPE: (
-            FUTURES_MARKET_TYPE,
-            FUTURES_REST_BASE_URL,
-            "/fapi/v1/exchangeInfo",
-            None,
-        ),
+        SPOT_MARKET_TYPE: (SPOT_REST_BASE_URL, "/api/v3/exchangeInfo"),
+        FUTURES_MARKET_TYPE: (FUTURES_REST_BASE_URL, "/fapi/v1/exchangeInfo"),
     }
-    result: dict[str, dict[str, dict[str, Any]]] = {}
-    for symbol_id in symbols:
-        result[symbol_id] = {}
-        for requested_market in market_types:
-            market_type, base_url, endpoint, params = requests[requested_market]
+    result: dict[str, dict[str, dict[str, Any]]] = {symbol: {} for symbol in symbols}
+    for market_type in market_types:
+        base_url, endpoint = requests[market_type]
+        symbol_groups = (
+            (symbols,)
+            if market_type == FUTURES_MARKET_TYPE
+            else tuple((symbol,) for symbol in symbols)
+        )
+        for requested_symbols in symbol_groups:
             params = (
-                {"symbol": symbol_id} if market_type == SPOT_MARKET_TYPE else params
+                {"symbol": requested_symbols[0]}
+                if market_type == SPOT_MARKET_TYPE
+                else None
             )
             with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
                 payload = symbol = filters = tick_size = received = monotonic_ns = None
@@ -1051,36 +1051,37 @@ def _record_market_metadata(
                         endpoint,
                         params=params,
                     )
-                    symbol = _selected_symbol(payload, symbol_id)
-                    filters = symbol.get("filters")
-                    if not isinstance(filters, list):
-                        raise ValueError("binance_recorder_symbol_metadata_invalid")
-                    tick_size = next(
-                        (
-                            item.get("tickSize")
-                            for item in filters
-                            if isinstance(item, dict)
-                            and item.get("filterType") == "PRICE_FILTER"
-                        ),
-                        None,
-                    )
-                    strict_positive_float(
-                        tick_size,
-                        error="binance_recorder_tick_size_invalid",
-                    )
-                    result[symbol_id][market_type] = {
-                        "tick_size": tick_size,
-                        "snapshot_limit": SNAPSHOT_LIMITS[market_type],
-                    }
-                    writer.write(
-                        symbol=symbol_id,
-                        market_type=market_type,
-                        data_kind="metadata",
-                        stream=f"REST:{endpoint}",
-                        payload=symbol,
-                        receive_time=received,
-                        receive_monotonic_ns=monotonic_ns,
-                    )
+                    for symbol_id in requested_symbols:
+                        symbol = _selected_symbol(payload, symbol_id)
+                        filters = symbol.get("filters")
+                        if not isinstance(filters, list):
+                            raise ValueError("binance_recorder_symbol_metadata_invalid")
+                        tick_size = next(
+                            (
+                                item.get("tickSize")
+                                for item in filters
+                                if isinstance(item, dict)
+                                and item.get("filterType") == "PRICE_FILTER"
+                            ),
+                            None,
+                        )
+                        strict_positive_float(
+                            tick_size,
+                            error="binance_recorder_tick_size_invalid",
+                        )
+                        result[symbol_id][market_type] = {
+                            "tick_size": tick_size,
+                            "snapshot_limit": SNAPSHOT_LIMITS[market_type],
+                        }
+                        writer.write(
+                            symbol=symbol_id,
+                            market_type=market_type,
+                            data_kind="metadata",
+                            stream=f"REST:{endpoint}",
+                            payload=symbol,
+                            receive_time=received,
+                            receive_monotonic_ns=monotonic_ns,
+                        )
                 except BaseException as error:
                     clear_exception_frames(error)
                     raise
@@ -1179,10 +1180,11 @@ def record(config: RecorderConfig) -> dict[str, Any]:
     """Record one bounded public-data run and publish its exact manifest."""
 
     config.validate()
-    return atomic_write_directory(
-        Path(config.output_root),
-        lambda root: _record_staged(config, root),
-    )
+    with runtime_resource_policy_scope():
+        return atomic_write_directory(
+            Path(config.output_root),
+            lambda root: _record_staged(config, root),
+        )
 
 
 def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
@@ -1206,7 +1208,6 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
             writer,
             policy,
             files,
-            cleanup_errors,
             capture_stats=stats,
         ):
             stats.bind(policy)
@@ -1361,7 +1362,13 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
             "cleanup_errors": cleanup_errors,
         },
     }
-    atomic_write_json(root / "run.json", manifest)
+    encoded_size = bounded_rendered_qrp_json_object_size(
+        manifest, lazy_arrays={}, max_bytes=policy.operation_headroom_bytes
+    )
+    with policy.lease(
+        "binance.recorder.manifest", json_record_working_set_bytes(encoded_size)
+    ):
+        atomic_write_json(root / "run.json", manifest)
     return manifest
 
 

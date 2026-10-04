@@ -113,6 +113,8 @@ def test_rest_metadata_releases_previous_payload_before_next_admission(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     released: list[int] = []
+    requests = []
+    writes = []
     observations: list[bool] = []
     policy = capture_test_policy(
         available_memory_bytes=2 * 1024**3,
@@ -122,7 +124,8 @@ def test_rest_metadata_releases_previous_payload_before_next_admission(
     class Payload(dict):
         pass
 
-    def get_json(*_args, **_kwargs):  # noqa: ANN202
+    def get_json(base_url, endpoint, *, params):  # noqa: ANN202
+        requests.append((base_url, endpoint, params))
         if observations:
             observations.append(bool(released))
         else:
@@ -142,11 +145,18 @@ def test_rest_metadata_releases_previous_payload_before_next_admission(
             }
         )
         weakref.finalize(payload, released.append, policy.used_memory_bytes)
-        return payload, recorder._utc_now(), 1
+        return payload, recorder._utc_now(), len(requests)
 
     class Writer:
-        def write(self, **_kwargs) -> None:
-            return None
+        def write(self, **kwargs) -> None:
+            writes.append(
+                (
+                    kwargs["symbol"],
+                    kwargs["market_type"],
+                    kwargs["receive_time"],
+                    kwargs["receive_monotonic_ns"],
+                )
+            )
 
     monkeypatch.setattr(recorder, "_http_get_json", get_json)
     with runtime_resource_policy_scope(policy):
@@ -157,7 +167,15 @@ def test_rest_metadata_releases_previous_payload_before_next_admission(
             symbols=recorder.RESEARCH_SYMBOLS,
         )
 
-    assert observations == [False, True, True, True]
+    assert observations == [False, True, True]
+    assert [params for _base, _endpoint, params in requests] == [
+        {"symbol": "BTCUSDT"},
+        {"symbol": "ETHUSDT"},
+        None,
+    ]
+    futures_writes = [row for row in writes if row[1] == FUTURES_MARKET_TYPE]
+    assert [row[0] for row in futures_writes] == list(recorder.RESEARCH_SYMBOLS)
+    assert futures_writes[0][2:] == futures_writes[1][2:]
     assert released
     assert all(used > 0 for used in released)
 
@@ -820,6 +838,31 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
         },
     )
     monkeypatch.setattr(recorder, "_StreamReader", Reader)
+    original_json = recorder.atomic_write_json
+    original_directory = recorder.atomic_write_directory
+    observed = []
+
+    def write_json(*args, **kwargs):
+        assert policy.state == "ACTIVE"
+        assert any(
+            lease.owner == "binance.recorder.manifest" for lease in policy._leases
+        )
+        observed.append("json")
+        return original_json(*args, **kwargs)
+
+    def publish_directory(path, write):
+        def staged(root):
+            result = write(root)
+            assert policy.state == "ACTIVE"
+            observed.append("publish")
+            return result
+
+        result = original_directory(path, staged)
+        assert policy.state == "ACTIVE"
+        return result
+
+    monkeypatch.setattr(recorder, "atomic_write_json", write_json)
+    monkeypatch.setattr(recorder, "atomic_write_directory", publish_directory)
 
     if late_failure:
         with pytest.raises(RuntimeError, match="binance_recorder_reader_failure"):
@@ -831,6 +874,7 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
             (output_root / "run.json").read_text(encoding="utf-8")
         )
         assert result["status"] == "PARTIAL"
+        assert observed == ["json", "publish"]
         descriptor = result["capture"]["connection_intervals"]
         sidecar = output_root / descriptor["path"]
         assert descriptor["sha256"] == hashlib.sha256(sidecar.read_bytes()).hexdigest()
@@ -969,6 +1013,7 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
     tmp_path, monkeypatch
 ):
     from collections import Counter
+    from types import SimpleNamespace
 
     from quant_research_platform.contracts.order_book import BookBoundary
     from quant_research_platform.sources.binance.replay import (
@@ -981,6 +1026,43 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
     connections = Counter()
     snapshots = Counter()
     sockets = []
+    recovered_recorded = threading.Event()
+    clock = 0.0
+    real_time = recorder.time
+    recovery_deadline = real_time.monotonic() + 10
+    real_write = recorder._RunWriter.write
+
+    def monotonic():
+        nonlocal clock
+        if threading.current_thread() is not threading.main_thread():
+            return real_time.monotonic()
+        if recovered_recorded.is_set():
+            clock += 1.0
+        elif real_time.monotonic() >= recovery_deadline:
+            raise AssertionError("recorder_recovery_did_not_complete")
+        return clock
+
+    def write(self, **kwargs):
+        result = real_write(self, **kwargs)
+        if (
+            kwargs["symbol"] == "BTCUSDT"
+            and kwargs["data_kind"] == "depth"
+            and kwargs["payload"]["u"] == 102
+        ):
+            recovered_recorded.set()
+        return result
+
+    monkeypatch.setattr(
+        recorder,
+        "time",
+        SimpleNamespace(
+            monotonic=monotonic,
+            monotonic_ns=real_time.monotonic_ns,
+            process_time=real_time.process_time,
+            time_ns=real_time.time_ns,
+        ),
+    )
+    monkeypatch.setattr(recorder._RunWriter, "write", write)
 
     def http(_base, endpoint, *, params=None):
         if endpoint.endswith("exchangeInfo"):
@@ -1070,6 +1152,7 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
     )
     root = tmp_path / "recording"
     result = recorder.record(RecorderConfig(root, duration_seconds=0.2))
+    assert recovered_recorded.is_set()
     assert result["status"] == "PARTIAL"
     assert result["capture"]["sequence_gaps"] == 0
     assert result["capture"]["cleanup_errors"] == []
@@ -1209,3 +1292,97 @@ print(json.dumps({"live_threads_at_failure": 4, "new_root": "REJECTED"}))
         "live_threads_at_failure": 4,
         "new_root": "REJECTED",
     }
+
+
+def test_invalid_payload_coverage_stops_at_captured_receive_clock(
+    tmp_path, monkeypatch
+):
+    phase = {"value": "open"}
+    stamps = {
+        "open": "1970-01-01T00:00:00.000000Z",
+        "receive": "1970-01-01T00:00:00.250000Z",
+        "detect": "1970-01-01T00:00:00.350000Z",
+    }
+    monotonic = {"open": 1, "receive": 250_000_000, "detect": 350_000_000}
+
+    class Websocket:
+        def recv(self, timeout):
+            phase["value"] = "receive"
+            return b"{}"
+
+        def close(self):
+            pass
+
+    def invalid(*args):
+        phase["value"] = "detect"
+        raise ValueError("synthetic_invalid_payload")
+
+    monkeypatch.setattr(recorder, "_utc_now", lambda: stamps[phase["value"]])
+    monkeypatch.setattr(
+        recorder.time, "monotonic_ns", lambda: monotonic[phase["value"]]
+    )
+    monkeypatch.setattr(
+        recorder, "_connect_websocket", lambda *args, **kwargs: Websocket()
+    )
+    monkeypatch.setattr(recorder, "validate_market_payload", invalid)
+    with runtime_resource_policy_scope() as policy:
+        writer = recorder._RunWriter(tmp_path)
+        stats = recorder._CaptureStats(policy, writer)
+        reader = recorder._StreamReader(
+            stream=FUTURES_STREAMS[1],
+            writer=writer,
+            stats=stats,
+            stop=threading.Event(),
+            config=RecorderConfig(tmp_path / "unused", 1),
+            resource_policy=policy,
+            tick_size="0.1",
+        )
+        with pytest.raises(recorder._InvalidPayload):
+            reader._read_connection(reconnect=False)
+        writer.close()
+        descriptor = writer.connection_interval_manifest(policy)
+        stats.set_connection_interval_manifest(descriptor)
+        stats.close()
+        with gzip.open(tmp_path / descriptor["path"], "rt") as stream:
+            interval = json.loads(next(stream))
+        assert interval["closed_at"] == stamps["receive"]
+        assert interval["closed_monotonic_ns"] == monotonic["receive"]
+        assert phase["value"] == "detect"
+        assert stats.invalid_messages == 1
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("failure_at", ["close", "hash", "cancel"])
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_writer_lifecycle_preserves_first_cleanup_or_body_failure(
+    tmp_path, monkeypatch, failure_at, body_fails
+):
+    primary = ValueError("synthetic_body")
+    secondary = (
+        KeyboardInterrupt() if failure_at == "cancel" else OSError("synthetic_cleanup")
+    )
+    with runtime_resource_policy_scope() as policy:
+        writer = recorder._RunWriter(tmp_path)
+        stats = recorder._CaptureStats(policy, writer)
+        original = writer.close
+
+        def fail_close():
+            original()
+            raise secondary
+
+        def fail_hash(*args):
+            raise secondary
+
+        if failure_at == "close":
+            monkeypatch.setattr(writer, "close", fail_close)
+        else:
+            monkeypatch.setattr(recorder, "_sha256_path", fail_hash)
+        with pytest.raises(BaseException) as caught:
+            with recorder._writer_lifecycle(writer, policy, [], capture_stats=stats):
+                if body_fails:
+                    raise primary
+        assert caught.value is (primary if body_fails else secondary)
+        assert writer._closed
+        assert policy.used_memory_bytes == 0
+        if body_fails:
+            assert any(type(secondary).__name__ in note for note in primary.__notes__)

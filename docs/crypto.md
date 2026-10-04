@@ -368,10 +368,17 @@ PANEL 构造输出帧后释放已消费列缓冲；仍跨批存活的逐品种�
 
 Tardis 市场事件只消费该日自身的深度与成交，不以官方事件补洞。
 同一 Binance venue 的结算数据作为独立附属输入，明确区分官方 `fundingRate` 原件与
-[XOOMAR 历史结算记录](https://xoomar.com/markets/api/funding-rates)。第三方抽取只保留批准日期/资产的原记录，记录完整响应 SHA-256，
-不冒充官方直取；`source_id`、实际供应商 endpoint 和抽取文件哈希进入持久化身份。绑定
-symbol、官方 UTC 查询窗或第三方抽取窗、HTTP 状态、所存字节数与哈希；每次资金费读取核验
-资金费 symbol 原子目录中的 `settlements.json`；第三方抽取文件中的上游响应哈希是采集证据，不能替代所存文件的逐字节核验。
+[XOOMAR 历史结算记录](https://xoomar.com/markets/api/funding-rates)。两种来源均原样保存完整响应至
+资金费 symbol 原子目录中的 `settlements.json`，不以自行抽取的记录或上游哈希替代原响应。
+`settlement_source` 绑定供应商、endpoint、symbol、请求窗、HTTP 状态、原字节哈希、实际 limit、
+响应数、窗口内结算数及从响应推导的完成依据；importer 与 reader 复用同一校验责任模块。
+
+[Binance fundingRate](https://developers.binance.com/docs/derivatives/usds-margined-futures/market-data/rest-api/Get-Funding-Rate-History)
+按请求 limit 截断，默认 100、最多 1000；离线导入必须显式提供实际有效 `request_limit`。
+当前单页路径只在响应数小于实际 limit 时认证请求窗，满页保持覆盖未证，不从小于 1000 推定。
+XOOMAR 的 `data.history` 最多 5000 条、跨场所并按时间倒序；原响应必须在正确 Binance/资产
+子集上同时给出请求起点之前与末端之后的真实结算，才认证中间窗口。服务 `updatedAt` 不充当
+结算完整性水位。不能证明完成的输入明确 BLOCKED，保留已有产物，不增加自动分页或补洞。
 其 `observations/` 子目录
 仍只含严格 CSV 与元数据两个成员。规范元数据的 `settlement_source` 显式说明原件身份，
 既有显式规范归档没有此原生附属成员时为 `null`，不从缺字段静默推断。
@@ -383,7 +390,10 @@ symbol、官方 UTC 查询窗或第三方抽取窗、HTTP 状态、所存字节�
 Crypto 研究计划的 `execution` 显式提供 `taker_fee_bps`、`latency_ms`、
 `markout_horizon_ms`、`latency_scenarios_ms`、`fee_scenarios_bps` 和
 `additional_spread_scenarios_bps`；不填入隐含的零费用或零延迟。
-延迟候选固定为 `[0, 100, 200]` ms。资金和仓位上限仍来自同一计划的
+`latency_scenarios_ms` 枚举使用计划默认延迟的 taker 候选，默认场景为 `[0, 100, 200]` ms。
+保留显式候选延迟；按资产、模型、实际延迟去除与基准、显式候选和已派生场景重复的派生项。
+新增场景复用同一候选、执行目标、账本、统计与报告链，实际延迟进入各自持久化身份。
+maker 继续使用独立的 `maker.latency_ms` 及同一时钟下的冻结校准。资金和仓位上限仍来自同一计划的
 `initial_capital`、`valuation_currency` 与 `exposure_limits`。
 
 `sources/binance/funding.py` 读取录制目录同级的
@@ -401,6 +411,12 @@ Crypto 研究计划的 `execution` 显式提供 `taker_fee_bps`、`latency_ms`�
 只有决策时已经可得、覆盖预测终点且相关现金流均已知的 forecast 才参与增量下单。
 实际结算不能反向影响下单量；显式完整覆盖内的空事件表才能表示无结算，
 没有输入不能当作零资金费。本模块消费外部归档，不新增联网采集端点。
+
+排名模型仍发布原始无量纲排名分数。其训练同时以同一合法训练样本及权重拟合
+label = intercept + slope * score，将两个系数绑定于冻结模型状态和元数据；
+常量分数采用训练标签均值。taker 和 maker 的价格/proxy 输入在经济执行入口统一
+转换为标签单位，maker 的验证期校准消费对应 TRAIN 模型的转换；最终执行消费
+TRAIN+VALIDATION 正式重拟合后的冻结转换。验证评分及测试执行只读取已冻结系数，不以当前待评分窗口重估。
 
 每个候选跨 OOS 窗口使用连续独立资金。窗口边界先处理已到时的市场事件、
 资金费和生效订单，再记录边界；窗口结束取消待生效订单。空档期间不发出新信号订单，
@@ -508,7 +524,7 @@ maker 的价格与压力模型角色由配置中的模型 ID 指定，不按算�
 两个角色均为空表示未校准 maker；否则必须同时指定已选模型，并分别使用
 500ms mid return 与 500ms observed sell-pressure proxy 标签。
 该资产必须同时在模型的训练/验证与 OOS 预测范围内。
-验证预测的保存与读取校验只针对实际被 maker 引用的模型，模型改名不改变角色。
+全部所选模型均保存验证预测并在读取时校验；maker 按配置引用其中的模型角色，模型改名不改变角色。
 
 
 模型直接比较复用 evaluation catalog 与既有 prediction lookup。

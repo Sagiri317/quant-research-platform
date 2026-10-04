@@ -461,13 +461,13 @@ def probabilistic_and_deflated_sharpe(
         raise ValueError("finite_vector_required")
     if type(benchmark_sharpe) is not float or not np.isfinite(benchmark_sharpe):
         raise ValueError("sharpe_benchmark_invalid")
-    standard_deviation = float(
-        return_standard_deviation(data, roundoff=return_roundoff)
-    )
-    if not np.isfinite(standard_deviation) or standard_deviation == 0.0:
+    observed = float(_return_sharpes(data, roundoff=return_roundoff))
+    if not np.isfinite(observed):
         raise ValueError("sharpe_zero_variance")
-    observed = float(np.mean(data) / standard_deviation)
-    normalized = (data - data[0]) / standard_deviation
+    _, exponent = np.frexp(np.max(np.abs(data)))
+    scaled = np.ldexp(data, -exponent)
+    centered = scaled - scaled[0]
+    normalized = centered / np.std(centered, ddof=1)
     sample_skew = float(skew(normalized, bias=False))
     sample_kurtosis = float(kurtosis(normalized, fisher=False, bias=False))
     variance = (
@@ -624,12 +624,26 @@ def fama_macbeth_period(
     complete = numeric.notna().all(axis=1)
     numeric = numeric.loc[complete]
     y = numeric[return_column]
-    x = sm.add_constant(numeric.loc[:, factor_columns], has_constant="add")
-    if (
-        len(numeric) <= x.shape[1]
-        or not bool(np.isfinite(numeric.to_numpy()).all())
-        or np.linalg.matrix_rank(x.to_numpy(dtype="float64")) != x.shape[1]
+    if len(numeric) <= len(factor_columns) + 1 or not bool(
+        np.isfinite(numeric.to_numpy()).all()
     ):
+        raise ValueError("fama_macbeth_period_insufficient")
+    values = numeric.loc[:, factor_columns].to_numpy(dtype="float64")
+    _, exponents = np.frexp(np.max(np.abs(values), axis=0))
+    scaled = np.ldexp(values, -exponents)
+    differences = scaled - scaled[0]
+    offsets = np.mean(differences, axis=0)
+    centered = differences - offsets
+    scales = np.max(np.abs(centered), axis=0)
+    x = sm.add_constant(
+        pd.DataFrame(
+            centered / np.where(scales > 0, scales, 1.0),
+            index=numeric.index,
+            columns=factor_columns,
+        ),
+        has_constant="add",
+    )
+    if np.linalg.matrix_rank(x.to_numpy(dtype="float64")) != x.shape[1]:
         raise ValueError("fama_macbeth_period_insufficient")
     if weight_column is None:
         fit = sm.OLS(y, x).fit()
@@ -656,8 +670,12 @@ def fama_macbeth_period(
                 white_p_value = None
         except (AssertionError, ValueError):
             white_p_value = None
+    coefficients = fit.params.copy()
+    scaled_slopes = fit.params.loc[list(factor_columns)].to_numpy() / scales
+    coefficients.loc[list(factor_columns)] = np.ldexp(scaled_slopes, -exponents)
+    coefficients.loc["const"] -= np.dot(scaled[0] + offsets, scaled_slopes)
     return FamaMacBethPeriodResult(
-        coefficients=fit.params.copy(),
+        coefficients=coefficients,
         white_p_value=white_p_value,
         white_reason=None if white_p_value is not None else "white_test_undefined",
         observation_count=len(numeric),
@@ -907,7 +925,7 @@ def _return_roundoff(values: np.ndarray, roundoff: object) -> np.ndarray:
     errors = np.asarray(roundoff, dtype="float64")
     if (
         errors.shape not in ((), values.shape)
-        or not np.isfinite(errors).all()
+        or np.isnan(errors).any()
         or (errors < 0).any()
     ):
         raise ValueError("return_roundoff_invalid")
@@ -927,7 +945,8 @@ def _return_intervals_overlap(data: np.ndarray, errors: np.ndarray) -> np.ndarra
             continue
         # Rounding is monotone, so only equal rounded extrema are ambiguous.
         # Refine that column without retaining a matrix of exact endpoints.
-        values, bounds = data[selected], errors[selected]
+        finite = np.isfinite(errors[selected])
+        values, bounds = data[selected][finite], errors[selected][finite]
         overlap[column] = max(
             Fraction(float(value)) - Fraction(float(error))
             for value, error in zip(values, bounds, strict=True)
@@ -951,20 +970,38 @@ def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.n
     unresolved = _return_intervals_overlap(data, errors)
     _, exponent = np.frexp(np.max(np.abs(data), axis=0))
     scaled = np.ldexp(data, -exponent)
-    return np.ldexp(
-        np.std(scaled, axis=0, ddof=1),
+    result = np.ldexp(
+        np.std(scaled - scaled[0], axis=0, ddof=1),
         exponent,
         out=np.zeros(data.shape[1:]),
         where=~unresolved,
     )
+    # Unbounded NAV uncertainty cannot establish a finite risk, even at zero return.
+    return np.where(np.isfinite(errors).all(axis=0), result, np.nan)
+
+
+def _return_sharpes(values: object, *, roundoff: object = 0.0) -> np.ndarray:
+    """Compute mean/risk in one binary scale without changing candidate coverage."""
+    data = np.asarray(values, dtype="float64")
+    errors = _return_roundoff(data, roundoff)
+    if len(data) < 2:
+        return np.full(data.shape[1:], np.nan)
+    unresolved = _return_intervals_overlap(data, errors)
+    _, exponent = np.frexp(np.max(np.abs(data), axis=0))
+    scaled = np.ldexp(data, -exponent)
+    differences = scaled - scaled[0]
+    deviation = np.std(differences, axis=0, ddof=1)
+    return np.divide(
+        scaled[0] + np.mean(differences, axis=0),
+        deviation,
+        out=np.full(data.shape[1:], np.nan),
+        where=(deviation > 0) & ~unresolved & np.isfinite(errors).all(axis=0),
+    )
 
 
 def _candidate_sharpes(values: np.ndarray, errors: np.ndarray) -> np.ndarray | None:
-    if bool(_return_intervals_overlap(values, errors).any()):
-        return None
-    _, exponent = np.frexp(np.max(np.abs(values), axis=0))
-    scaled = np.ldexp(values, -exponent)
-    return np.mean(scaled, axis=0) / np.std(scaled, axis=0, ddof=1)
+    result = _return_sharpes(values, roundoff=errors)
+    return result if np.isfinite(result).all() else None
 
 
 def _undefined_pbo(

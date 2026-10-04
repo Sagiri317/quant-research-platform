@@ -1510,3 +1510,31 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
         hashlib.sha256(path.read_bytes()).hexdigest() == digest
         for path, digest in before.items()
     )
+
+
+def test_research_assembly_can_finish_after_soft_planning_target_is_used(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.runtime import resources
+
+    layout = StorageLayout(project_root=tmp_path)
+    processed_catalog = make_demo_processed_catalog()
+    dataset_catalog = make_research_dataset_catalog(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
+    )
+    write_demo_processed_inputs(layout, processed_catalog)
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 256 * 1024**2)
+    with runtime_resource_policy_scope() as policy:
+        with policy.lease("tests.existing", policy.memory_budget_bytes):
+            assert policy.planning_headroom_bytes == 0
+            root = assemble_research_dataset(
+                layout=layout,
+                dataset_catalog=dataset_catalog,
+                processed_catalog=processed_catalog,
+                dataset_id="demo",
+                time_window=TimeWindow("2014-01-02", "2014-01-03"),
+                resource_policy=policy,
+            )
+            assert root.is_dir()
+        assert policy.used_memory_bytes == 0
+    assert inspect_dataset(root).row_count > 0

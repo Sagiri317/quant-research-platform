@@ -1662,27 +1662,22 @@ def _iter_pruned_interim_frames(
                             del pruned, report, candidate
                             start = stop
                             continue
-                        next_pending_frame: pd.DataFrame | None = None
-                        next_pending_lease: MemoryLease | None = None
-                        next_pending_bound: int | None = None
-                        next_pending_span: int | None = None
+                        pending_frame = None
+                        if pending_lease is not None and pending_lease is not lease:
+                            pending_lease.close()
+                        pending_lease = None
+                        pending_bound = None
+                        pending_span = None
                         if stop < len(chunk):
                             remainder_bytes = pandas_frame_payload_bytes(
                                 chunk.iloc[stop:]
                             )
-                            next_pending_lease = policy.lease(
+                            pending_lease = policy.lease(
                                 "source.csmar.interim.pending", remainder_bytes
                             )
-                            try:
-                                next_pending_frame = chunk.iloc[stop:].copy()
-                                next_pending_bound = lease.reserved_bytes
-                                next_pending_span = span
-                            except BaseException:
-                                _close_lease_preserving_primary(
-                                    next_pending_lease,
-                                    owner="source.csmar.interim.pending",
-                                )
-                                raise
+                            pending_frame = chunk.iloc[stop:].copy()
+                            pending_bound = lease.reserved_bytes
+                            pending_span = span
                         if source_owned:
                             try:
                                 upstream_bound = chunks.send(None)
@@ -1694,14 +1689,6 @@ def _iter_pruned_interim_frames(
                                 raise ValueError("invalid_csmar_raw_bound")
                         del report, candidate
                         del owned, chunk
-                        pending_frame = None
-                        if pending_lease is not None and pending_lease is not lease:
-                            pending_lease.close()
-                        pending_lease = None
-                        pending_frame = next_pending_frame
-                        pending_lease = next_pending_lease
-                        pending_bound = next_pending_bound
-                        pending_span = next_pending_span
                         lease.shrink_to(pandas_frame_payload_bytes(pruned) + 64 * 1024)
                         owned_output = OwnedValue(pruned, lease)
                         del pruned
@@ -1914,152 +1901,48 @@ def _append_duplicate_summary(
 
 
 def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:
+    grain = DataGrain.ASSET_REFERENCE_TIMESTAMP
+    partition_columns = ("year",)
     if data_id == "analyst_forecast":
         primary_key = ("source_asset_id", "timestamp", "report_id", "forecast_end_date")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id == "industry_classification":
+    elif data_id == "industry_classification":
         primary_key = ("source_asset_id", "timestamp", "industry_standard_id")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id == "industry_classification_sets":
+    elif data_id == "industry_classification_sets":
         primary_key = ("industry_standard_id", "industry_code")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=(),
-        )
-    if data_id == "industry_classification_versions":
+        grain = DataGrain.ASSET_REFERENCE
+        partition_columns = ()
+    elif data_id == "industry_classification_versions":
         primary_key = ("industry_standard_id", "timestamp")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id in {"listing_status_changes", "stock_info_changes"}:
+    elif data_id in {"listing_status_changes", "stock_info_changes"}:
         primary_key = ("source_asset_id", "timestamp", "changed_item")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id == "special_treatment_changes":
+    elif data_id == "special_treatment_changes":
         primary_key = ("source_asset_id", "timestamp", "change_type")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id == "equity_changes":
+    elif data_id == "equity_changes":
         primary_key = ("source_asset_id", "timestamp", "report_type")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id in {"index_membership", "index_weights"}:
+    elif data_id in {"index_membership", "index_weights"}:
         primary_key = ("source_asset_id", "constituent_asset_id", "timestamp")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id in FINANCIAL_COLUMNS_BY_DATA_ID:
+    elif data_id in FINANCIAL_COLUMNS_BY_DATA_ID:
         primary_key = (
             "source_asset_id",
             "timestamp",
             "report_type",
             "version_identity",
         )
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id == "trading_calendar":
+    elif data_id == "trading_calendar":
         primary_key = ("timestamp", "source_market_type")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.SOURCE_MARKET_CALENDAR_DATE,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id == "index_info":
+        grain = DataGrain.SOURCE_MARKET_CALENDAR_DATE
+    else:
         primary_key = ("source_asset_id", "timestamp")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    if data_id == "stock_master":
-        primary_key = ("source_asset_id", "timestamp")
-        return InterimDataSpec(
-            data_id=data_id,
-            source_id=SourceId(SOURCE_ID),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_REFERENCE_TIMESTAMP,
-            column_roles=_column_roles(columns, primary_key=primary_key),
-            primary_key=primary_key,
-            partition_columns=("year",),
-        )
-    primary_key = ("source_asset_id", "timestamp")
+        if data_id not in {"index_info", "stock_master"}:
+            grain = DataGrain.ASSET_TIMESTAMP
     return InterimDataSpec(
         data_id=data_id,
         source_id=SourceId(SOURCE_ID),
         frequency=DataFrequency.DAILY,
-        grain=DataGrain.ASSET_TIMESTAMP,
+        grain=grain,
         column_roles=_column_roles(columns, primary_key=primary_key),
         primary_key=primary_key,
-        partition_columns=("year",),
+        partition_columns=partition_columns,
     )
 
 

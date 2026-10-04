@@ -850,6 +850,8 @@ def test_configuration_rejects_fields_that_have_no_market_consumer():
 
 
 def test_rebinding_drops_previous_auxiliary_context(tmp_path):
+    from dataclasses import replace
+
     from quant_research_platform.profiles.research import (
         CRYPTO_PROFILE_ID,
         bind_research_configuration,
@@ -858,7 +860,12 @@ def test_rebinding_drops_previous_auxiliary_context(tmp_path):
     from tests.helpers.research_configuration import research_configuration
 
     baseline = research_configuration("crypto", "baseline")
-    fresh = bind_research_configuration(research_profile(CRYPTO_PROFILE_ID), baseline)
+    base = research_profile(CRYPTO_PROFILE_ID)
+    custom = next(iter(base.producer_bindings.values()))
+    base = replace(
+        base, producer_bindings={**base.producer_bindings, "custom_source": custom}
+    )
+    fresh = bind_research_configuration(base, baseline, tardis_root=tmp_path)
     for name in (
         "cross_asset",
         "cross_btc_eth",
@@ -867,13 +874,18 @@ def test_rebinding_drops_previous_auxiliary_context(tmp_path):
         "spot_context",
     ):
         expanded = bind_research_configuration(
-            research_profile(CRYPTO_PROFILE_ID),
+            base,
             research_configuration("crypto", name),
             tardis_root=tmp_path,
         )
         rebound = bind_research_configuration(expanded, baseline, tardis_root=tmp_path)
         assert rebound.research_datasets.list() == fresh.research_datasets.list()
         assert rebound.processed.list() == fresh.processed.list()
+        assert set(rebound.producer_bindings) == set(fresh.producer_bindings)
+        assert rebound.producer_bindings["custom_source"] is custom
+        assert {
+            key: binding.raw_root for key, binding in rebound.producer_bindings.items()
+        } == {key: binding.raw_root for key, binding in fresh.producer_bindings.items()}
         assert (
             rebound.protocol(baseline["scenario_id"]).manifest()
             == fresh.protocol(baseline["scenario_id"]).manifest()
@@ -1132,3 +1144,201 @@ def test_a_share_primary_portfolio_requires_declared_candidate_identity(primary)
     config["primary_portfolio_id"] = primary
     with pytest.raises(ValueError, match="research_primary_portfolio_invalid"):
         bind_research_configuration(research_profile(), config)
+
+
+def test_crypto_latency_scenarios_use_existing_execution_dag_and_precise_identity():
+    from quant_research_platform.workflows.research import (
+        _target_specs,
+        resolve_target_graph,
+    )
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "baseline")
+    config["portfolios"] = [
+        {
+            "candidate_id": "base",
+            "asset_id": "btc_usdt",
+            "model_id": "crypto_hft_linear_regression",
+            "latency_ms": None,
+        },
+        {
+            "candidate_id": "explicit",
+            "asset_id": "btc_usdt",
+            "model_id": "crypto_hft_linear_regression",
+            "latency_ms": 100,
+        },
+    ]
+    config["research_plan"]["execution"]["latency_ms"] = 17
+    config["research_plan"]["execution"]["latency_scenarios_ms"] = [0, 17, 100, 200]
+    profile = bind_research_configuration(
+        research_profile("crypto_binance_hft"), config
+    )
+    protocol = profile.protocol(config["scenario_id"], access_window="holdout")
+    assert [
+        (item.candidate_id, item.latency_ms) for item in protocol.portfolio_candidates()
+    ] == [
+        ("base", None),
+        ("explicit", 100),
+        ("base_latency_0ms", 0),
+        ("base_latency_200ms", 200),
+    ]
+    graph = {
+        item.target_id: item
+        for item in resolve_target_graph(
+            _target_specs(profile, action="research run", protocol=protocol),
+            protocol.terminal_targets("research run"),
+        )
+    }
+    for target in protocol.execution_targets():
+        assert target.target_id in profile.producer_bindings
+        assert graph[target.statistics_target_id].dependencies == (target.target_id,)
+        actual = protocol.target_manifest(target.target_id, "PORTFOLIO")
+        assert (
+            actual["portfolio_candidates"][0]["latency_ms"]
+            == target.candidate.latency_ms
+        )
+    base_before = protocol.target_manifest("base_continuous_statistics", "STATISTIC")
+    config["research_plan"]["execution"]["latency_scenarios_ms"] = [0, 17, 100, 250]
+    changed = bind_research_configuration(
+        research_profile("crypto_binance_hft"), config
+    )
+    changed_protocol = changed.protocol(config["scenario_id"], access_window="holdout")
+    assert (
+        changed_protocol.target_manifest("base_continuous_statistics", "STATISTIC")
+        == base_before
+    )
+    assert "base_latency_250ms_ledger" in {
+        item.target_id for item in changed_protocol.execution_targets()
+    }
+    assert "base_latency_200ms_ledger" not in {
+        item.target_id for item in changed_protocol.execution_targets()
+    }
+    config["portfolios"].append(
+        {
+            "candidate_id": "base_latency_250ms",
+            "asset_id": "btc_usdt",
+            "model_id": "crypto_hft_lightgbm_regressor",
+            "latency_ms": 100,
+        }
+    )
+    with pytest.raises(ValueError, match="research_portfolio_candidate_duplicate"):
+        bind_research_configuration(research_profile("crypto_binance_hft"), config)
+
+
+def test_formal_seed_normalizes_native_duplicate_before_derived_selection():
+    from quant_research_platform.research.models.production import (
+        _selection_model_specs,
+    )
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration()
+    model = next(
+        item
+        for item in config["models"]
+        if item["model_algorithm"] == "random_forest_regressor"
+    )
+    model["random_seed"] = 42
+    model["hyperparameters"]["random_state"] = 42
+    for candidate in model.get("parameter_candidates", []):
+        candidate["random_state"] = 42
+    bound = bind_research_configuration(research_profile(), config)
+    canonical = next(
+        item
+        for item in bound.protocol(config["scenario_id"]).manifest()[
+            "research_configuration"
+        ]["models"]
+        if item["model_id"] == model["model_id"]
+    )
+    spec = bound.models.get(model["model_id"])
+    assert spec.random_seed == 42
+    assert "random_state" not in spec.hyperparameters
+    assert all(
+        "random_state" not in value
+        for value in canonical.get("parameter_candidates", [])
+    )
+    selected = _selection_model_specs(
+        spec,
+        (dict(spec.hyperparameters),),
+        n_train=100,
+        root_seed=42,
+        quarter_id="2023Q1",
+    )
+    assert len(selected) == 1
+    assert selected[0].random_seed != 42
+    model["random_seed"] = 123
+    model["hyperparameters"].pop("random_state")
+    for candidate in model.get("parameter_candidates", []):
+        candidate.pop("random_state", None)
+    with pytest.raises(ValueError, match="research_root_seed_must_be_42"):
+        bind_research_configuration(research_profile(), config)
+
+
+@pytest.mark.parametrize(
+    "section,field,value,affects_calibration",
+    [
+        ("maker", "maker_fee_bps", 3.0, False),
+        ("execution", "markout_horizon_ms", 600, False),
+        ("maker", "inventory_skew", 0.5, False),
+        ("maker", "inventory_target", 0.01, False),
+        ("maker", "latency_ms", 210, True),
+        ("maker", "min_calibration_samples", 101, True),
+        ("limits", "max_order_quantity", 0.02, True),
+        ("limits", "max_position_quantity", 0.004, True),
+    ],
+)
+def test_maker_calibration_identity_tracks_reference_parameters(
+    section, field, value, affects_calibration
+):
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "baseline")
+    profile = research_profile(config["profile_id"])
+    initial = bind_research_configuration(profile, config).protocol(
+        config["scenario_id"]
+    )
+    candidate = next(
+        candidate
+        for candidate in initial.portfolio_candidates()
+        if isinstance(candidate, crypto_hft.CryptoMakerCandidate)
+        and candidate.calibrated
+    )
+    config["portfolios"] = [
+        item
+        for item in config["portfolios"]
+        if item["candidate_id"] == candidate.candidate_id
+    ]
+    base = bind_research_configuration(profile, config).protocol(config["scenario_id"])
+    changed = copy.deepcopy(config)
+    plan = changed["research_plan"]
+    target = (
+        plan["exposure_limits"][candidate.asset_id]
+        if section == "limits"
+        else plan["execution"]["maker"]
+        if section == "maker"
+        else plan["execution"]
+    )
+    target[field] = value
+    altered = bind_research_configuration(profile, changed).protocol(
+        config["scenario_id"]
+    )
+    before = base.target_manifest(candidate.calibration_target_id, "STATISTIC")
+    after = altered.target_manifest(candidate.calibration_target_id, "STATISTIC")
+    assert (
+        canonical_json_hash(before) != canonical_json_hash(after)
+    ) is affects_calibration
+    model_id = config["scenario_id"] + "_models"
+    assert base.target_manifest(model_id, "MODEL") == altered.target_manifest(
+        model_id, "MODEL"
+    )
+    execution_id = base.execution_targets()[0].target_id
+    assert base.target_manifest(execution_id, "PORTFOLIO") != altered.target_manifest(
+        execution_id, "PORTFOLIO"
+    )
+    reference = before["research_plan"]["execution"]["maker"]
+    assert set(reference) == {"order_quantity", "latency_ms", "min_calibration_samples"}
+    assert reference == {
+        "order_quantity": 0.01,
+        "latency_ms": 100,
+        "min_calibration_samples": 100,
+    }

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from math import isfinite
+
 import pandas as pd
 
 from quant_research_platform.artifacts.outputs.common_validation import (
@@ -579,6 +581,7 @@ def _validate_crypto_lineage(metadata):
         "model_id",
         "asset_ids",
         "fold_models",
+        "score_to_label",
     }:
         raise ValueError("invalid_model_metadata")
     validate_run_id(metadata["model_artifact_id"])
@@ -591,6 +594,16 @@ def _validate_crypto_lineage(metadata):
     ):
         raise ValueError("invalid_model_metadata")
     require_metadata_string_list(metadata, "asset_ids", "invalid_model_metadata")
+    calibration = metadata["score_to_label"]
+    if calibration is not None and (
+        type(calibration) is not list
+        or len(calibration) != 2
+        or any(
+            type(value) not in {int, float} or not isfinite(value)
+            for value in calibration
+        )
+    ):
+        raise ValueError("invalid_model_metadata")
     folds = metadata["fold_models"]
     if type(folds) is not list or len(folds) != 1:
         raise ValueError("invalid_model_metadata")

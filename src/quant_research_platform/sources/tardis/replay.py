@@ -309,6 +309,7 @@ class TardisArchive:
             tracker = _ObservedStreams(
                 self.manifest["exchange"], observe_trade=observe_trade
             )
+            state_epoch = 0
             for member in self.manifest["files"]:
                 number = 0
                 with closing_iterator(
@@ -331,6 +332,18 @@ class TardisArchive:
                             self._check_interval(interval)
                         if value is None:
                             continue
+                        if tracker.epoch != state_epoch:
+                            state_epoch = tracker.epoch
+                            for affected in self.manifest["symbols"]:
+                                yield (
+                                    (affected.upper(), "state"),
+                                    {
+                                        "receive_time": timestamp,
+                                        "channel": None,
+                                        "payload": None,
+                                        "epoch": self._sequence_offset + state_epoch,
+                                    },
+                                )
                         raw_symbol, channel, *_ = value["stream"].split("@")
                         symbol = raw_symbol.upper()
                         if channel in STATE_CHANNELS:
@@ -582,9 +595,11 @@ def _open_tardis_archive(root, resource_policy, *, expected_manifest_hash):
     ):
         manifest_path = root / "manifest.json"
         identity = _capture_raw_file_identity(manifest_path)
-        with policy.lease(
-            "tardis.manifest", json_record_working_set_bytes(identity.size)
-        ):
+        manifest_bytes = json_record_working_set_bytes(identity.size)
+        with policy.lease("tardis.manifest", manifest_bytes):
+            policy.require_working_set(
+                0, error="tardis_manifest_memory_budget_exceeded"
+            )
             _raw = manifest = members = identities = _after_raw = after = run = None
             try:
                 _raw, manifest = read_bounded_qrp_json(
@@ -650,14 +665,27 @@ def _open_tardis_archive(root, resource_policy, *, expected_manifest_hash):
                         primary = sys.exception()
                         try:
                             verify_files()
-                            _after_raw, after = read_bounded_qrp_json(
-                                manifest_path,
-                                expected_identity=identity,
-                                max_bytes=identity.size,
-                            )
-                            if canonical_json_hash(after) != manifest_hash:
-                                raise ValueError("tardis_manifest_identity_changed")
-                            _after_raw = after = None
+                            with policy.lease(
+                                "tardis.manifest_verification", manifest_bytes
+                            ):
+                                policy.require_working_set(
+                                    0, error="tardis_manifest_memory_budget_exceeded"
+                                )
+                                try:
+                                    _after_raw, after = read_bounded_qrp_json(
+                                        manifest_path,
+                                        expected_identity=identity,
+                                        max_bytes=identity.size,
+                                    )
+                                    if canonical_json_hash(after) != manifest_hash:
+                                        raise ValueError(
+                                            "tardis_manifest_identity_changed"
+                                        )
+                                except BaseException as error:
+                                    clear_exception_frames(error)
+                                    raise
+                                finally:
+                                    _after_raw = after = None
                         except BaseException as error:
                             if primary is None:
                                 raise
@@ -736,14 +764,9 @@ class _TardisArchives:
         values = [
             archive.market_metadata(market_type, symbol) for archive in self.archives
         ]
-        if any(
-            value["snapshot_limit"] != values[0]["snapshot_limit"]
-            for value in values[1:]
-        ):
-            raise ValueError("tardis_archive_market_metadata_mismatch")
         return {
             "price_unit": min((value["price_unit"] for value in values), key=Fraction),
-            "snapshot_limit": values[0]["snapshot_limit"],
+            "snapshot_limit": max(value["snapshot_limit"] for value in values),
         }
 
     def observation_coverage(self, **scope):
@@ -804,26 +827,39 @@ def open_tardis_archive(
             with policy.lease(
                 "tardis.archive_selection", json_record_working_set_bytes(identity.size)
             ):
-                _, manifest = read_bounded_qrp_json(
-                    path / "manifest.json",
-                    expected_identity=identity,
-                    max_bytes=identity.size,
+                policy.require_working_set(
+                    0, error="tardis_manifest_memory_budget_exceeded"
                 )
-                _validate_manifest(manifest)
-                if _archive_intersects(manifest, time_window):
-                    selected.append((path, canonical_json_hash(manifest)))
-                manifest = None
+                _raw = manifest = None
+                try:
+                    _raw, manifest = read_bounded_qrp_json(
+                        path / "manifest.json",
+                        expected_identity=identity,
+                        max_bytes=identity.size,
+                    )
+                    _validate_manifest(manifest)
+                    if _archive_intersects(manifest, time_window):
+                        selected.append((path, canonical_json_hash(manifest)))
+                except BaseException as error:
+                    clear_exception_frames(error)
+                    raise
+                finally:
+                    _raw = manifest = None
         if not selected:
             raise PortfolioTargetBlocked("tardis_archive_window_empty")
         archives = tuple(
-            readers.enter_context(
-                _open_tardis_archive(path, policy, expected_manifest_hash=identity)
+            sorted(
+                (
+                    readers.enter_context(
+                        _open_tardis_archive(
+                            path, policy, expected_manifest_hash=identity
+                        )
+                    )
+                    for path, identity in selected
+                ),
+                key=lambda archive: _archive_span(archive.manifest),
             )
-            for path, identity in selected
         )
-        dates = tuple(archive.manifest["date"] for archive in archives)
-        if dates != tuple(sorted(set(dates))):
-            raise ValueError("tardis_archive_dates_invalid")
         spans = tuple(_archive_span(archive.manifest) for archive in archives)
         if any(
             current[0] < previous[1]

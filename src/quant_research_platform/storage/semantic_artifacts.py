@@ -90,14 +90,31 @@ def compare_semantic_artifacts(
             }
             old_operational = {}
             candidate_operational = {}
+            member_identities = {}
             old_envelope, old_members = read_semantic_artifact_record(
-                old_root, lease=metadata_lease, operational_metadata=old_operational
+                old_root,
+                lease=metadata_lease,
+                operational_metadata=old_operational,
+                member_identities=member_identities,
             )
+            identities.update(
+                (old_root / name, identity)
+                for name, identity in member_identities.items()
+                if name != "manifest.json"
+            )
+            member_identities.clear()
             candidate_envelope, candidate_members = read_semantic_artifact_record(
                 candidate_root,
                 lease=metadata_lease,
                 operational_metadata=candidate_operational,
+                member_identities=member_identities,
             )
+            identities.update(
+                (candidate_root / name, identity)
+                for name, identity in member_identities.items()
+                if name != "manifest.json"
+            )
+            member_identities.clear()
             if old_envelope != candidate_envelope:
                 return SemanticArtifactComparison("CONTENT_MISMATCH")
             old_paths = tuple(member["path"] for member in old_members)
@@ -142,17 +159,14 @@ def compare_semantic_artifacts(
                     candidate_root / member["path"],
                 )
                 old_identity, candidate_identity = (
-                    _member_identity(old_path),
-                    _member_identity(candidate_path),
+                    identities[old_path],
+                    identities[candidate_path],
                 )
-                identities[old_path] = old_identity
-                identities[candidate_path] = candidate_identity
                 if (
-                    _member_record(member["path"], old_path) != member
-                    or _member_record(member["path"], candidate_path)
-                    != candidate_member
+                    _member_identity(old_path) != old_identity
+                    or _member_identity(candidate_path) != candidate_identity
                 ):
-                    raise ValueError("semantic_artifact_member_integrity_invalid")
+                    raise ValueError("semantic_artifact_member_identity_changed")
                 same_bytes = False
                 if member == candidate_member:
                     with (
@@ -240,6 +254,7 @@ def compare_semantic_artifacts(
             old_envelope = candidate_envelope = None
             old_members = candidate_members = member = candidate_member = None
             old_operational = candidate_operational = None
+            member_identities = None
             old_trials = candidate_trials = old_ref = candidate_ref = None
             old_paths = candidate_paths = identities = remaining = verify = left = None
         return SemanticArtifactComparison("MATCH")
@@ -335,6 +350,8 @@ def write_semantic_artifact(
             try:
                 writer(staging)
                 members = _member_inventory(staging, _admit=admit)
+                if not members:
+                    raise ValueError("semantic_artifact_member_manifest_invalid")
                 if staged_validator is not None:
                     staged_validator(staging, members)
                 admit(

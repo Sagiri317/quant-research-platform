@@ -127,7 +127,12 @@ def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
             old_root, expected_identity=envelope.instance_identity, lease=artifact_lease
         )
         assert len(tuple(old.iter_chunks())) == 1
-        assert ledger_artifact.summarize_portfolio_ledger(old)["net_pnl"] == 0.0
+        assert (
+            ledger_artifact.summarize_portfolio_ledger(old.capital, old.iter_chunks())[
+                "net_pnl"
+            ]
+            == 0.0
+        )
         old_bytes = _file_bytes(old_root)
 
         def invalid(emit):
@@ -237,7 +242,7 @@ def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill
         artifact = read_portfolio_ledger_artifact(
             root, expected_identity=root.name, lease=artifact_lease
         )
-        summary = summarize_portfolio_ledger(artifact)
+        summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
         batches = list(artifact.iter_chunks())
     expected_gross = -0.5 if mode == "taker" else 0.5
     expected_fee = 0.01005 if mode == "taker" else -0.00995
@@ -397,7 +402,7 @@ def test_adjusted_return_terminal_nav_is_valued_at_actual_interval_end(
         )
         assert pd.Timestamp(asset_end.timestamp_ns) == pd.Timestamp("2019-01-03")
         assert asset_end.value == pytest.approx(110.0)
-        summary = summarize_portfolio_ledger(artifact)
+        summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
         assert summary["nav"] == 110.0
         assert pd.Timestamp(summary["valuation_timestamp_ns"]) == pd.Timestamp(
             "2019-01-03"
@@ -621,7 +626,7 @@ def test_portfolio_ledger_roundtrip_preserves_complete_sessions(
             inspected.append(batch.sequence)
             yield batch
 
-    def consume_first(batches):
+    def consume_first(_artifact, batches):
         with closing_iterator(batches):
             assert next(batches).sequence == 0
 
@@ -1242,7 +1247,7 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
         else:
             assert len(terminal.valuations) == 3
             assert {row.asset_id for row in terminal.valuations} == {"__cash__"}
-        summary = summarize_portfolio_ledger(artifact)
+        summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
         if case == "closed_before_quote_expiry":
             assert (
                 result["filled_orders"] == 2
@@ -1437,7 +1442,9 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
         artifact = read_portfolio_ledger_artifact(
             root, expected_identity=root.name, lease=artifact_lease
         )
-        summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+        summary = ledger_artifact.summarize_portfolio_ledger(
+            artifact.capital, artifact.iter_chunks()
+        )
         assert summary["alpha_calibration"]["status"] == "UNDEFINED"
         assert (
             summary["alpha_calibration"]["undefined_reason"]
@@ -1532,7 +1539,9 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
             selection_group="global",
         )
         assert frozen == calibration
-        summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+        summary = ledger_artifact.summarize_portfolio_ledger(
+            artifact.capital, artifact.iter_chunks()
+        )
         assert summary["alpha_calibration"]["inference_status"] == "UNDEFINED"
         assert (
             summary["alpha_calibration"]["inference_reason"]
@@ -1659,7 +1668,9 @@ def test_flat_eof_preserves_historical_fill_diagnostics_and_cash_ledger(
         persisted = list(artifact.iter_chunks())
         trades = [trade for batch in persisted for trade in batch.trades]
         assert len(trades) == 2 and sum(trade.quantity for trade in trades) == 0
-        summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+        summary = ledger_artifact.summarize_portfolio_ledger(
+            artifact.capital, artifact.iter_chunks()
+        )
         assert summary["net_pnl"] == pytest.approx(-1.0 if engine == "taker" else 1.02)
         diagnostics = [
             row
@@ -1751,7 +1762,9 @@ def test_perpetual_close_sign_is_independent_of_quantity_units(
         }
         assert end["__cash__"].value == 1000.0 + expected_realized
         assert end["asset"].cost_basis == expected_basis
-        summary = ledger_artifact.summarize_portfolio_ledger(artifact)
+        summary = ledger_artifact.summarize_portfolio_ledger(
+            artifact.capital, artifact.iter_chunks()
+        )
         assert summary["net_pnl"] == summary["gross_pnl"] == direction
         assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
@@ -1993,12 +2006,19 @@ def test_portfolio_reader_releases_previous_transition_before_next_admission(
             with closing_iterator(artifact.iter_chunks()) as rows:
                 consume(rows)
         elif entry == "summary":
-            assert ledger_artifact.summarize_portfolio_ledger(artifact)["nav"] == 100.0
+            assert (
+                ledger_artifact.summarize_portfolio_ledger(
+                    artifact.capital, artifact.iter_chunks()
+                )["nav"]
+                == 100.0
+            )
         else:
             read_portfolio_ledger_artifact(
                 root,
                 expected_identity=envelope.instance_identity,
-                consume_batches=consume if entry == "callback" else None,
+                consume_batches=(lambda _artifact, batches: consume(batches))
+                if entry == "callback"
+                else None,
                 lease=artifact_lease,
             )
         assert observed == [[]]

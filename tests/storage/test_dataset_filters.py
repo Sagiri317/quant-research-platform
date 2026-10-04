@@ -28,6 +28,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
 )
 from tests.helpers.runtime_resources import capture_test_policy
+from tests.storage.dataset_test_support import prepared_in_filter
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
@@ -495,11 +496,12 @@ def test_dataset_filter_preflight_rejects_before_bulk_arrow_array(
         storage_errors.DatasetReadCapacityExceeded,
         match="dataset_filter_values_exceed_(payload_target|task_memory_budget)",
     ):
-        dataset_reading._prepare_in_filter(
+        with prepared_in_filter(
             pa.field("asset_id", pa.string()),
             values,
             resource_policy=policy,
-        )
+        ):
+            pass
     assert bulk_array_called is False
     assert scalar_called is False
 
@@ -529,11 +531,12 @@ def test_dataset_filter_preparation_subtracts_shared_reservations_before_sort(
             match="dataset_filter_values_exceed_task_memory_budget",
         ),
     ):
-        dataset_reading._prepare_in_filter(
+        with prepared_in_filter(
             pa.field("value", pa.int64()),
             values,
             resource_policy=policy,
-        )
+        ):
+            pass
     assert policy.used_memory_bytes == 0
     assert policy.state == "CLOSED"
 
@@ -566,11 +569,12 @@ def test_dataset_filter_preparation_checks_physical_overlap_before_allocation(
         storage_errors.DatasetReadCapacityExceeded,
         match="^dataset_filter_values_exceed_task_memory_budget$",
     ):
-        dataset_reading._prepare_in_filter(
+        with prepared_in_filter(
             pa.field("asset_id", pa.string()),
             values,
             resource_policy=policy,
-        )
+        ):
+            pass
 
     assert len(sort_calls) == (stage == "arrow")
     assert policy.used_memory_bytes == 0
@@ -603,21 +607,21 @@ def test_dataset_filter_preparation_accepts_physical_capacity_above_soft_target(
     monkeypatch.setattr(dataset_reading, "sorted", observed_sort, raising=False)
     monkeypatch.setattr(dataset_reading.pa, "array", observed_array)
 
-    prepared = dataset_reading._prepare_in_filter(
+    with prepared_in_filter(
         pa.field("asset_id", pa.string()),
         values,
         resource_policy=policy,
-    )
-
-    assert prepared.values.to_pylist() == sorted(set(values))
-    assert len(reservations) == 2
-    assert max(reservations) < policy.captured_available_memory_bytes
-    if shape != "small":
-        assert max(reservations) > policy.memory_budget_bytes
-        borrowed_bytes = sys.getsizeof(values) + sum(map(len, values))
-        assert (
-            borrowed_bytes + max(reservations) > policy.captured_available_memory_bytes
-        )
+    ) as prepared:
+        assert prepared.values.to_pylist() == sorted(set(values))
+        assert len(reservations) == 2
+        assert max(reservations) < policy.captured_available_memory_bytes
+        if shape != "small":
+            assert max(reservations) > policy.memory_budget_bytes
+            borrowed_bytes = sys.getsizeof(values) + sum(map(len, values))
+            assert (
+                borrowed_bytes + max(reservations)
+                > policy.captured_available_memory_bytes
+            )
     assert policy.used_memory_bytes == 0
     assert policy.state == "CLOSED"
 
@@ -643,13 +647,12 @@ def test_dataset_prepared_in_filter_compacts_sorted_duplicates_without_arrow_uni
 
     monkeypatch.setattr(dataset_reading.pa.compute, "unique", reject_unique)
 
-    prepared = dataset_reading._prepare_in_filter(
+    with prepared_in_filter(
         pa.field("value", pa.int64()),
         (2, 1, 1),
         resource_policy=policy,
-    )
-
-    assert prepared.values.to_pylist() == [1, 2]
+    ) as prepared:
+        assert prepared.values.to_pylist() == [1, 2]
 
 
 @pytest.mark.parametrize(
@@ -667,14 +670,13 @@ def test_dataset_prepared_in_filter_payload_gate_uses_compact_values(
     )
     values = (value,) * 140_000
 
-    prepared = dataset_reading._prepare_in_filter(
+    with prepared_in_filter(
         pa.field("value", data_type),
         values,
         resource_policy=policy,
-    )
-
-    assert prepared.values.to_pylist() == [value]
-    assert prepared.retained_memory_bytes <= policy.memory_budget_bytes
+    ) as prepared:
+        assert prepared.values.to_pylist() == [value]
+        assert prepared.retained_memory_bytes <= policy.memory_budget_bytes
 
 
 def test_dataset_prepared_in_filter_rejects_distinct_equal_string_payloads() -> None:
@@ -689,11 +691,12 @@ def test_dataset_prepared_in_filter_rejects_distinct_equal_string_payloads() -> 
         storage_errors.DatasetReadCapacityExceeded,
         match="dataset_filter_values_exceed_task_memory_budget",
     ):
-        dataset_reading._prepare_in_filter(
+        with prepared_in_filter(
             pa.field("value", pa.string()),
             values,
             resource_policy=policy,
-        )
+        ):
+            pass
 
 
 @pytest.mark.parametrize(
@@ -712,13 +715,12 @@ def test_dataset_prepared_in_filter_accepts_arrow_time_values(
         available_memory_bytes=16 * 1024**2,
     )
 
-    prepared = dataset_reading._prepare_in_filter(
+    with prepared_in_filter(
         pa.field("value", data_type),
         values,
         resource_policy=policy,
-    )
-
-    assert prepared.values.to_pylist() == list(values)
+    ) as prepared:
+        assert prepared.values.to_pylist() == list(values)
 
 
 @pytest.mark.parametrize(
@@ -745,38 +747,39 @@ def test_persisted_arrow_time_filters_support_equal_and_membership(
     policy = capture_test_policy(
         available_memory_bytes=16 * 1024**2,
     )
-    prepared = dataset_reading._prepare_in_filter(
+    with prepared_in_filter(
         pa.field("value", data_type),
         (values[0], values[-1]),
         resource_policy=policy,
-    )
-
-    equal = list(
-        dataset_physical.iter_dataset_part_batches(
-            path,
-            expected_identity=dataset_physical.dataset_file_identity(path),
-            target_chunk_bytes=1024,
-            operation_headroom_bytes=1024**2,
-            parquet_filters=[("value", "==", values[1])],
+    ) as prepared:
+        equal = list(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=dataset_physical.dataset_file_identity(path),
+                target_chunk_bytes=1024,
+                operation_headroom_bytes=1024**2,
+                parquet_filters=[("value", "==", values[1])],
+            )
         )
-    )
-    membership = list(
-        dataset_physical.iter_dataset_part_batches(
-            path,
-            expected_identity=dataset_physical.dataset_file_identity(path),
-            target_chunk_bytes=1024,
-            operation_headroom_bytes=1024**2,
-            parquet_filters=[("value", "in", prepared)],
+        membership = list(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=dataset_physical.dataset_file_identity(path),
+                target_chunk_bytes=1024,
+                operation_headroom_bytes=1024**2,
+                parquet_filters=[("value", "in", prepared)],
+            )
         )
-    )
 
-    assert [value for batch in equal for value in batch.column(0).to_pylist()] == [
-        values[1]
-    ]
-    assert [value for batch in membership for value in batch.column(0).to_pylist()] == [
-        values[0],
-        values[-1],
-    ]
+        assert [value for batch in equal for value in batch.column(0).to_pylist()] == [
+            values[1]
+        ]
+        assert [
+            value for batch in membership for value in batch.column(0).to_pylist()
+        ] == [
+            values[0],
+            values[-1],
+        ]
 
 
 def test_dataset_prepared_in_filter_rejects_unsupported_arrow_family() -> None:
@@ -785,11 +788,12 @@ def test_dataset_prepared_in_filter_rejects_unsupported_arrow_family() -> None:
     )
 
     with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
-        dataset_reading._prepare_in_filter(
+        with prepared_in_filter(
             pa.field("value", pa.list_(pa.int64())),
             ((1,),),
             resource_policy=policy,
-        )
+        ):
+            pass
 
 
 def test_dataset_prepared_in_filter_accepts_fixed_size_binary() -> None:
@@ -797,13 +801,12 @@ def test_dataset_prepared_in_filter_accepts_fixed_size_binary() -> None:
         available_memory_bytes=16 * 1024**2,
     )
 
-    prepared = dataset_reading._prepare_in_filter(
+    with prepared_in_filter(
         pa.field("value", pa.binary(2)),
         (b"ab", b"cd"),
         resource_policy=policy,
-    )
-
-    assert prepared.values.to_pylist() == [b"ab", b"cd"]
+    ) as prepared:
+        assert prepared.values.to_pylist() == [b"ab", b"cd"]
 
 
 def test_dataset_filter_preflight_rejects_surrogate_before_arrow(
@@ -821,11 +824,12 @@ def test_dataset_filter_preflight_rejects_surrogate_before_arrow(
     monkeypatch.setattr(dataset_reading.pa, "scalar", reject_arrow)
 
     with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
-        dataset_reading._prepare_in_filter(
+        with prepared_in_filter(
             pa.field("asset_id", pa.string()),
             ("valid\ud800suffix",),
             resource_policy=policy,
-        )
+        ):
+            pass
 
 
 @pytest.mark.parametrize(
@@ -859,8 +863,9 @@ def test_dataset_binary_filter_preflight_rejects_before_arrow(
     monkeypatch.setattr(dataset_reading.pa, "scalar", reject_arrow)
 
     with pytest.raises(storage_errors.DatasetReadCapacityExceeded, match=expected):
-        dataset_reading._prepare_in_filter(
+        with prepared_in_filter(
             pa.field("payload", data_type),
             values,
             resource_policy=policy,
-        )
+        ):
+            pass

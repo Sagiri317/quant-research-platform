@@ -38,15 +38,24 @@ class _MachineLock:
         except OSError:
             raise RuntimeError("runtime_data_scale_lock_failed") from None
         try:
-            os.lseek(fd, 0, os.SEEK_SET)
-            if os.name == "nt":
-                msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
-            else:
-                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
-            os.close(fd)
-            raise RuntimeError("runtime_data_scale_lock_busy") from None
-        return cls(fd=fd)
+            try:
+                os.lseek(fd, 0, os.SEEK_SET)
+                if os.name == "nt":
+                    msvcrt.locking(fd, msvcrt.LK_NBLCK, 1)
+                else:
+                    fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            except OSError:
+                raise RuntimeError("runtime_data_scale_lock_busy") from None
+            return cls(fd=fd)
+        except BaseException as primary:
+            try:
+                os.close(fd)
+            except BaseException as close_error:
+                primary.add_note(
+                    "runtime lock acquisition close also failed: "
+                    f"{type(close_error).__name__}"
+                )
+            raise
 
     def close(self) -> None:
         if self.closed:

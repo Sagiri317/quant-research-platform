@@ -129,7 +129,7 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
             selection_group="global",
         )
         assert frozen == calibration
-        summary = summarize_portfolio_ledger(artifact)
+        summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
         assert (
             summary["alpha_calibration"]["inference_status"]
             == calibration.inference_status

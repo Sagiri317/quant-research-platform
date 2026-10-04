@@ -523,25 +523,6 @@ def test_read_dataset_keeps_discovered_policy_active_through_session_exit(
         list(result)
 
 
-class _FailureBetweenValues:
-    def __init__(
-        self,
-        first: Path,
-        failure: BaseException,
-        later: Path,
-    ) -> None:
-        self._values = iter((first, failure, later))
-
-    def __iter__(self) -> _FailureBetweenValues:
-        return self
-
-    def __next__(self) -> Path:
-        value = next(self._values)
-        if isinstance(value, BaseException):
-            raise value
-        return value
-
-
 @pytest.mark.parametrize(
     ("owner", "later_name"),
     (

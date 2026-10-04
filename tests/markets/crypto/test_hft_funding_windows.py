@@ -23,7 +23,7 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
         artifact_policy.lease("tests.artifact_metadata", 0) as artifact_lease,
     ):
         from quant_research_platform.artifacts.crypto_hft import (
-            summarize_crypto_ledger_windows,
+            summarize_crypto_ledger,
         )
         from quant_research_platform.artifacts.portfolio_ledger import (
             read_portfolio_ledger_artifact,
@@ -132,9 +132,11 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
             artifact = read_portfolio_ledger_artifact(
                 root, expected_identity=envelope.instance_identity, lease=artifact_lease
             )
-            intervals = summarize_crypto_ledger_windows(
-                artifact, windows_ns=((0, 20_000_000), (60_000_000, 100_000_000))
-            )
+            intervals = summarize_crypto_ledger(
+                artifact,
+                artifact.iter_chunks(),
+                windows_ns=((0, 20_000_000), (60_000_000, 100_000_000)),
+            )["intervals"]
             assert [row["kind"] for row in intervals] == ["oos", "gap", "oos"]
             assert [row["net_pnl"] for row in intervals] == pytest.approx(
                 [0.48995, 3.001, 0.27955]
@@ -149,8 +151,10 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
                 result["net_pnl"]
             )
             with pytest.raises(ValueError, match="crypto_ledger_window_marker_invalid"):
-                summarize_crypto_ledger_windows(
-                    artifact, windows_ns=((0, 21_000_000), (60_000_000, 100_000_000))
+                summarize_crypto_ledger(
+                    artifact,
+                    artifact.iter_chunks(),
+                    windows_ns=((0, 21_000_000), (60_000_000, 100_000_000)),
                 )
             assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
@@ -313,7 +317,9 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
             summaries = []
             with closing_iterator(artifact.iter_episodes()) as rows:
                 for index, ledger in rows:
-                    summaries.append(summarize_portfolio_ledger(ledger))
+                    summaries.append(
+                        summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
+                    )
                     assert ledger.capital == capital
                     assert index["termination"] == "TRUNCATED"
                     with closing_iterator(ledger.iter_chunks()) as batches:
@@ -496,14 +502,14 @@ def test_episode_publication_cancel_preserves_old_and_parent_capture_rejects_chi
                     replaced = True
                 consume = kwargs.pop("consume_batches")
 
-                def counted(batches):
+                def counted(artifact, batches):
                     def rows():
                         nonlocal consumed
                         for batch in batches:
                             consumed += 1
                             yield batch
 
-                    return consume(rows())
+                    return consume(artifact, rows())
 
                 return real(root, consume_batches=counted, **kwargs)
 

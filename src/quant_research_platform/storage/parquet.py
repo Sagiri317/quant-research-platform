@@ -155,11 +155,18 @@ def iter_dataset_part_batches(
         )
         file_metadata = parquet_file.metadata
         current_dictionary_paths = ()
+        selected_positions = tuple(
+            index
+            for positions in _projected_parquet_leaf_positions(
+                parquet_file, selected_columns
+            ).values()
+            for index in positions
+        )
         for row_group in selected_row_groups:
             dictionary_paths = tuple(
                 parquet_file.schema.column(index).path
                 for index in _dictionary_encoded_column_positions(
-                    parquet_file, selected_columns, row_groups=[row_group]
+                    parquet_file, selected_positions, row_groups=[row_group]
                 )
                 if parquet_file.schema.column(index).physical_type == "BYTE_ARRAY"
             )
@@ -194,12 +201,11 @@ def iter_dataset_part_batches(
                 parquet_file, selected_columns, row_groups=[row_group]
             )
             maximum_decode_fixed_bytes = _maximum_projected_decode_fixed_bytes(
-                parquet_file, selected_columns, row_groups=[row_group]
+                parquet_file, selected_columns, handle=handle, row_groups=[row_group]
             )
             selected_source_rows = int(file_metadata.row_group(row_group).num_rows)
             projected_buffer_bytes = (
-                len(_projected_parquet_leaf_positions(parquet_file, selected_columns))
-                * _PARQUET_READ_BUFFER_BYTES
+                len(selected_positions) * _PARQUET_READ_BUFFER_BYTES
             )
             admitted_batch_rows = _target_batch_rows(
                 maximum_row_bytes=maximum_projected_row_bytes,
@@ -657,10 +663,14 @@ def _maximum_projected_row_bytes(
         if row_groups is None
         else row_groups
     )
+    column_positions = _projected_parquet_leaf_positions(parquet_file, columns)
+    projected_positions = tuple(
+        index for positions in column_positions.values() for index in positions
+    )
     byte_dictionary_positions = {
         index
         for index in _dictionary_encoded_column_positions(
-            parquet_file, columns, row_groups=selected_groups
+            parquet_file, projected_positions, row_groups=selected_groups
         )
         if parquet_file.schema.column(index).physical_type == "BYTE_ARRAY"
     }
@@ -672,12 +682,12 @@ def _maximum_projected_row_bytes(
     )
     dictionary_positions = {
         index
-        for index in _projected_parquet_leaf_positions(parquet_file, columns)
+        for index in projected_positions
         if pa.types.is_dictionary(native_types[index])
     }
     maximum_row_bytes = 0
     for column in columns:
-        positions = _projected_parquet_leaf_positions(parquet_file, (column,))
+        positions = column_positions[column]
         encoded_positions = dictionary_positions.intersection(positions)
         native_index_bytes = sum(
             native_types[index].index_type.bit_width // 8 + 1
@@ -697,7 +707,7 @@ def _maximum_projected_row_bytes(
                 continue
             group_dictionary_positions = set(
                 _dictionary_encoded_column_positions(
-                    parquet_file, (column,), row_groups=[row_group_index]
+                    parquet_file, positions, row_groups=[row_group_index]
                 )
             )
             physical_bytes = sum(
@@ -740,6 +750,7 @@ def _maximum_projected_decode_fixed_bytes(
     parquet_file: pq.ParquetFile,
     columns: tuple[str, ...],
     *,
+    handle: Any,
     row_groups: list[int] | tuple[int, ...] | None = None,
 ) -> int:
     decoded_bounds = _decoded_row_bounds(parquet_file)
@@ -753,9 +764,13 @@ def _maximum_projected_decode_fixed_bytes(
         for field in parquet_file.schema_arrow
         for leaf in _arrow_leaf_types(field.type)
     )
+    column_positions = _projected_parquet_leaf_positions(parquet_file, columns)
+    projected_positions = tuple(
+        index for positions in column_positions.values() for index in positions
+    )
     native_dictionary_positions = {
         index
-        for index in _projected_parquet_leaf_positions(parquet_file, columns)
+        for index in projected_positions
         if pa.types.is_dictionary(native_types[index])
     }
     physical_bounds = dict.fromkeys(columns, 0)
@@ -770,13 +785,13 @@ def _maximum_projected_decode_fixed_bytes(
                 int(group.column(index).total_compressed_size)
                 + 2 * int(group.column(index).total_uncompressed_size)
                 + 4 * min(1024, int(group.column(index).num_values))
-                for index in _projected_parquet_leaf_positions(parquet_file, (name,))
+                for index in column_positions[name]
             )
             for name in columns
         }
         for index in native_dictionary_positions.union(
             _dictionary_encoded_column_positions(
-                parquet_file, columns, row_groups=[row_group_index]
+                parquet_file, projected_positions, row_groups=[row_group_index]
             )
         ):
             leaf = parquet_file.schema.column(index)
@@ -785,6 +800,15 @@ def _maximum_projected_decode_fixed_bytes(
             # Include Arrow offsets, validity, and dictionary-length inspection.
             payload_factor = 4 if leaf.physical_type == "BYTE_ARRAY" else 2
             bound = payload_factor * int(column.total_uncompressed_size)
+            if (
+                leaf.physical_type == "BYTE_ARRAY"
+                and index in native_dictionary_positions
+            ):
+                # Arrow's dictionary memo grows at half load to four times its
+                # old capacity, retaining both 16-byte entry buffers. Include
+                # unused dictionary entries and possible plain fallback pages.
+                dictionary_entries = _parquet_dictionary_memo_entries(handle, column)
+                bound += max(512, 192 * dictionary_entries)
             if leaf.max_repetition_level:
                 bound += 16 * leaf.max_repetition_level * int(column.num_values)
             name = next(
@@ -811,9 +835,86 @@ def _maximum_projected_decode_fixed_bytes(
         ) from None
 
 
+def _parquet_dictionary_memo_entries(handle: Any, column: Any) -> int:
+    """Bound memo keys from the actual compact-protocol dictionary page header."""
+    total_bytes = int(column.total_uncompressed_size)
+    if not column.has_dictionary_page:
+        return min(int(column.num_values), total_bytes // 4)
+    position = handle.tell()
+    handle.seek(column.dictionary_page_offset)
+    # Eight field headers, six i32 values, and two STOPs need at most
+    # 8 * 4 + 6 * 5 + 2 bytes, including CRC and the optional sorted flag.
+    raw = handle.read(64)
+    handle.seek(position)
+    offset = 0
+
+    def byte() -> int:
+        nonlocal offset
+        if offset >= len(raw):
+            raise ValueError("dataset_parquet_dictionary_header_invalid")
+        value = raw[offset]
+        offset += 1
+        return value
+
+    def integer() -> int:
+        value = 0
+        for shift in range(0, 35, 7):
+            part = byte()
+            value |= (part & 127) << shift
+            if not part & 128:
+                if value > 0xFFFFFFFF:
+                    break
+                return (value >> 1) ^ -(value & 1)
+        raise ValueError("dataset_parquet_dictionary_header_invalid")
+
+    header: dict[int, Any] = {}
+    current = header
+    parent = None
+    field = 0
+    while True:
+        tag = byte()
+        if not tag:
+            if parent is None:
+                break
+            current, field = parent
+            parent = None
+            continue
+        delta, kind = tag >> 4, tag & 15
+        field = field + delta if delta else integer()
+        if not 0 < field <= 32767 or field in current:
+            raise ValueError("dataset_parquet_dictionary_header_invalid")
+        if kind in (1, 2):
+            current[field] = kind == 1
+        elif kind in (4, 5):
+            current[field] = integer()
+        elif kind == 12:
+            if parent is not None:
+                raise ValueError("dataset_parquet_dictionary_header_invalid")
+            child = {}
+            current[field] = child
+            parent = current, field
+            current = child
+            field = 0
+        else:
+            raise ValueError("dataset_parquet_dictionary_header_invalid")
+
+    dictionary = header.get(7)
+    if (
+        header.get(1) != 2
+        or type(header.get(2)) is not int
+        or not 0 <= header[2] <= total_bytes
+        or type(dictionary) is not dict
+        or type(dictionary.get(1)) is not int
+        or not 0 <= dictionary[1] <= header[2] // 4
+    ):
+        raise ValueError("dataset_parquet_dictionary_header_invalid")
+    # Every additional plain BYTE_ARRAY value needs at least its 4-byte length.
+    return dictionary[1] + (total_bytes - header[2]) // 4
+
+
 def _dictionary_encoded_column_positions(
     parquet_file: pq.ParquetFile,
-    columns: tuple[str, ...],
+    positions: tuple[int, ...],
     *,
     row_groups: list[int] | tuple[int, ...] | range | None = None,
 ) -> tuple[int, ...]:
@@ -824,7 +925,7 @@ def _dictionary_encoded_column_positions(
     )
     return tuple(
         index
-        for index in _projected_parquet_leaf_positions(parquet_file, columns)
+        for index in positions
         if any(
             {"RLE_DICTIONARY", "PLAIN_DICTIONARY"}.intersection(
                 parquet_file.metadata.row_group(group).column(index).encodings
@@ -926,12 +1027,15 @@ def _zstd_compressed_bound(source_bytes: int) -> int:
 def parquet_decoded_working_set_bounds(
     parquet_file: pq.ParquetFile,
     columns: tuple[str, ...],
+    *,
+    handle: Any,
 ) -> tuple[int, int]:
     return (
         _maximum_projected_row_bytes(parquet_file, columns),
         _maximum_projected_decode_fixed_bytes(
             parquet_file,
             columns,
+            handle=handle,
         ),
     )
 
@@ -1128,23 +1232,21 @@ def _parse_decoded_row_bounds(
 def _projected_parquet_leaf_positions(
     parquet_file: pq.ParquetFile,
     columns: tuple[str, ...],
-) -> tuple[int, ...]:
+) -> dict[str, tuple[int, ...]]:
     schema = parquet_file.schema
-    paths = tuple(
-        schema.column(index).path for index in range(parquet_file.metadata.num_columns)
-    )
-    positions: list[int] = []
-    for column in columns:
-        prefix = f"{column}."
-        matches = [
-            index
-            for index, path in enumerate(paths)
-            if path == column or path.startswith(prefix)
-        ]
-        if not matches:
-            raise ValueError("dataset_column_not_found")
-        positions.extend(matches)
-    return tuple(positions)
+    positions: dict[str, list[int]] = {column: [] for column in columns}
+    for index in range(parquet_file.metadata.num_columns):
+        path = schema.column(index).path
+        prefixes = [path]
+        prefixes.extend(
+            path[:end] for end, character in enumerate(path) if character == "."
+        )
+        for prefix in prefixes:
+            if prefix in positions:
+                positions[prefix].append(index)
+    if any(not matches for matches in positions.values()):
+        raise ValueError("dataset_column_not_found")
+    return {column: tuple(matches) for column, matches in positions.items()}
 
 
 def _matching_row_groups(
@@ -1242,6 +1344,7 @@ def _filter_arrow_batch(
         "<": pc.less,
         "==": pc.equal,
     }
+    combined = None
     for column, operator, value in filters or ():
         if operator == "in":
             if not isinstance(value, PreparedMembershipValues):
@@ -1274,33 +1377,27 @@ def _filter_arrow_batch(
                 pc.equal(column_values, candidates),
             )
             del column_values, values, low, high, candidate_positions, candidates
-            filtered = batch.filter(condition)
-            del batch, condition
-            batch = filtered
-            del filtered
-            continue
-        column_values = batch.column(batch.schema.get_field_index(column))
-        scalar = value
-        if pa.types.is_timestamp(column_values.type):
-            scalar = pa.scalar(
-                value,
-                type=pa.timestamp(
-                    value.unit if isinstance(value, pd.Timestamp) else "us",
-                    tz=column_values.type.tz,
-                ),
-            )
-            if operator == "==":
-                try:
-                    scalar = scalar.cast(column_values.type, safe=True)
-                except pa.ArrowInvalid:
-                    return batch.slice(0, 0)
-        condition = operations[operator](column_values, scalar)
-        del column_values, scalar
-        filtered = batch.filter(condition)
-        del batch, condition
-        batch = filtered
-        del filtered
-    return batch
+        else:
+            column_values = batch.column(batch.schema.get_field_index(column))
+            scalar = value
+            if pa.types.is_timestamp(column_values.type):
+                scalar = pa.scalar(
+                    value,
+                    type=pa.timestamp(
+                        value.unit if isinstance(value, pd.Timestamp) else "us",
+                        tz=column_values.type.tz,
+                    ),
+                )
+                if operator == "==":
+                    try:
+                        scalar = scalar.cast(column_values.type, safe=True)
+                    except pa.ArrowInvalid:
+                        return batch.slice(0, 0)
+            condition = operations[operator](column_values, scalar)
+            del column_values, scalar
+        combined = condition if combined is None else pc.and_kleene(combined, condition)
+        del condition
+    return batch if combined is None else pc.filter(batch, combined)
 
 
 def _filter_working_set_bytes(
@@ -1315,14 +1412,14 @@ def _filter_working_set_bytes(
         integer_array_bytes = row_count * 4
         candidate_array_bytes = row_count * membership_max_scalar_bytes
         search_index_state_bytes = 8 * integer_array_bytes
-        search_condition_state_bytes = 4 * boolean_buffer_bytes
+        search_condition_state_bytes = 5 * boolean_buffer_bytes
         condition_state_bytes = (
             search_index_state_bytes
             + candidate_array_bytes
             + search_condition_state_bytes
         )
     else:
-        condition_state_bytes = boolean_buffer_bytes
+        condition_state_bytes = 3 * boolean_buffer_bytes
     filtered_output_bytes = source_batch_bytes
     publication_state_bytes = boolean_buffer_bytes + filtered_output_bytes
     return source_batch_bytes + max(
@@ -1505,7 +1602,7 @@ def _parquet_table_write_state(
 
 @contextmanager
 def parquet_table_writer(
-    handle, *, parent: Path, compression: str, schema=None, statistics=()
+    handle, *, parent: Path, compression: str, schema=None, statistics=(), **options
 ):
     """Own one native stream, its page/footer reservations and primary failure."""
     with (
@@ -1522,7 +1619,7 @@ def parquet_table_writer(
         metadata = None
         writer = None
 
-        def write_table(table):
+        def write_table(table, *, row_group_size=None):
             nonlocal retained, metadata, writer
             persisted = None
             try:
@@ -1532,13 +1629,21 @@ def parquet_table_writer(
                     )
                 )
                 state.enter_context(reservation)
+                actual_group_rows = (
+                    batch_rows if row_group_size is None else row_group_size
+                )
                 group_rows = _parquet_row_group_size(persisted.num_rows)
-                extra_groups = (persisted.num_rows + batch_rows - 1) // batch_rows - (
+                extra_groups = (
+                    persisted.num_rows + actual_group_rows - 1
+                ) // actual_group_rows - (
                     persisted.num_rows + group_rows - 1
                 ) // group_rows
                 if policy is not None and extra_groups:
                     extra_footer = extra_groups * _parquet_row_group_footer_upper_bound(
                         persisted.schema, rows=0
+                    )
+                    policy.require_working_set(
+                        extra_footer, error="runtime_memory_budget_exceeded"
                     )
                     state.enter_context(
                         policy.lease("storage.parquet.native", extra_footer)
@@ -1567,10 +1672,11 @@ def parquet_table_writer(
                                 else False,
                                 write_page_index=False,
                                 write_page_checksum=False,
+                                **options,
                             )
                         )
                     )
-                writer.write_table(persisted, row_group_size=batch_rows)
+                writer.write_table(persisted, row_group_size=actual_group_rows)
             finally:
                 persisted = None
 

@@ -10,18 +10,26 @@ from pathlib import Path
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
     json_record_working_set_bytes,
+    parse_qrp_json_object,
 )
 from quant_research_platform.contracts.portfolios import (
     FundingEvent,
     FundingForecast,
     PortfolioTargetBlocked,
 )
+from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     RESEARCH_SYMBOLS,
 )
+from quant_research_platform.sources.binance.validation import (
+    strict_iso_timestamp,
+    strict_non_negative_integer,
+    strict_positive_float,
+)
+from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
     filesystem_is_file,
@@ -63,6 +71,106 @@ def settlement_endpoint(source_id, symbol):
         asset = symbol.removesuffix("USDT").lower()
         return f"https://xoomar.com/api/markets/funding-rates/{asset}?history=1y"
     raise ValueError("binance_funding_settlement_source_invalid")
+
+
+def _settlement_response(raw, *, source_id, symbol, start_ms, end_ms, request_limit):
+    """Prove one supplier response covers the requested settlement window."""
+    if source_id == "binance":
+        if type(request_limit) is not int or not 1 <= request_limit <= 1000:
+            raise ValueError("binance_funding_request_limit_invalid")
+        rows = parse_qrp_json_object(b'{"records":' + raw + b"}")["records"]
+        if type(rows) is not list or len(rows) >= request_limit:
+            raise PortfolioTargetBlocked("binance_funding_coverage_unproven")
+        selected = rows
+        completion = "short_page"
+    elif source_id == "xoomar":
+        if type(request_limit) is not int or request_limit != 5000:
+            raise ValueError("binance_funding_request_limit_invalid")
+        payload = parse_qrp_json_object(raw)
+        data = payload.get("data")
+        if type(data) is not dict or type(data.get("history")) is not list:
+            raise PortfolioTargetBlocked("binance_funding_coverage_unproven")
+        rows = data["history"]
+        if not rows or len(rows) > request_limit:
+            raise PortfolioTargetBlocked("binance_funding_coverage_unproven")
+        selected = []
+        previous = None
+        asset = symbol.removesuffix("USDT")
+        for row in rows:
+            if type(row) is not dict:
+                raise ValueError("binance_funding_settlement_identity_invalid")
+            stamp = strict_iso_timestamp(
+                row.get("fundingTime"), error="binance_funding_settlement_time_invalid"
+            ).value
+            if stamp % 1_000_000 or (previous is not None and stamp > previous):
+                raise ValueError("binance_funding_settlement_order_invalid")
+            previous = stamp
+            if row.get("exchange") == "binance" and row.get("baseAsset") == asset:
+                if row.get("slug") != asset.lower():
+                    raise ValueError("binance_funding_settlement_identity_invalid")
+                selected.append(row)
+        # Bracketing settlement facts prove a historical interval independently
+        # of a server refresh timestamp or a caller's claim of completeness.
+        if (
+            not selected
+            or strict_iso_timestamp(
+                selected[-1]["fundingTime"],
+                error="binance_funding_settlement_time_invalid",
+            ).value
+            > start_ms * 1_000_000
+            or strict_iso_timestamp(
+                selected[0]["fundingTime"],
+                error="binance_funding_settlement_time_invalid",
+            ).value
+            < end_ms * 1_000_000
+        ):
+            raise PortfolioTargetBlocked("binance_funding_coverage_unproven")
+        selected = list(reversed(selected))
+        completion = "history_brackets_window"
+    else:
+        raise ValueError("binance_funding_settlement_source_invalid")
+    events = []
+    previous = -1
+    for row in selected:
+        if type(row) is not dict:
+            raise ValueError("binance_funding_settlement_identity_invalid")
+        if source_id == "binance":
+            if row.get("symbol") != symbol:
+                raise ValueError("binance_funding_settlement_identity_invalid")
+            timestamp = strict_non_negative_integer(
+                row.get("fundingTime"), error="binance_funding_settlement_time_invalid"
+            )
+        else:
+            timestamp = (
+                strict_iso_timestamp(
+                    row["fundingTime"], error="binance_funding_settlement_time_invalid"
+                ).value
+                // 1_000_000
+            )
+        if timestamp <= previous:
+            raise ValueError("binance_funding_settlement_order_invalid")
+        previous = timestamp
+        if not start_ms <= timestamp <= end_ms:
+            if source_id == "binance":
+                raise ValueError("binance_funding_settlement_order_invalid")
+            continue
+        events.append(
+            FundingEvent(
+                timestamp * 1_000_000,
+                strict_finite_float(
+                    row.get("fundingRate"), error="binance_funding_rate_invalid"
+                ),
+                strict_positive_float(
+                    row.get("markPrice"), error="binance_funding_mark_invalid"
+                ),
+            )
+        )
+    return events, {
+        "request_limit": request_limit,
+        "response_count": len(rows),
+        "settlement_count": len(events),
+        "completion": completion,
+    }
 
 
 def _manifest(root, symbol):
@@ -125,6 +233,10 @@ def _manifest(root, symbol):
                 "http_status",
                 "sha256",
                 "byte_count",
+                "request_limit",
+                "response_count",
+                "settlement_count",
+                "completion",
             }
             or native["endpoint"] != settlement_endpoint(native["source_id"], symbol)
             or native["symbol"] != symbol
@@ -133,6 +245,10 @@ def _manifest(root, symbol):
             or native["start_ms"] * 1_000_000 > coverage["start_ns"]
             or (native["end_ms"] + 1) * 1_000_000 <= coverage["end_ns"]
             or native["http_status"] != 200
+            or any(
+                type(native[key]) is not int or native[key] < 0
+                for key in ("response_count", "settlement_count")
+            )
             or type(native["byte_count"]) is not int
             or native["byte_count"] <= 0
             or type(native["sha256"]) is not str
@@ -144,19 +260,45 @@ def _manifest(root, symbol):
             error="binance_funding_settlement_source_invalid",
         )
         before = dataset_file_identity(path)
-        with open_filesystem_file(path, "rb") as handle:
-            digest = hashlib.file_digest(handle, "sha256").hexdigest()
-        if (
-            before != dataset_file_identity(path)
-            or before.size != native["byte_count"]
-            or digest != native["sha256"]
+        with (
+            runtime_resource_policy_scope() as policy,
+            policy.lease(
+                "binance.funding.settlement_source",
+                json_record_working_set_bytes(before.size) + 64 * 1024,
+            ),
+            handle_preserving_primary(open_filesystem_file(path, "rb")) as handle,
         ):
-            raise ValueError("binance_funding_settlement_source_changed")
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+            if (
+                before != dataset_file_identity(path)
+                or before.size != native["byte_count"]
+                or digest != native["sha256"]
+            ):
+                raise ValueError("binance_funding_settlement_source_changed")
+            handle.seek(0)
+            raw = handle.read(before.size + 1)
+            if len(raw) != before.size or before != dataset_file_identity(path):
+                raise ValueError("binance_funding_settlement_source_changed")
+            _events = proof = None
+            try:
+                _events, proof = _settlement_response(
+                    raw,
+                    source_id=native["source_id"],
+                    symbol=symbol,
+                    start_ms=native["start_ms"],
+                    end_ms=native["end_ms"],
+                    request_limit=native["request_limit"],
+                )
+                if any(native[key] != value for key, value in proof.items()):
+                    raise ValueError("binance_funding_settlement_source_invalid")
+            finally:
+                raw = _events = proof = None
     return manifest
 
 
 def _records(root, manifest):
     previous = {"settlement": -1, "forecast": -1}
+    settlement_count = 0
     rows = iter_csv_snapshot(
         root, expected_manifest=manifest, max_bytes=manifest["byte_count"]
     )
@@ -178,6 +320,7 @@ def _records(root, manifest):
                     or not coverage["start_ns"] <= timestamp <= coverage["end_ns"]
                 ):
                     raise ValueError("binance_funding_settlement_invalid")
+                settlement_count += 1
                 yield FundingEvent(timestamp, rate, mark)
             else:
                 if rate is not None or mark is not None or type(cashflows) is not list:
@@ -187,6 +330,9 @@ def _records(root, manifest):
                 yield FundingForecast(
                     timestamp, known_until, tuple(tuple(item) for item in cashflows)
                 )
+    native = manifest["metadata"]["settlement_source"]
+    if native is not None and settlement_count != native["settlement_count"]:
+        raise ValueError("binance_funding_settlement_count_invalid")
 
 
 @contextmanager

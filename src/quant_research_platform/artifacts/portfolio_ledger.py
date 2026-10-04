@@ -292,7 +292,10 @@ def read_portfolio_ledger_artifact(
     *,
     lease,
     expected_identity: str,
-    consume_batches: Callable[[Iterator[PortfolioLedgerBatch]], object] | None = None,
+    consume_batches: Callable[
+        [PortfolioLedgerArtifact, Iterator[PortfolioLedgerBatch]], object
+    ]
+    | None = None,
     expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
 ) -> PortfolioLedgerArtifact:
     """Validate once, optionally consuming batches during that same full pass."""
@@ -363,18 +366,35 @@ def read_portfolio_ledger_artifact(
         )
     ) as batches:
         if consume_batches is not None:
-            consume_batches(islice(batches, None))
+            consume_batches(artifact, islice(batches, None))
         for _batch in batches:
             _batch = None
     return artifact
 
 
-def summarize_portfolio_ledger(artifact: PortfolioLedgerArtifact) -> dict[str, object]:
-    fees = funding = turnover = nav = fill_quantity = 0.0
-    valuation_timestamp_ns = 0
-    fills = 0
-    alpha_calibration = {}
-    with closing_iterator(artifact.iter_chunks()) as batches:
+def summarize_portfolio_ledger(
+    capital: PortfolioCapital,
+    batches: Iterator[PortfolioLedgerBatch],
+    *,
+    consume_batch: Callable[[PortfolioLedgerBatch, Mapping[str, object]], None]
+    | None = None,
+) -> dict[str, object]:
+    result = {
+        "candidate_id": capital.candidate_id,
+        "initial_capital": capital.initial_capital,
+        "valuation_currency": capital.valuation_currency,
+        "gross_pnl": 0.0,
+        "net_pnl": 0.0,
+        "nav": capital.initial_capital,
+        "capital_return": 0.0,
+        "fees": 0.0,
+        "funding": 0.0,
+        "turnover": 0.0,
+        "fill_events": 0,
+        "fill_quantity": 0.0,
+        "valuation_timestamp_ns": 0,
+    }
+    with closing_iterator(batches):
         for batch in batches:
             try:
                 calibration = {
@@ -386,39 +406,34 @@ def summarize_portfolio_ledger(artifact: PortfolioLedgerArtifact) -> dict[str, o
                     and row.name.startswith("alpha_")
                 }
                 if "status" in calibration:
-                    alpha_calibration = calibration
-                fills += len(batch.trades)
-                fill_quantity += sum(abs(row.quantity) for row in batch.trades)
-                turnover += sum(abs(row.notional) for row in batch.trades)
-                fees -= sum(
+                    result["alpha_calibration"] = calibration
+                result["fill_events"] += len(batch.trades)
+                result["fill_quantity"] += sum(
+                    abs(row.quantity) for row in batch.trades
+                )
+                result["turnover"] += sum(abs(row.notional) for row in batch.trades)
+                result["fees"] -= sum(
                     row.amount for row in batch.cashflows if row.kind.endswith("_cost")
                 )
-                funding += sum(
+                result["funding"] += sum(
                     row.amount for row in batch.cashflows if row.kind == "funding"
                 )
-                nav = sum(row.value for row in batch.valuations if row.phase == "end")
-                valuation_timestamp_ns = max(
+                result["nav"] = sum(
+                    row.value for row in batch.valuations if row.phase == "end"
+                )
+                result["valuation_timestamp_ns"] = max(
                     row.timestamp_ns for row in batch.valuations if row.phase == "end"
                 )
+                result["net_pnl"] = result["nav"] - capital.initial_capital
+                result["gross_pnl"] = (
+                    result["net_pnl"] + result["fees"] - result["funding"]
+                )
+                result["capital_return"] = result["net_pnl"] / capital.initial_capital
+                if consume_batch is not None:
+                    consume_batch(batch, result)
             finally:
                 batch = None
-    net = nav - artifact.capital.initial_capital
-    return {
-        "candidate_id": artifact.capital.candidate_id,
-        "initial_capital": artifact.capital.initial_capital,
-        "valuation_currency": artifact.capital.valuation_currency,
-        "gross_pnl": net + fees - funding,
-        "net_pnl": net,
-        "nav": nav,
-        "capital_return": net / artifact.capital.initial_capital,
-        "fees": fees,
-        "funding": funding,
-        "turnover": turnover,
-        "fill_events": fills,
-        "fill_quantity": fill_quantity,
-        "valuation_timestamp_ns": valuation_timestamp_ns,
-        **({"alpha_calibration": alpha_calibration} if alpha_calibration else {}),
-    }
+    return result
 
 
 def _table_records(

@@ -110,8 +110,6 @@ class EvaluationSpec:
     evaluation_axis: EvaluationAxis = "cross_sectional"
     filter_mode: EvaluationFilterMode = "eligible"
     n_groups: int = 5
-    segment_columns: tuple[str, ...] = ()
-    time_breakdowns: tuple[str, ...] = ("year", "month")
     run_type: str = "evaluation"
     contract_version: str = "0.1"
 
@@ -145,16 +143,6 @@ class EvaluationSpec:
             self,
             "label_availability_columns",
             MappingProxyType(dict(sorted(availability.items()))),
-        )
-        _validate_column_tuple(
-            self.segment_columns,
-            "segment_columns",
-            required=False,
-        )
-        _validate_column_tuple(
-            self.time_breakdowns,
-            "time_breakdowns",
-            required=False,
         )
         if not isinstance(self.n_groups, int) or isinstance(self.n_groups, bool):
             raise TypeError("n_groups must be an integer")

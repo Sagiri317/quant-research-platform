@@ -272,33 +272,17 @@ def _write_model_metadata(path, payload, *, lease):
 
 
 def _persisted_model_metadata(result, *, retain, fit_cutoff=None, fit_coverage_id=None):
-    algorithm = result.metadata["model_algorithm"]
-    rank_parameters = None
-    if algorithm in {"equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"}:
-        predictor = result.prediction_model
-        parameter = (
-            "directions" if algorithm == "equal_weight_rank_ensemble" else "weights"
-        )
-        rank_parameters = {
-            "columns": predictor.columns,
-            parameter: getattr(predictor, parameter),
-        }
     cutoff = (
         None if fit_cutoff is None else time_value_isoformat(fit_cutoff, date_only=True)
     )
     retain(
         {
             "metadata": result.metadata,
-            "rank_parameters": rank_parameters,
             "fit_cutoff": cutoff,
             "fit_coverage_id": fit_coverage_id,
         }
     )
     metadata = dict(result.metadata)
-    if rank_parameters is not None:
-        metadata["rank_parameters"] = {
-            key: list(value) for key, value in rank_parameters.items()
-        }
     if fit_cutoff is not None:
         metadata["fit_cutoff"] = cutoff
         metadata["fit_coverage_id"] = fit_coverage_id
@@ -362,7 +346,10 @@ def write_quarterly_model_artifact(
 
             def write_validation(fold, family, spec, frame):
                 nonlocal validation_writer, current_path
-                path = f"models/{quarter_id_for_fold(fold)}/{spec.model_id}.parquet"
+                path = (
+                    f"models/{quarter_id_for_fold(fold)}/{family}/"
+                    f"{spec.model_id}.parquet"
+                )
                 if validation_writer is None:
                     current_path = path
                     target = staging / path
@@ -810,7 +797,7 @@ def _select_a_share_models(
                 model_id=candidate_id,
                 label_column="label",
                 prediction_column="prediction_score",
-                expected_coverage=coverage,
+                expected_coverage=None if first_candidate else coverage,
             )
             first_candidate = False
             rows.append(
@@ -960,6 +947,7 @@ def _validate_a_share_model_payload(
         raise ValueError("model_artifact_manifest_invalid")
     contract = envelope["semantic_metadata"]["target_contract"]
     protocol = contract["protocol"]
+    protocol_identity = canonical_json_hash(protocol)
     dataset_identity = envelope["upstream_identities"][protocol["scenario_id"]]
     specs = {
         item["model_id"]: ModelSpec(
@@ -1094,8 +1082,7 @@ def _validate_a_share_model_payload(
                         or plan.data_snapshot_id != dataset_identity
                         or plan.input_lineage != (dataset_identity,)
                         or plan.target_id != envelope["logical_artifact_id"]
-                        or plan.research_protocol_identity
-                        != canonical_json_hash(protocol)
+                        or plan.research_protocol_identity != protocol_identity
                         or plan.candidate_family_id != family_id
                         or len(plan.folds) != 1
                         or plan.candidate_ids != candidate_orders[family_id]
@@ -1175,7 +1162,9 @@ def _validate_a_share_model_payload(
                             metadata, expected_parameters
                         )
                         member = entry["validation_prediction"]
-                        path = f"models/{quarter}/{entry['model_id']}.parquet"
+                        path = (
+                            f"models/{quarter}/{family_id}/{entry['model_id']}.parquet"
+                        )
                         if member.get("path") != path or member != member_records.get(
                             path
                         ):
@@ -1222,7 +1211,7 @@ def _validate_a_share_model_payload(
                             model_id=entry["model_id"],
                             label_column="label",
                             prediction_column="prediction_score",
-                            expected_coverage=expected_coverage,
+                            expected_coverage=None,
                         )
                         terminal = {
                             key: None
@@ -1381,7 +1370,7 @@ def _validate_a_share_model_payload(
                     or plan.input_lineage != (dataset_identity,)
                     or plan.target_id != envelope["logical_artifact_id"]
                     or plan.candidate_family_id != family_id
-                    or plan.research_protocol_identity != canonical_json_hash(protocol)
+                    or plan.research_protocol_identity != protocol_identity
                     or plan.fit_windows != fit_windows
                     or pd.Timestamp(plan.fit_cutoff) != cutoff
                     or plan.candidate_ids != (expected_spec.model_id,)
@@ -1414,6 +1403,7 @@ def _validate_a_share_model_payload(
             root,
             members,
             relative,
+            model_algorithm=metadata["model_algorithm"],
             expected_identity=member_identities[relative],
         ) as owned:
             validate_model_state(owned.value, metadata)
@@ -1468,6 +1458,7 @@ def read_quarterly_predictor(
         relative,
         expected_identity=artifact.member_identities[relative],
         resource_policy=resource_policy,
+        model_algorithm=entry["model_metadata"]["model_algorithm"],
     ) as owned:
         predictor = owned.value
         try:
@@ -1492,6 +1483,7 @@ def _read_model_member(
     members,
     relative,
     *,
+    model_algorithm,
     resource_policy=None,
     workspace_factor=1,
     expected_identity=None,
@@ -1502,9 +1494,17 @@ def _read_model_member(
     path = root / relative
     size = filesystem_stat(path, follow_symlinks=False).st_size
     with runtime_resource_policy_scope(resource_policy) as policy:
-        lease = policy.lease(
-            "research.model.predictor", max(1, size * workspace_factor)
+        retained_bytes = max(1, size * workspace_factor)
+        # Tree reconstruction copies decoded arrays retained by the pickle memo.
+        working_bytes = (
+            max(retained_bytes, 2 * size)
+            if model_algorithm == "random_forest_regressor"
+            else retained_bytes
         )
+        policy.require_working_set(
+            working_bytes, error="model_predictor_exceeds_memory_capacity"
+        )
+        lease = policy.lease("research.model.predictor", working_bytes)
         value = None
         owned = None
         try:
@@ -1532,6 +1532,7 @@ def _read_model_member(
                 ImportError,
             ) as error:
                 raise ValueError("model_artifact_model_invalid") from error
+            lease.shrink_to(retained_bytes)
             owned = OwnedValue(value, lease)
             value = None
             yield owned
@@ -1605,6 +1606,15 @@ class PersistedCryptoModelArtifact:
             "model_artifact_identity": self.envelope["instance_identity"],
             "model_artifact_schema": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
             "model_id": model_id,
+            "score_to_label": (
+                entries[0]["model_metadata"]["rank_parameters"]["label_calibration"]
+                if entries[0]["model_metadata"]["model_algorithm"]
+                in {
+                    "equal_weight_rank_ensemble",
+                    "ic_weighted_rank_ensemble",
+                }
+                else None
+            ),
             "asset_ids": sorted(
                 {asset for entry in entries for asset in entry["evaluation_asset_ids"]}
             ),
@@ -2312,6 +2322,7 @@ def read_crypto_model_member(artifact, entry, *, resource_policy):
         relative,
         expected_identity=artifact.member_identities[relative],
         resource_policy=resource_policy,
+        model_algorithm=entry["model_metadata"]["model_algorithm"],
         workspace_factor=4,
     ) as owned:
         value = owned.value

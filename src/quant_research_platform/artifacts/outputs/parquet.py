@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import sys
 from collections.abc import Iterable
 from contextlib import ExitStack
 from dataclasses import dataclass
@@ -12,7 +13,6 @@ from uuid import uuid4
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.artifacts.outputs.common_validation import (
@@ -47,7 +47,6 @@ from quant_research_platform.storage.parquet import (
     _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     _parquet_frame_reservation,
     _parquet_row_group_size,
-    _parquet_table_write_state,
     _parquet_writer_fixed_reservation,
     parquet_table_writer,
 )
@@ -185,7 +184,7 @@ def write_parquet_chunks(
                             finally:
                                 frame = selected = table = timestamps = item = None
                                 if is_first:
-                                    first_frame_state.close()
+                                    first_frame_state.__exit__(*sys.exc_info())
                                     first_frame = first_item = None
                     handle.flush()
                     os.fsync(handle.fileno())
@@ -293,23 +292,19 @@ def write_parquet(
                     frame,
                     preserve_index=preserve_index,
                 )
-                persisted, table_state, batch_rows, _retained = (
-                    _parquet_table_write_state(table)
-                )
-                with table_state:
-                    pq.write_table(
-                        persisted,
+                try:
+                    with parquet_table_writer(
                         handle,
+                        parent=final_path.parent,
                         compression=compression,
-                        row_group_size=_parquet_row_group_size(persisted.num_rows),
-                        write_batch_size=batch_rows,
-                        max_rows_per_page=batch_rows,
-                        use_dictionary=False,
-                        write_statistics=False,
-                        write_page_index=False,
-                        write_page_checksum=False,
                         **options,
-                    )
+                    ) as write_table:
+                        write_table(
+                            table,
+                            row_group_size=_parquet_row_group_size(table.num_rows),
+                        )
+                finally:
+                    table = None
                 handle.flush()
                 os.fsync(handle.fileno())
         reject_if_exists(final_path)

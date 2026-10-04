@@ -537,7 +537,11 @@ def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(tmp_
     assert (
         public_panel.timestamp.max() == history_panel.timestamp.max() == requested[-1]
     )
-    assert history_panel.timestamp.min() == dates[0]
+    assert history_panel.timestamp.min() <= dates[0]
+    prior = history_panel.loc[history_panel.timestamp.lt(dates[0])]
+    assert (
+        prior[["listing_date", "listing_age_trading_days", "close"]].isna().all().all()
+    )
     for target in targets[1:]:
         spec = profile.processed.get(target)
         root = layout.processed_data_root(spec.market_id, spec.kind, target)
@@ -609,11 +613,25 @@ def test_internal_history_failure_blocks_exact_dependent_without_hiding_failure(
 ):
     dates = pd.bdate_range("2020-01-02", periods=40).as_unit("ns")
     requested = dates[-10:]
-    profile = _windowed_source_profile(
-        _synthetic_interim_frames(dates),
-        [],
-        reject_before=requested[0] if failed_window == "history" else None,
-        reject_at=requested[0] if failed_window == "core" else None,
+    from contextlib import contextmanager
+
+    profile = _windowed_source_profile(_synthetic_interim_frames(dates), [])
+    binding = profile.producer_bindings["market_panel_1d"]
+
+    @contextmanager
+    def produce_panel(*args, **kwargs):
+        start = pd.Timestamp(kwargs["time_window"].start)
+        if (start < requested[0]) == (failed_window == "history"):
+            raise ValueError("synthetic_history_unavailable")
+        with binding.producer(*args, **kwargs) as result:
+            yield result
+
+    profile = replace(
+        profile,
+        producer_bindings={
+            **profile.producer_bindings,
+            "market_panel_1d": replace(binding, producer=produce_panel),
+        },
     )
     result = research.data_materialize(
         profile=profile,
@@ -625,8 +643,8 @@ def test_internal_history_failure_blocks_exact_dependent_without_hiding_failure(
     )
     assert result["status"] == "FAILED"
     assert any(
-        entry["target_id"] == "market_bars_1d"
-        and entry["reason"] == "interim_build_failed:synthetic_history_unavailable"
+        entry["target_id"] == "market_panel_1d"
+        and entry["reason"] == "processed_build_failed:synthetic_history_unavailable"
         for entry in result["blockers"]
     )
     targets = {entry["target_id"]: entry for entry in result["target_results"]}
@@ -636,7 +654,7 @@ def test_internal_history_failure_blocks_exact_dependent_without_hiding_failure(
         assert targets["price_volume_facts"]["status"] == "BLOCKED"
         assert "market_panel_1d" in targets["price_volume_facts"]["reason"]
     else:
-        assert targets["market_panel_1d"]["status"] == "BLOCKED"
+        assert targets["market_panel_1d"]["status"] == "FAILED"
         assert targets["price_volume_facts"]["status"] == "BUILT"
 
 
@@ -778,3 +796,153 @@ def test_mixed_window_interruption_preserves_completed_public_result_sink(
     assert (
         panel.timestamp.min() == requested[0] and panel.timestamp.max() == requested[-1]
     )
+
+
+@pytest.mark.parametrize(
+    "barrier", ("known", "unknown", "raw_missing", "adjusted_missing")
+)
+def test_public_narrow_panel_retains_preceding_suspension_state(tmp_path, barrier):
+    dates = pd.bdate_range("2020-01-02", periods=7).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    bars = frames["market_bars_1d"]
+    asset = bars.source_asset_id.eq("000001")
+    columns = ["open", "high", "low", "close", "adj_open", "adj_close"]
+    bars.loc[asset, columns] = 100.0
+    suspended = asset & bars.timestamp.between(dates[2], dates[4])
+    bars.loc[suspended, "filling_flag"] = 1
+    bars.loc[suspended, columns] = 50.0
+    bars.loc[asset & bars.timestamp.eq(dates[5]), columns] = 120.0
+    bars.loc[asset & bars.timestamp.eq(dates[5]), "period_return"] = 0.2
+    if barrier == "unknown":
+        frames["market_bars_1d"] = bars.loc[
+            ~(asset & bars.timestamp.eq(dates[1]))
+        ].copy()
+    elif barrier == "raw_missing":
+        bars.loc[
+            asset & bars.timestamp.eq(dates[1]), ["open", "high", "low", "close"]
+        ] = np.nan
+    elif barrier == "adjusted_missing":
+        bars.loc[asset & bars.timestamp.eq(dates[1]), ["adj_open", "adj_close"]] = (
+            np.nan
+        )
+    profile = _windowed_source_profile(frames, [])
+    layout = StorageLayout(tmp_path)
+    outputs = []
+    for start in (dates[0], dates[3]):
+        result = research.data_materialize(
+            profile=profile,
+            layout=layout,
+            raw_root=tmp_path / "raw",
+            start_date=str(start.date()),
+            end_date=str(dates[5].date()),
+            data_ids=("market_panel_1d",),
+        )
+        assert result["status"] == "COMPLETE", result["blockers"]
+        item = next(
+            row
+            for row in result["target_results"]
+            if row["target_id"] == "market_panel_1d"
+        )
+        spec = profile.processed.get("market_panel_1d")
+        output = read_dataset(
+            layout.instance_root(
+                layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+                item["instance_identity"],
+            )
+        )
+        outputs.append(output.loc[output.timestamp.ge(dates[3])].reset_index(drop=True))
+    pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
+    rows = outputs[1].loc[outputs[1].asset_id.eq("000001")].set_index("timestamp")
+    if barrier in {"unknown", "raw_missing"}:
+        assert pd.isna(rows.loc[dates[3], "close"])
+    else:
+        assert rows.loc[dates[3], "close"] == 100.0
+    if barrier in {"unknown", "adjusted_missing"}:
+        assert pd.isna(rows.loc[dates[3], "adj_close"])
+    else:
+        assert rows.loc[dates[3], "adj_close"] == 100.0
+        assert rows.loc[dates[5], "period_return"] == pytest.approx(0.2)
+
+
+@pytest.mark.parametrize("missing", (0, 2, 4))
+def test_public_panel_keeps_calendar_endpoints_without_market_bars(tmp_path, missing):
+    dates = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    frames["market_bars_1d"] = (
+        frames["market_bars_1d"]
+        .loc[frames["market_bars_1d"].timestamp.ne(dates[missing])]
+        .copy()
+    )
+    profile = _windowed_source_profile(frames, [])
+    layout = StorageLayout(tmp_path)
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=tmp_path / "raw",
+        start_date=str(dates[0].date()),
+        end_date=str(dates[-1].date()),
+        data_ids=("market_panel_1d",),
+    )
+    assert result["status"] == "COMPLETE", result["blockers"]
+    item = next(
+        row for row in result["target_results"] if row["target_id"] == "market_panel_1d"
+    )
+    spec = profile.processed.get("market_panel_1d")
+    saved = read_dataset(
+        layout.instance_root(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            item["instance_identity"],
+        )
+    )
+    assert len(saved) == 15 and saved.timestamp.nunique() == 5
+    missing_rows = saved.loc[saved.timestamp.eq(dates[missing])]
+    assert len(missing_rows) == 3
+    assert missing_rows[["close", "adj_close", "is_trading"]].isna().all().all()
+
+
+def test_public_expectations_window_preserves_fresh_preceding_forecasts(tmp_path):
+    dates = pd.bdate_range("2020-04-01", periods=5).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    declared = dates[2] - pd.Timedelta(days=7)
+    frames["analyst_forecast"] = pd.DataFrame(
+        {
+            "source_asset_id": "000001",
+            "timestamp": declared,
+            "declare_date": declared,
+            "forecast_end_date": pd.Timestamp("2020-12-31"),
+            "institution_id": list("ABC"),
+            "report_id": ["rA", "rB", "rC"],
+            "analyst_ids": list("abc"),
+            "forecast_eps": [1.0, 2.0, 3.0],
+            "forecast_pe": 10.0,
+        }
+    )
+    profile = _windowed_source_profile(frames, [])
+    layout = StorageLayout(tmp_path)
+    outputs = []
+    for start in (dates[0], dates[2]):
+        result = research.data_materialize(
+            profile=profile,
+            layout=layout,
+            raw_root=tmp_path / "raw",
+            start_date=str(start.date()),
+            end_date=str(dates[-1].date()),
+            data_ids=("expectations_factors",),
+        )
+        assert result["status"] == "COMPLETE", result["blockers"]
+        item = next(
+            row
+            for row in result["target_results"]
+            if row["target_id"] == "expectations_factors"
+        )
+        spec = profile.processed.get("expectations_factors")
+        saved = read_dataset(
+            layout.instance_root(
+                layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+                item["instance_identity"],
+            )
+        )
+        outputs.append(saved.loc[saved.timestamp.ge(dates[2])].reset_index(drop=True))
+    pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
+    selected = outputs[1].loc[outputs[1].asset_id.eq("000001")]
+    assert selected.forward_earnings_yield_fy1.notna().all()

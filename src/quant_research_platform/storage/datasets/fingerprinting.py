@@ -94,6 +94,26 @@ def _fingerprint_dataset_session_owned(
         raise
 
 
+def comparison_schema(context: DatasetSession) -> dict[str, Any]:
+    hash_columns = tuple(
+        dict.fromkeys((*context.spec["primary_key"], *context.logical_columns))
+    )
+    return {
+        "physical_schema": physical_schema_from_schema(
+            pa.schema([context.arrow_schema.field(column) for column in hash_columns])
+        ),
+        "logical_dtypes": {
+            descriptor["name"]: {
+                key: value
+                for key, value in descriptor.items()
+                if key != "categories" or descriptor["ordered"]
+            }
+            for descriptor in context.logical_dtypes["columns"]
+            if descriptor["name"] in hash_columns
+        },
+    }
+
+
 def _fingerprint_dataset_session_owned_with_lease(
     context: DatasetSession,
     *,
@@ -113,24 +133,7 @@ def _fingerprint_dataset_session_owned_with_lease(
     )
     output_columns = tuple(context.logical_columns)
     reader_upstream_headroom_bytes = operation_headroom_bytes
-    projected_schema_hash = canonical_json_hash(
-        {
-            "physical_schema": physical_schema_from_schema(
-                pa.schema(
-                    [context.arrow_schema.field(column) for column in hash_columns]
-                )
-            ),
-            "logical_dtypes": {
-                descriptor["name"]: {
-                    key: value
-                    for key, value in descriptor.items()
-                    if key != "categories" or descriptor["ordered"]
-                }
-                for descriptor in context.logical_dtypes["columns"]
-                if descriptor["name"] in hash_columns
-            },
-        }
-    )
+    projected_schema_hash = canonical_json_hash(comparison_schema(context))
     row_count = 0
     row_hash_sum = 0
     row_hash_xor = 0
@@ -173,6 +176,7 @@ def _fingerprint_dataset_session_owned_with_lease(
         for hashes in _iter_fingerprint_hashes(
             chunk,
             target_bytes=hash_target_bytes,
+            resource_policy=resource_policy,
             arrow_schema=arrow_schema,
             primary_key=key_columns,
         ):
@@ -292,6 +296,7 @@ def _iter_fingerprint_hashes(
     frame: pd.DataFrame,
     *,
     target_bytes: int,
+    resource_policy: RuntimeResourcePolicy,
     arrow_schema: pa.Schema | None = None,
     primary_key: tuple[str, ...] = (),
 ) -> Iterator[np.ndarray[Any, np.dtype[np.uint64]]]:
@@ -318,18 +323,58 @@ def _iter_fingerprint_hashes(
                 raise ValueError("unsupported_dataset_fingerprint_value")
     if len(frame) == 0:
         return
-    if available_bytes < 8:
-        raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
-    rows_per_slice = max(1, available_bytes // 8)
-    for start in range(0, len(frame), rows_per_slice):
-        current = frame.iloc[start : start + rows_per_slice]
-        try:
-            hashes = pd.util.hash_pandas_object(
-                current,
-                index=False,
-            ).to_numpy("uint64", copy=False)
-        except (TypeError, ValueError) as exc:
-            raise ValueError("unsupported_dataset_fingerprint_value") from exc
-        if hashes.nbytes > available_bytes:
+    # Pandas hashes columns sequentially, factorizing strings and hashing every
+    # categorical domain member, including unused members. Cover object/string
+    # expansion, factorization tables, codes, and overlapping uint64 arrays.
+    hash_fixed_bytes = 16 * 1024 + 512 * max(
+        (
+            len(dtype.categories)
+            for dtype in frame.dtypes
+            if isinstance(dtype, pd.CategoricalDtype)
+        ),
+        default=0,
+    )
+    start = 0
+    while start < len(frame):
+        capacity = min(available_bytes, resource_policy.operation_headroom_bytes)
+        low = 1
+        high = min(len(frame) - start, max(0, (capacity - hash_fixed_bytes) // 512))
+        if (
+            start == 0
+            and hash_fixed_bytes + 512 * len(frame) + 8 * input_payload_bytes
+            <= capacity
+        ):
+            low = high
+        rows_per_slice = 0
+        reserved_bytes = 0
+        while low <= high:
+            candidate = (low + high) // 2
+            required_bytes = (
+                hash_fixed_bytes
+                + 512 * candidate
+                + 8 * pandas_frame_payload_bytes(frame.iloc[start : start + candidate])
+            )
+            if required_bytes <= capacity:
+                rows_per_slice = candidate
+                reserved_bytes = required_bytes
+                low = candidate + 1
+            else:
+                high = candidate - 1
+        if not rows_per_slice:
             raise ValueError("dataset_fingerprint_value_exceeds_target_bytes")
-        yield hashes
+        with resource_policy.lease("storage.dataset.fingerprint.hash", reserved_bytes):
+            current = frame.iloc[start : start + rows_per_slice]
+            hashes = None
+            try:
+                try:
+                    hashes = pd.util.hash_pandas_object(
+                        current,
+                        index=False,
+                    ).to_numpy("uint64", copy=False)
+                except (TypeError, ValueError) as exc:
+                    raise ValueError("unsupported_dataset_fingerprint_value") from exc
+                yield hashes
+            finally:
+                hashes = None
+                current = None
+        start += rows_per_slice

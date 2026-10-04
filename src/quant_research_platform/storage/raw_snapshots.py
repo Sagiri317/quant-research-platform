@@ -11,6 +11,7 @@ import sys
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
+from quant_research_platform.contracts.json_codec import canonical_identity_bytes
 from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.atomic import atomic_write_directory
@@ -180,7 +181,10 @@ def iter_csv_snapshot(
         }
         or manifest["schema_id"] != SCHEMA_ID
         or manifest["encoding"] != "utf-8-json-cells"
-        or manifest != expected_manifest
+        or canonical_identity_bytes(manifest)
+        != canonical_identity_bytes(expected_manifest)
+        or type(manifest["byte_count"]) is not int
+        or manifest["byte_count"] < 0
         or type(manifest["row_count"]) is not int
         or manifest["row_count"] < 0
     ):

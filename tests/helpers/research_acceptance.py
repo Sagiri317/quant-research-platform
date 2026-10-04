@@ -1,14 +1,16 @@
-"""Executable acceptance using only real installed QRP production bindings."""
+"""Executable acceptance using only real QRP production bindings."""
 
 from __future__ import annotations
 
+from datetime import date
 from hashlib import sha256
 from math import isclose
 from pathlib import Path
+from unittest.mock import patch
 
 import pandas as pd
 
-from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger_windows
+from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
@@ -31,6 +33,7 @@ from quant_research_platform.research.models.persisted import (
     read_crypto_model_artifact,
     read_quarterly_model_artifact,
 )
+from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.protocols.crypto_hft import (
     CryptoMakerCandidate,
     CryptoTakerCandidate,
@@ -61,13 +64,67 @@ from tests.helpers.research_configuration import (
 
 
 @compact_a_share_windows()
+@patch.multiple(
+    a_share,
+    DATA_END=date(2019, 10, 31),
+    FORMAL_DATASET_END=date(2019, 10, 31),
+    DEVELOPMENT_END=date(2019, 3, 1),
+    HOLDOUT_START=date(2019, 9, 2),
+    HOLDOUT_END=date(2019, 10, 31),
+)
 def run_a_share_acceptance(project_root: Path):
-    """Exercise both selection groups through full development and frozen test."""
+    """Exercise real source bindings, competing groups, and frozen holdout."""
     layout = StorageLayout(project_root=project_root)
     raw_root = project_root / "data/raw"
     profile = research_profile()
     configuration = compact_a_share_configuration()
+    assert configuration["windows"]["development"] == {
+        "start": "2019-01-01",
+        "end": "2019-03-01",
+    }
+    assert configuration["windows"]["holdout"] == {
+        "start": "2019-09-02",
+        "end": "2019-10-31",
+    }
+    # Backend and portfolio matrices have separate real-producer coverage.
+    # This source chain keeps both groups and the unmodified factor-risk floors.
+    configuration["models"] = [
+        model
+        for model in configuration["models"]
+        if model["model_algorithm"]
+        in {"equal_weight_rank_ensemble", "ridge_regression"}
+    ]
+    configuration["portfolios"] = [
+        candidate
+        for candidate in configuration["portfolios"]
+        if candidate["candidate_id"] == "champion_csi500_enhanced"
+    ]
+    configuration["primary_portfolio_id"] = "champion_csi500_enhanced"
     bound_profile = bind_research_configuration(profile, configuration)
+    protocol = bound_profile.protocol(configuration["scenario_id"])
+    assert protocol.data_window.end == date(2019, 10, 31)
+    assert protocol.formal_dataset_window.end == date(2019, 10, 31)
+    assert protocol.risk_config.minimum_factor_dates == 252
+    assert protocol.risk_config.minimum_cross_section == 100
+    # The bounded calendar must supply listing age, market beta, residual
+    # volatility, then lagged factor-risk observations before the active test.
+    first_identifiable_risk = pd.bdate_range(
+        protocol.data_window.start,
+        periods=(252 - 1)
+        + (252 - 1)
+        + (60 - 1)
+        + protocol.risk_config.minimum_factor_dates
+        + 1,
+    )[-1]
+    assert first_identifiable_risk == pd.Timestamp("2019-09-03")
+    assert (
+        len(
+            pd.bdate_range(
+                first_identifiable_risk, configuration["windows"]["holdout"]["end"]
+            )
+        )
+        >= 20
+    )
     write_a_share_raw_fixture(
         layout,
         benchmark_total_return_indices=bound_profile.protocol(
@@ -103,17 +160,18 @@ def run_a_share_acceptance(project_root: Path):
             lease=artifact_lease,
         )
         families = {item["model_id"] for item in configuration["models"]}
-        assert len(families) == 8
+        assert len(families) == 2
         assert {item["family_id"] for item in artifact.candidate_models} == families
         assert {item["quarter_id"] for item in artifact.candidate_models} == {
-            str(period) for period in pd.period_range("2018Q1", "2019Q2", freq="Q")
+            str(period) for period in pd.period_range("2018Q1", "2019Q1", freq="Q")
         }
         assert set(artifact.selections["global"]) == {"final"}
         assert set(artifact.selections["quarterly"]) == {
-            *(str(period) for period in pd.period_range("2019Q1", "2019Q2", freq="Q")),
+            "2019Q1",
             "final",
         }
-        assert len(artifact.final_models) == 16
+        assert len(artifact.candidate_models) == 25
+        assert len(artifact.final_models) == 4
         assert {
             (item["selection_group"], item["family_id"])
             for item in artifact.final_models
@@ -121,9 +179,27 @@ def run_a_share_acceptance(project_root: Path):
             (group, family) for group in ("global", "quarterly") for family in families
         }
         assert all(
-            pd.Timestamp(item["fit_cutoff"]) == pd.Timestamp("2019-06-30")
+            pd.Timestamp(item["fit_cutoff"]) == pd.Timestamp("2019-03-01")
             for item in artifact.final_models
         )
+        global_decision = artifact.selections["global"]["final"]
+        quarterly_decision = artifact.selections["quarterly"]["2019Q1"]
+        assert global_decision["validation_start"] == "2019-01-01"
+        assert global_decision["validation_end"] == "2019-03-01"
+        assert pd.Timestamp(quarterly_decision["validation_end"]) < pd.Timestamp(
+            "2019-01-01"
+        )
+        for decision in (global_decision, quarterly_decision):
+            assert set(decision["candidate_family_ids"]) == families
+            assert decision["common_validation_coverage"]["row_count"] > 0
+            assert len(decision["families"]) == 2
+            assert all(family["trial_metrics"] for family in decision["families"])
+        for entry in (*artifact.candidate_models, *artifact.final_models):
+            assert entry["model_metadata"]["rows_after_input_label_dropna"] > 0
+        for entry in artifact.candidate_models:
+            assert pd.Timestamp(entry["model_metadata"]["train_end"]) < pd.Timestamp(
+                entry["validation_window"]["start"]
+            )
         trial_root = layout.trial_ledger_root(record.run_id)
         trial_before = {
             path.relative_to(trial_root).as_posix(): sha256(
@@ -166,8 +242,8 @@ def run_a_share_acceptance(project_root: Path):
             if filesystem_is_file(path)
         } == trial_before
         assert held_record.research_window["access"] == "holdout"
-        assert held_record.research_window["start"] == "2019-07-01"
-        assert held_record.research_window["end"] == "2019-12-31"
+        assert held_record.research_window["start"] == "2019-09-02"
+        assert held_record.research_window["end"] == "2019-10-31"
         record = held_record
         with (
             runtime_resource_policy_scope() as policy,
@@ -183,7 +259,9 @@ def run_a_share_acceptance(project_root: Path):
                     expected_identity=target.instance_identity,
                     lease=nested_artifact_lease,
                 )
-                summary = summarize_portfolio_ledger(ledger)
+                summary = summarize_portfolio_ledger(
+                    ledger.capital, ledger.iter_chunks()
+                )
                 assert summary["fill_events"] > 0
                 if candidate.construction == "benchmark_enhanced":
                     with closing_iterator(ledger.iter_chunks()) as chunks:
@@ -208,7 +286,7 @@ def run_a_share_acceptance(project_root: Path):
                 row.producer_kind is ProducerKind.PORTFOLIO
                 for row in record.target_results
             )
-            == 10
+            == 2
         )
         for group in ("global", "quarterly"):
             assert (
@@ -226,7 +304,7 @@ def run_a_share_acceptance(project_root: Path):
 
 
 def run_crypto_acceptance(project_root: Path):
-    """Exercise recorder bytes through actual fold models and all fourteen ledgers."""
+    """Exercise recorder bytes through actual fold models and all selected ledgers."""
     layout = StorageLayout(project_root)
     raw = project_root / "raw/recorder"
     write_binance_hft_run(raw, count=90, maker_liquidity=True)
@@ -310,7 +388,13 @@ def run_crypto_acceptance(project_root: Path):
     )
     assert report["status"] == "COMPLETE"
     sections = report["report"]["sections"]
-    assert len(sections["portfolio"]["candidates"]) == 14
+    assert sorted(
+        (item["candidate_id"], item["execution_mode"], item["target_id"])
+        for item in sections["portfolio"]["candidates"]
+    ) == sorted(
+        (target.candidate.candidate_id, target.execution_mode, target.target_id)
+        for target in execution_targets.values()
+    )
     assert len(sections["models and validation"]["fold_models"]) == 18
     assert len(sections["OOS prediction"]["outputs"]) == 9
     assert len(sections["factor diagnostics"]["evaluations"]) == 10
@@ -343,7 +427,7 @@ def run_crypto_acceptance(project_root: Path):
         for row in sections["daily statistics"]["results"]
         if row["metric_id"] == "sharpe"
     )
-    assert len(takers) == 12 and len(makers) == 2
+    assert len(candidates) == 38 and len(takers) == 36 and len(makers) == 2
     with (
         runtime_resource_policy_scope() as policy,
         policy.lease("test.artifact.metadata", 0) as artifact_lease,
@@ -362,14 +446,15 @@ def run_crypto_acceptance(project_root: Path):
                 expected_identity=target["instance_identity"],
                 lease=artifact_lease,
             )
-            summary = summarize_portfolio_ledger(ledger)
+            summary = summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
             assert summary["fill_events"] > 0
             assert summary["initial_capital"] == 1000.0
             assert summary["valuation_timestamp_ns"] == 9_000_000_000
-            intervals = summarize_crypto_ledger_windows(
+            intervals = summarize_crypto_ledger(
                 ledger,
+                ledger.iter_chunks(),
                 windows_ns=((8_600_000_000, 9_000_000_000),),
-            )
+            )["intervals"]
             assert [row["kind"] for row in intervals] == ["oos"]
             for key in (
                 "net_pnl",

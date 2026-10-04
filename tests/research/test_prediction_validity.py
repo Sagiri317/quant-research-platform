@@ -24,7 +24,11 @@ from quant_research_platform.research.features.transforms import (
     canonical_feature_transforms,
     model_input_validity_columns,
 )
-from quant_research_platform.research.portfolios.production import _prediction_alpha
+from quant_research_platform.research.portfolios.production import (
+    _DATASET_COLUMNS,
+    _prediction_alpha,
+    _session_frame,
+)
 from quant_research_platform.research.predictions import runner
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.runtime.resources import runtime_resource_policy_scope
@@ -171,13 +175,16 @@ def test_transform_prediction_publication_and_consumers_share_exact_validity(
         ) as (_manifest, lookup):
             assert lookup.row_count == len(expected) - int(missing_required)
             validity = model_input_validity_columns(spec.input_columns, algorithm)
+            session = _session_frame(
+                frame, tuple(dict.fromkeys((*_DATASET_COLUMNS, *validity)))
+            )
             if missing_required:
                 with pytest.raises(
                     ValueError, match="^missing_required_prediction_keys$"
                 ):
-                    _prediction_alpha(frame, lookup, validity)
+                    _prediction_alpha(session, lookup, validity)
             else:
-                alpha = _prediction_alpha(frame, lookup, validity)
+                alpha = _prediction_alpha(session, lookup, validity)
                 assert alpha.dropna().index.tolist() == expected
                 assert alpha.index.tolist() == frame.asset_id.tolist()
                 assert lookup.coverage_counts() == (0, 0)
@@ -453,8 +460,23 @@ def test_persisted_ic_rank_keeps_only_defined_weight_columns(tmp_path):
         )
         for entry in (*case.artifact.candidate_models, *case.artifact.final_models):
             assert entry["model_metadata"]["input_columns"] == ["x", "y"]
-            assert entry["model_metadata"]["rank_parameters"] == {
-                "columns": ["x"],
-                "weights": [1.0],
-            }
+            metadata = entry["model_metadata"]
+            parameters = metadata["rank_parameters"]
+            assert set(parameters) == {"columns", "weights", "label_calibration"}
+            assert parameters["columns"] == ["x"]
+            assert parameters["weights"] == [1.0]
+            trained = frame.loc[
+                frame.timestamp.between(
+                    pd.Timestamp(metadata["train_start"]),
+                    pd.Timestamp(metadata["train_end"]),
+                )
+            ]
+            # Eight centered asset ranks have slope 8 * 0.03; their mean is zero.
+            expected_intercept = trained.groupby("timestamp").label.mean().mean()
+            np.testing.assert_allclose(
+                parameters["label_calibration"],
+                [expected_intercept, 0.24],
+                rtol=0,
+                atol=1e-14,
+            )
         assert policy.used_memory_bytes == artifact_lease.reserved_bytes

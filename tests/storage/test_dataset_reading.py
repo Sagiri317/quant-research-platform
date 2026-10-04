@@ -1,8 +1,8 @@
 from __future__ import annotations
 
-import gc
 import json
 import struct
+import tracemalloc
 import weakref
 from pathlib import Path
 from types import SimpleNamespace
@@ -42,7 +42,7 @@ from quant_research_platform.storage.datasets import (
 from quant_research_platform.storage.datasets.schema import (
     logical_dtype_payload_from_frame,
 )
-from tests.helpers.runtime_resources import capture_test_policy
+from tests.helpers.runtime_resources import capture_test_policy, disabled_gc
 from tests.storage.dataset_test_support import (
     _input_dataset_identity_payload,
     _persisted_table,
@@ -52,6 +52,7 @@ from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
     make_processed_dataset_spec,
+    write_low_level_parquet_artifact,
 )
 
 
@@ -656,7 +657,17 @@ def test_time_window_filter_is_applied_before_arrow_to_pandas_conversion(
 
 def test_time_window_row_group_pruning_uses_parquet_leaf_path(
     tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import pyarrow.parquet as pq
+
+    original_write_table = pq.write_table
+
+    def write_table_with_statistics(*args, **kwargs):
+        kwargs["write_statistics"] = True
+        return original_write_table(*args, **kwargs)
+
+    monkeypatch.setattr(pq, "write_table", write_table_with_statistics)
     root = make_dataset_artifact_root(tmp_path, "nested_before_timestamp")
     spec = ProcessedDataSpec(
         data_id="nested_before_timestamp",
@@ -691,30 +702,64 @@ def test_time_window_row_group_pruning_uses_parquet_leaf_path(
     )
     write_dataset(root, frame, spec=spec)
 
+    parts = list((root / "data").rglob("part-*.parquet"))
+    assert len(parts) == 1
+    with pq.ParquetFile(parts[0]) as parquet:
+        top_level_position = parquet.schema_arrow.get_field_index("timestamp")
+        leaf_position = next(
+            index
+            for index in range(len(parquet.schema))
+            if parquet.schema.column(index).path == "timestamp"
+        )
+        assert leaf_position != top_level_position
+        assert parquet.schema.column(top_level_position).path == "context.second"
+        group = parquet.metadata.row_group(0)
+        correct_stats = group.column(leaf_position).statistics
+        wrong_stats = group.column(top_level_position).statistics
+        assert correct_stats is not None and correct_stats.has_min_max
+        assert wrong_stats is not None and wrong_stats.has_min_max
+        assert pd.Timestamp(correct_stats.min) == target
+        assert pd.Timestamp(correct_stats.max) == target
+        assert pd.Timestamp(wrong_stats.max) < target
+
     result = read_dataset(
         root,
         time_window=TimeWindow(target.to_pydatetime(), target.to_pydatetime()),
     )
 
-    assert len(result) == 1
+    assert len(result) == 1, "retained_target_row_missing"
     assert result.loc[0, "timestamp"] == target
 
 
-def test_fingerprint_hashes_ordinary_frame_without_normalized_copy() -> None:
+def test_fingerprint_hashes_ordinary_frame_without_normalized_copy(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     frame = pd.DataFrame({"value": np.arange(20_000, dtype="int64")})
+    expected = pd.util.hash_pandas_object(frame, index=False).to_numpy("uint64")
+    values = frame["value"].to_numpy(copy=False)
+    original = pd.util.hash_pandas_object
+    slices = []
 
-    observed = tuple(
-        dataset_fingerprinting._iter_fingerprint_hashes(
-            frame,
-            target_bytes=pandas_frame_payload_bytes(frame) + len(frame) * 8,
+    def hash_view(current, *args, **kwargs):
+        assert np.shares_memory(current["value"].to_numpy(copy=False), values)
+        slices.append(len(current))
+        return original(current, *args, **kwargs)
+
+    monkeypatch.setattr(pd.util, "hash_pandas_object", hash_view)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    payload = pandas_frame_payload_bytes(frame)
+    with runtime_resource_policy_scope(policy):
+        observed = tuple(
+            dataset_fingerprinting._iter_fingerprint_hashes(
+                frame,
+                target_bytes=payload + 16 * 1024 + 512 * len(frame) + 8 * payload,
+                resource_policy=policy,
+            )
         )
-    )
 
     assert len(observed) == 1
-    np.testing.assert_array_equal(
-        observed[0],
-        pd.util.hash_pandas_object(frame, index=False).to_numpy("uint64"),
-    )
+    assert slices == [len(frame)]
+    np.testing.assert_array_equal(observed[0], expected)
 
 
 @pytest.mark.parametrize(
@@ -737,11 +782,16 @@ def test_fingerprint_rejects_generalized_nested_values_before_hashing(
         lambda *_args, **_kwargs: pytest.fail("nested_value_was_hashed"),
     )
 
-    with pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"):
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with (
+        runtime_resource_policy_scope(policy),
+        pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"),
+    ):
         tuple(
             dataset_fingerprinting._iter_fingerprint_hashes(
                 frame,
                 target_bytes=pandas_frame_payload_bytes(frame) + 1024,
+                resource_policy=policy,
                 arrow_schema=schema,
             )
         )
@@ -760,35 +810,118 @@ def test_fingerprint_rejects_float_primary_keys_before_hashing(
         lambda *_args, **_kwargs: pytest.fail("float_primary_key_was_hashed"),
     )
 
-    with pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"):
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with (
+        runtime_resource_policy_scope(policy),
+        pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"),
+    ):
         tuple(
             dataset_fingerprinting._iter_fingerprint_hashes(
                 frame,
                 target_bytes=pandas_frame_payload_bytes(frame) + 1024,
+                resource_policy=policy,
                 arrow_schema=schema,
                 primary_key=("asset_id",),
             )
         )
 
 
-def test_fingerprint_hashes_large_primitive_frame_in_bounded_slices() -> None:
+def test_fingerprint_hashes_large_primitive_frame_in_bounded_slices(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     frame = pd.DataFrame({"value": np.arange(20_000, dtype="int64")})
-    target_bytes = pandas_frame_payload_bytes(frame) + 8 * 1_000
-
-    observed = tuple(
-        dataset_fingerprinting._iter_fingerprint_hashes(
-            frame,
-            target_bytes=target_bytes,
-        )
+    expected = pd.util.hash_pandas_object(frame, index=False).to_numpy("uint64")
+    values = frame["value"].to_numpy(copy=False)
+    original = pd.util.hash_pandas_object
+    slices = []
+    # Fund 1,000 rows of the complete hashing workspace, including factorization.
+    target_bytes = (
+        pandas_frame_payload_bytes(frame)
+        + 16 * 1024
+        + 512 * 1_000
+        + 8 * pandas_frame_payload_bytes(frame.iloc[:1_000])
     )
+
+    def hash_view(current, *args, **kwargs):
+        assert np.shares_memory(current["value"].to_numpy(copy=False), values)
+        slices.append(len(current))
+        return original(current, *args, **kwargs)
+
+    monkeypatch.setattr(pd.util, "hash_pandas_object", hash_view)
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with runtime_resource_policy_scope(policy):
+        observed = tuple(
+            dataset_fingerprinting._iter_fingerprint_hashes(
+                frame,
+                target_bytes=target_bytes,
+                resource_policy=policy,
+            )
+        )
 
     assert len(observed) == 20
-    np.testing.assert_array_equal(
-        np.concatenate(observed),
-        pd.util.hash_pandas_object(frame, index=False).to_numpy("uint64"),
+    assert slices == [1_000] * 20
+    np.testing.assert_array_equal(np.concatenate(observed), expected)
+
+
+@disabled_gc()
+def test_fingerprint_funds_dictionary_decode_and_string_hash_workspace(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    frame = pd.DataFrame({"asset_id": [f"A{index:08d}" for index in range(120_000)]})
+    root = make_dataset_artifact_root(tmp_path, "hash_workspace")
+    write_low_level_parquet_artifact(
+        root, frame, primary_key=("asset_id",), partition_columns=()
     )
+    expected = pd.util.hash_pandas_object(frame, index=False).to_numpy("uint64")
+    expected_content = canonical_json_hash(
+        {
+            "row_hash_sum": int(expected.sum(dtype=np.uint64)),
+            "row_hash_xor": int(np.bitwise_xor.reduce(expected, initial=np.uint64(0))),
+            "row_count": len(frame),
+            "columns": ["asset_id"],
+            "hash_columns": ["asset_id"],
+        }
+    )
+    del expected
+    policy = capture_test_policy(
+        available_memory_bytes=256 * 1024**2,
+        explicit_cap_bytes=128 * 1024**2,
+    )
+    arrow_baseline = pa.total_allocated_bytes()
+    original = pd.util.hash_pandas_object
+    observed_rows = []
+
+    def hash_with_accounting(current, *args, **kwargs):
+        tracemalloc.reset_peak()
+        python_before = tracemalloc.get_traced_memory()[0]
+        arrow_owned = pa.total_allocated_bytes() - arrow_baseline
+        result = original(current, *args, **kwargs)
+        python_peak = tracemalloc.get_traced_memory()[1]
+        hash_reserved = sum(
+            lease.reserved_bytes
+            for lease in policy._leases
+            if lease.owner == "storage.dataset.fingerprint.hash"
+        )
+        assert python_peak - python_before <= hash_reserved
+        assert python_peak + arrow_owned <= policy.used_memory_bytes
+        observed_rows.append(len(current))
+        return result
+
+    monkeypatch.setattr(pd.util, "hash_pandas_object", hash_with_accounting)
+    tracemalloc.start()
+    try:
+        result = dataset_fingerprinting.fingerprint_dataset(
+            root, resource_policy=policy
+        )
+    finally:
+        tracemalloc.stop()
+    assert sum(observed_rows) == len(frame)
+    assert result.content_hash == expected_content
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
 
 
+@disabled_gc()
 def test_fingerprint_releases_hash_array_before_next_source_batch(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -803,7 +936,6 @@ def test_fingerprint_releases_hash_array_before_next_source_batch(
         observer = kwargs["batch_observer"]
         observer(arrow_batch, frame)
         yield paths[0], frame
-        gc.collect()
         released_before_next_batch.append(
             bool(hash_references) and hash_references[-1]() is None
         )
@@ -942,7 +1074,7 @@ def test_fingerprint_reserves_many_partition_counters_before_traversal(
     assert traversals == 0
 
 
-def test_fingerprint_rejects_many_partition_output_overlap_after_traversal(
+def test_fingerprint_rejects_operation_bound_before_traversal(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -977,6 +1109,7 @@ def test_fingerprint_rejects_many_partition_output_overlap_after_traversal(
         arrow_schema=batch.schema,
         time_window=None,
         schema_hash="schema",
+        logical_dtypes=logical_dtype_payload_from_frame(frame),
     )
     context.physical_columns = context.logical_columns
     context.spec_bytes = json.dumps(context.spec).encode("utf-8")

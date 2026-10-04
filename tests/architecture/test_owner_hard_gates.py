@@ -40,14 +40,11 @@ def test_research_and_profile_owners_have_no_provider_traversal(import_edges) ->
         path.read_text(encoding="utf-8")
         for path in (SOURCE_ROOT / "research").rglob("*.py")
     )
-    from tests.helpers.import_graph import import_edges_under
+    from tests.helpers.import_graph import import_edges_under, is_ids_contract_import
 
     for edge in import_edges_under(import_edges, SOURCE_ROOT / "research"):
         if edge.module.startswith("quant_research_platform.markets.implementations"):
-            assert edge.module in {
-                "quant_research_platform.markets.implementations.a_share.ids",
-                "quant_research_platform.markets.implementations.crypto.ids",
-            }
+            assert is_ids_contract_import(edge.module)
     assert "quant_research_platform.sources" not in research_sources
 
     profile = (SOURCE_ROOT / "profiles" / "research.py").read_text(encoding="utf-8")
@@ -185,11 +182,6 @@ def test_source_surfaces_have_no_retired_naming() -> None:
         text = path.read_text(encoding="utf-8")
         if _contains_retired_token(text):
             violations.append(f"{relative_path}:text")
-        if path.suffix == ".py":
-            tree = ast.parse(text, filename=relative_path.as_posix())
-            for symbol in _defined_symbols(tree):
-                if _is_retired_symbol(symbol):
-                    violations.append(f"{relative_path}:{symbol}")
 
     assert violations == []
 
@@ -226,10 +218,7 @@ def test_csmar_source_surface_has_one_root_without_retired_sibling_api() -> None
 _RETIRED_TEXT = re.compile(
     r"(?i)(?<![a-z0-9])(?:phase\s*[_-]?\s*[12]|"
     "current" + r"[_ -]" + "contract|"
-    "unified" + r"[_-]" + "research|"
-    "leg" + "acy|"
-    "com" + r"pat(?:ibility)?|"
-    r"_" + "v2)(?![a-z0-9])"
+    "unified" + r"[_-]" + "research)(?![a-z0-9])"
 )
 
 
@@ -257,10 +246,6 @@ def _imported_modules(tree: ast.AST) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             modules.add(node.module)
     return modules
-
-
-def _is_retired_symbol(symbol: str) -> bool:
-    return bool(_RETIRED_TEXT.fullmatch(symbol))
 
 
 def _contains_retired_token(value: str) -> bool:

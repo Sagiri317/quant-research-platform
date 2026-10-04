@@ -116,6 +116,11 @@ def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
     )
 
     assert first == second
+    assert first.mean == pytest.approx(0.1125)
+    assert (first.lower, first.upper) == pytest.approx((0.0125, 0.219375))
+    longer = stationary_bootstrap_mean_ci(values, block_size=3, repetitions=99, seed=11)
+    assert (longer.lower, longer.upper) == pytest.approx((0.018125, 0.194375))
+    assert longer.lower < longer.mean < longer.upper
     result = cscv_pbo(returns, slice_count=4, max_combinations=6)
     assert result.combination_count == 6
     assert result.status == "DEFINED"
@@ -334,6 +339,23 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
     slope = summary.loc[summary.coefficient_id.eq("factor")].iloc[0]
     assert slope.period_count == 4
     assert slope["mean"] == pytest.approx(np.mean(expected_slopes))
+    from scipy.stats import norm
+
+    # Bartlett lag-one variance of four slopes spaced by 0.1 is 1/256.
+    se = 1 / 16
+    expected_mean = 0.549
+    assert slope.standard_error == pytest.approx(se)
+    assert slope.t_statistic == pytest.approx(expected_mean / se)
+    assert slope.p_value == pytest.approx(2 * norm.sf(abs(expected_mean / se)))
+    assert (slope.ci_lower, slope.ci_upper) == pytest.approx(
+        (expected_mean - norm.ppf(0.975) * se, expected_mean + norm.ppf(0.975) * se)
+    )
+    lag_zero = _fama_macbeth_summary(
+        periods, factors=("factor",), core_factors=(), max_lags=0
+    )
+    assert lag_zero.loc[lag_zero.coefficient_id.eq("factor"), "standard_error"].iloc[
+        0
+    ] != pytest.approx(se)
     assert periods.white_p_value.notna().all()
     assert periods.white_reason.isna().all()
     np.testing.assert_allclose(weighted_slopes, expected_weighted)
@@ -573,7 +595,7 @@ def test_cscv_subnormal_observations_keep_original_roundoff_resolution():
     matrix = np.arange(1, 9, dtype="float64").reshape(4, 2) * 1e-310
     with np.errstate(over="raise", invalid="raise", divide="raise"):
         assert _candidate_sharpes(matrix, np.ones_like(matrix)) is None
-    for invalid in (-1.0, np.nan, np.inf):
+    for invalid in (-1.0, np.nan, -np.inf):
         with pytest.raises(ValueError, match="return_roundoff_invalid"):
             cscv_pbo(matrix, slice_count=4, max_combinations=6, return_roundoff=invalid)
 
@@ -674,3 +696,142 @@ def test_cscv_keeps_disjoint_uncertainty_intervals_defined():
     result = cscv_pbo(matrix, slice_count=4, max_combinations=6, return_roundoff=errors)
     assert result.status == "UNDEFINED"
     assert result.reason == "candidate_sharpe_undefined"
+
+
+@pytest.mark.parametrize("exponent", (-700, 0, 700))
+def test_near_constant_sample_risk_preserves_exact_center(exponent):
+    from decimal import Decimal, localcontext
+
+    from quant_research_platform.research.statistics import (
+        _candidate_sharpes,
+        return_standard_deviation,
+    )
+
+    values = np.ldexp(np.array([1.0, np.nextafter(1.0, np.inf)]), exponent)
+    with localcontext() as context:
+        context.prec = 90
+        exact = [Decimal.from_float(value) for value in values]
+        mean = sum(exact) / 2
+        deviation = ((exact[1] - exact[0]) ** 2 / 2).sqrt()
+        expected_sharpe = float(mean / deviation)
+    assert float(return_standard_deviation(values)) == pytest.approx(
+        float(deviation), rel=2e-15, abs=0
+    )
+    np.testing.assert_allclose(
+        _candidate_sharpes(values[:, None], np.zeros((2, 1))),
+        [expected_sharpe],
+        rtol=2e-15,
+    )
+
+
+def test_extreme_normal_nav_sharpe_matches_decimal_oracle():
+    from decimal import Decimal, localcontext
+
+    from scipy.stats import norm
+
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _nav_return_roundoff,
+    )
+
+    exponents = [0]
+    for _ in range(2):
+        exponents.append(exponents[-1] + 1023)
+        for _ in range(29):
+            exponents.append(exponents[-1] - 51)
+    nav = np.ldexp(np.ones(61), exponents)
+    values = nav[1:] / nav[:-1] - 1
+    assert np.isfinite(nav).all() and (nav >= np.finfo(float).tiny).all()
+    np.testing.assert_array_equal(nav[:-1] * (1 + values), nav[1:])
+    with localcontext() as context:
+        context.prec = 100
+        data = [Decimal.from_float(value) for value in values]
+        n = Decimal(len(data))
+        mean = sum(data) / n
+        diffs = [value - mean for value in data]
+        m2 = sum(value**2 for value in diffs) / n
+        observed = mean / (m2 * n / (n - 1)).sqrt()
+        m3 = sum(value**3 for value in diffs) / n
+        m4 = sum(value**4 for value in diffs) / n
+        skew = (n * (n - 1)).sqrt() / (n - 2) * m3 / (m2 * m2.sqrt())
+        kurtosis = (n - 1) / ((n - 2) * (n - 3)) * ((n + 1) * (m4 / m2**2 - 3) + 6) + 3
+        variance = (1 - skew * observed + (kurtosis - 1) / 4 * observed**2) / (n - 1)
+        expected_psr = norm.cdf(float(observed / variance.sqrt()))
+    result = probabilistic_and_deflated_sharpe(
+        values,
+        benchmark_sharpe=0.0,
+        trial_sharpes=[0.1, 0.2, 0.3],
+        return_roundoff=_nav_return_roundoff(nav[:-1], nav[1:], values),
+    )
+    assert result.observed_sharpe == pytest.approx(float(observed), rel=2e-14)
+    assert result.psr == pytest.approx(expected_psr, rel=2e-14)
+
+
+def test_fama_macbeth_preserves_small_factor_units_and_rejects_collinearity():
+    from decimal import Decimal, localcontext
+
+    from quant_research_platform.research.statistics_production import (
+        _fama_macbeth_period_records,
+    )
+
+    x = np.linspace(5e-14, 2e-13, 1000)
+    y = 0.01 + 1e11 * x + 0.001 * np.sin(np.arange(len(x)))
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-01"),
+            "asset_id": [f"s{i}" for i in range(len(x))],
+            "x": x,
+            "y": y,
+        }
+    )
+    with localcontext() as context:
+        context.prec = 80
+        xx = [Decimal.from_float(value) for value in x]
+        yy = [Decimal.from_float(value) for value in y]
+        mx, my = sum(xx) / len(xx), sum(yy) / len(yy)
+        slope = sum((a - mx) * (b - my) for a, b in zip(xx, yy, strict=True)) / sum(
+            (a - mx) ** 2 for a in xx
+        )
+        intercept = my - slope * mx
+    for scale in (1.0, 1e12):
+        result = fama_macbeth_period(
+            frame.assign(x=x * scale), return_column="y", factor_columns=("x",)
+        )
+        assert result.coefficients["x"] * scale == pytest.approx(
+            float(slope), rel=1e-12
+        )
+        assert result.coefficients["const"] == pytest.approx(
+            float(intercept), rel=1e-12
+        )
+        assert result.white_p_value is not None
+    rows = _fama_macbeth_period_records(
+        frame, return_column="y", factors=("x",), core_factors=("x",)
+    )
+    assert all(row["status"] == "DEFINED" for row in rows)
+    with pytest.raises(ValueError, match="fama_macbeth_period_insufficient"):
+        fama_macbeth_period(
+            frame.assign(z=x * 2), return_column="y", factor_columns=("x", "z")
+        )
+
+
+@pytest.mark.parametrize("capital", (np.nextafter(0.0, 1.0), np.finfo(float).max))
+def test_unbounded_nav_roundoff_is_undefined_not_zero_risk(capital):
+    from quant_research_platform.research.portfolios.diagnostics import (
+        _nav_return_roundoff,
+    )
+    from quant_research_platform.research.statistics import (
+        _candidate_sharpes,
+        return_standard_deviation,
+    )
+
+    values = np.zeros(4)
+    errors = _nav_return_roundoff(np.full(4, capital), np.full(4, capital), values)
+    assert np.isposinf(errors).all()
+    assert np.isnan(return_standard_deviation(values, roundoff=errors))
+    assert _candidate_sharpes(values[:, None], errors[:, None]) is None
+    with pytest.raises(ValueError, match="sharpe_zero_variance"):
+        probabilistic_and_deflated_sharpe(
+            values,
+            benchmark_sharpe=0.0,
+            trial_sharpes=[0.1, 0.2],
+            return_roundoff=errors,
+        )

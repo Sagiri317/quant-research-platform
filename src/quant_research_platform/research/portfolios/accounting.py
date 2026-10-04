@@ -28,6 +28,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
     PortfolioValuation,
     TradeCostComponents,
+    portfolio_notional_tolerance,
 )
 from quant_research_platform.contracts.validation import (
     strict_finite_float,
@@ -433,7 +434,7 @@ class ExecutionAccounting:
         if (numeric.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)] < 0.0).any().any():
             raise ValueError("execution_ledger_cost_invalid")
         nav_before = _finite_positive(self._nav_before, "execution_nav_invalid")
-        tolerance = _scaled_tolerance(nav_before)
+        tolerance = portfolio_notional_tolerance(nav_before)
         desired = numeric["target_notional"] - numeric["pre_trade_notional"]
         executed = numeric["executed_delta_notional"]
         if (
@@ -827,7 +828,7 @@ def execute_continuous_target(
     target = _weight_values(target_weights, assets, "target_weights_invalid")
     if current.lt(0.0).any() or target.lt(0.0).any():
         raise ValueError("execution_weights_invalid")
-    tolerance = _scaled_tolerance(nav_value)
+    tolerance = portfolio_notional_tolerance(nav_value)
     if (
         current.sum() * nav_value > nav_value + tolerance
         or target.sum() * nav_value > nav_value + tolerance
@@ -835,7 +836,9 @@ def execute_continuous_target(
         raise ValueError("execution_weights_sum_invalid")
     enter = _bool_values(can_enter, assets, "execution_entry_mask_invalid")
     exit_ = _bool_values(can_exit, assets, "execution_exit_mask_invalid")
-    desired = (target - current) * nav_value
+    pre_notional = current * nav_value
+    target_notional = target * nav_value
+    desired = target_notional - pre_notional
     trading_assets = {
         str(asset)
         for asset in assets
@@ -852,7 +855,7 @@ def execute_continuous_target(
     capacity = adv * participation
     records = {
         str(asset): _empty_ledger_row(
-            asset, execution_date, current[asset] * nav_value, target[asset] * nav_value
+            asset, execution_date, pre_notional[asset], target_notional[asset]
         )
         for asset in assets
     }
@@ -887,7 +890,7 @@ def execute_continuous_target(
             reason="adv_capacity" if amount < -desired_delta - tolerance else None,
             cost=cost,
         )
-    pre_trade_cash = nav_value - float((current * nav_value).sum())
+    pre_trade_cash = nav_value - float(pre_notional.sum())
     if -tolerance <= pre_trade_cash < 0.0:
         pre_trade_cash = 0.0
     sell_notional = float(-sell_delta.sum())
@@ -988,7 +991,7 @@ def execute_continuous_target(
     post_trade_cash = cash_after_sells - buy_notional - buy_cost_total
     if -tolerance <= post_trade_cash < 0.0:
         post_trade_cash = 0.0
-    post_trade = current * nav_value + sell_delta + buy_delta
+    post_trade = pre_notional + sell_delta + buy_delta
     nav_after = float(post_trade.sum() + post_trade_cash)
     expected_nav_after = nav_value - total_cost
     if post_trade_cash < -tolerance or nav_after <= tolerance:
@@ -996,7 +999,10 @@ def execute_continuous_target(
     if not np.isclose(nav_after, expected_nav_after, rtol=0.0, atol=tolerance):
         raise ValueError("execution_self_financing_invalid")
     for asset in assets:
-        records[str(asset)]["post_trade_notional"] = float(post_trade[asset])
+        record = records[str(asset)]
+        record["post_trade_notional"] = float(post_trade[asset])
+        if abs(record["target_notional"] - record["post_trade_notional"]) <= tolerance:
+            record["reason"] = None
     ledger = pd.DataFrame.from_records(
         [records[str(asset)] for asset in assets],
         columns=_LEDGER_COLUMNS,
@@ -1174,10 +1180,6 @@ def _finite_nonnegative(value: float, error: str) -> float:
     return numeric
 
 
-def _scaled_tolerance(nav: float) -> float:
-    return max(np.finfo("float64").eps * max(nav, 1.0) * 256.0, 1e-12)
-
-
 def capacity_quantiles(
     capacity_by_rebalance_date: pd.Series,
 ) -> dict[str, object]:
@@ -1231,7 +1233,7 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
     ]
     if other_flows or endpoint <= entry or b <= 0 or a <= 0 or e <= 0:
         raise ValueError("portfolio_interval_economic_scope_invalid")
-    tolerance = _scaled_tolerance(b)
+    tolerance = portfolio_notional_tolerance(b)
     if not np.isclose(a, b - costs, rtol=0, atol=tolerance):
         raise ValueError("portfolio_interval_cost_reconciliation_invalid")
     diagnostics = {(row.asset_id, row.name): row for row in batch.diagnostics}

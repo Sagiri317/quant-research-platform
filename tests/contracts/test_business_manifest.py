@@ -139,7 +139,9 @@ def test_validator_rejects_operational_fields_instead_of_hashing_them() -> None:
         validate_business_manifest_envelope(payload)
 
 
-def test_typed_envelope_admission_precedes_plain_container_projection() -> None:
+def test_typed_envelope_admission_precedes_plain_container_projection(
+    monkeypatch,
+) -> None:
     envelope = _envelope(semantic_metadata={"counts": [{} for _ in range(2000)]})
     original_identity = envelope.instance_identity
     sizes: list[int] = []
@@ -148,12 +150,26 @@ def test_typed_envelope_admission_precedes_plain_container_projection() -> None:
         == envelope.payload()
     )
     assert sizes and all(size > 0 for size in sizes)
+    original_payload = BusinessManifestEnvelope.payload
+    projection_returned = False
 
-    def reject(_size: int) -> None:
+    def observe_payload(self, *, _admit=None):
+        nonlocal projection_returned
+        projected = original_payload(self, _admit=_admit)
+        projection_returned = True
+        return projected
+
+    def reject(size: int) -> None:
+        sizes.append(size)
+        assert not projection_returned, "plain_projection_returned_before_admission"
         raise MemoryError("envelope_projection_not_admitted")
 
-    with pytest.raises(MemoryError, match="envelope_projection_not_admitted"):
-        validate_business_manifest_envelope(envelope, _admit=reject)
+    with monkeypatch.context() as context:
+        context.setattr(BusinessManifestEnvelope, "payload", observe_payload)
+        with pytest.raises(MemoryError, match="envelope_projection_not_admitted"):
+            validate_business_manifest_envelope(envelope, _admit=reject)
+    assert not projection_returned
+    assert all(size > 0 for size in sizes)
     assert envelope.instance_identity == original_identity
     assert len(envelope.semantic_metadata["counts"]) == 2000
     assert validate_business_manifest_envelope(envelope) == envelope.payload()

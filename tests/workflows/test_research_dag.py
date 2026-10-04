@@ -863,7 +863,12 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
     }
     execution_targets = crypto.execution_targets()
     ledger_ids = tuple(target.target_id for target in execution_targets)
-    assert len(ledger_ids) == 14
+    assert len(ledger_ids) == 30
+    assert sorted(ledger_ids) == sorted(
+        target_id
+        for target_id in crypto_specs
+        if crypto_profile.producer_bindings[target_id].kind is ProducerKind.PORTFOLIO
+    )
     assert all(
         crypto_specs[target.statistics_target_id].dependencies == (target.target_id,)
         for target in execution_targets
@@ -2257,8 +2262,9 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
     "kind", (ProducerKind.INTERIM, ProducerKind.PROCESSED, ProducerKind.DATASET)
 )
 @pytest.mark.parametrize("failure", ("duplicate", "interrupt", "memory", "io"))
+@pytest.mark.parametrize("phase", ("build", "reuse"))
 def test_target_local_validation_preserves_independent_production(
-    tmp_path, monkeypatch, kind, failure
+    tmp_path, monkeypatch, kind, failure, phase
 ):
     from contextlib import contextmanager
 
@@ -2317,14 +2323,19 @@ def test_target_local_validation_preserves_independent_production(
         "io": OSError("target_primary"),
     }.get(failure)
 
+    priming = False
+
     def frame(name):
         calls.append(name)
-        if name == a and primary is not None:
+        if name == a and primary is not None and not priming:
             raise primary
         values = {
             asset_column: ["asset", "asset"],
             "timestamp": pd.to_datetime(
-                ["2020-01-02", "2020-01-02" if name == a else "2020-01-03"]
+                [
+                    "2020-01-02",
+                    "2020-01-02" if name == a and not priming else "2020-01-03",
+                ]
             ),
             "value": [1.0, 2.0],
             "label": [0.1, 0.2],
@@ -2413,6 +2424,35 @@ def test_target_local_validation_preserves_independent_production(
         end_date="2020-01-31",
         data_ids=(b, c),
     )
+    if phase == "reuse":
+        priming = True
+        initial = research.data_materialize(**{**kwargs, "data_ids": (a,)})
+        assert initial["status"] == "COMPLETE"
+        priming = False
+        calls.clear()
+        identity = initial["target_results"][0]["instance_identity"]
+        root = research._target_instance_root(profile, kwargs["layout"], a, identity)
+        if primary is None:
+            part = next(filesystem_glob(root, "**/*.parquet"))
+            content = bytearray(filesystem_read_bytes(part))
+            content[4] ^= 1
+            filesystem_write_bytes(part, bytes(content))
+        actual_inspect = research.inspect_physical_dataset
+
+        def inspect(*args, **inner):
+            calls.append(a)
+            if primary is not None:
+                raise primary
+            return actual_inspect(*args, **inner)
+
+        monkeypatch.setattr(research, "inspect_physical_dataset", inspect)
+        planned = research.data_materialize(**kwargs, plan=True)
+        assert (
+            next(item for item in planned["targets"] if item["target_id"] == a)[
+                "decision"
+            ]
+            == "REUSE"
+        )
     if primary is not None:
         with pytest.raises(type(primary)) as raised:
             research.data_materialize(**kwargs)
@@ -2424,7 +2464,10 @@ def test_target_local_validation_preserves_independent_production(
     assert result["status"] == "FAILED"
     assert calls == [a, c]
     assert results[a]["status"] == "FAILED"
-    assert "duplicate_dataset_primary_key" in results[a]["reason"]
+    if phase == "build":
+        assert "duplicate_dataset_primary_key" in results[a]["reason"]
+    else:
+        assert results[a]["reason"].startswith(f"{kind.value.lower()}_build_failed:")
     assert results[b]["status"] == "BLOCKED"
     assert results[b]["reason"] == f"dependency_blocked: {a}"
     assert results[c]["status"] == "BUILT"
@@ -2684,6 +2727,7 @@ def test_formal_prediction_dispatch_preserves_planned_window_and_identity(
 
 def test_prediction_lineage_requires_exact_model_dependency_identity(
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     with (
         runtime_resource_policy_scope() as artifact_policy,
@@ -2708,18 +2752,25 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
             dependencies=("model",),
             producer_id="prediction",
         )
-        protocol = SimpleNamespace(protocol_id="a_share_low_frequency")
+        protocol = SimpleNamespace(
+            protocol_id="a_share_low_frequency",
+            selection_group_for_target=lambda _target: "synthetic",
+            access_window=TimeWindow("2024-01-01", "2024-01-02"),
+        )
+        layout = StorageLayout(project_root=tmp_path)
         envelope = {
             "logical_artifact_id": "prediction",
             "upstream_identities": {"model": model_identity},
         }
         manifest = {
             "metadata": {
+                "test_start": "2024-01-01",
+                "test_end": "2024-01-02",
                 "model_metadata": {
                     "model_artifact_id": "model",
                     "model_artifact_identity": "b" * 64,
                     "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-                }
+                },
             }
         }
 
@@ -2739,7 +2790,22 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
             yield manifest, object()
 
         monkeypatch.setattr(research, "read_prediction_output_bundle", bundle)
-        with pytest.raises(ValueError, match="prediction_inner_artifact_invalid"):
+        monkeypatch.setattr(
+            research, "_target_instance_root", lambda *_args: tmp_path / "model"
+        )
+        monkeypatch.setattr(
+            research,
+            "read_quarterly_model_artifact",
+            lambda *_args, **_kwargs: SimpleNamespace(
+                prediction_lineage=lambda *_args, **_kwargs: manifest["metadata"][
+                    "model_metadata"
+                ]
+            ),
+        )
+        with pytest.raises(
+            ValueError,
+            match="^prediction_inner_artifact_invalid:prediction_model_lineage_mismatch$",
+        ):
             research._validate_semantic_target_root(  # noqa: SLF001
                 profile,
                 protocol,
@@ -2747,7 +2813,20 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
                 Path("prediction-root"),
                 "c" * 64,
                 artifact_lease=artifact_lease,
+                trial_layout=layout,
             )
+        manifest["metadata"]["model_metadata"]["model_artifact_identity"] = (
+            model_identity
+        )
+        research._validate_semantic_target_root(  # noqa: SLF001
+            profile,
+            protocol,
+            target,
+            Path("prediction-root"),
+            "c" * 64,
+            artifact_lease=artifact_lease,
+            trial_layout=layout,
+        )
 
 
 def test_model_selection_rejects_protocol_family_mismatch(
@@ -2814,3 +2893,79 @@ def test_model_selection_rejects_protocol_family_mismatch(
                 "a" * 64,
                 artifact_lease=artifact_lease,
             )
+
+
+def test_evaluation_result_is_owned_before_atomic_publication_callback(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.profiles.research import bind_research_configuration
+
+    config = research_configuration()
+    config.update(
+        stage="evaluation",
+        models=[],
+        portfolios=[],
+        comparison_model_id=None,
+        primary_portfolio_id=None,
+    )
+    profile = bind_research_configuration(research_profile(), config)
+    protocol = profile.protocol(config["scenario_id"])
+    target = next(
+        item
+        for item in protocol.target_specs("research run")
+        if item.target_id.endswith("_evaluation")
+    )
+    layout = StorageLayout(tmp_path)
+    window = TimeWindow(**config["windows"]["development"])
+    window_payload = {**config["windows"]["development"], "access": "development"}
+    software = research.production_software_identity()
+    envelope = research._target_envelope_for_spec(
+        profile=profile,
+        protocol=protocol,
+        target_spec=target,
+        data_spec=None,
+        research_window=window_payload,
+        upstream_identities={},
+        software_identity=software,
+        raw_content_identity=None,
+    )
+    existing = (
+        research._target_logical_root(profile, layout, target.target_id)
+        / envelope.instance_identity
+    )
+    filesystem_mkdir(existing, parents=True)
+    marker = existing / "existing.txt"
+    filesystem_write_bytes(marker, b"unchanged")
+    actual_write = research.write_semantic_artifact
+    observed = []
+
+    def publish(*args, **kwargs):
+        assert policy.used_memory_bytes > 0
+        try:
+            return actual_write(*args, **kwargs)
+        except ValueError as error:
+            observed.append(error)
+            raise
+
+    monkeypatch.setattr(research, "write_semantic_artifact", publish)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError, match="evaluation_write_failed") as raised:
+            research._build_semantic_target(
+                profile=profile,
+                protocol=protocol,
+                layout=layout,
+                spec=target,
+                planned={
+                    "requested_identity": envelope.instance_identity,
+                    "upstream_identities": {},
+                },
+                target_layout=layout,
+                policy=policy,
+                time_window=window,
+                research_window=window_payload,
+                software_identity=software,
+                raw_root=tmp_path / "raw",
+            )
+        assert len(observed) == 1 and raised.value.__cause__ is observed[0]
+        assert policy.used_memory_bytes == 0
+    assert filesystem_read_bytes(marker) == b"unchanged"

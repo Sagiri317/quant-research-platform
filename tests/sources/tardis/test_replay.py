@@ -1025,7 +1025,10 @@ def test_tardis_spool_rechecks_disk_before_each_append(monkeypatch):
     assert policy.used_memory_bytes == 0
 
 
-def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_path):
+@pytest.mark.parametrize("snapshot_depths", [(12, 12), (12, 13), (13, 12), (12, 9)])
+def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
+    tmp_path, snapshot_depths
+):
     from functools import partial
 
     from quant_research_platform.contracts.json_codec import canonical_json_hash
@@ -1056,15 +1059,15 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=128 * 1024**2)
     ) as policy:
-        for date, path in zip(dates, paths, strict=True):
+        for date, path, depth in zip(dates, paths, snapshot_depths, strict=True):
             midnight = pd.Timestamp(date, tz="UTC").value // 1_000_000
             native = _delta(1, 99, 101, 98) + _line(
                 2,
                 "depthSnapshot",
                 {
                     "lastUpdateId": 100,
-                    "bids": [[str(100 - i), "2"] for i in range(12)],
-                    "asks": [[str(101 + i), "2"] for i in range(12)],
+                    "bids": [[str(100 - i), "2"] for i in range(depth)],
+                    "asks": [[str(101 + i), "2"] for i in range(depth)],
                 },
             )
             for second in (3, 4):
@@ -1129,6 +1132,15 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_
                 source.market_metadata(FUTURES_MARKET_TYPE, "BTCUSDT")["price_unit"]
                 == "0.1"
             )
+            assert [
+                archive.market_metadata(FUTURES_MARKET_TYPE, "BTCUSDT")[
+                    "snapshot_limit"
+                ]
+                for archive in source.archives
+            ] == list(snapshot_depths)
+            assert source.market_metadata(FUTURES_MARKET_TYPE, "BTCUSDT")[
+                "snapshot_limit"
+            ] == max(snapshot_depths)
             identity = canonical_json_hash(source.source_identity)
             rows = list(
                 source.iter_market_records(
@@ -1148,6 +1160,48 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_
                 observation_ids[0].split(":", 1)[1]
                 == (observation_ids[2].split(":", 1)[1])
             )
+            stats = ReconstructionStats()
+            books, boundaries = [], []
+            for event in iter_reconstructed_depth(
+                source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+            ):
+                if isinstance(event, OwnedValue):
+                    try:
+                        book = event.value
+                        books.append(
+                            (
+                                pd.Timestamp(book.observed_time_ns, tz="UTC").strftime(
+                                    "%Y-%m-%d"
+                                ),
+                                len(book.bids),
+                                len(book.asks),
+                                book.update_id,
+                            )
+                        )
+                    finally:
+                        book = None
+                        event.release(owner="tests.archive_depth")
+                else:
+                    boundaries.append(event.reason)
+            expected_books = [
+                (date, depth, depth, update_id)
+                for date, depth in zip(dates, snapshot_depths, strict=True)
+                if depth >= 10
+                for update_id in (102, 103)
+            ]
+            assert books == expected_books
+            if snapshot_depths[1] < 10:
+                assert boundaries == ["reconnect_boundary", "unsupported_coverage"]
+                assert stats.invalid_segments == stats.unsupported_coverage == 1
+                assert len(stats.coverage_segments) == 1
+            else:
+                assert boundaries == ["reconnect_boundary"]
+                assert stats.invalid_segments == stats.unsupported_coverage == 0
+                assert len(stats.coverage_segments) == 2
+
+        if snapshot_depths[1] < 10:
+            assert policy.used_memory_bytes == 0
+            return
 
         with processed_producer.produce_hft_processed_data(
             spec,
@@ -1254,3 +1308,300 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(tmp_
             if path.is_file()
         } == before
         assert policy.used_memory_bytes == 0
+
+
+def test_disconnect_snapshot_and_bridge_share_recovered_observation(tmp_path):
+    snapshot = {
+        "lastUpdateId": 100,
+        "bids": [[str(100 - i), "2"] for i in range(12)],
+        "asks": [[str(101 + i), "2"] for i in range(12)],
+    }
+    native = (
+        _line(0, "depthSnapshot", snapshot)
+        + _delta(1, 100, 101, 99)
+        + _delta(2, 102, 102, 101)
+        + b"\n"
+        + _line(4, "depthSnapshot", {**snapshot, "lastUpdateId": 200})
+        + _delta(5, 200, 201, 199)
+        + _delta(6, 202, 202, 201)
+    )
+    with runtime_resource_policy_scope() as policy:
+        published = tmp_path / "published"
+        import_slices(
+            published,
+            date="2026-09-01",
+            slices=_slices(tmp_path / "native", native, count=1),
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        with open_market_source(published, resource_policy=policy) as source:
+            stats = ReconstructionStats()
+            identifiers = []
+            for event in iter_reconstructed_depth(
+                source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+            ):
+                if isinstance(event, OwnedValue):
+                    identifiers.append(event.value.update_id)
+                    event.release(owner="tests.recovered_book")
+            assert identifiers == [101, 102, 201, 202]
+            assert len(stats.coverage_segments) == 2
+        assert policy.used_memory_bytes == 0
+
+
+def test_archive_actual_spans_sort_equivalent_cross_midnight_slices(tmp_path):
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.sources.tardis.replay import _archive_span
+
+    tape = (
+        _delta(1, 99, 101, 98)
+        + _line(
+            2,
+            "depthSnapshot",
+            {
+                "lastUpdateId": 100,
+                "bids": [[str(100 - i), "2"] for i in range(12)],
+                "asks": [[str(101 + i), "2"] for i in range(12)],
+            },
+        )
+        + _delta(3, 102, 102, 101)
+        + _delta(4, 103, 103, 102)
+    )
+    slices = {}
+    anchors = {
+        "before": pd.Timestamp("2026-12-31T23:59:55Z"),
+        "after": pd.Timestamp("2027-01-01T00:00:00Z"),
+    }
+    for name, anchor in anchors.items():
+        shift = anchor - pd.Timestamp("2026-09-01T00:00:00Z")
+        rows = []
+        for line in tape.decode().splitlines():
+            timestamp, body = line.split(" ", 1)
+            record = json.loads(body)
+            for clock in ("E", "T"):
+                if clock in record["data"]:
+                    record["data"][clock] += shift.value // 1_000_000
+            observed = (pd.Timestamp(timestamp) + shift).isoformat(
+                timespec="microseconds"
+            )
+            rows.append(observed.replace("+00:00", "Z") + " " + json.dumps(record))
+        slices[name] = _slices(
+            tmp_path / ("native-" + name),
+            ("\n".join(rows) + "\n").encode(),
+            count=1,
+        )
+
+    with runtime_resource_policy_scope() as policy:
+        manifests = {}
+        for name, date, offset, native in (
+            ("before", "2026-12-31", 1430, "before"),
+            ("offset", "2026-12-31", 1440, "after"),
+            ("next_day", "2027-01-01", 0, "after"),
+        ):
+            manifests[name] = import_slices(
+                tmp_path / name,
+                date=date,
+                offset_minutes=offset,
+                slices=slices[native],
+                byte_budget=1024**2,
+                resource_policy=policy,
+            )
+        offset_file = manifests["offset"]["files"][0]
+        next_day_file = manifests["next_day"]["files"][0]
+        assert offset_file["path"] == next_day_file["path"]
+        assert offset_file["sha256"] == next_day_file["sha256"]
+        assert (tmp_path / "offset" / offset_file["path"]).read_bytes() == (
+            tmp_path / "next_day" / next_day_file["path"]
+        ).read_bytes()
+        assert canonical_json_hash(manifests["offset"]) != canonical_json_hash(
+            manifests["next_day"]
+        )
+        summaries = []
+        for paths in (
+            ("offset", "before"),
+            ("next_day", "before"),
+            ("before", "offset"),
+        ):
+            with open_market_source(tmp_path, policy, archive_paths=paths) as source:
+                spans = tuple(
+                    _archive_span(archive.manifest) for archive in source.archives
+                )
+                assert spans == tuple(sorted(spans))
+                assert spans[0][1] == spans[1][0]
+                ordered_paths = (
+                    "before",
+                    next(name for name in paths if name != "before"),
+                )
+                assert [
+                    item["manifest_hash"] for item in source.source_identity["archives"]
+                ] == [canonical_json_hash(manifests[name]) for name in ordered_paths]
+                stats = ReconstructionStats()
+                books, boundaries, identities = [], [], []
+                for event in iter_reconstructed_depth(
+                    source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+                ):
+                    if isinstance(event, OwnedValue):
+                        try:
+                            book = event.value
+                            books.append(
+                                (
+                                    book.observed_time_ns,
+                                    book.update_id,
+                                    book.bids,
+                                    book.asks,
+                                )
+                            )
+                            identities.append(book.observation_id)
+                        finally:
+                            book = None
+                            event.release(owner="tests.archive_span")
+                    else:
+                        boundaries.append((event.observed_time_ns, event.reason))
+                assert [(row[0], row[1]) for row in books] == [
+                    (anchor.value + second * 1_000_000_000, 99 + second)
+                    for anchor in anchors.values()
+                    for second in (3, 4)
+                ]
+                assert len(set(identities)) == 2
+                assert identities[0] == identities[1]
+                assert identities[2] == identities[3]
+                coverage = sorted(stats.coverage_segments.values())
+                assert coverage == [
+                    (anchor.value + 3_000_000_000, anchor.value + 4_000_000_001)
+                    for anchor in anchors.values()
+                ]
+                assert boundaries == [
+                    (anchors["after"].value + 3_000_000_000, "reconnect_boundary")
+                ]
+                assert stats.gaps == 0
+                summaries.append((books, coverage, boundaries))
+            assert policy.used_memory_bytes == 0
+        assert summaries[0] == summaries[1] == summaries[2]
+        for paths, reason in (
+            (("before", "before"), "tardis_archive_set_invalid"),
+            (("offset", "next_day"), "tardis_archive_spans_overlap"),
+        ):
+            with pytest.raises(ValueError, match=reason):
+                with open_market_source(tmp_path, policy, archive_paths=paths):
+                    pass
+            assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("source_kind", ("tardis", "binance"))
+@pytest.mark.parametrize("explicit", (False, True))
+@pytest.mark.parametrize("capacity", ("raw", "bound", "terminal", "ample"))
+def test_native_manifest_physical_admission_and_identity(
+    tmp_path, monkeypatch, source_kind, explicit, capacity
+):
+    import hashlib
+
+    import quant_research_platform.runtime.resources as resources
+    from quant_research_platform.contracts.json_codec import (
+        canonical_json_hash,
+        json_record_working_set_bytes,
+    )
+    from quant_research_platform.sources import market_source_identity
+    from quant_research_platform.sources.binance import replay as binance_replay
+    from quant_research_platform.sources.tardis import replay as tardis_replay
+    from tests.helpers.binance_hft import write_binance_hft_run
+
+    published = tmp_path / "published"
+    if source_kind == "tardis":
+        first = (
+            _line(
+                1,
+                "depthSnapshot",
+                {
+                    "lastUpdateId": 100,
+                    "bids": [["100", "2"]],
+                    "asks": [["101", "2"]],
+                },
+            )
+            + _delta(2, 101, 101, 100)
+            + _line(
+                3,
+                "aggTrade",
+                {
+                    "e": "aggTrade",
+                    "E": 1788220803000,
+                    "T": 1788220803000,
+                    "s": "BTCUSDT",
+                    "st": 1,
+                    "a": 1,
+                    "f": 1,
+                    "l": 1,
+                    "p": "100",
+                    "q": "1",
+                    "nq": "1",
+                    "m": True,
+                },
+            )
+        )
+        second = first.replace(b"btcusdt", b"ethusdt").replace(b"BTCUSDT", b"ETHUSDT")
+        native = b"".join(sorted((first + second).splitlines(keepends=True)))
+        slices = _slices(tmp_path / "native", native, count=64)
+        with runtime_resource_policy_scope(explicit_cap_bytes=512 * 1024**2):
+            import_slices(
+                published,
+                date="2026-09-01",
+                slices=slices,
+                byte_budget=1024**2,
+            )
+        module, filename = tardis_replay, "manifest.json"
+    else:
+        write_binance_hft_run(published, count=3)
+        module, filename = binance_replay, "run.json"
+
+    manifest_path = published / filename
+    original_bytes = manifest_path.read_bytes()
+    before = {
+        str(path.relative_to(published)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in published.rglob("*")
+        if path.is_file()
+    }
+    bound = json_record_working_set_bytes(len(original_bytes))
+    if source_kind == "binance":
+        bound += 64 * 1024
+    with runtime_resource_policy_scope(explicit_cap_bytes=512 * 1024**2) as control:
+        with open_market_source(published) as source:
+            expected_identity = canonical_json_hash(source.source_identity)
+            retained = control.used_memory_bytes
+        assert control.used_memory_bytes == 0
+    assert control.state == "CLOSED" and control._lock.closed
+    available = {
+        "raw": len(original_bytes) // 2,
+        "bound": bound - 1,
+        "terminal": retained + bound - 1,
+        "ample": 512 * 1024**2,
+    }[capacity]
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: available)
+    read = module.read_bounded_qrp_json
+    reads = []
+
+    def observed(path, **options):
+        if path == manifest_path:
+            reads.append(policy.used_memory_bytes)
+            assert policy.used_memory_bytes >= bound
+        return read(path, **options)
+
+    monkeypatch.setattr(module, "read_bounded_qrp_json", observed)
+    with runtime_resource_policy_scope(
+        explicit_cap_bytes=available if explicit else None
+    ) as policy:
+        if capacity == "ample":
+            assert market_source_identity(published, "probe") == expected_identity
+            assert len(reads) == (3 if source_kind == "tardis" else 2)
+        else:
+            error_type = MemoryError if explicit else ValueError
+            with pytest.raises(error_type, match="memory_budget_exceeded"):
+                market_source_identity(published, "probe")
+            assert len(reads) == (
+                (2 if source_kind == "tardis" else 1) if capacity == "terminal" else 0
+            )
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED" and policy._lock.closed
+    assert manifest_path.read_bytes() == original_bytes
+    assert {
+        str(path.relative_to(published)): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in published.rglob("*")
+        if path.is_file()
+    } == before

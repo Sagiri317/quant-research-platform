@@ -92,6 +92,16 @@ def test_experiment_plan_is_locked_immutable_and_hash_stable() -> None:
     assert plan.holdout_status == "LOCKED"
     assert plan.protocol_hash == reordered.protocol_hash
     assert len(plan.protocol_hash) == 64
+    assert (
+        ExperimentPlan.from_payload(plan.protocol_payload()).protocol_hash
+        == plan.protocol_hash
+    )
+    changed = replace(plan, random_seed=plan.random_seed + 1)
+    assert changed.protocol_hash != plan.protocol_hash
+    assert (
+        changed.protocol_hash
+        == ExperimentPlan.from_payload(changed.protocol_payload()).protocol_hash
+    )
     assert "protocol_version" not in plan.protocol_payload()
     assert plan.window("train") == tuple(fold.train for fold in plan.folds)
     assert plan.window("validation") == (

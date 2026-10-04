@@ -54,6 +54,16 @@ def _write_artifact(tmp_path: Path) -> Path:
     return write_semantic_artifact(tmp_path / "model", _envelope(), writer)
 
 
+def test_semantic_artifact_empty_members_are_rejected_before_publication(
+    tmp_path: Path,
+) -> None:
+    envelope = _envelope()
+    logical_root = tmp_path / "empty"
+    with pytest.raises(ValueError, match="semantic_artifact_member_manifest_invalid"):
+        write_semantic_artifact(logical_root, envelope, lambda _staging: None)
+    assert not (logical_root / "instances" / envelope.instance_identity).exists()
+
+
 def test_semantic_artifact_member_mutation_is_rejected_by_read_and_discovery(
     tmp_path: Path,
 ) -> None:
@@ -186,9 +196,11 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
     assert storage.compare_semantic_artifacts(left, right).status == "CONTENT_MISMATCH"
 
 
+@pytest.mark.parametrize("stage", ("inventory", "exact_bytes"))
 def test_semantic_compare_read_failure_keeps_primary_when_close_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stage: str
 ) -> None:
+    import quant_research_platform.storage.identity as identity
     import quant_research_platform.storage.semantic_artifacts as storage
 
     left, right = (
@@ -196,7 +208,9 @@ def test_semantic_compare_read_failure_keeps_primary_when_close_fails(
         _write_artifact(tmp_path / "right"),
     )
     primary = KeyboardInterrupt("test primary")
-    original_open = storage.open_filesystem_file
+    owner = identity if stage == "inventory" else storage
+    original_open = owner.open_filesystem_file
+    reads = []
 
     class BrokenRead:
         def __init__(self, handle):
@@ -206,18 +220,21 @@ def test_semantic_compare_read_failure_keeps_primary_when_close_fails(
             return self.handle.fileno()
 
         def read(self, _size):
+            reads.append(stage)
             raise primary
 
         def close(self):
             self.handle.close()
             raise RuntimeError("close failed")
 
-    monkeypatch.setattr(
-        storage, "open_filesystem_file", lambda path: BrokenRead(original_open(path))
-    )
+    def opening(path, *args, **kwargs):
+        return BrokenRead(original_open(path, *args, **kwargs))
+
+    monkeypatch.setattr(owner, "open_filesystem_file", opening)
     with pytest.raises(KeyboardInterrupt) as caught:
         storage.compare_semantic_artifacts(left, right)
     assert caught.value is primary
+    assert reads == [stage]
     assert any("close also failed" in note for note in primary.__notes__)
 
 
@@ -864,7 +881,7 @@ def test_semantic_reader_rejects_before_json_decode(
     root = storage.write_semantic_artifact(
         tmp_path / "large",
         build_business_manifest_envelope(**fields),
-        lambda _path: None,
+        lambda path: filesystem_write_bytes(path / "member", b"data"),
     )
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024, explicit_cap_bytes=explicit_cap

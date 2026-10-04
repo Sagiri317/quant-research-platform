@@ -279,9 +279,11 @@ def _calculate_values(
             dtype=float,
         )
     elif factor == "trend_efficiency_60d":
-        denominator = np.sum(np.abs(current), axis=1)
+        _, exponent = np.frexp(np.max(np.abs(current), axis=1, keepdims=True))
+        scaled = np.ldexp(current, -exponent)
+        denominator = np.sum(np.abs(scaled), axis=1)
         result = np.divide(
-            np.abs(np.sum(current, axis=1)),
+            np.abs(np.sum(scaled, axis=1)),
             denominator,
             out=np.full(len(current), np.nan),
             where=denominator != 0,

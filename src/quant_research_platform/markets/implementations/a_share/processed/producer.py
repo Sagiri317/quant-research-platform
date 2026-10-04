@@ -230,6 +230,10 @@ def produce_a_share_processed_data(
                     except StopIteration:
                         yield pd.DataFrame(), {}, verify
                         return
+                    resource_policy.require_working_set(
+                        bound,
+                        error="a_share_processed_output_exceeds_task_memory_budget",
+                    )
                     lease = readers.enter_context(
                         resource_policy.lease("a_share.processed.output", bound)
                     )
@@ -248,7 +252,10 @@ def produce_a_share_processed_data(
 
                 def frames():
                     yield first.lease.reserved_bytes, first.lease
-                    yield first
+                    try:
+                        yield first
+                    finally:
+                        first.release(owner="a_share.processed.output")
                     yield from data
 
                 with closing_iterator(frames()) as output:
@@ -297,10 +304,16 @@ def _processed_frames(
         panel_source=panel_source,
         retained=retained,
         calendar=calendar,
+        validation_window=time_window if panel_source else None,
     )
-    if panel_source and sessions:
+    lower, upper, closed = time_window_timestamp_interval(time_window)
+    if panel_source:
+        history_start = min(lower, sessions[0]) if sessions else lower
         sessions = tuple(
-            calendar[(calendar >= sessions[0]) & (calendar <= sessions[-1])]
+            calendar[
+                (calendar >= history_start)
+                & ((calendar <= upper) if closed else (calendar < upper))
+            ]
         )
     definitions = (
         tuple(
@@ -354,8 +367,8 @@ def _processed_frames(
             - lookahead,
         ),
     )
-    lower, upper, closed = time_window_timestamp_interval(time_window)
-    first = bisect_left(sessions, lower)
+    # The same bounded slabs establish suspension state before public output.
+    first = 0 if panel_source else bisect_left(sessions, lower)
     stop = bisect_right(sessions, upper) if closed else bisect_left(sessions, upper)
     history = None
     with ExitStack() as history_owner:
@@ -465,6 +478,10 @@ def _processed_frames(
                         history_owner.close()
                         history_owner.enter_context(next_owner.pop_all())
                         del combined, ordered
+                if panel_source:
+                    output = output.loc[output["timestamp"].ge(lower)].reset_index(
+                        drop=True
+                    )
                 lease.shrink_to(pandas_frame_payload_bytes(output))
                 yield OwnedValue(output, lease)
                 del output, frames, current_source
@@ -516,7 +533,13 @@ def _benchmark_frames(source, session, policy, retained):
 
 
 def _processed_axis(
-    session, *, panel_source, retained, asset_column=None, calendar=None
+    session,
+    *,
+    panel_source,
+    retained,
+    asset_column=None,
+    calendar=None,
+    validation_window=None,
 ):
     if asset_column is None:
         asset_column = "source_asset_id" if panel_source else "asset_id"
@@ -552,8 +575,22 @@ def _processed_axis(
                         allow_null=True,
                     )
                     frame = frame.loc[frame["market_type"].isin(CURRENT_MARKET_TYPES)]
-                    if not frame.empty:
-                        validate_market_bar_calendar(frame, calendar)
+                    observed = frame
+                    if validation_window is not None:
+                        lower, upper, closed = time_window_timestamp_interval(
+                            validation_window
+                        )
+                        observed = frame.loc[
+                            frame["timestamp"].ge(lower)
+                            & (
+                                frame["timestamp"].le(upper)
+                                if closed
+                                else frame["timestamp"].lt(upper)
+                            )
+                        ]
+                    if not observed.empty:
+                        validate_market_bar_calendar(observed, calendar)
+                    del observed
                     frame = frame.loc[frame["filling_flag"].ne(2)]
                 new_dates = set(pd.to_datetime(frame["timestamp"]).unique()) - dates
                 first = frame.drop_duplicates(asset_column)
@@ -723,9 +760,7 @@ def _financial_pit_events(source):
     calendar = source.get("trading_calendar")
     if calendar is None:
         raise ValueError("fundamental_pit_calendar_required")
-    sessions = pd.DatetimeIndex(
-        calendar.loc[calendar["is_trading_day"], "calendar_date"]
-    )
+    sessions = unified_trading_sessions(calendar)
     events = financial_events_from_interim(
         {
             data_id: source[data_id]

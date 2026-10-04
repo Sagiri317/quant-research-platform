@@ -141,13 +141,14 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
     panel_spec = profile.processed.get(ids.HFT_PANEL_DATA_ID)
     start = pd.Timestamp("2026-08-01T00:00:01")
     start_ms = start.value // 1_000_000
-    window = TimeWindow(start, start + pd.Timedelta(milliseconds=200))
+    window = TimeWindow(start, start + pd.Timedelta(milliseconds=600))
     assert json.loads(spec.parameters_json)["max_age_ms"] == 200
     # Coverage starts at t0: the first complete interval ends at t0 + 100ms.
     expected = {
         ("crypto", asset, start + pd.Timedelta(milliseconds=offset)): (mid, age)
         for asset in ("btc_usdt", "eth_usdt")
-        for offset, mid, age in ((100, 100.0, 105.0), (200, None, 205.0))
+        for offset in range(100, 601, 100)
+        for mid, age in [(100.0 if offset == 100 else None, offset + 5.0)]
     }
     clock = (start_ms - 5) * 1000
     headers_and_values = {
@@ -180,7 +181,19 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
                         f"exchange,symbol,timestamp,local_timestamp,{header}\n"
                         f"{exchange},{symbol},{archive_clock - 1000},"
                         f"{archive_clock},{values}\n"
-                    ).encode()
+                    )
+                    if kind == "trades":
+                        buy_amount = 3 if symbol.startswith("BTC") else 5
+                        for trade_id, offset, side, price, amount in (
+                            (2, 205_000, "buy", 100, buy_amount),
+                            (3, 405_000, "sell", 110, 1),
+                        ):
+                            observed = archive_clock + offset
+                            raw += (
+                                f"{exchange},{symbol},{observed - 1000},{observed},"
+                                f"{trade_id},{side},{price},{amount}\n"
+                            )
+                    raw = raw.encode()
                     compressed = gzip.compress(raw, mtime=0)
                     monkeypatch.setattr(
                         "urllib.request.urlopen",
@@ -225,10 +238,10 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
                         market_id="crypto",
                         asset_id=asset,
                         start_ms=start_ms,
-                        end_ms=start_ms + 200,
-                        book_coverage={"s1": _coverage(start_ms, start_ms + 300)},
+                        end_ms=start_ms + 600,
+                        book_coverage={"s1": _coverage(start_ms, start_ms + 700)},
                         trade_coverage=coverage_lookup(
-                            {"trade-connection-1": _coverage(start_ms, start_ms + 300)}
+                            {"trade-connection-1": _coverage(start_ms, start_ms + 700)}
                         ),
                         batch_rows=10,
                     )
@@ -300,6 +313,34 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
                     else:
                         assert mid == expected_mid
                     seen.add(key)
+                for row in frame.to_dict("records"):
+                    stamp = row["timestamp"]
+                    base_flow = row[venue + "_observed_signed_base_flow_500ms"]
+                    if stamp < start + pd.Timedelta(milliseconds=600):
+                        assert pd.isna(base_flow)
+                        continue
+                    btc = row["asset_id"] == "btc_usdt"
+                    multiplier = 1 if venue == "bybit" else 0.01 if btc else 0.1
+                    buy_amount = 3 if btc else 5
+                    assert base_flow == pytest.approx((buy_amount - 1) * multiplier)
+                    assert row[
+                        venue + "_observed_signed_notional_flow_500ms"
+                    ] == pytest.approx((buy_amount * 100 - 110) * multiplier)
+                    assert row[venue + "_observed_tfi_500ms"] == pytest.approx(
+                        (buy_amount - 1) / (buy_amount + 1)
+                    )
+                    for kind, observed_ms, event_ms, age_ms in (
+                        ("quote", -5, -6, 605),
+                        ("trade", 400, 399, 200),
+                        ("ticker", -5, -6, 605),
+                    ):
+                        assert row[venue + "_" + kind + "_age_ms"] == age_ms
+                        assert row[
+                            venue + "_" + kind + "_observed_at"
+                        ] == start + pd.Timedelta(milliseconds=observed_ms)
+                        assert row[
+                            venue + "_" + kind + "_event_at"
+                        ] == start + pd.Timedelta(milliseconds=event_ms)
                 frame = None
             assert seen == set(expected)
         good = {

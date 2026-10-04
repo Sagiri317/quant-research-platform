@@ -102,13 +102,14 @@ def write_research_run_record(path: Path, record: ResearchRunRecord) -> Path:
 
 
 def read_research_run_record(
-    path: Path, *, expected_profile_id: str | None = None
+    path: Path, *, expected_profile_id: str | None = None, lease=None
 ) -> ResearchRunRecord:
     candidate = Path(path)
     with read_json_evidence(
         candidate,
         expected_schema_id="qrp-research-run",
         error="research_run_record_invalid",
+        lease=lease,
     ) as payload:
         record = research_run_record_from_payload(payload)
         if candidate.stem != record.run_id:
@@ -526,6 +527,40 @@ def load_a_share_run_evidence(
                         )
                 finally:
                     attribution = daily = merged = rows = None
+            with artifact.table("portfolio_exposures.parquet") as exposures:
+                latest = None
+                workspace = pandas_frame_payload_bytes(exposures) + 16 * len(exposures)
+                policy = current_runtime_resource_policy()
+                policy.require_working_set(
+                    workspace, error="report_working_set_exceeds_memory_capacity"
+                )
+                with policy.lease("reports.exposure_selection", workspace):
+                    try:
+                        latest = exposures.loc[
+                            exposures.entry_at.eq(
+                                exposures.groupby("candidate_id").entry_at.transform(
+                                    "max"
+                                )
+                            )
+                        ]
+                        exposure_evidence = {
+                            "status": "DEFINED" if not latest.empty else "UNDEFINED",
+                            "reason": ""
+                            if not latest.empty
+                            else "no_exposure_observations",
+                            "artifact_identity": portfolio_ref.instance_identity,
+                            "table": "portfolio_exposures.parquet",
+                            "key_columns": [
+                                "candidate_id",
+                                "decision_at",
+                                "entry_at",
+                                "factor_id",
+                            ],
+                            "value_column": "value",
+                            "latest": _report_rows(latest, report_lease),
+                        }
+                    finally:
+                        latest = exposures = None
             portfolio_statistics = {
                 "status": diagnostic_status(
                     [
@@ -540,8 +575,15 @@ def load_a_share_run_evidence(
                 "performance": summaries["performance"],
                 "group_comparison": summaries["group_comparison"],
                 "capacity": summaries["capacity_summary"],
+                "capacity_detail": {
+                    "artifact_identity": portfolio_ref.instance_identity,
+                    "table": "portfolio_capacity.parquet",
+                    "key_columns": ["candidate_id", "entry_at", "participation"],
+                    "value_column": "bottleneck_asset_id",
+                },
                 "robustness": summaries["robustness"],
                 "attribution": attribution_summary,
+                "exposures": exposure_evidence,
                 "nav_path": {
                     "table": "portfolio_daily.parquet",
                     "post_nav": "nav_post",
@@ -576,11 +618,15 @@ def load_a_share_run_evidence(
                 )
             continue
         try:
+            economics = {}
             ledger = read_portfolio_ledger_artifact(
                 _instance_root(layout, ledger_ref),
                 expected_identity=ledger_ref.instance_identity,
                 expected_member_identities=captured[ledger_ref.target_id],
                 lease=report_lease,
+                consume_batches=lambda artifact, batches, result=economics: (
+                    result.update(summarize_portfolio_ledger(artifact.capital, batches))
+                ),
             )
             ledger_operations = {}
             read_semantic_artifact_record(
@@ -599,7 +645,7 @@ def load_a_share_run_evidence(
                     "calibration_observations": ledger_operations.get(
                         "final_alpha_observations"
                     ),
-                    "economics": summarize_portfolio_ledger(ledger),
+                    "economics": economics,
                     "metrics": metrics,
                 }
             )

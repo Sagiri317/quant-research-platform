@@ -714,7 +714,6 @@ class RecorderRun:
         symbol: str | None = None,
         market_type: str | None = None,
         data_kinds: Sequence[str] | None = None,
-        _record_observer: Callable[[dict[str, Any], str, int, int], None] | None = None,
     ) -> Iterator[dict[str, Any]]:
         kinds = None if data_kinds is None else frozenset(data_kinds)
         selected = [
@@ -735,7 +734,6 @@ class RecorderRun:
                         item,
                         manifest=self.manifest,
                         resource_policy=self.resource_policy,
-                        record_observer=_record_observer,
                     )
                 ) as records:
                     yield from records
@@ -1037,6 +1035,9 @@ def _read_run_manifest(
         raise ValueError("binance_replay_run_manifest_invalid")
     bound = json_record_working_set_bytes(identity.size) + 64 * 1024
     with policy.lease("binance.replay.manifest", bound) as lease:
+        policy.require_working_set(
+            0, error="binance_replay_manifest_memory_budget_exceeded"
+        )
         manifest: dict[str, Any] | None = None
         try:
             try:
@@ -1473,7 +1474,6 @@ def _iter_raw_file(
     *,
     manifest: dict[str, Any],
     resource_policy: RuntimeResourcePolicy,
-    record_observer: Callable[[dict[str, Any], str, int, int], None] | None = None,
 ) -> Iterator[dict[str, Any]]:
     metadata = item.metadata
     path = root / metadata["path"]
@@ -1490,7 +1490,6 @@ def _iter_raw_file(
             count = 0
             minimum: int | None = None
             maximum: int | None = None
-            record_index = 0
             previous: int | None = None
             while True:
                 with resource_policy.lease("binance.replay.record", bound):
@@ -1511,14 +1510,6 @@ def _iter_raw_file(
                         if previous is not None and capture_seq <= previous:
                             raise ValueError("binance_replay_capture_seq_non_monotonic")
                         previous = capture_seq
-                        if record_observer is not None:
-                            record_observer(
-                                record,
-                                metadata["path"],
-                                record_index,
-                                len(line),
-                            )
-                        record_index += 1
                         minimum = (
                             capture_seq
                             if minimum is None
@@ -1962,10 +1953,15 @@ class DepthReconstructor:
     def _close_coverage(self, observed_time: int) -> None:
         if self._segment_id in self.stats.coverage_segments:
             start, end = self.stats.coverage_segments[self._segment_id]
-            self.stats.coverage_segments[self._segment_id] = (
-                start,
-                min(end, observed_time),
-            )
+            stop = min(end, observed_time)
+            if stop <= start:
+                del self.stats.coverage_segments[self._segment_id]
+                self.coverage_lease.shrink_to(
+                    self.coverage_lease.reserved_bytes
+                    - 4 * (512 + 4 * len(self._segment_id))
+                )
+            else:
+                self.stats.coverage_segments[self._segment_id] = (start, stop)
 
     def _invalidate(self, record: dict[str, Any], reason: str) -> BookBoundary:
         event_time, transaction_time, observed_time = _record_times(
@@ -2238,11 +2234,12 @@ def iter_reconstructed_depth(
 @contextmanager
 def native_trade_identities(resource_policy):
     """Own exact native trade identity across resends and historical conflicts."""
+    index = ExactPrimaryKeyIndex(primary_key=("market", "symbol", "trade_id"))
     with (
-        ExactPrimaryKeyIndex(primary_key=("market", "symbol", "trade_id")) as index,
         resource_policy.lease(
             "binance.native_trade_identities", index.retained_memory_bytes + 128 * 1024
         ),
+        index,
     ):
         latest = {}
         pending = ()

@@ -209,7 +209,7 @@ class ChoiceRawSession:
                         )
                         return root
                     finally:
-                        metadata.clear()
+                        metadata = None
                 response = response_metadata = metadata = None
                 try:
                     response = getattr(self.sdk, request.endpoint)(*request.arguments)
@@ -322,7 +322,7 @@ def read_choice_response(
                 data.clear()
                 response.clear()
                 header.clear()
-                metadata.clear()
+                metadata = None
 
 
 def _validate_response_metadata(value: dict[str, object]) -> None:

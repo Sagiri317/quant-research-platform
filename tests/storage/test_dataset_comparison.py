@@ -280,6 +280,11 @@ def test_compare_reuses_one_policy_for_both_fingerprints(
         def __init__(self, root: Path) -> None:
             self.root = root
             self.retained_memory_bytes = 0
+            frame = pd.DataFrame({"value": pd.Series(dtype="int64")})
+            self.spec = {"primary_key": ("value",)}
+            self.logical_columns = ("value",)
+            self.arrow_schema = pa.Schema.from_pandas(frame, preserve_index=False)
+            self.logical_dtypes = logical_dtype_payload_from_frame(frame)
 
         def verify(self):
             pass
@@ -1157,7 +1162,7 @@ def test_aggregate_chunks_tmpfs_growth_obeys_physical_capacity(tmp_path):
 def _aggregate_streaming_case(tmp_path: Path, *, tmpfs_failure: bool) -> None:
     from quant_research_platform.storage._scratch_ownership import _memory_filesystem
 
-    if _memory_filesystem(tmp_path) != tmpfs_failure:
+    if _memory_filesystem(Path(dataset_key_tracking.gettempdir())) != tmpfs_failure:
         pytest.skip(
             "requires actual tmpfs"
             if tmpfs_failure

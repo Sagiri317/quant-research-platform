@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
+from dataclasses import replace
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -505,7 +506,12 @@ def _aggregate_dataset_stats(
     exact_duplicate_count: int,
     resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
-    dtypes: dict[str, str] = {}
+    dtypes = {
+        descriptor["name"]: (
+            "category" if descriptor["kind"] == "categorical" else descriptor["dtype"]
+        )
+        for descriptor in session.logical_dtypes["columns"]
+    }
     row_count_by_year: dict[str, int] = {}
     null_key_counts = {column: 0 for column in primary_key}
     important_columns = tuple(
@@ -513,22 +519,34 @@ def _aggregate_dataset_stats(
     )
     important_null_counts = {column: 0 for column in important_columns}
     duplicate_primary_key_count = exact_duplicate_count
+    statistic_columns = tuple(
+        column
+        for column in columns
+        if column == session.timestamp_column
+        or column in primary_key
+        or column in important_columns
+    )
     chunks = iter_dataset_chunks(
-        session,
+        replace(
+            session,
+            logical_columns=statistic_columns,
+            physical_columns=statistic_columns,
+            owns_inventory=False,
+            owns_lease=False,
+        ),
         target_chunk_bytes=max(1, resource_policy.planning_headroom_bytes),
     )
     with closing_iterator(chunks):
         for frame in chunks:
-            for column in frame.columns:
-                dtypes.setdefault(str(column), str(frame[column].dtype))
             if session.timestamp_column is not None:
                 timestamps = strict_timestamp_series(
                     frame[session.timestamp_column],
                     error="schema_inventory_invalid_timestamp",
                 ).dropna()
                 if not timestamps.empty:
-                    year_counts = timestamps.dt.year.astype(str).value_counts()
+                    year_counts = timestamps.dt.year.value_counts()
                     for year, count in year_counts.items():
+                        year = str(year)
                         row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
                             count
                         )
@@ -538,7 +556,7 @@ def _aggregate_dataset_stats(
                 important_null_counts[column] += int(frame[column].isna().sum())
 
     return {
-        "dtypes": {column: dtypes.get(column, "") for column in columns},
+        "dtypes": {column: dtypes[column] for column in columns},
         "row_count_by_year": dict(sorted(row_count_by_year.items())),
         "null_key_counts": dict(sorted(null_key_counts.items())),
         "duplicate_primary_key_count": duplicate_primary_key_count,

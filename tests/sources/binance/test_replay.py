@@ -1607,7 +1607,10 @@ def test_invalid_book_emits_honest_boundary(
     assert events[0].reason == reason
 
 
-def test_raw_decode_is_admitted_before_json_allocation(tmp_path: Path) -> None:
+@pytest.mark.parametrize("insufficient", [False, True])
+def test_raw_decode_is_admitted_before_json_allocation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, insufficient: bool
+) -> None:
     root = tmp_path / "run"
     manifest = _write_run(
         root,
@@ -1626,33 +1629,40 @@ def test_raw_decode_is_admitted_before_json_allocation(tmp_path: Path) -> None:
     )
     manifest["files"][0]["max_record_bytes"] = 1_000_000
     filesystem_write_text(root / "run.json", json.dumps(manifest), encoding="utf-8")
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-
-    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
-        record = next(run.iter_records())
-
-    assert record["capture_seq"] == 1
-
-
-def test_replay_bootstraps_snapshot_without_locator_rescan(
-    tmp_path: Path,
-) -> None:
-    root = tmp_path / "run"
-    _futures_run(
-        root,
-        [_futures_delta(1, 90, 100, previous=0, transaction_time=10, segment_id="s1")],
+    policy = capture_test_policy(
+        available_memory_bytes=128 * 1024**2,
+        explicit_cap_bytes=16 * 1024**2 if insufficient else None,
     )
+    decode = replay.parse_qrp_json_object
+    observed = []
 
-    assert not hasattr(replay, "_read_snapshot_at_locator")
-    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-
-    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
-        events = list(
-            iter_reconstructed_depth(
-                run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
+    def admitted(raw):
+        if b'"capture_seq"' in raw:
+            bound = (
+                replay.json_record_working_set_bytes(
+                    manifest["files"][0]["max_record_bytes"]
+                )
+                + 64 * 1024
             )
-        )
-        _close_owned_events(events)
+            leases = [
+                lease
+                for lease in policy._leases
+                if lease.owner == "binance.replay.record" and lease.active
+            ]
+            assert len(leases) == 1 and leases[0].reserved_bytes >= bound
+            observed.append(True)
+        return decode(raw)
+
+    monkeypatch.setattr(replay, "parse_qrp_json_object", admitted)
+    with runtime_resource_policy_scope(policy), open_recorder_run(root, policy) as run:
+        if insufficient:
+            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
+                next(run.iter_records())
+            assert not observed
+        else:
+            record = next(run.iter_records())
+            assert record["capture_seq"] == 1
+            assert observed
 
 
 def test_snapshot_decode_and_bootstrap_share_an_active_transient_lease(
@@ -2930,3 +2940,69 @@ def test_manifest_growth_blocks_materialization_and_preserves_old_good(
     assert rejected["target_results"][0]["reason"] == "source_identity_invalid"
     assert attempts and attempts[0] == len(original)
     assert published_bytes() == old_good
+
+
+def test_same_utc_book_invalidation_drops_empty_coverage_and_reservation():
+    stats = replay.ReconstructionStats()
+    snapshot = dict(
+        _raw(
+            1,
+            {"lastUpdateId": 10, "bids": [["100", "1"]], "asks": [["101", "1"]]},
+            segment_id="s",
+        ),
+        market_type=FUTURES_MARKET_TYPE,
+        tick_size="1",
+    )
+
+    def update(sequence, identifier, bids):
+        return replay.normalize_recorder_record(
+            dict(
+                _raw(
+                    sequence,
+                    {
+                        "U": identifier,
+                        "u": identifier,
+                        "pu": identifier - 1,
+                        "E": 1,
+                        "T": 1,
+                        "b": bids,
+                        "a": [],
+                    },
+                    segment_id="s",
+                ),
+                market_type=FUTURES_MARKET_TYPE,
+                tick_size="1",
+            )
+        )
+
+    with runtime_resource_policy_scope() as policy:
+        with policy.lease("tests.coverage", 0) as coverage:
+            engine = replay.DepthReconstructor(
+                FUTURES_MARKET_TYPE,
+                price_unit="1",
+                snapshot_limit=1,
+                required_levels=1,
+                max_book_levels=4,
+                connection_close_ns=snapshot["observed_time_ns"] + 100,
+                resource_policy=policy,
+                stats=stats,
+                coverage_lease=coverage,
+            )
+            try:
+                engine.bootstrap(replay.normalize_recorder_record(snapshot))
+                first = list(engine.feed(update(2, 10, [["100", "2"]])))
+                assert len(first) == 1 and isinstance(first[0], OwnedValue)
+                first[0].release(owner="tests.same_utc")
+                assert coverage.reserved_bytes > 0
+                boundary = list(engine.feed(update(3, 11, [["102", "1"]])))
+                assert len(boundary) == 1 and isinstance(boundary[0], BookBoundary)
+                assert stats.crossed_books == 1
+                assert stats.coverage_segments == {}
+                assert coverage.reserved_bytes == 0
+                decoded = replay.ReconstructionStats.from_payload(
+                    json.loads(json.dumps(__import__("dataclasses").asdict(stats)))
+                )
+                assert decoded.coverage_segments == {} and decoded.crossed_books == 1
+            finally:
+                engine.close()
+        assert policy.used_memory_bytes == 0

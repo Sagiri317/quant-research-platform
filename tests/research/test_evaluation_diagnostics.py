@@ -1186,3 +1186,154 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
         finally:
             state.close()
         assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+
+
+def test_evaluation_writer_releases_previous_frames_before_next_output(tmp_path):
+    import gc
+    import weakref
+
+    from quant_research_platform.artifacts.outputs.evaluation import (
+        _write_evaluation_artifact_chunks,
+    )
+    from quant_research_platform.contracts.signals import SignalSpec
+
+    references = []
+    spec = EvaluationSpec(
+        evaluation_id="lifetime",
+        market_id=MarketId("a_share"),
+        research_dataset_id="fixture",
+        signals=(
+            SignalSpec(
+                signal_id="signal", source_column="signal", source_kind="factor"
+            ),
+        ),
+        label_columns=("label",),
+        n_groups=2,
+    )
+
+    def frames():
+        for day in range(4):
+            yield pd.DataFrame(
+                {
+                    "timestamp": pd.Timestamp("2023-01-01") + pd.Timedelta(days=day),
+                    "asset_id": ["a", "b", "c"],
+                    "signal": [1.0, 2.0, 3.0],
+                    "label": [2.0, 4.0, 6.0],
+                    "eligible": True,
+                }
+            )
+
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with runtime_resource_policy_scope() as policy:
+            with evaluation_engine.build_evaluation_result_from_frames(
+                frames(),
+                spec=spec,
+                signal_columns=("signal",),
+                label_columns=("label",),
+                n_groups=2,
+                asset_column="asset_id",
+                source_columns_by_kind={"factor": ("signal",)},
+                resource_policy=policy,
+            ) as result:
+
+                def observed():
+                    for item in result.output_chunks:
+                        assert all(reference() is None for reference in references)
+                        references.extend(
+                            weakref.ref(frame) for frame in item.value[:2]
+                        )
+                        yield item
+                        item = None
+
+                _write_evaluation_artifact_chunks(
+                    observed(), temp_root=tmp_path, spec=spec, n_groups=2
+                )
+            assert policy.used_memory_bytes == 0
+        restored = pd.read_parquet(tmp_path / "metrics.parquet")
+        assert len(restored) == 4
+        assert restored.ic.tolist() == pytest.approx([1.0] * 4)
+        assert len(references) >= 4
+    finally:
+        if was_enabled:
+            gc.enable()
+
+
+@pytest.mark.parametrize("change_member", [False, True])
+def test_evaluation_close_verifies_real_dataset_without_generator_finalization(
+    tmp_path, change_member
+):
+    from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
+    from quant_research_platform.catalog.evaluations import EvaluationCatalog
+    from quant_research_platform.contracts.columns import ColumnRole
+    from quant_research_platform.contracts.signals import SignalSpec
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.research.evaluations.runner import (
+        build_evaluation_result_from_research_dataset,
+    )
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.research_specs import make_demo_research_dataset_spec
+
+    layout = StorageLayout(tmp_path)
+    dataset = make_demo_research_dataset_spec(
+        data_id="close_fixture",
+        factor_columns=("signal",),
+        label_columns=("label", "available_at"),
+        filter_columns=("eligible",),
+        context_columns=(),
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+    )
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": ["a", "b", "c"] * 3,
+            "timestamp": pd.date_range("2023-01-02", periods=3).repeat(3),
+            "signal": [1.0, 2.0, 3.0] * 3,
+            "label": [2.0, 4.0, 6.0] * 3,
+            "available_at": pd.date_range("2023-01-02", periods=3).repeat(3),
+            "eligible": True,
+        }
+    )
+    spec = EvaluationSpec(
+        evaluation_id="close_fixture",
+        market_id=dataset.market_id,
+        research_dataset_id=dataset.data_id,
+        signals=(
+            SignalSpec(
+                signal_id="signal", source_column="signal", source_kind="factor"
+            ),
+        ),
+        label_columns=("label",),
+        label_availability_columns={"label": "available_at"},
+        n_groups=2,
+    )
+    with runtime_resource_policy_scope() as policy:
+        dataset_root = layout.research_dataset_root(dataset.market_id, dataset.data_id)
+        write_dataset(
+            dataset_root,
+            frame,
+            spec=dataset,
+            resource_policy=policy,
+            borrowed_input=True,
+        )
+        result = build_evaluation_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=ResearchDatasetCatalog((dataset,)),
+            evaluation_catalog=EvaluationCatalog((spec,)),
+            evaluation_id=spec.evaluation_id,
+            time_window=TimeWindow("2023-01-02", "2023-01-04"),
+            resource_policy=policy,
+        )
+        item = next(result.output_chunks)
+        item.release(owner="test.evaluation")
+        item = None
+        if change_member:
+            member = next(dataset_root.rglob("*.parquet"))
+            member.write_bytes(member.read_bytes() + b"changed")
+            with pytest.raises(ValueError, match="identity_changed"):
+                result.close()
+        else:
+            result.close()
+        assert policy.used_memory_bytes == 0

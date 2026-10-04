@@ -8,9 +8,8 @@ import pandas as pd
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
     json_record_working_set_bytes,
-    parse_qrp_json_object,
 )
-from quant_research_platform.contracts.portfolios import FundingEvent, FundingForecast
+from quant_research_platform.contracts.portfolios import FundingForecast
 from quant_research_platform.contracts.validation import (
     clear_exception_frames,
     strict_finite_float,
@@ -22,6 +21,7 @@ from quant_research_platform.sources.binance.funding import (
     FUNDING_SCHEMA_ID,
     _manifest,
     _records,
+    _settlement_response,
     settlement_endpoint,
 )
 from quant_research_platform.sources.binance.ids import (
@@ -35,6 +35,7 @@ from quant_research_platform.sources.binance.validation import (
 )
 from quant_research_platform.sources.tardis.raw import SLICE_MINUTES, iter_native_slice
 from quant_research_platform.sources.tardis.replay import _archive_span
+from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
@@ -55,6 +56,7 @@ def import_funding_history(
     start_ms,
     end_ms,
     byte_budget,
+    request_limit,
 ):
     """Preserve source bytes and publish forecasts with vendor availability."""
     selected = [
@@ -99,74 +101,22 @@ def import_funding_history(
         "tardis.funding.native",
         json_record_working_set_bytes(identity.size) + 64 * 1024,
     ):
-        raw = payload = events = event = row = metadata = native = None
+        raw = events = metadata = native = None
         try:
-            with open_filesystem_file(path, "rb") as handle:
+            with handle_preserving_primary(open_filesystem_file(path, "rb")) as handle:
                 raw = handle.read(identity.size + 1)
             if identity != dataset_file_identity(path) or len(raw) != identity.size:
                 raise ValueError("tardis_funding_source_changed")
             if byte_budget <= len(raw):
                 raise ValueError("tardis_funding_budget_exceeded")
-            if source_id == "binance":
-                payload = parse_qrp_json_object(b'{"records":' + raw + b"}")["records"]
-            else:
-                payload = parse_qrp_json_object(raw)
-                if (
-                    set(payload) != {"schema_id", "upstream_response_sha256", "records"}
-                    or payload["schema_id"] != "qrp-xoomar-settlement-extract"
-                    or type(payload["upstream_response_sha256"]) is not str
-                    or len(payload["upstream_response_sha256"]) != 64
-                    or any(
-                        c not in "0123456789abcdef"
-                        for c in payload["upstream_response_sha256"]
-                    )
-                ):
-                    raise ValueError("tardis_funding_extract_invalid")
-                payload = payload["records"]
-            if type(payload) is not list or len(payload) >= 1000:
-                raise ValueError("tardis_funding_response_incomplete")
-            events = []
-            previous = -1
-            for row in payload:
-                if type(row) is not dict:
-                    raise ValueError("tardis_funding_settlement_identity_invalid")
-                if source_id == "binance":
-                    if row.get("symbol") != symbol:
-                        raise ValueError("tardis_funding_settlement_identity_invalid")
-                    timestamp = strict_non_negative_integer(
-                        row.get("fundingTime"),
-                        error="tardis_funding_settlement_time_invalid",
-                    )
-                else:
-                    asset = symbol.removesuffix("USDT")
-                    if (
-                        row.get("exchange") != "binance"
-                        or row.get("baseAsset") != asset
-                        or row.get("slug") != asset.lower()
-                    ):
-                        raise ValueError("tardis_funding_settlement_identity_invalid")
-                    observed = strict_iso_timestamp(
-                        row.get("fundingTime"),
-                        error="tardis_funding_settlement_time_invalid",
-                    ).value
-                    if observed % 1_000_000:
-                        raise ValueError("tardis_funding_settlement_time_invalid")
-                    timestamp = observed // 1_000_000
-                if not start_ms <= timestamp <= end_ms or timestamp <= previous:
-                    raise ValueError("tardis_funding_settlement_order_invalid")
-                previous = timestamp
-                rate = strict_finite_float(
-                    row.get("fundingRate"), error="tardis_funding_rate_invalid"
-                )
-                event = FundingEvent(
-                    timestamp * 1_000_000,
-                    rate,
-                    strict_positive_float(
-                        row.get("markPrice"), error="tardis_funding_mark_invalid"
-                    ),
-                )
-                events.append(event)
-            payload = row = event = None
+            events, proof = _settlement_response(
+                raw,
+                source_id=source_id,
+                symbol=symbol,
+                start_ms=start_ms,
+                end_ms=end_ms,
+                request_limit=request_limit,
+            )
             native = {
                 "source_id": source_id,
                 "endpoint": endpoint,
@@ -176,6 +126,7 @@ def import_funding_history(
                 "http_status": http_status,
                 "sha256": hashlib.sha256(raw).hexdigest(),
                 "byte_count": len(raw),
+                **proof,
             }
             metadata = {
                 "schema_id": FUNDING_SCHEMA_ID,
@@ -243,7 +194,7 @@ def import_funding_history(
                                     * 1_000_000
                                 )
                                 rate = strict_finite_float(
-                                    float(mark["r"]),
+                                    mark["r"],
                                     error="tardis_funding_forecast_rate_invalid",
                                 )
                                 price = strict_positive_float(
@@ -273,7 +224,9 @@ def import_funding_history(
                 checked = _manifest(root, symbol)
                 for _item in _records(root, checked):
                     pass
-                with open_filesystem_file(path, "rb") as handle:
+                with handle_preserving_primary(
+                    open_filesystem_file(path, "rb")
+                ) as handle:
                     digest = hashlib.file_digest(handle, "sha256").hexdigest()
                 if (
                     identity != dataset_file_identity(path)
@@ -300,4 +253,4 @@ def import_funding_history(
             clear_exception_frames(error)
             raise
         finally:
-            raw = payload = events = event = row = metadata = native = None
+            raw = events = metadata = native = None

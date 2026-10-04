@@ -93,7 +93,7 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
     )
     manifest = {
         "metadata": {
-            "model_metadata": {"model_id": "model"},
+            "model_metadata": {"model_id": "model", "score_to_label": None},
             "prediction_metadata": {
                 "input_columns": ["ofi_100ms"],
                 "sample_filter_mode": "eligible",
@@ -639,7 +639,9 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             expected_identity=continuous_result["instance_identity"],
             lease=artifact_lease,
         )
-        continuous_economics = summarize_portfolio_ledger(continuous_ledger)
+        continuous_economics = summarize_portfolio_ledger(
+            continuous_ledger.capital, continuous_ledger.iter_chunks()
+        )
         segmented_result = mode_results[taker_segmented.target_id]
         segmented_root = layout.instance_root(
             layout.semantic_artifact_root("crypto", taker_segmented.target_id),
@@ -652,7 +654,10 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         )
         with closing_iterator(collection.iter_episodes()) as episodes:
             segment_economics = [
-                (index, summarize_portfolio_ledger(ledger))
+                (
+                    index,
+                    summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks()),
+                )
                 for index, ledger in episodes
             ]
         assert len(segment_economics) == 1
@@ -969,116 +974,144 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
 
 
 @pytest.mark.complete_chain
-def test_future_source_gap_preserves_maker_prefix_through_research_and_report(tmp_path):
-    with (
-        runtime_resource_policy_scope() as artifact_policy,
-        artifact_policy.lease("tests.artifact_metadata", 0) as artifact_lease,
-    ):
-        import gzip
-        import hashlib
+def test_future_source_gap_preserves_maker_prefix_through_research_and_report(
+    tmp_path, monkeypatch
+):
+    import gzip
+    import hashlib
 
-        from quant_research_platform.artifacts.portfolio_ledger import (
-            read_portfolio_ledger_artifact,
-        )
-        from quant_research_platform.artifacts.research import read_research_run_record
-        from quant_research_platform.profiles.research import (
-            CRYPTO_PROFILE_ID,
-            research_profile,
-        )
-        from quant_research_platform.workflows import research
-        from tests.helpers.binance_hft import (
-            write_binance_hft_run,
-            write_hft_funding_fixture,
-        )
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.artifacts.research import read_research_run_record
+    from quant_research_platform.profiles.research import (
+        CRYPTO_PROFILE_ID,
+        research_profile,
+    )
+    from quant_research_platform.workflows import research
+    from tests.helpers.binance_hft import (
+        write_binance_hft_run,
+        write_hft_funding_fixture,
+    )
 
-        expected_assumption = (
-            "public MBP aggregate depth; cancellations do not advance queue; "
-            "positive visible trade-through fills all remaining quantity "
-            "at the resting price; "
-            "same-price fills use visible quantity after queue depletion; "
-            "zero visible quantity neither fills nor advances queue; "
-            "unknown visible quantity blocks; historical replay assumes small orders "
-            "with no market impact; order and position limits "
-            "do not validate this assumption"
-        )
-        prefixes = {}
-        for name, count in (("complete", 90), ("future_gap", 83)):
-            layout = StorageLayout(tmp_path / name)
-            raw = layout.project_root / "raw/recorder"
-            manifest = write_binance_hft_run(raw, count=count, maker_liquidity=True)
-            if name == "future_gap":
-                sidecar = raw / "connection_intervals.jsonl.gz"
-                with gzip.open(native_filesystem_path(sidecar), "rt") as stream:
-                    intervals = [json.loads(line) for line in stream]
+    expected_assumption = (
+        "public MBP aggregate depth; cancellations do not advance queue; "
+        "positive visible trade-through fills all remaining quantity "
+        "at the resting price; "
+        "same-price fills use visible quantity after queue depletion; "
+        "zero visible quantity neither fills nor advances queue; "
+        "unknown visible quantity blocks; historical replay assumes small orders "
+        "with no market impact; order and position limits "
+        "do not validate this assumption"
+    )
+    prefixes = {}
+    for name, count in (("complete", 90), ("future_gap", 83)):
+        layout = StorageLayout(tmp_path / name)
+        raw = layout.project_root / "raw/recorder"
+        manifest = write_binance_hft_run(raw, count=count, maker_liquidity=True)
+        if name == "future_gap":
+            sidecar = raw / "connection_intervals.jsonl.gz"
+            with gzip.open(native_filesystem_path(sidecar), "rt") as stream:
+                intervals = [json.loads(line) for line in stream]
+            for interval in intervals:
+                interval["closed_at"] = "1970-01-01T00:00:08.350000Z"
+                interval["closed_monotonic_ns"] = 8_350_000_000
+                interval["close_reason"] = "connection_problem"
+            with gzip.open(native_filesystem_path(sidecar), "wt") as stream:
                 for interval in intervals:
-                    interval["closed_at"] = "1970-01-01T00:00:08.350000Z"
-                    interval["closed_monotonic_ns"] = 8_350_000_000
-                    interval["close_reason"] = "connection_problem"
-                with gzip.open(native_filesystem_path(sidecar), "wt") as stream:
-                    for interval in intervals:
-                        stream.write(json.dumps(interval) + "\n")
-                descriptor = manifest["capture"]["connection_intervals"]
-                descriptor["compressed_bytes"] = filesystem_stat(sidecar).st_size
-                descriptor["sha256"] = hashlib.sha256(
-                    filesystem_read_bytes(sidecar)
-                ).hexdigest()
-                filesystem_write_text(
-                    raw / "run.json", json.dumps(manifest), encoding="utf-8"
-                )
-            write_hft_funding_fixture(raw)
-            profile = research_profile(CRYPTO_PROFILE_ID)
-            plan = hft_research_plan()
-            plan["folds"][-1]["validation"] = {
-                "start": "1970-01-01T00:00:05.500000",
-                "end": "1970-01-01T00:00:06.500000",
-            }
-            plan["test"] = {
-                "start": "1970-01-01T00:00:07",
-                "end": "1970-01-01T00:00:08.200000",
-            }
-            configuration = research_configuration(
-                "crypto",
-                "baseline",
-                development=("1970-01-01T00:00:04", "1970-01-01T00:00:06.500000"),
-                plan=plan,
-                small_models=True,
+                    stream.write(json.dumps(interval) + "\n")
+            descriptor = manifest["capture"]["connection_intervals"]
+            descriptor["compressed_bytes"] = filesystem_stat(sidecar).st_size
+            descriptor["sha256"] = hashlib.sha256(
+                filesystem_read_bytes(sidecar)
+            ).hexdigest()
+            filesystem_write_text(
+                raw / "run.json", json.dumps(manifest), encoding="utf-8"
             )
-            development = research.research_run(
-                profile=profile,
-                layout=layout,
-                raw_root=raw,
-                research_plan=configuration,
-            )
-            assert development["status"] == "COMPLETE"
-            result = research.research_run(
-                profile=profile,
-                layout=layout,
-                raw_root=raw,
-                research_plan=configuration,
-                holdout=True,
-                development_run_id=development["run_id"],
-            )
-            assert result["status"] == "COMPLETE"
+        write_hft_funding_fixture(raw)
+        profile = research_profile(CRYPTO_PROFILE_ID)
+        plan = hft_research_plan()
+        plan["folds"][-1]["validation"] = {
+            "start": "1970-01-01T00:00:05.500000",
+            "end": "1970-01-01T00:00:06.500000",
+        }
+        plan["test"] = {
+            "start": "1970-01-01T00:00:07",
+            "end": "1970-01-01T00:00:08.200000",
+        }
+        configuration = research_configuration(
+            "crypto",
+            "baseline",
+            development=("1970-01-01T00:00:04", "1970-01-01T00:00:06.500000"),
+            plan=plan,
+            small_models=True,
+        )
+        development = research.research_run(
+            profile=profile,
+            layout=layout,
+            raw_root=raw,
+            research_plan=configuration,
+        )
+        assert development["status"] == "COMPLETE"
+        result = research.research_run(
+            profile=profile,
+            layout=layout,
+            raw_root=raw,
+            research_plan=configuration,
+            holdout=True,
+            development_run_id=development["run_id"],
+        )
+        assert result["status"] == "COMPLETE"
+        from quant_research_platform.artifacts import portfolio_ledger
+
+        scanned = []
+        original_batches = portfolio_ledger._iter_batches
+
+        def count_batches(
+            root, *args, scanned=scanned, original_batches=original_batches
+        ):
+            scanned.append(root)
+            yield from original_batches(root, *args)
+
+        with monkeypatch.context() as check:
+            check.setattr(portfolio_ledger, "_iter_batches", count_batches)
             report = research.report_build(
                 profile=profile, layout=layout, run_id=result["run_id"]
             )
-            assert report["target_result"]["status"] == "BUILT"
-            reported_assumptions = {
-                row["candidate_id"]: row["text"]
-                for row in report["report"]["sections"]["execution"]["results"]
-                if row["metric_id"] == "queue_assumption" and row["status"] == "DEFINED"
-            }
-            record = read_research_run_record(
-                layout.research_run_path(result["run_id"])
-            )
-            observed = {}
-            for target in record.target_results:
-                if target.target_id not in {
-                    "crypto_hft_maker_baseline_ledger",
-                    "crypto_hft_maker_ledger",
-                }:
-                    continue
-                assert target.status.value == "BUILT"
+        assert scanned and len(scanned) == len(set(scanned))
+        assert report["target_result"]["status"] == "BUILT"
+        reported_assumptions = {
+            row["candidate_id"]: row["text"]
+            for row in report["report"]["sections"]["execution"]["results"]
+            if row["metric_id"] == "queue_assumption" and row["status"] == "DEFINED"
+        }
+        record = read_research_run_record(layout.research_run_path(result["run_id"]))
+        latency_candidates = {
+            f"crypto_hft_lightgbm_regressor_latency_{latency}ms": latency
+            for latency in (0, 100, 200)
+        }
+        reported_latencies = {
+            row["candidate_id"]: row["value"]
+            for row in report["report"]["sections"]["execution"]["results"]
+            if row["metric_id"] == "latency_ms" and row["status"] == "DEFINED"
+        }
+        assert {
+            key: reported_latencies[key] for key in latency_candidates
+        } == latency_candidates
+        observed = {}
+        latency_fills = {}
+        for target in record.target_results:
+            if target.target_id not in {
+                "crypto_hft_maker_baseline_ledger",
+                "crypto_hft_maker_ledger",
+                *(key + "_ledger" for key in latency_candidates),
+            }:
+                continue
+            assert target.status.value == "BUILT"
+            with (
+                runtime_resource_policy_scope() as artifact_policy,
+                artifact_policy.lease("tests.artifact_metadata", 0) as artifact_lease,
+            ):
                 artifact = read_portfolio_ledger_artifact(
                     layout.instance_root(
                         layout.project_root / target.artifact_root,
@@ -1087,6 +1120,25 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(tm
                     expected_identity=target.instance_identity,
                     lease=artifact_lease,
                 )
+                if artifact.capital.candidate_id in latency_candidates:
+                    latency = latency_candidates[artifact.capital.candidate_id]
+                    fills = []
+                    summaries = []
+                    for batch in artifact.iter_chunks():
+                        fills.extend(
+                            (row.timestamp_ns, row.quantity, row.notional)
+                            for row in batch.trades
+                        )
+                        summaries.extend(
+                            json.loads(row.text)
+                            for row in batch.diagnostics
+                            if row.name == "execution_summary"
+                        )
+                    assert len(summaries) == 1
+                    assert summaries[0]["latency_ms"] == latency
+                    assert summaries[0]["market_event_count"] > 0
+                    latency_fills[latency] = tuple(fills)
+                    continue
                 decisions = []
                 queue_assumptions = []
                 for batch in artifact.iter_chunks():
@@ -1110,9 +1162,11 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(tm
                     == queue_assumptions[0]
                 )
                 observed[target.target_id] = decisions
-            assert len(observed) == 2 and all(observed.values())
-            prefixes[name] = observed
-        assert prefixes["future_gap"] == prefixes["complete"]
+        assert len(observed) == 2 and all(observed.values())
+        assert set(latency_fills) == {0, 100, 200}
+        assert len(set(latency_fills.values())) > 1
+        prefixes[name] = observed
+    assert prefixes["future_gap"] == prefixes["complete"]
 
 
 @pytest.mark.parametrize("gap_kind", [None, "depth", "agg_trades"])
@@ -1215,6 +1269,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
                 source,
                 symbol=symbol,
                 source_id="binance",
+                request_limit=1000,
                 response_path=settlements,
                 http_status=200,
                 start_ms=start_ms,

@@ -46,9 +46,7 @@ def build_crypto_research_report(*, record, evidence):
             "results": selected,
         }
 
-    assets = {
-        item["candidate_id"]: item["asset_id"] for item in configuration["portfolios"]
-    }
+    assets = {item["candidate_id"]: item["asset_id"] for item in evidence["portfolios"]}
     coverage_groups = {}
     for item in statistics:
         if item["status"] != "DEFINED":

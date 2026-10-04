@@ -78,3 +78,39 @@ def test_raw_cell_codec_preserves_types_canonical_bytes_and_bounds():
             decode_raw_cell(invalid)
     with pytest.raises(ValueError, match="raw_csv_cell_bound_exceeded"):
         decode_raw_cell('"' + "x" * (64 * 1024 + 1) + '"')
+
+
+@pytest.mark.parametrize("field", ["byte_count", "metadata"])
+def test_raw_manifest_expected_identity_preserves_json_numeric_types(tmp_path, field):
+    from copy import deepcopy
+
+    from quant_research_platform.contracts.json_codec import canonical_identity_bytes
+
+    root = tmp_path / "typed_snapshot"
+    write_csv_snapshot(
+        root,
+        columns=("value",),
+        rows=((1,), (2,)),
+        metadata={"revision": 1},
+        max_bytes=1024,
+        validate=lambda path: list(
+            iter_csv_snapshot(
+                path,
+                expected_manifest=read_manifest(path / "response.metadata.json"),
+                max_bytes=1024,
+            )
+        ),
+    )
+    manifest = read_manifest(root / "response.metadata.json")
+    assert list(
+        iter_csv_snapshot(root, expected_manifest=manifest, max_bytes=1024)
+    ) == [(1,), (2,)]
+    changed = deepcopy(manifest)
+    if field == "byte_count":
+        changed["byte_count"] = float(changed["byte_count"])
+    else:
+        changed["metadata"]["revision"] = True
+    assert changed == manifest
+    assert canonical_identity_bytes(changed) != canonical_identity_bytes(manifest)
+    with pytest.raises(ValueError, match="raw_csv_metadata_invalid"):
+        list(iter_csv_snapshot(root, expected_manifest=changed, max_bytes=1024))

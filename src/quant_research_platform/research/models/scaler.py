@@ -63,14 +63,14 @@ class ModelMatrixScaler:
         scale = np.asarray(self.scale_)
         with np.errstate(over="ignore"):
             differences = values - mean
-        scaled = differences / scale
         overflow = ~np.isfinite(differences)
+        differences /= scale
         if overflow.any():
             rows, columns = np.nonzero(overflow)
-            scaled[rows, columns] = (
+            differences[rows, columns] = (
                 values[rows, columns] / scale[columns] - mean[columns] / scale[columns]
             )
-        return pd.DataFrame(scaled, index=frame.index, columns=self.columns)
+        return pd.DataFrame(differences, index=frame.index, columns=self.columns)
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -123,12 +123,15 @@ def equal_timestamp_sample_weights(
         raise ValueError("sample_weight_timestamps_invalid")
     counts = values.groupby(values, sort=False).transform("size").to_numpy()
     timestamp_count = int(values.nunique())
-    weights = len(values) / (timestamp_count * counts.astype("float64"))
-    if weighting.half_life is not None:
-        periods = pd.Index(values.unique()).sort_values()
-        age = len(periods) - 1 - periods.get_indexer(values)
-        weights *= np.exp2(-age / weighting.half_life)
-        weights *= len(values) / weights.sum()
+    if weighting.half_life is None:
+        return len(values) / (timestamp_count * counts.astype("float64"))
+    periods = pd.Index(values.unique()).sort_values()
+    with np.errstate(over="ignore", under="ignore"):
+        age = (len(periods) - 1 - periods.get_indexer(values)) / weighting.half_life
+        total_mass = float((np.exp2(-age) / counts).sum())
+        weights = np.exp2(np.log2(len(values) / total_mass) - np.log2(counts) - age)
+    if (weights <= 0.0).any():
+        raise ValueError("sample_weights_unrepresentable")
     return weights
 
 

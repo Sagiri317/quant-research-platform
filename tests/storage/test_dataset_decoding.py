@@ -5,6 +5,7 @@ import json
 import weakref
 from datetime import date
 from decimal import Decimal
+from io import BytesIO
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -50,9 +51,10 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
-from tests.helpers.runtime_resources import capture_test_policy
+from tests.helpers.runtime_resources import capture_test_policy, disabled_gc
 from tests.storage.dataset_test_support import (
     _issued_test_policy,
+    prepared_in_filter,
 )
 from tests.storage.low_level_fixtures import (
     fixture_dataset_content_hash,
@@ -677,6 +679,91 @@ def test_metadata_free_batches_advance_without_delivering_oversized_payload(
 
     assert not delivered
     assert all(size <= 64 * 1024 for _rows, size in delivered)
+
+
+@pytest.mark.parametrize("sorted_flag", (None, False, True))
+@pytest.mark.parametrize("crc", (-(2**31), 2**31 - 1))
+@pytest.mark.parametrize("reversed_fields", (False, True))
+def test_dictionary_header_bound_accepts_crc_sorted_flag_and_field_order(
+    sorted_flag, crc, reversed_fields
+):
+    def integer(value):
+        value = (value << 1) ^ (value >> 31)
+        result = bytearray()
+        while value >= 128:
+            result.append((value & 127) | 128)
+            value >>= 7
+        result.append(value)
+        return bytes(result)
+
+    def fields(values):
+        ordered = reversed(values) if reversed_fields else values
+        return (
+            b"".join(
+                bytes((kind, number * 2)) + value for number, kind, value in ordered
+            )
+            + b"\x00"
+        )
+
+    dictionary = [(1, 5, integer(1)), (2, 5, integer(0))]
+    if sorted_flag is not None:
+        dictionary.append((3, 1 if sorted_flag else 2, b""))
+    header = fields(
+        [
+            (1, 5, integer(2)),
+            (2, 5, integer(1024**2)),
+            (3, 5, integer(1024**2)),
+            (4, 5, integer(crc)),
+            (7, 12, fields(dictionary)),
+        ]
+    )
+    assert len(header) <= 64
+    column = SimpleNamespace(
+        total_uncompressed_size=1024**2 + 16,
+        has_dictionary_page=True,
+        dictionary_page_offset=4,
+        num_values=1,
+    )
+    with BytesIO(b"PAR1" + header) as handle:
+        handle.seek(2)
+        # One existing key plus at most four length-only plain fallback values.
+        assert dataset_physical._parquet_dictionary_memo_entries(handle, column) == 5
+        assert handle.tell() == 2
+
+
+@pytest.mark.parametrize("unused_categories", (False, True))
+def test_dictionary_memo_bound_keeps_unused_keys_and_plain_fallback(
+    tmp_path, unused_categories
+):
+    categories = [f"value-{index:05d}" for index in range(2000)]
+    array = (
+        pa.DictionaryArray.from_arrays(
+            pa.array([0], type=pa.int32()), pa.array(categories)
+        )
+        if unused_categories
+        else pa.array(categories)
+    )
+    path = tmp_path / "dictionary-memo.parquet"
+    pq.write_table(
+        pa.table({"value": array}),
+        native_filesystem_path(path),
+        use_dictionary=True,
+        dictionary_pagesize_limit=64,
+        write_page_checksum=True,
+    )
+    with open_filesystem_file(path) as handle:
+        parquet = pq.ParquetFile(handle, read_dictionary=["value"])
+        try:
+            column = parquet.metadata.row_group(0).column(0)
+            bound = dataset_physical._parquet_dictionary_memo_entries(handle, column)
+            values = parquet.read().column("value").chunk(0)
+            assert len(values.dictionary) == len(categories)
+            assert bound >= len(values.dictionary)
+            if unused_categories:
+                assert column.num_values == 1
+                assert bound < len(categories) + 64
+        finally:
+            parquet.close()
 
 
 @pytest.mark.parametrize("cap", [1024**2, 4 * 1024**2])
@@ -1310,6 +1397,7 @@ def test_materialization_uses_capacity_and_keeps_explicit_parent_budget(
         assert policy.used_memory_bytes == 0
 
 
+@disabled_gc()
 def test_categorical_converter_releases_temporary_codes_after_publication(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1339,7 +1427,6 @@ def test_categorical_converter_releases_temporary_codes_after_publication(
     )
 
     output = next(converted)
-    gc.collect()
 
     assert not output.empty
     assert code_references
@@ -1406,6 +1493,9 @@ def test_chunk_iterator_verifies_session_on_close_empty_and_error(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    import sys
+
+    error_verifications = 0
     root = make_dataset_artifact_root(tmp_path, "iterator_final_verify")
     write_dataset(
         root,
@@ -1421,10 +1511,16 @@ def test_chunk_iterator_verifies_session_on_close_empty_and_error(
         original_verify = dataset_reading.DatasetSession.verify
 
         def record_verify(current: dataset_reading.DatasetSession) -> None:
-            nonlocal calls
+            nonlocal calls, error_verifications
             if current.root == root:
                 calls += 1
             original_verify(current)
+            if (
+                isinstance(sys.exception(), RuntimeError)
+                and str(sys.exception()) == "injected_read_failure"
+            ):
+                error_verifications += 1
+                raise ValueError("injected_final_identity_failure")
 
         monkeypatch.setattr(dataset_reading.DatasetSession, "verify", record_verify)
 
@@ -1462,23 +1558,25 @@ def test_chunk_iterator_verifies_session_on_close_empty_and_error(
 
     monkeypatch.setattr(
         dataset_reading,
-        "iter_dataset_file_batches",
+        "iter_declared_parquet_member_batches",
         fail_batches,
     )
-    before_error = calls
     with dataset_reading.open_dataset_session(
         root,
         columns=None,
         time_window=None,
     ) as error_session:
-        with pytest.raises(RuntimeError, match="injected_read_failure"):
+        before_error = calls
+        with pytest.raises(RuntimeError, match="injected_read_failure") as caught:
             list(
                 dataset_reading.iter_dataset_chunks(
                     error_session,
                     target_chunk_bytes=1024**2,
                 )
             )
-    assert calls > before_error
+        assert calls > before_error
+        assert error_verifications >= 1
+        assert "dataset verification also failed: ValueError" in caught.value.__notes__
 
 
 @pytest.mark.parametrize(
@@ -1644,7 +1742,7 @@ def test_materialized_context_fails_before_second_pass_allocation(
     assert concat_called is False
 
 
-def test_materialized_session_accounts_for_concat_transition(
+def test_materialized_buffers_preserve_values_within_output_budget(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     expected = pd.DataFrame({"value": ["payload"]})
@@ -1710,6 +1808,7 @@ def test_materialized_nullable_and_string_fill_is_vectorized_at_scale(
 
 
 @pytest.mark.parametrize("failure_stage", ["fill", "frame", "bound"])
+@disabled_gc()
 def test_materialized_failure_releases_output_and_closes_both_streams(
     monkeypatch: pytest.MonkeyPatch,
     failure_stage: str,
@@ -1772,7 +1871,6 @@ def test_materialized_failure_releases_output_and_closes_both_streams(
     assert opened == 2
     assert closed == 2
     assert caught.value is primary
-    gc.collect()
     assert references and all(reference() is None for reference in references)
     assert context.resource_policy.used_memory_bytes == 0
 
@@ -2653,3 +2751,376 @@ def test_timestamp_equality_keeps_predicate_precision(tmp_path, unit, offset_ns)
                     assert (result["value"] == predicate).all()
             assert rows == (1 if offset_ns in (0, 1000000) else 0)
         assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("dtype", ["object", "float64"])
+@pytest.mark.parametrize("value", [float("inf"), float("-inf")])
+def test_numeric_infinity_is_rejected_independently_of_logical_dtype(
+    tmp_path, dtype, value
+):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    frame = make_default_dataset_frame().iloc[:1].copy()
+    frame["value"] = pd.Series([value], index=frame.index, dtype=dtype)
+    root = make_dataset_artifact_root(tmp_path, "nonfinite")
+    with pytest.raises(ValueError, match="dataset_infinite_value"):
+        write_dataset(
+            root,
+            frame,
+            spec=make_processed_dataset_spec(
+                "nonfinite", value_role=ColumnRole.CONTEXT
+            ),
+        )
+    assert not root.exists()
+
+
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("values", [[2**53 + 1, None], [3, None], [2**53 + 1, 5]])
+def test_public_nested_integer_null_readback_is_exact(tmp_path, nested, values):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    frame = make_default_dataset_frame().iloc[:1].copy()
+    frame["value"] = pd.Series(
+        [{"items": values} if nested else values], index=frame.index, dtype=object
+    )
+    root = make_dataset_artifact_root(tmp_path, "nested_exact")
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec("nested_exact", value_role=ColumnRole.CONTEXT),
+    )
+    physical = (
+        pq.read_table(next((root / "data").rglob("*.parquet")))
+        .column("value")[0]
+        .as_py()
+    )
+    expected = physical["items"] if nested else physical
+    assert expected == values
+    for mode in (DatasetReadMode.CHUNKED, DatasetReadMode.MATERIALIZED):
+        result = read_dataset(root, mode=mode)
+        output = (
+            pd.concat(list(result), ignore_index=True)
+            if mode is DatasetReadMode.CHUNKED
+            else result
+        )
+        observed = output["value"].iloc[0]
+        observed = observed["items"] if nested else observed
+        assert int(observed[0]) == values[0]
+        assert (
+            pd.isna(observed[1]) if values[1] is None else int(observed[1]) == values[1]
+        )
+
+
+@pytest.mark.parametrize("zone", ["UTC", "Asia/Shanghai", "America/New_York"])
+@pytest.mark.parametrize("unit", ["s", "ms", "us", "ns"])
+def test_materialized_timezone_context_preserves_epoch_unit_and_nat(
+    tmp_path, zone, unit
+):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    frame = make_default_dataset_frame()
+    frame["value"] = pd.Series(
+        pd.to_datetime(["2024-01-15", "2024-07-15", None])
+        .tz_localize(zone)
+        .as_unit(unit)
+    )
+    root = make_dataset_artifact_root(tmp_path, "timezone_context")
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec(
+            "timezone_context", value_role=ColumnRole.CONTEXT
+        ),
+    )
+    expected = frame.sort_values(["market_id", "asset_id", "timestamp"])[
+        "value"
+    ].reset_index(drop=True)
+    for mode in (DatasetReadMode.MATERIALIZED, DatasetReadMode.CHUNKED):
+        result = read_dataset(root, mode=mode)
+        result = (
+            pd.concat(list(result), ignore_index=True)
+            if mode is DatasetReadMode.CHUNKED
+            else result
+        )
+        result = result.sort_values(["market_id", "asset_id", "timestamp"])
+        assert result["value"].dtype == expected.dtype
+        np.testing.assert_array_equal(result["value"].array.asi8, expected.array.asi8)
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+@pytest.mark.parametrize("parts", [1, 2])
+def test_categorical_single_and_multiple_parts_share_the_same_normal_form(
+    tmp_path, ordered, parts
+):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["value"] = pd.Categorical(
+        ["a", "b"], categories=["b", "a", "unused"], ordered=ordered
+    )
+    roots = [
+        make_dataset_artifact_root(tmp_path / str(index), "categories")
+        for index in range(2)
+    ]
+    for index, root in enumerate(roots):
+        current = frame.copy()
+        if index and not ordered:
+            current["value"] = current["value"].cat.reorder_categories(
+                ["a", "b", "unused"]
+            )
+        data = current if parts == 1 else (current.iloc[:1], current.iloc[1:])
+        write_dataset(
+            root,
+            data,
+            spec=make_processed_dataset_spec(
+                "categories", value_role=ColumnRole.CONTEXT
+            ),
+        )
+        actual = read_dataset(root)
+        assert actual["value"].cat.ordered is ordered
+        if ordered:
+            assert list(actual["value"].cat.categories) == ["b", "a", "unused"]
+    assert compare_datasets(*roots).matches
+
+
+@pytest.mark.parametrize("kind", ["timestamp", "duration", "time", "float"])
+def test_membership_does_not_round_queries_into_matches(kind):
+    from datetime import time
+
+    if kind == "timestamp":
+        dtype, stored = pa.timestamp("ms"), pd.Timestamp("2024-01-01")
+        query = stored + pd.Timedelta(1, "ns")
+    elif kind == "duration":
+        dtype, stored = pa.duration("ms"), pd.Timedelta(1, "s")
+        query = stored + pd.Timedelta(1, "ns")
+    elif kind == "time":
+        dtype, stored, query = pa.time32("s"), time(1, 2, 3), time(1, 2, 3, 1)
+    else:
+        dtype, stored, query = pa.float32(), 1.0, float(np.nextafter(1.0, 2.0))
+    batch = pa.record_batch([pa.array([stored], type=dtype)], names=["value"])
+    with runtime_resource_policy_scope(explicit_cap_bytes=8 * 1024**2) as policy:
+        for values, expected in [
+            ((query,), 0),
+            ((stored,), 1),
+            ((query, stored, stored), 1),
+        ]:
+            with prepared_in_filter(
+                pa.field("value", dtype), values, resource_policy=policy
+            ) as prepared:
+                result = dataset_physical._filter_arrow_batch(
+                    batch, [("value", "in", prepared)], operation_headroom_bytes=1024**2
+                )
+                assert result.num_rows == expected
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+
+
+def test_comparison_rechecks_dtype_structure_after_schema_hash_collision(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.storage.datasets import fingerprinting
+
+    roots = [
+        make_dataset_artifact_root(tmp_path / str(index), "dtype_exact")
+        for index in range(2)
+    ]
+    for root, dtype in zip(roots, ("int64", "Int64"), strict=True):
+        frame = make_default_dataset_frame().iloc[:2].copy()
+        frame["value"] = frame["value"].astype(dtype)
+        write_dataset(root, frame, spec=make_processed_dataset_spec("dtype_exact"))
+    assert compare_datasets(*roots).status == "SCHEMA_MISMATCH"
+    monkeypatch.setattr(fingerprinting, "canonical_json_hash", lambda _value: "a" * 64)
+    assert compare_datasets(*roots).status == "SCHEMA_MISMATCH"
+
+
+@pytest.mark.parametrize("location", ["body", "observer"])
+def test_explicit_generator_exit_keeps_primary_during_final_verification(
+    tmp_path, monkeypatch, location
+):
+    root = make_dataset_artifact_root(tmp_path, "generator_exit")
+    write_dataset(
+        root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("generator_exit"),
+    )
+    with dataset_reading.open_dataset_session(
+        root, columns=None, time_window=None
+    ) as session:
+        original_verify = dataset_reading.DatasetSession.verify
+        primary = GeneratorExit("explicit_primary")
+
+        def verify(current):
+            import sys
+
+            if sys.exception() is primary:
+                raise ValueError("secondary_identity_failure")
+            original_verify(current)
+
+        monkeypatch.setattr(dataset_reading.DatasetSession, "verify", verify)
+        with pytest.raises(GeneratorExit) as caught:
+            if location == "body":
+                with session.filtered_view(TimeWindow("2014-01-01", "2015-12-31")):
+                    raise primary
+            else:
+
+                def observe(_batch, _frame):
+                    raise primary
+
+                list(
+                    dataset_reading.iter_dataset_chunks(
+                        session, target_chunk_bytes=1024**2, batch_observer=observe
+                    )
+                )
+        assert caught.value is primary
+        assert "dataset verification also failed: ValueError" in primary.__notes__
+
+
+def test_materialized_nested_output_reserves_all_retained_leaves(tmp_path):
+    import sys
+
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    root = make_dataset_artifact_root(tmp_path, "nested_capacity")
+    values = [[f"leaf_{row}_{item}" for item in range(4096)] for row in range(64)]
+    frame = make_default_dataset_frame(
+        asset_ids=[f"asset_{index}" for index in range(64)],
+        dates=["2024-01-01"] * 64,
+        values=values,
+    )
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec(
+            "nested_capacity", value_role=ColumnRole.CONTEXT
+        ),
+    )
+    del values, frame
+    gc.collect()
+    with runtime_resource_policy_scope(explicit_cap_bytes=8 * 1024**2) as policy:
+        with dataset_reading.open_dataset_session(
+            root, columns=None, time_window=None, resource_policy=policy
+        ) as session:
+            with pytest.raises(
+                ValueError, match="dataset_.*(?:memory|target_bytes|capacity)"
+            ):
+                dataset_reading.materialize_dataset_session_owned(
+                    session, target_chunk_bytes=1024**2
+                )
+        assert policy.used_memory_bytes == 0
+    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
+        with dataset_reading.open_dataset_session(
+            root, columns=None, time_window=None, resource_policy=policy
+        ) as session:
+            owned = dataset_reading.materialize_dataset_session_owned(
+                session, target_chunk_bytes=1024**2
+            )
+            try:
+                assert len(owned.value) == 64
+                leaves = sum(
+                    sys.getsizeof(leaf)
+                    for cell in owned.value["value"]
+                    for leaf in cell
+                )
+                assert leaves > 8 * 1024**2
+                assert owned.lease.reserved_bytes >= leaves
+            finally:
+                owned.release(owner="tests.materialized.nested")
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("predicate_count", [0, 1, 2])
+@pytest.mark.parametrize("cap_mib", [4, 16, 64])
+def test_dictionary_declared_reader_materializes_combined_predicates_once(
+    tmp_path, monkeypatch, predicate_count, cap_mib
+):
+    import sys
+
+    path = tmp_path / "dictionary-predicates.parquet"
+    leaf = "x" * 768
+    source = pa.table(
+        {"key": [0, 1, None], "payload": [[leaf] * 8192, [leaf] * 8192, None]}
+    )
+    pq.write_table(source, path, use_dictionary=True)
+    del source
+    filters = [("key", ">=", 0), ("key", "<=", 1)][:predicate_count]
+    native_filter = dataset_physical.pc.filter
+    original_owner = dataset_physical._filter_arrow_batch
+    materializations = []
+
+    def buffers(value):
+        if isinstance(value, pa.RecordBatch):
+            for array in value.columns:
+                yield from buffers(array)
+        elif isinstance(value, pa.Array):
+            for buffer in value.buffers():
+                if buffer is not None:
+                    yield buffer.address, buffer.address + buffer.size
+            if isinstance(value, pa.DictionaryArray):
+                yield from buffers(value.dictionary)
+            elif isinstance(
+                value, (pa.ListArray, pa.LargeListArray, pa.FixedSizeListArray)
+            ):
+                yield from buffers(value.values)
+            elif isinstance(value, pa.StructArray):
+                for index in range(value.type.num_fields):
+                    yield from buffers(value.field(index))
+
+    def observed_filter(batch, condition, *args, **kwargs):
+        result = native_filter(batch, condition, *args, **kwargs)
+        if isinstance(batch, pa.RecordBatch):
+            intervals = [*buffers(batch), *buffers(condition), *buffers(result)]
+            current = sys._getframe(1)
+            while current is not None:
+                if current.f_globals.get("__name__") == dataset_physical.__name__:
+                    for value in current.f_locals.values():
+                        intervals.extend(buffers(value))
+                current = current.f_back
+            total = end = 0
+            for start, stop in sorted(intervals):
+                total += max(0, stop - max(start, end))
+                end = max(end, stop)
+            materializations.append(total)
+            assert total <= cap_mib * 1024**2
+        return result
+
+    def combined_once(batch, predicates, **kwargs):
+        before = len(materializations)
+        result = original_owner(batch, predicates, **kwargs)
+        assert len(materializations) - before == bool(predicates)
+        return result
+
+    monkeypatch.setattr(dataset_physical.pc, "filter", observed_filter)
+    monkeypatch.setattr(dataset_physical, "_filter_arrow_batch", combined_once)
+    rows = []
+    rejected = False
+    with runtime_resource_policy_scope(explicit_cap_bytes=cap_mib * 1024**2) as policy:
+        try:
+            with closing_iterator(
+                dataset_reading.iter_declared_parquet_member_batches(
+                    path,
+                    expected_identity=dataset_physical.dataset_file_identity(path),
+                    target_chunk_bytes=8 * 1024**2,
+                    operation_headroom_bytes=policy.operation_headroom_bytes,
+                    parquet_filters=filters,
+                )
+            ) as frames:
+                for frame in frames:
+                    rows.extend(frame["key"].fillna(-1).astype(int).tolist())
+                    for payload in frame["payload"]:
+                        if payload is not None:
+                            assert (
+                                len(payload) == 8192
+                                and payload[0] == leaf
+                                and payload[-1] == leaf
+                            )
+                    frame = payload = None
+        except ValueError as exc:
+            assert cap_mib < 64
+            assert "capacity" in str(exc) or "memory" in str(exc)
+            rejected = True
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+    if not rejected:
+        assert rows == ([0, 1] if predicate_count else [0, 1, -1])
+    if cap_mib == 64 and predicate_count:
+        assert materializations

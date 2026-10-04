@@ -1,13 +1,11 @@
 from __future__ import annotations
 
-from collections.abc import Sequence
-
 import pandas as pd
 
 
 def make_cross_section_compute_panel(
     *,
-    dates: Sequence[str] = ("2024-01-02", "2024-01-03"),
+    dates: tuple[str, str] = ("2024-01-02", "2024-01-03"),
     include_alt_signal: bool = True,
     timestamps_as_datetime: bool = True,
 ) -> pd.DataFrame:

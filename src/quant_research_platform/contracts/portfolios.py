@@ -375,15 +375,18 @@ class FundingEvent:
         if type(self.timestamp_ns) is not int or self.timestamp_ns < 0:
             raise ValueError("portfolio_funding_timestamp_invalid")
         if self.rate is not None:
-            strict_finite_float(self.rate, error="portfolio_funding_rate_invalid")
-        if (
-            self.mark_price is not None
-            and strict_finite_float(
+            object.__setattr__(
+                self,
+                "rate",
+                strict_finite_float(self.rate, error="portfolio_funding_rate_invalid"),
+            )
+        if self.mark_price is not None:
+            mark = strict_finite_float(
                 self.mark_price, error="portfolio_funding_mark_invalid"
             )
-            <= 0
-        ):
-            raise ValueError("portfolio_funding_mark_invalid")
+            if mark <= 0:
+                raise ValueError("portfolio_funding_mark_invalid")
+            object.__setattr__(self, "mark_price", mark)
 
 
 @dataclass(frozen=True, slots=True)
@@ -403,6 +406,7 @@ class FundingForecast:
         ):
             raise ValueError("portfolio_funding_forecast_coverage_invalid")
         previous = self.available_at_ns
+        normalized = []
         for item in self.cashflows:
             if (
                 type(item) is not tuple
@@ -411,11 +415,20 @@ class FundingForecast:
                 or not previous < item[0] <= self.known_until_ns
             ):
                 raise ValueError("portfolio_funding_forecast_events_invalid")
-            if item[1] is not None:
-                strict_finite_float(
+            amount = (
+                None
+                if item[1] is None
+                else strict_finite_float(
                     item[1], error="portfolio_funding_forecast_cashflow_invalid"
                 )
+            )
+            normalized.append((item[0], amount))
             previous = item[0]
+        object.__setattr__(self, "cashflows", tuple(normalized))
+
+
+def portfolio_notional_tolerance(nav: float) -> float:
+    return max(ulp(1.0) * max(1.0, nav) * 512.0, 1e-12)
 
 
 def _quantity_tolerance(*quantities: float) -> float:
@@ -433,7 +446,11 @@ def validate_portfolio_transition(
         for phase in ("before", "after", "end")
     }
     before, after, end = (phases[phase] for phase in ("before", "after", "end"))
-    tolerance = max(ulp(1.0) * max(1.0, capital.initial_capital) * 512.0, 1e-12)
+    tolerance = portfolio_notional_tolerance(
+        sum(row.value for row in before.values())
+        if capital.valuation_method == "adjusted_notional"
+        else capital.initial_capital
+    )
     if previous is None:
         if not isclose(
             sum(row.value for row in before.values()),

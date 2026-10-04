@@ -285,11 +285,9 @@ def build_prediction_result_from_persisted_model(
                             model_metadata=q_metadata,
                             resource_policy=policy,
                         )
-                        try:
+                        with q_result:
                             yield from q_result.output_chunks
                             state.add(q_result.prediction_metadata_factory())
-                        finally:
-                            q_result.close()
 
     source = output_chunks()
     return PredictionResult(

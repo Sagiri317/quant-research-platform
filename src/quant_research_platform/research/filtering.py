@@ -63,14 +63,11 @@ def _filter_mode_scope(
         filtered = frame
     else:
         working_bytes = _filter_working_set_bound(frame, mode=mode)
-        if (
-            policy is not None
-            and policy.explicit_memory_cap_bytes is not None
-            and policy.used_memory_bytes + working_bytes
-            > policy.explicit_memory_cap_bytes
-        ):
-            raise ValueError("research_filter_working_set_exceeds_task_memory_budget")
         if policy is not None:
+            policy.require_working_set(
+                working_bytes,
+                error="research_filter_working_set_exceeds_task_memory_budget",
+            )
             lease = policy.lease("research.filter", working_bytes)
         try:
             filtered, metadata = apply_filter_mode(

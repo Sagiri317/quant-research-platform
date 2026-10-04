@@ -1324,11 +1324,16 @@ def test_top_level_float_primary_key_fingerprint_rejects_unsupported_width(
     data_type: pa.DataType,
 ) -> None:
     table = pa.table({"key": pa.array([-0.0, 0.0], type=data_type)})
-    with pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"):
+    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
+    with (
+        runtime_resource_policy_scope(policy),
+        pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"),
+    ):
         tuple(
             dataset_fingerprinting._iter_fingerprint_hashes(
                 table.to_pandas(),
                 target_bytes=1024**2,
+                resource_policy=policy,
                 arrow_schema=table.schema,
                 primary_key=("key",),
             )

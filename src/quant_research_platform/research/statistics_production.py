@@ -135,6 +135,9 @@ def build_a_share_statistics_tables(
     family_ids = tuple(
         dict.fromkeys(item["family_id"] for item in model_entries.values())
     )
+    # Dataset columns are strings; ordinal keys keep business IDs out of this namespace.
+    family_columns = {family: index for index, family in enumerate(family_ids)}
+    prediction_columns = tuple(family_columns.values())
     benchmark_id = protocol_manifest["research_configuration"]["comparison_model_id"]
     if benchmark_id not in family_ids:
         raise ValueError("statistics_model_benchmark_missing")
@@ -243,18 +246,20 @@ def build_a_share_statistics_tables(
                                         np.asarray(values, dtype="float64"),
                                         index=keys.index,
                                     )
-                                mature[family_id] = scores.reindex(mature.index)
+                                mature[family_columns[family_id]] = scores.reindex(
+                                    mature.index
+                                )
                             if mature.empty:
                                 continue
                             mature[_PREDICTION_COLUMN] = mature[
-                                selection["selected_family_id"]
+                                family_columns[selection["selected_family_id"]]
                             ]
                             rank = cross_sectional_rank_ic(
                                 mature,
                                 value_columns=(
                                     *factors,
                                     _PREDICTION_COLUMN,
-                                    *family_ids,
+                                    *prediction_columns,
                                 ),
                                 label_column=primary_label,
                             )
@@ -262,23 +267,24 @@ def build_a_share_statistics_tables(
                             daily = rank.iloc[0]
                             paired_rank, paired_count = _common_model_rank_ic(
                                 mature,
-                                family_ids=family_ids,
+                                family_ids=prediction_columns,
                                 label_column=primary_label,
                             )
                             comparison_records.extend(paired_rank.to_dict("records"))
                             common = bool(
                                 np.isfinite(
-                                    paired_rank.loc[:, list(family_ids)].to_numpy(
-                                        dtype="float64"
-                                    )
+                                    paired_rank.loc[
+                                        :, list(prediction_columns)
+                                    ].to_numpy(dtype="float64")
                                 ).all()
                             )
                             for family_id in family_ids:
-                                value = daily[family_id]
+                                column = family_columns[family_id]
+                                value = daily[column]
                                 defined = bool(np.isfinite(value))
                                 paired_assets = (
                                     mature.loc[
-                                        mature[[family_id, primary_label]]
+                                        mature[[column, primary_label]]
                                         .notna()
                                         .all(axis=1),
                                         "asset_id",
@@ -337,7 +343,7 @@ def build_a_share_statistics_tables(
 
         rank_by_date = pd.DataFrame.from_records(
             rank_records,
-            columns=["timestamp", *factors, _PREDICTION_COLUMN, *family_ids],
+            columns=["timestamp", *factors, _PREDICTION_COLUMN],
         )
         factor_summary = _factor_summary(
             rank_by_date,
@@ -382,8 +388,14 @@ def build_a_share_statistics_tables(
                 "asset_coverage_id",
             ),
         )
-        comparison_by_date = pd.DataFrame.from_records(
-            comparison_records, columns=["timestamp", *family_ids]
+        comparison_by_date = (
+            pd.DataFrame.from_records(
+                comparison_records, columns=["timestamp", *prediction_columns]
+            )
+            .set_index("timestamp")
+            .rename(
+                columns={column: family for family, column in family_columns.items()}
+            )
         )
         common_count = int(
             comparison_by_date.loc[:, list(family_ids)].notna().all(axis=1).sum()
@@ -393,6 +405,9 @@ def build_a_share_statistics_tables(
             + 256 * len(rank_by_date) * len(family_ids)
             if inference_blocker is None and common_count > block_size
             else 65536
+        )
+        resource_policy.require_working_set(
+            bootstrap_workspace, error="statistics_bootstrap_capacity_exceeded"
         )
         with resource_policy.lease(
             "research.statistics.bootstrap_workspace", bootstrap_workspace
@@ -817,7 +832,7 @@ def _model_comparison(
     root_seed,
     dataset_id,
 ):
-    common = rank_by_date.set_index("timestamp").loc[:, list(family_ids)].dropna()
+    common = rank_by_date.loc[:, list(family_ids)].dropna()
     losses = -common
     challengers = tuple(family for family in family_ids if family != benchmark_id)
     comparisons = []

@@ -651,7 +651,7 @@ class StatisticsArtifact:
                 if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
                     raise ValueError("statistics_table_schema_invalid")
                 row_bytes, fixed_bytes = parquet_decoded_working_set_bounds(
-                    parquet, _TABLE_COLUMNS[member]
+                    parquet, _TABLE_COLUMNS[member], handle=_handle
                 )
                 working_bytes = max(
                     1, 4 * fixed_bytes + 8 * row_bytes * parquet.metadata.num_rows
@@ -1045,6 +1045,11 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             or (defined & result.access_window.ne("holdout")).any()
             or (bootstrap_defined & ~defined).any()
             or result.loc[defined, list(measurements)].isna().any().any()
+            or result.loc[defined, ["global_mean", "quarterly_mean", "mean_difference"]]
+            .isna()
+            .any()
+            .any()
+            or (defined & result.observation_count.lt(2)).any()
             or result.loc[~defined, list(measurements)].notna().any().any()
             or result.loc[defined, "reason"].ne("").any()
             or result.loc[~defined, "reason"].str.strip().eq("").any()

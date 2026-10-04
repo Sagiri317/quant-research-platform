@@ -355,96 +355,110 @@ def _write_evaluation_artifact_chunks(
                     required=required["grouped_label_values"],
                     error_name="evaluation_grouped_label_values",
                 )
-                validate_evaluation_artifact_structure(
-                    metrics=metrics,
-                    grouped_label_values=grouped,
-                    ic_summary=pd.DataFrame(columns=EVALUATION_IC_SUMMARY_COLUMNS),
-                    group_spread_summary=pd.DataFrame(
-                        columns=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS
-                    ),
-                    spec=spec,
-                    n_groups=n_groups,
-                )
-                timestamps = strict_timestamp_series(
-                    metrics["timestamp"],
-                    error="evaluation_diagnostics_inconsistent",
-                )
-                n_obs = strict_non_negative_count_series(metrics["n_obs"])
-                rows_input += int(metadata["rows_input"])
-                rows_after_filter_mode += int(metadata["rows_after_filter_mode"])
-                rows_after_signal_label_dropna += int(n_obs.sum())
-                metric_rows += len(metrics)
-                grouped_label_value_rows += len(grouped)
-                if spec.evaluation_axis == "single_asset_time_series":
-                    chunk_timestamp_count = int(metadata["timestamp_count"])
-                    timestamp_count += chunk_timestamp_count
-                    skipped_timestamp_count += int(metadata["skipped_timestamp_count"])
-                    chunk_min = metadata["min_timestamp"]
-                    chunk_max = metadata["max_timestamp"]
-                    if chunk_timestamp_count == 0:
-                        if (
-                            not metrics.empty
-                            or not grouped.empty
-                            or chunk_min is not None
-                            or chunk_max is not None
-                        ):
-                            raise ValueError("evaluation_diagnostics_inconsistent")
-                    elif (
-                        chunk_timestamp_count < 0
-                        or not isinstance(chunk_min, str)
-                        or not isinstance(chunk_max, str)
-                    ):
-                        raise ValueError("evaluation_diagnostics_inconsistent")
-                else:
-                    timestamp_count += int(timestamps.nunique())
-                    skipped_timestamp_count += int(
-                        timestamps.loc[n_obs.lt(2)].nunique()
-                    )
-                    chunk_min = (
-                        time_value_isoformat(
-                            pd.Timestamp(timestamps.min()),
-                            preserve_datetime=True,
-                        )
-                        if not timestamps.empty
-                        else None
-                    )
-                    chunk_max = (
-                        time_value_isoformat(
-                            pd.Timestamp(timestamps.max()),
-                            preserve_datetime=True,
-                        )
-                        if not timestamps.empty
-                        else None
-                    )
-                if chunk_min is not None and chunk_max is not None:
-                    min_timestamp = (
-                        chunk_min
-                        if min_timestamp is None
-                        else min(min_timestamp, chunk_min)
-                    )
-                    max_timestamp = (
-                        chunk_max
-                        if max_timestamp is None
-                        else max(max_timestamp, chunk_max)
-                    )
-                chunk_filter_columns = tuple(
-                    str(column) for column in metadata["filter_columns_used"]
-                )
-                chunk_filter_definition = str(metadata["filter_definition"])
-                if not filter_definition_value:
-                    filter_columns_used = chunk_filter_columns
-                    filter_definition_value = chunk_filter_definition
-                elif (
-                    filter_columns_used != chunk_filter_columns
-                    or filter_definition_value != chunk_filter_definition
-                ):
-                    raise ValueError("evaluation_diagnostics_inconsistent")
                 with _parquet_frames_reservation(
                     ((metrics, ()), (grouped, ())),
                     owned_lease=owned_lease,
                 ):
-                    write_frame("metrics", metrics)
-                    write_frame("grouped_label_values", grouped)
+                    try:
+                        validate_evaluation_artifact_structure(
+                            metrics=metrics,
+                            grouped_label_values=grouped,
+                            ic_summary=pd.DataFrame(
+                                columns=EVALUATION_IC_SUMMARY_COLUMNS
+                            ),
+                            group_spread_summary=pd.DataFrame(
+                                columns=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS
+                            ),
+                            spec=spec,
+                            n_groups=n_groups,
+                        )
+                        timestamps = strict_timestamp_series(
+                            metrics["timestamp"],
+                            error="evaluation_diagnostics_inconsistent",
+                        )
+                        n_obs = strict_non_negative_count_series(metrics["n_obs"])
+                        rows_input += int(metadata["rows_input"])
+                        rows_after_filter_mode += int(
+                            metadata["rows_after_filter_mode"]
+                        )
+                        rows_after_signal_label_dropna += int(n_obs.sum())
+                        metric_rows += len(metrics)
+                        grouped_label_value_rows += len(grouped)
+                        if spec.evaluation_axis == "single_asset_time_series":
+                            chunk_timestamp_count = int(metadata["timestamp_count"])
+                            timestamp_count += chunk_timestamp_count
+                            skipped_timestamp_count += int(
+                                metadata["skipped_timestamp_count"]
+                            )
+                            chunk_min = metadata["min_timestamp"]
+                            chunk_max = metadata["max_timestamp"]
+                            if chunk_timestamp_count == 0:
+                                if (
+                                    not metrics.empty
+                                    or not grouped.empty
+                                    or chunk_min is not None
+                                    or chunk_max is not None
+                                ):
+                                    raise ValueError(
+                                        "evaluation_diagnostics_inconsistent"
+                                    )
+                            elif (
+                                chunk_timestamp_count < 0
+                                or not isinstance(chunk_min, str)
+                                or not isinstance(chunk_max, str)
+                            ):
+                                raise ValueError("evaluation_diagnostics_inconsistent")
+                        else:
+                            timestamp_count += int(timestamps.nunique())
+                            skipped_timestamp_count += int(
+                                timestamps.loc[n_obs.lt(2)].nunique()
+                            )
+                            chunk_min = (
+                                time_value_isoformat(
+                                    pd.Timestamp(timestamps.min()),
+                                    preserve_datetime=True,
+                                )
+                                if not timestamps.empty
+                                else None
+                            )
+                            chunk_max = (
+                                time_value_isoformat(
+                                    pd.Timestamp(timestamps.max()),
+                                    preserve_datetime=True,
+                                )
+                                if not timestamps.empty
+                                else None
+                            )
+                        if chunk_min is not None and chunk_max is not None:
+                            min_timestamp = (
+                                chunk_min
+                                if min_timestamp is None
+                                else min(min_timestamp, chunk_min)
+                            )
+                            max_timestamp = (
+                                chunk_max
+                                if max_timestamp is None
+                                else max(max_timestamp, chunk_max)
+                            )
+                        chunk_filter_columns = tuple(
+                            str(column) for column in metadata["filter_columns_used"]
+                        )
+                        chunk_filter_definition = str(metadata["filter_definition"])
+                        if not filter_definition_value:
+                            filter_columns_used = chunk_filter_columns
+                            filter_definition_value = chunk_filter_definition
+                        elif (
+                            filter_columns_used != chunk_filter_columns
+                            or filter_definition_value != chunk_filter_definition
+                        ):
+                            raise ValueError("evaluation_diagnostics_inconsistent")
+                        write_frame("metrics", metrics)
+                        write_frame("grouped_label_values", grouped)
+                    finally:
+                        metrics = grouped = metadata = value = timestamps = n_obs = None
+                        if isinstance(item, OwnedValue):
+                            item.value = None
+                        item = None
         flush("metrics")
         flush("grouped_label_values")
         for name in tuple(writers):

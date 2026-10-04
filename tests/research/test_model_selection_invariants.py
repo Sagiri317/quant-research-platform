@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from fractions import Fraction
+
 import numpy as np
 import pandas as pd
 import pytest
@@ -88,7 +90,7 @@ def test_model_selection_rejects_nonfinite_values() -> None:
         )
 
 
-@pytest.mark.parametrize("residual", [1e155, 1e-155, 0.0, 2.0])
+@pytest.mark.parametrize("residual", [1e155, 1e-155, 2e-161, 3e-161, 0.0, 2.0])
 def test_model_selection_mse_scales_before_squaring(residual: float) -> None:
     frame = pd.DataFrame(
         {
@@ -109,7 +111,7 @@ def test_model_selection_mse_scales_before_squaring(residual: float) -> None:
     )
     assert whole == split
     assert whole["validation_mse"] == pytest.approx(
-        (residual / 10) ** 2, rel=1e-12, abs=0.0
+        float(Fraction.from_float(residual) ** 2 / len(frame)), rel=1e-12, abs=0.0
     )
     assert whole["validation_ic"] is None
     assert whole["validation_rankic"] is None
@@ -453,3 +455,56 @@ def test_forced_memory_sqlite_accounts_unspilled_sorters_and_trees(
             assert query_calls == [True]
         assert policy.used_memory_bytes == 0
     assert list(scratch.iterdir()) == []
+
+
+def test_metric_consumer_drops_owned_input_before_next_production():
+    import gc
+    import weakref
+
+    from quant_research_platform.runtime.resources import (
+        OwnedValue,
+        pandas_frame_payload_bytes,
+        runtime_resource_policy_scope,
+    )
+
+    references = []
+    was_enabled = gc.isenabled()
+    gc.disable()
+    try:
+        with runtime_resource_policy_scope() as policy:
+
+            def chunks():
+                for day in range(3):
+                    assert all(reference() is None for reference in references)
+                    frame = pd.DataFrame(
+                        {
+                            "timestamp": pd.Timestamp("2023-01-01")
+                            + pd.Timedelta(days=day),
+                            "asset_id": ["a", "b", "c"],
+                            "label": [1.0, 2.0, 3.0],
+                            "prediction": [1.0, 2.0, 3.0],
+                        }
+                    )
+                    references.append(weakref.ref(frame))
+                    item = OwnedValue(
+                        frame,
+                        policy.lease(
+                            "test.metric.input", pandas_frame_payload_bytes(frame)
+                        ),
+                    )
+                    frame = None
+                    yield item
+                    item = None
+
+            actual = evaluate_model_trial_metrics_from_chunks(
+                chunks(),
+                model_id="fixture",
+                label_column="label",
+                prediction_column="prediction",
+            )
+            assert actual["validation_mse"] == 0
+            assert all(reference() is None for reference in references)
+            assert policy.used_memory_bytes == 0
+    finally:
+        if was_enabled:
+            gc.enable()

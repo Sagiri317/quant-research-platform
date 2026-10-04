@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
+from contextlib import nullcontext
 from dataclasses import dataclass
 
 import numpy as np
@@ -14,6 +15,7 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
 )
+from quant_research_platform.runtime.resources import current_runtime_resource_policy
 
 
 @dataclass(frozen=True)
@@ -198,17 +200,50 @@ def optimize_portfolio(
             ),
         },
     ]
-    result = minimize(
-        lambda weights: float(
-            -(expected_alpha @ (weights - benchmark))
-            + float(expected_transaction_cost(weights)) / nav
-        ),
-        current.copy(),
-        method="SLSQP",
-        bounds=bounds,
-        constraints=constraints,
-        options={"ftol": config.solver_ftol, "maxiter": config.solver_maxiter},
+    # SciPy 1.18 SLSQP keeps the native buffer, constraint Jacobian, numerical
+    # derivatives, multipliers and bounds alive together. Fixed variables are
+    # removed by scipy.optimize.minimize before entering the native solver.
+    n = sum(lower != upper for lower, upper in bounds)
+    m = 3 + len(columns) + len(data)
+    meq = 1
+    buffer_items = (
+        n * (n + 1) // 2
+        + 3 * m * n
+        - (m + 5 * n + 7) * meq
+        + 9 * m
+        + 8 * n * n
+        + 35 * n
+        + meq * meq
+        + 28
     )
+    working_bytes = 8 * (
+        max(1, buffer_items)
+        + 3 * m * max(1, n)
+        + 2 * (m + 2 * n + 2)
+        + 16 * len(data)
+        + 4 * m
+    )
+    policy = current_runtime_resource_policy()
+    if policy is not None:
+        policy.require_working_set(
+            working_bytes, error="optimizer_working_set_exceeds_memory_capacity"
+        )
+    with (
+        policy.lease("research.portfolio.optimizer", working_bytes)
+        if policy is not None
+        else nullcontext()
+    ):
+        result = minimize(
+            lambda weights: float(
+                -(expected_alpha @ (weights - benchmark))
+                + float(expected_transaction_cost(weights)) / nav
+            ),
+            current.copy(),
+            method="SLSQP",
+            bounds=bounds,
+            constraints=constraints,
+            options={"ftol": config.solver_ftol, "maxiter": config.solver_maxiter},
+        )
     if not result.success:
         raise ValueError("optimizer_failed_closed")
     weights = np.asarray(result.x, dtype="float64")

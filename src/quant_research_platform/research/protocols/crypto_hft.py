@@ -728,10 +728,24 @@ class CryptoProtocol:
             for key, value in full["model_scopes"].items()
             if key in model_ids
         }
+        execution = plan["execution"]
+        if calibration is not None:
+            limits = plan["exposure_limits"][candidate.asset_id]
+            maker = execution["maker"]
+            selected_plan["execution"] = {
+                "maker": {
+                    "order_quantity": min(
+                        limits["max_order_quantity"],
+                        2 * limits["max_position_quantity"],
+                    ),
+                    "latency_ms": maker["latency_ms"],
+                    "min_calibration_samples": maker["min_calibration_samples"],
+                }
+            }
+            return result
         selected_plan["exposure_limits"] = {
             candidate.asset_id: plan["exposure_limits"][candidate.asset_id]
         }
-        execution = plan["execution"]
         selected_plan["execution"] = {
             key: execution[key]
             for key in (
@@ -740,24 +754,22 @@ class CryptoProtocol:
                 else ("taker_fee_bps", "latency_ms", "markout_horizon_ms")
             )
         }
-        if calibration is None:
-            result["execution_mode"] = descriptor.execution_mode
-            result["execution_target_id"] = descriptor.target_id
-            selected_plan.update(
-                {key: plan[key] for key in ("initial_capital", "valuation_currency")}
+        result["execution_mode"] = descriptor.execution_mode
+        result["execution_target_id"] = descriptor.target_id
+        selected_plan.update(
+            {key: plan[key] for key in ("initial_capital", "valuation_currency")}
+        )
+        if producer_kind == "STATISTIC":
+            result["portfolio_statistics"] = full["portfolio_statistics"]
+            selected_plan["execution"].update(
+                {
+                    key: execution[key]
+                    for key in (
+                        "fee_scenarios_bps",
+                        "additional_spread_scenarios_bps",
+                    )
+                }
             )
-            if producer_kind == "STATISTIC":
-                result["portfolio_statistics"] = full["portfolio_statistics"]
-                selected_plan["execution"].update(
-                    {
-                        key: execution[key]
-                        for key in (
-                            "latency_scenarios_ms",
-                            "fee_scenarios_bps",
-                            "additional_spread_scenarios_bps",
-                        )
-                    }
-                )
         return result
 
     def model_ids_for_target(self, target_id):
@@ -801,11 +813,46 @@ class CryptoProtocol:
         return self.execution_target_for_target(target_id).candidate
 
     def portfolio_candidates(self):
-        return portfolio_candidates(
+        candidates = portfolio_candidates(
             self.configuration()["portfolios"]
             if self.configuration_json is not None
             else []
         )
+        if self.research_plan is None or self.research_plan.execution is None:
+            return candidates
+        execution = self.research_plan.execution
+        seen = {
+            (
+                candidate.asset_id,
+                candidate.model_id,
+                execution.latency_ms
+                if candidate.latency_ms is None
+                else candidate.latency_ms,
+            )
+            for candidate in candidates
+            if isinstance(candidate, CryptoTakerCandidate)
+        }
+        result = list(candidates)
+        candidate_ids = {candidate.candidate_id for candidate in candidates}
+        for candidate in candidates:
+            if (
+                not isinstance(candidate, CryptoTakerCandidate)
+                or candidate.latency_ms is not None
+            ):
+                continue
+            for latency in execution.latency_scenarios_ms:
+                key = (candidate.asset_id, candidate.model_id, latency)
+                if key in seen:
+                    continue
+                candidate_id = f"{candidate.candidate_id}_latency_{latency}ms"
+                if candidate_id in candidate_ids:
+                    raise ValueError("research_portfolio_candidate_duplicate")
+                result.append(
+                    replace(candidate, candidate_id=candidate_id, latency_ms=latency)
+                )
+                seen.add(key)
+                candidate_ids.add(candidate_id)
+        return tuple(result)
 
     def statistics_table_group(self, target_id):
         if any(

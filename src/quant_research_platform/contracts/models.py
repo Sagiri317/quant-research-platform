@@ -502,15 +502,23 @@ def validate_model_metadata_core(
         ):
             raise ValueError("invalid_model_metadata")
     rank_parameters = metadata.get("rank_parameters")
-    if metadata["model_algorithm"] in rank_algorithms and (
-        quarterly or rank_parameters is not None
-    ):
+    if metadata["model_algorithm"] in rank_algorithms:
         expected = (
-            {"columns", "directions"}
+            {"columns", "directions", "label_calibration"}
             if metadata["model_algorithm"] == "equal_weight_rank_ensemble"
-            else {"columns", "weights"}
+            else {"columns", "weights", "label_calibration"}
         )
         if type(rank_parameters) is not dict or set(rank_parameters) != expected:
+            raise ValueError("invalid_model_metadata")
+        calibration = rank_parameters["label_calibration"]
+        if (
+            type(calibration) is not list
+            or len(calibration) != 2
+            or any(
+                type(value) not in {int, float} or not np.isfinite(value)
+                for value in calibration
+            )
+        ):
             raise ValueError("invalid_model_metadata")
         rank_columns = rank_parameters["columns"]
         if (

@@ -24,6 +24,7 @@ from quant_research_platform.contracts.data import (
     DataGrain,
     InterimDataSpec,
 )
+from quant_research_platform.contracts.json_codec import json_record_working_set_bytes
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.validation import (
     strict_string_series,
@@ -63,7 +64,7 @@ from quant_research_platform.storage.identity import (
     require_unaliased_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import read_manifest
+from quant_research_platform.storage.manifests import read_bounded_qrp_json
 
 _INDICATORS = tuple(field for fields in FINANCIAL_FIELDS.values() for field in fields)
 _DISCLOSURE_INDICATORS = {"STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE"}
@@ -154,39 +155,54 @@ def _raw_requests(raw_root: Path, *, financial: bool):
             if not re.fullmatch(r"[0-9a-f]{64}", directory.name):
                 continue
             require_unaliased_path(directory, error="choice_raw_identity_changed")
-            manifest = read_manifest(directory / "response.metadata.json")
-            try:
-                payload = manifest["metadata"]["request"]
-                if type(payload["arguments"]) is not list:
-                    raise ValueError("choice_raw_request_metadata_invalid")
-                request = ChoiceRequest(
-                    endpoint=payload["endpoint"],
-                    arguments=tuple(payload["arguments"]),
-                    sdk_version=payload["sdk_version"],
-                    cutoff=date.fromisoformat(payload["cutoff"]),
-                    max_response_bytes=manifest["byte_count"],
-                )
-                request_identity = request.identity()
-            except (KeyError, TypeError) as error:
-                raise ValueError("choice_raw_request_metadata_invalid") from error
-            if request_identity != directory.name or request.endpoint != "css":
-                raise ValueError("choice_raw_identity_changed")
-            options = dict(
-                (name.lower(), value)
-                for part in request.arguments[2].split(",")
-                if part
-                for name, _, value in (part.partition("="),)
+            policy = current_runtime_resource_policy()
+            path = directory / "response.metadata.json"
+            expected = dataset_file_identity(path)
+            bound = 2 * json_record_working_set_bytes(expected.size)
+            policy.require_working_set(
+                bound, error="choice_discovery_exceeds_task_memory_budget"
             )
-            fields = set(request.arguments[1].upper().split(","))
-            disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
-            snapshot = (
-                financial
-                and bool(set(_INDICATORS).intersection(fields))
-                and options.get("type", "1") in {"1", "3"}
-            )
-            if "reportdate" not in options or not (disclosure or snapshot):
-                continue
-            yield directory, request, options, disclosure
+            with policy.lease("choice.raw.discovery", bound):
+                try:
+                    manifest = read_bounded_qrp_json(path, expected_identity=expected)[
+                        1
+                    ]
+                    try:
+                        payload = manifest["metadata"]["request"]
+                        if type(payload["arguments"]) is not list:
+                            raise ValueError("choice_raw_request_metadata_invalid")
+                        request = ChoiceRequest(
+                            endpoint=payload["endpoint"],
+                            arguments=tuple(payload["arguments"]),
+                            sdk_version=payload["sdk_version"],
+                            cutoff=date.fromisoformat(payload["cutoff"]),
+                            max_response_bytes=manifest["byte_count"],
+                        )
+                        request_identity = request.identity()
+                    except (KeyError, TypeError) as error:
+                        raise ValueError(
+                            "choice_raw_request_metadata_invalid"
+                        ) from error
+                    if request_identity != directory.name or request.endpoint != "css":
+                        raise ValueError("choice_raw_identity_changed")
+                    options = dict(
+                        (name.lower(), value)
+                        for part in request.arguments[2].split(",")
+                        if part
+                        for name, _, value in (part.partition("="),)
+                    )
+                    fields = set(request.arguments[1].upper().split(","))
+                    disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
+                    snapshot = (
+                        financial
+                        and bool(set(_INDICATORS).intersection(fields))
+                        and options.get("type", "1") in {"1", "3"}
+                    )
+                    if "reportdate" not in options or not (disclosure or snapshot):
+                        continue
+                    yield directory, request, options, disclosure
+                finally:
+                    manifest = payload = request = options = fields = None
 
 
 @contextmanager
@@ -418,7 +434,7 @@ def _snapshot(index, pair, day, branch):
     }
 
 
-def _report_versions(index, pair, first):
+def _report_versions(index, pair, first, end):
     initial = _snapshot(index, pair, first, "1")
     if initial is None:
         raise PortfolioTargetBlocked("choice_first_disclosure_snapshot_missing")
@@ -446,7 +462,7 @@ def _report_versions(index, pair, first):
     with closing_iterator(events):
         for payload in events:
             event = date.fromisoformat(json.loads(payload))
-            if event == first:
+            if event == first or (end is not None and event > end):
                 continue
             changed: dict[int, set[float | None]] = {}
             requests = []
@@ -501,6 +517,12 @@ def _rows(index, data_id, start, end) -> Iterator[tuple[object, ...]]:
                 end is not None and period > end
             ):
                 continue
+            disclosure = _get(index, "disclosure", pair)
+            first = (
+                date.fromisoformat(disclosure[2]) if disclosure is not None else None
+            )
+            if first is not None and end is not None and first > end:
+                continue
             coordinates = index.identity_payload_values(
                 namespace=f"disclosure_coordinates:{pair[0]}:{pair[1]}"
             )
@@ -518,10 +540,8 @@ def _rows(index, data_id, start, end) -> Iterator[tuple[object, ...]]:
                                 f"EndDate={coordinate[2]}; type={coordinate[3]}"
                             )
                             raise error
-            disclosure = _get(index, "disclosure", pair)
-            if disclosure is None:
+            if first is None:
                 raise PortfolioTargetBlocked("choice_first_disclosure_missing")
-            first = date.fromisoformat(disclosure[2])
             with closing_iterator(
                 index.identity_payload_values(namespace=f"events:{pair[0]}:{pair[1]}")
             ) as events:
@@ -541,7 +561,9 @@ def _rows(index, data_id, start, end) -> Iterator[tuple[object, ...]]:
             if data_id == FIRST_DISCLOSURE_DATA_ID:
                 yield (pair[0][:6], pair[1], first.isoformat())
                 continue
-            for public_date, revised, values in _report_versions(index, pair, first):
+            for public_date, revised, values in _report_versions(
+                index, pair, first, end
+            ):
                 yield (
                     pair[0][:6],
                     pair[1],

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from fractions import Fraction
+from statistics import median
 
 import numpy as np
 import pandas as pd
@@ -15,13 +17,15 @@ from quant_research_platform.contracts.validation import (
 
 from .definitions import EXPECTATIONS_FACTORS
 
+FORECAST_FRESHNESS_DAYS = 90
+
 
 def build_expectations_features(
     records: pd.DataFrame,
     observations: pd.DataFrame,
     *,
     trading_sessions: Iterable[object],
-    freshness_days: int = 90,
+    freshness_days: int = FORECAST_FRESHNESS_DAYS,
     minimum_institutions: int = 3,
 ) -> pd.DataFrame:
     """Aggregate the latest PIT annual forecasts for each asset/session."""
@@ -84,7 +88,7 @@ def build_expectations_features(
         ],
         as_index=False,
         sort=False,
-    )["forecast_eps"].median()
+    )["forecast_eps"].agg(_finite_median)
     forecast = forecast.sort_values(
         ["asset_id", "available_at", "declare_date"], kind="mergesort"
     )
@@ -159,16 +163,23 @@ def _features_for_observation(
         selected.append(np.asarray(by_period[end_dates[1]], dtype="float64"))
     eps_values = selected[0]
     if len(eps_values) >= minimum_institutions:
-        median_eps = float(np.median(eps_values))
-        mad = float(np.median(np.abs(eps_values - median_eps)))
+        exact = [Fraction(float(value)) for value in eps_values]
+        center = median(exact)
+        median_eps = float(center)
+        mad = float(median(abs(value - center) for value in exact))
         base["forward_earnings_yield_fy1"] = median_eps / close
         base["forecast_dispersion_fy1"] = mad
         base["log_analyst_coverage"] = float(np.log(len(eps_values)))
     if len(selected) > 1:
         fy2 = selected[1]
         if len(fy2) >= minimum_institutions:
-            base["forward_earnings_yield_fy2"] = float(np.median(fy2)) / close
+            base["forward_earnings_yield_fy2"] = _finite_median(fy2) / close
     return base
+
+
+def _finite_median(values) -> float:
+    # Exact dyadic values preserve even centers without overflow or underflow.
+    return float(median(Fraction(float(value)) for value in values))
 
 
 def _next_session(

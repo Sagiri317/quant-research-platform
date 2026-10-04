@@ -2,9 +2,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from tempfile import TemporaryDirectory
 
-import numpy as np
 import pandas as pd
 
 from quant_research_platform.artifacts.outputs import (
@@ -17,10 +15,6 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
-from quant_research_platform.research.models.scaler import (
-    LinearScaledPredictor,
-    ModelMatrixScaler,
-)
 from quant_research_platform.research.predictions.outputs import (
     build_prediction_result_from_frames,
 )
@@ -32,81 +26,24 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage.layout import StorageLayout
 
 
-def prediction_frame_from_artifact(
-    frame: pd.DataFrame,
-    spec: PredictionSpec,
-    coefficients: np.ndarray,
-    input_columns: tuple[str, ...],
-    *,
-    prediction_model: object | None = None,
-    model_metadata: dict[str, object] | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
-) -> pd.DataFrame:
-    with TemporaryDirectory() as temp_dir:
-        prediction, _, _ = write_prediction_output_and_read(
-            Path(temp_dir),
-            (frame,),
-            spec,
-            coefficients,
-            input_columns,
-            prediction_model=prediction_model,
-            model_metadata=model_metadata,
-            resource_policy=resource_policy,
-        )
-        return prediction
-
-
-def prediction_frame_from_artifact_frames(
-    frames: tuple[pd.DataFrame, ...],
-    spec: PredictionSpec,
-    coefficients: np.ndarray,
-    input_columns: tuple[str, ...],
-    *,
-    prediction_model: object | None = None,
-    model_metadata: dict[str, object] | None = None,
-) -> pd.DataFrame:
-    with TemporaryDirectory() as temp_dir:
-        prediction, _, _ = write_prediction_output_and_read(
-            Path(temp_dir),
-            frames,
-            spec,
-            coefficients,
-            input_columns,
-            prediction_model=prediction_model,
-            model_metadata=model_metadata,
-        )
-        return prediction
-
-
 def write_prediction_output_and_read(
     project_root: Path,
     frames: tuple[pd.DataFrame, ...],
     spec: PredictionSpec,
-    coefficients: np.ndarray,
     input_columns: tuple[str, ...],
     *,
-    prediction_model: object | None = None,
-    model_metadata: dict[str, object] | None = None,
+    prediction_model: object,
+    model_metadata: dict[str, object],
     resource_policy: RuntimeResourcePolicy | None = None,
 ) -> tuple[pd.DataFrame, Path, dict[str, object]]:
     layout = StorageLayout(project_root=project_root)
     with runtime_resource_policy_scope(resource_policy) as policy:
-        if prediction_model is None:
-            prediction_model = LinearScaledPredictor(
-                tuple(coefficients),
-                ModelMatrixScaler(
-                    input_columns,
-                    (0.0,) * len(input_columns),
-                    (1.0,) * len(input_columns),
-                ),
-            )
         result = build_prediction_result_from_frames(
             frames,
             spec,
             input_columns,
             prediction_model=prediction_model,
-            model_metadata=model_metadata
-            or synthetic_prediction_model_metadata(spec, input_columns),
+            model_metadata=model_metadata,
             resource_policy=policy,
         )
         output_bundle = write_prediction_result(layout, result)

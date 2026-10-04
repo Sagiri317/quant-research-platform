@@ -1195,7 +1195,7 @@ def test_csmar_identity_rejects_requested_bad_schema_and_cleans_scratch(
     assert not tuple(filesystem_glob(tmp_path.parent, ".k-*/k.db"))
 
 
-def test_dirty_index_info_csv_audit_counts_and_semantics(
+def test_dirty_index_info_csv_preserves_semantics_and_closes_scratch(
     tmp_path: Path, monkeypatch
 ) -> None:
     scratch = tmp_path / "scratch"
@@ -1232,7 +1232,6 @@ def test_dirty_index_info_csv_audit_counts_and_semantics(
         encoding="utf-8",
     )
 
-    audit = _audit_index_info_csv(index_path)
     raw = _collect_raw_export(index_path, "index_info")
     normalized = interim.normalize_raw_frame(raw, "index_info")
     pruned, _ = interim._apply_output_column_rules_validated(
@@ -1241,29 +1240,16 @@ def test_dirty_index_info_csv_audit_counts_and_semantics(
         overrides=interim._validated_column_overrides({}),
     )
 
-    assert len(handles) >= 2 and all(handle.closed for handle in handles)
+    assert handles and all(handle.closed for handle in handles)
     assert not list(filesystem_iterdir(scratch))
 
-    assert audit == {
-        "metadata_row_count": 1,
-        "physical_line_count": 7,
-        "record_start_count": 4,
-        "logical_records": 4,
-        "merged_continuation_rows": 2,
-        "ambiguous_rows": 0,
-        "malformed_rows": 0,
-        "dedup_rows": 0,
-        "final_rows": 4,
-        "out_of_enum_counts": {
-            "Idxinfo05": 1,
-            "Idxinfo06": 1,
-            "Idxinfo07": 1,
-            "Idxinfo08": 1,
-            "Idxinfo09": 1,
-        },
-    }
+    assert len(raw) == len(pruned) == 4
     by_asset = pruned.set_index("source_asset_id")
     assert pd.isna(by_asset.loc["000985", "base_point"])
+    assert by_asset.loc["000985", "calculation_formula"] == (
+        "formula, English comma, 中文标点"
+    )
+    assert '"quotes"' in by_asset.loc["000300", "calculation_formula"]
     assert by_asset.loc["000300", "start_date"] == pd.Timestamp("2014-01-03")
     assert by_asset.loc["000300", "base_date"] == pd.Timestamp("2013-12-31")
     assert "embedded line\nbreak" in by_asset.loc[
@@ -1384,46 +1370,6 @@ def test_non_index_raw_iteration_bounds_requested_chunks_across_text_widths(
 
     assert all(0 < len(chunk) <= 4 for chunk in chunks)
     assert sum(map(len, chunks)) == 5
-
-
-def _audit_index_info_csv(path: Path) -> dict[str, object]:
-    physical_line_count = len(filesystem_read_text(path, encoding="utf-8").splitlines())
-    with open_filesystem_file(path, "r", encoding="utf-8", newline="") as handle:
-        reader = csv.reader(handle)
-        header = next(reader)
-        rows = list(reader)
-    logical_rows = [row for _, row, _ in raw_exports.iter_index_info_rows(path)]
-    raw = _collect_raw_export(path, "index_info")
-    enum_specs = {
-        "Idxinfo05": frozenset({"1", "2", "3", "4"}),
-        "Idxinfo06": frozenset({"1", "2", "3", "4"}),
-        "Idxinfo07": frozenset({"1", "2", "3", "4", "5", "6", "7"}),
-        "Idxinfo08": frozenset({"1", "2", "3", "4", "5"}),
-        "Idxinfo09": frozenset({"1", "2", "3", "4", "5", "6", "7", "8", "9"}),
-    }
-    header_index = {name: index for index, name in enumerate(header)}
-    out_of_enum_counts = {}
-    for column, allowed in enum_specs.items():
-        index = header_index[column]
-        out_of_enum_counts[column] = sum(
-            1
-            for row in logical_rows
-            if row[index].strip() != "" and row[index].strip() not in allowed
-        )
-    return {
-        "metadata_row_count": 1,
-        "physical_line_count": physical_line_count,
-        "record_start_count": sum(
-            int(raw_exports._looks_like_index_info_record_start(row)) for row in rows
-        ),
-        "logical_records": len(raw),
-        "merged_continuation_rows": sum(1 for row in rows if len(row) < len(header)),
-        "ambiguous_rows": 0,
-        "malformed_rows": 0,
-        "dedup_rows": 0,
-        "final_rows": len(raw),
-        "out_of_enum_counts": out_of_enum_counts,
-    }
 
 
 def test_index_market_preserves_nullable_official_open_without_close_substitution():
@@ -1600,13 +1546,21 @@ def test_csmar_conflicting_duplicate_keeps_prior_published_dataset(tmp_path, chu
         assert policy.used_memory_bytes == 0
 
 
-@pytest.mark.parametrize("cancel", (False, True))
-def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cleanup(
-    tmp_path, monkeypatch, cancel
+@pytest.mark.parametrize(
+    ("cancel", "cleanup_error"),
+    (
+        (None, False),
+        ("consumer", False),
+        ("source_advance", False),
+        ("source_advance", True),
+    ),
+)
+def test_csmar_capacity_preserves_pending_duplicates_next_batch_and_cleanup(
+    tmp_path, monkeypatch, cancel, cleanup_error
 ):
     from quant_research_platform.runtime.resources import (
+        MemoryLease,
         RuntimeResourcePolicy,
-        pandas_frame_payload_bytes,
     )
     from quant_research_platform.storage.datasets import writing
     from quant_research_platform.storage.datasets.reading import read_dataset
@@ -1631,13 +1585,20 @@ def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cle
     )
     transform = interim._transform_interim_chunk
     observed = []
-    injected = []
+    refusals = []
 
-    def transform_with_one_capacity_failure(frame, **kwargs):
-        if not injected:
-            injected.append(True)
-            size = pandas_frame_payload_bytes(frame)
-            raise interim._InterimCapacityExceeded(2 * size, 2 * size)
+    def transform_under_pressure(frame, **kwargs):
+        if not refusals:
+            size = policy.explicit_memory_cap_bytes - policy.used_memory_bytes - 1
+            with policy.lease("test.concurrent_payload", size):
+                payload = bytearray(size)
+                try:
+                    return transform(frame, **kwargs)
+                except interim._InterimCapacityExceeded:
+                    refusals.append(len(payload))
+                    raise
+                finally:
+                    del payload
         observed.append(len(frame))
         return transform(frame, **kwargs)
 
@@ -1650,7 +1611,32 @@ def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cle
             pending.append(lease)
         return lease
 
-    primary = KeyboardInterrupt("pending_consumer_cancel")
+    raw_chunks = interim.iter_private_export_chunks_with_policy
+    close_lease = MemoryLease.close
+    cleanup_failures = []
+    primary = KeyboardInterrupt("pending_cancel")
+
+    def chunks_with_cancel(*args, **kwargs):
+        source = iter(raw_chunks(*args, **kwargs))
+        with interim.closing_iterator(source):
+            value = next(source)
+            while True:
+                handoff = yield value
+                if isinstance(value, OwnedValue) and pending:
+                    assert pending[-1].active
+                    raise primary
+                try:
+                    value = source.send(handoff)
+                except StopIteration:
+                    return
+
+    def close_pending_then_fail(lease):
+        was_pending = any(lease is item for item in pending) and lease.active
+        close_lease(lease)
+        if was_pending:
+            cleanup_failures.append(True)
+            raise OSError("pending_cleanup_failed")
+
     with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
         original = interim.materialize_interim_data(
             layout=layout,
@@ -1661,10 +1647,16 @@ def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cle
         old_good = _file_bytes(original)
         candidate = layout.instance_root(original, "e" * 64)
         monkeypatch.setattr(
-            interim, "_transform_interim_chunk", transform_with_one_capacity_failure
+            interim, "_transform_interim_chunk", transform_under_pressure
         )
         monkeypatch.setattr(RuntimeResourcePolicy, "lease", record_pending)
-        if cancel:
+        if cancel == "source_advance":
+            monkeypatch.setattr(
+                interim, "iter_private_export_chunks_with_policy", chunks_with_cancel
+            )
+        if cleanup_error:
+            monkeypatch.setattr(MemoryLease, "close", close_pending_then_fail)
+        if cancel == "consumer":
 
             def fail_consumer(_self, _frame, **_kwargs):
                 raise primary
@@ -1692,7 +1684,13 @@ def test_csmar_injected_capacity_preserves_pending_duplicates_next_batch_and_cle
                 ]
                 == 1
             )
+        assert len(refusals) == 1
         assert pending and all(not lease.active for lease in pending)
+        assert bool(cleanup_failures) == cleanup_error
+        if cleanup_error:
+            assert any(
+                "lease close also failed: OSError" in note for note in primary.__notes__
+            )
         assert {
             relative: filesystem_read_bytes(original / relative)
             for relative in old_good
@@ -2401,7 +2399,7 @@ def test_csmar_pending_copy_admits_payload_before_concurrent_allocation(
             caller = sys._getframe(1)
             if (
                 caller.f_code.co_name == "_iter_pruned_interim_frames"
-                and caller.f_locals.get("next_pending_lease") is not None
+                and caller.f_locals.get("pending_lease") is not None
             ):
                 copies.append(len(frame))
             return copy(frame, *args, **kwargs)

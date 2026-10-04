@@ -343,7 +343,10 @@ def strict_real_numeric_series(values: pd.Series, *, error: str) -> pd.Series:
                 not is_null and not _is_hashable(value)
             ):
                 raise ValueError(error)
-    numeric = pd.to_numeric(series, errors="coerce")
+    try:
+        numeric = pd.to_numeric(series, errors="coerce")
+    except OverflowError as exc:
+        raise ValueError(error) from exc
     if (numeric.isna() & ~null_mask).any():
         raise ValueError(error)
     return numeric.astype("float64")

@@ -300,7 +300,12 @@ def test_frozen_archive_identity_and_persisted_maker_units(
                 asks=tuple((tick * 10, quantity) for tick, quantity in _state(0).asks),
             )
             new = _maker_new_order(
-                2, "buy", 1.0, state, _quote(0, book_segment_id="s1"), _maker_config()
+                2,
+                "buy",
+                1.0,
+                state,
+                _quote(0, book_segment_id="s1"),
+                _maker_config().latency_ms,
             )
             new.effective_at_ns = 100_000_000
             old = replace(
@@ -366,4 +371,146 @@ def test_frozen_archive_identity_and_persisted_maker_units(
                 historical.close()
                 baseline.close()
         assert fingerprints() == before
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "early_defined,last_defined", [(False, True), (True, True), (True, False)]
+)
+def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
+    tmp_path, monkeypatch, early_defined, last_defined
+):
+    import quant_research_platform.markets.implementations.crypto.portfolio as portfolio
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+
+    original_tables, original_envelope = maker_calibration_tables.__wrapped__()
+    payload = original_envelope.payload()
+    metadata = payload["semantic_metadata"]
+    contract = metadata["target_contract"]["protocol"]
+    plan = contract["research_plan"]
+    pieces = {name: [] for name in original_tables}
+    for fold_id, defined, shift in (
+        ("fold_1", early_defined, pd.Timedelta(0)),
+        ("fold_2", last_defined, pd.Timedelta(seconds=4.5)),
+    ):
+        for name, source in original_tables.items():
+            frame = source.copy()
+            frame["fold_id"] = fold_id
+            if name == "crypto_maker_calibration":
+                if not defined:
+                    frame.loc[:, ["sample_count", "zero_fill_count"]] = 0
+                    frame["status"] = "UNDEFINED"
+                    frame["reason"] = "insufficient_calibration_samples"
+            elif not defined:
+                frame = frame.iloc[:0]
+            elif name == "crypto_maker_samples":
+                for column in ("decision_at", "prediction_end", "label_available_at"):
+                    frame[column] += shift
+            else:
+                frame["event_at"] += shift
+            pieces[name].append(frame)
+    tables = {
+        name: pd.concat(frames, ignore_index=True) for name, frames in pieces.items()
+    }
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=payload["logical_artifact_id"],
+        schema_identity=payload["schema_identity"],
+        protocol_or_spec_identity=payload["protocol_or_spec_identity"],
+        software_identity=payload["software_identity"],
+        research_window={
+            "start": plan["folds"][0]["validation"]["start"],
+            "end": plan["folds"][-1]["validation"]["end"],
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata=metadata,
+    )
+    candidate = portfolio.portfolio_candidates(contract["portfolio_candidates"])[0]
+    execution_plan = hft_research_plan()
+    execution_plan["folds"] = plan["folds"]
+    execution_plan["test"] = plan["test"]
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        plan=execution_plan,
+        development=(
+            plan["folds"][0]["validation"]["start"],
+            plan["folds"][-1]["validation"]["end"],
+        ),
+    )
+    protocol = bind_research_configuration(
+        research_profile(configuration["profile_id"]), configuration
+    ).protocol(configuration["scenario_id"], access_window="holdout")
+    target = next(
+        target
+        for target in protocol.execution_targets()
+        if target.candidate.candidate_id == candidate.candidate_id
+        and target.execution_mode == "continuous"
+    )
+    protocol_manifest = protocol.target_manifest(target.target_id, "PORTFOLIO")
+
+    class RawReached(Exception):
+        pass
+
+    reached = []
+
+    def open_run(*args):
+        reached.append(True)
+        raise RawReached()
+
+    monkeypatch.setattr(
+        portfolio,
+        "_panel",
+        lambda *args: {
+            "producer_diagnostics": {
+                "reconstruction": {"BTCUSDT": {"coverage_segments": {}}}
+            },
+        },
+    )
+    with runtime_resource_policy_scope() as policy:
+
+        def produce(on_table):
+            for name, frame in tables.items():
+                on_table(name, frame)
+
+        root = write_statistics_artifact(
+            tmp_path / "calibration",
+            envelope=envelope,
+            tables=produce,
+            table_group="crypto_maker_calibration",
+            validate_tables=validate_maker_calibration,
+        )
+        with pytest.raises(
+            RawReached if last_defined else PortfolioTargetBlocked
+        ) as caught:
+            portfolio.produce_maker_ledger(
+                layout=SimpleNamespace(target_root=lambda *args: root),
+                candidate=candidate,
+                protocol_manifest=protocol_manifest,
+                dataset_catalog=SimpleNamespace(get=lambda *args: SimpleNamespace()),
+                output_window=TimeWindow(**plan["test"]),
+                upstream_identities={
+                    candidate.calibration_target_id: envelope.instance_identity
+                },
+                expected_funding_identity="a" * 64,
+                raw_root=tmp_path,
+                resource_policy=policy,
+                execution_mode="continuous",
+                symbol="BTCUSDT",
+                market_type="usdm_perpetual",
+                open_run=open_run,
+                reconstruct_depth=None,
+                read_trades=None,
+                read_funding=None,
+                read_prediction_bundle=None,
+                read_statistics_artifact=read_statistics_artifact,
+            )
+        if last_defined:
+            assert reached == [True]
+        else:
+            assert str(caught.value) == "maker_calibration_insufficient_samples"
+            assert not reached
         assert policy.used_memory_bytes == 0

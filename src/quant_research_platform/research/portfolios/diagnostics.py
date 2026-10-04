@@ -28,6 +28,7 @@ from quant_research_platform.research.portfolios.risk import (
 )
 from quant_research_platform.research.portfolios.schedules import holding_intervals
 from quant_research_platform.research.statistics import (
+    _return_sharpes,
     cscv_pbo,
     probabilistic_and_deflated_sharpe,
     return_standard_deviation,
@@ -49,20 +50,21 @@ def _nav_return_roundoff(start: object, end: object, returns: object) -> np.ndar
     """
     before = np.asarray(start, dtype="float64")
     after = np.asarray(end, dtype="float64")
-    lower = np.nextafter(
-        np.nextafter(after, -np.inf)
-        / np.nextafter(before, np.where(after >= 0, np.inf, -np.inf)),
-        -np.inf,
-    )
-    upper = np.nextafter(
-        np.nextafter(after, np.inf)
-        / np.nextafter(before, np.where(after >= 0, -np.inf, np.inf)),
-        np.inf,
-    )
-    lower = np.nextafter(lower - 1.0, -np.inf)
-    upper = np.nextafter(upper - 1.0, np.inf)
-    data = np.asarray(returns, dtype="float64")
-    return np.maximum(np.abs(data - lower), np.abs(upper - data))
+    with np.errstate(over="ignore", divide="ignore"):
+        lower = np.nextafter(
+            np.nextafter(after, -np.inf)
+            / np.nextafter(before, np.where(after >= 0, np.inf, -np.inf)),
+            -np.inf,
+        )
+        upper = np.nextafter(
+            np.nextafter(after, np.inf)
+            / np.nextafter(before, np.where(after >= 0, -np.inf, np.inf)),
+            np.inf,
+        )
+        lower = np.nextafter(lower - 1.0, -np.inf)
+        upper = np.nextafter(upper - 1.0, np.inf)
+        data = np.asarray(returns, dtype="float64")
+        return np.maximum(np.abs(data - lower), np.abs(upper - data))
 
 
 def fixed_turnover_cost_sensitivity(
@@ -101,7 +103,7 @@ def fixed_turnover_cost_sensitivity(
     return result
 
 
-def _crypto_ledger_observations(ledger, windows, limit, *, observation_window_ns=None):
+def _crypto_observations(ledger, windows, limit, *, observation_window_ns=None):
     bounds = [
         (fold, pd.Timestamp(window.start).value, pd.Timestamp(window.end).value)
         for fold, window in windows
@@ -127,111 +129,121 @@ def _crypto_ledger_observations(ledger, windows, limit, *, observation_window_ns
     }
     peak = ledger.capital.initial_capital
     drawdown = 0.0
-    with closing_iterator(ledger.iter_chunks()) as chunks:
-        for batch in chunks:
-            try:
-                endings = [row for row in batch.valuations if row.phase == "end"]
-                timestamp = endings[0].timestamp_ns
-                nav = sum(row.value for row in endings)
-                position = sum(
-                    row.quantity
-                    for row in endings
-                    if row.asset_id != PORTFOLIO_CASH_ASSET_ID
-                )
-                duration = max(0, timestamp - previous_timestamp)
-                oos_duration = sum(
-                    max(0, min(timestamp, end) - max(previous_timestamp, start))
-                    for _fold, start, end in bounds
-                )
-                for scope, weight in (
-                    ("oos", oos_duration),
-                    ("gap", duration - oos_duration),
-                ):
-                    if not weight:
-                        continue
-                    state = inventory[scope]
-                    new_duration = state["duration"] + weight
-                    delta = previous_position - state["mean"]
-                    state["mean"] += delta * weight / new_duration
-                    state["m2"] += weight * delta * (previous_position - state["mean"])
-                    state["duration"] = new_duration
-                    state["at_limit"] += weight * int(abs(previous_position) >= limit)
-                    state["max_abs"] = max(state["max_abs"], abs(previous_position))
-                for diagnostic in batch.diagnostics:
-                    if diagnostic.name == "utc_day_boundary":
-                        if timestamp % day_ns or timestamp == previous_utc_timestamp:
-                            raise ValueError("crypto_utc_day_boundary_invalid")
-                        previous_utc_timestamp = timestamp
-                        if any(
-                            start <= timestamp <= end for _fold, start, end in bounds
-                        ):
-                            utc[timestamp] = nav
-                    elif diagnostic.name == "oos_window_start":
-                        endpoints[(int(diagnostic.number), "start")] = nav
-                    elif diagnostic.name == "oos_window_end":
-                        endpoints[(int(diagnostic.number), "end")] = nav
-                peak = max(peak, nav)
-                drawdown = min(drawdown, nav / peak - 1.0)
-                scope = (
-                    "oos"
-                    if any(start <= timestamp <= end for _fold, start, end in bounds)
-                    else "gap"
-                )
+
+    def observe(batch):
+        nonlocal \
+            previous_utc_timestamp, \
+            previous_timestamp, \
+            previous_position, \
+            peak, \
+            drawdown
+        try:
+            endings = [row for row in batch.valuations if row.phase == "end"]
+            timestamp = endings[0].timestamp_ns
+            nav = sum(row.value for row in endings)
+            position = sum(
+                row.quantity
+                for row in endings
+                if row.asset_id != PORTFOLIO_CASH_ASSET_ID
+            )
+            duration = max(0, timestamp - previous_timestamp)
+            oos_duration = sum(
+                max(0, min(timestamp, end) - max(previous_timestamp, start))
+                for _fold, start, end in bounds
+            )
+            for scope, weight in (
+                ("oos", oos_duration),
+                ("gap", duration - oos_duration),
+            ):
+                if not weight:
+                    continue
                 state = inventory[scope]
-                running_position = sum(
-                    row.quantity
-                    for row in batch.valuations
-                    if row.phase == "before" and row.asset_id != PORTFOLIO_CASH_ASSET_ID
+                new_duration = state["duration"] + weight
+                delta = previous_position - state["mean"]
+                state["mean"] += delta * weight / new_duration
+                state["m2"] += weight * delta * (previous_position - state["mean"])
+                state["duration"] = new_duration
+                state["at_limit"] += weight * int(abs(previous_position) >= limit)
+                state["max_abs"] = max(state["max_abs"], abs(previous_position))
+            for diagnostic in batch.diagnostics:
+                if diagnostic.name == "utc_day_boundary":
+                    if timestamp % day_ns or timestamp == previous_utc_timestamp:
+                        raise ValueError("crypto_utc_day_boundary_invalid")
+                    previous_utc_timestamp = timestamp
+                    if any(start <= timestamp <= end for _fold, start, end in bounds):
+                        utc[timestamp] = nav
+                elif diagnostic.name == "oos_window_start":
+                    endpoints[(int(diagnostic.number), "start")] = nav
+                elif diagnostic.name == "oos_window_end":
+                    endpoints[(int(diagnostic.number), "end")] = nav
+            peak = max(peak, nav)
+            drawdown = min(drawdown, nav / peak - 1.0)
+            scope = (
+                "oos"
+                if any(start <= timestamp <= end for _fold, start, end in bounds)
+                else "gap"
+            )
+            state = inventory[scope]
+            running_position = sum(
+                row.quantity
+                for row in batch.valuations
+                if row.phase == "before" and row.asset_id != PORTFOLIO_CASH_ASSET_ID
+            )
+            state["max_abs"] = max(
+                state["max_abs"], abs(running_position), abs(position)
+            )
+            for trade in batch.trades:
+                running_position += trade.quantity
+                state["max_abs"] = max(state["max_abs"], abs(running_position))
+            state["observations"] += 1
+            previous_timestamp, previous_position = timestamp, position
+        finally:
+            batch = endings = diagnostic = trade = None
+
+    def finish():
+        daily = []
+        for index, (fold, start, end) in enumerate(bounds):
+            observed_start, observed_end = (
+                (start, end) if observation_window_ns is None else observation_window_ns
+            )
+            point = ((max(start, observed_start) + day_ns - 1) // day_ns) * day_ns
+            while point + day_ns <= min(end, observed_end):
+                start_nav = (
+                    endpoints.get((index, "start"))
+                    if point == start
+                    else utc.get(point)
                 )
-                state["max_abs"] = max(
-                    state["max_abs"], abs(running_position), abs(position)
+                end_nav = (
+                    endpoints.get((index, "end"))
+                    if point + day_ns == end
+                    else utc.get(point + day_ns)
                 )
-                for trade in batch.trades:
-                    running_position += trade.quantity
-                    state["max_abs"] = max(state["max_abs"], abs(running_position))
-                state["observations"] += 1
-                previous_timestamp, previous_position = timestamp, position
-            finally:
-                batch = endings = diagnostic = trade = None
-    daily = []
-    for index, (fold, start, end) in enumerate(bounds):
-        observed_start, observed_end = (
-            (start, end) if observation_window_ns is None else observation_window_ns
-        )
-        point = ((max(start, observed_start) + day_ns - 1) // day_ns) * day_ns
-        while point + day_ns <= min(end, observed_end):
-            start_nav = (
-                endpoints.get((index, "start")) if point == start else utc.get(point)
-            )
-            end_nav = (
-                endpoints.get((index, "end"))
-                if point + day_ns == end
-                else utc.get(point + day_ns)
-            )
-            reason = (
-                "utc_boundary_valuation_missing"
-                if start_nav is None or end_nav is None
-                else "nonpositive_start_nav"
-                if start_nav <= 0
-                else ""
-            )
-            daily.append(
-                {
-                    "fold_id": fold,
-                    "start_at": pd.Timestamp(point),
-                    "end_at": pd.Timestamp(point + day_ns),
-                    "start_nav": np.nan if start_nav is None else start_nav,
-                    "end_nav": np.nan if end_nav is None else end_nav,
-                    "net_return": (end_nav - start_nav) / start_nav
-                    if not reason
-                    else np.nan,
-                    "benchmark_return": 0.0,
-                    "status": "UNDEFINED" if reason else "DEFINED",
-                    "reason": reason,
-                }
-            )
-            point += day_ns
-    return daily, inventory, drawdown
+                reason = (
+                    "utc_boundary_valuation_missing"
+                    if start_nav is None or end_nav is None
+                    else "nonpositive_start_nav"
+                    if start_nav <= 0
+                    else ""
+                )
+                daily.append(
+                    {
+                        "fold_id": fold,
+                        "start_at": pd.Timestamp(point),
+                        "end_at": pd.Timestamp(point + day_ns),
+                        "start_nav": np.nan if start_nav is None else start_nav,
+                        "end_nav": np.nan if end_nav is None else end_nav,
+                        "net_return": (end_nav - start_nav) / start_nav
+                        if not reason
+                        else np.nan,
+                        "benchmark_return": 0.0,
+                        "status": "UNDEFINED" if reason else "DEFINED",
+                        "reason": reason,
+                    }
+                )
+                point += day_ns
+        return daily, inventory, drawdown
+
+    return observe, finish
 
 
 def build_crypto_portfolio_statistics_tables(
@@ -244,8 +256,6 @@ def build_crypto_portfolio_statistics_tables(
     read_ledger,
     read_episodes,
     summarize_ledger,
-    summarize_windows,
-    summarize_execution,
     table_columns,
 ):
     from quant_research_platform.research.protocols.crypto_hft import (
@@ -269,19 +279,6 @@ def build_crypto_portfolio_statistics_tables(
     lease = resource_policy.lease(
         "research.crypto.portfolio.statistics", max(65536, 1024 * len(windows))
     )
-
-    def ledgers():
-        root = layout.target_root(target_id, None)
-        identity = upstream_identities[target_id]
-        if mode == "continuous":
-            yield (
-                None,
-                read_ledger(root, expected_identity=identity, lease=lease),
-            )
-        else:
-            collection = read_episodes(root, expected_identity=identity, lease=lease)
-            with closing_iterator(collection.iter_episodes()) as episodes:
-                yield from episodes
 
     interval_rows, daily_rows, metrics, diagnostics, costs, coverage = (
         [],
@@ -326,279 +323,307 @@ def build_crypto_portfolio_statistics_tables(
             }
         )
 
-    try:
-        with closing_iterator(ledgers()) as episodes:
-            for episode, artifact in episodes:
-                observed_start, observed_end = (
-                    (bounds[0][0], bounds[-1][1])
-                    if episode is None
-                    else (episode["start_ns"], episode["terminal_valuation_ns"])
-                )
-                day_ns = 86_400_000_000_000
-                complete_days = sum(
-                    max(
-                        0,
-                        (
-                            min(end, observed_end)
-                            - ((max(start, observed_start) + day_ns - 1) // day_ns)
-                            * day_ns
-                        )
-                        // day_ns,
-                    )
-                    for start, end in bounds
-                )
-                lease.grow(
-                    max(
-                        131072,
-                        complete_days * 4096
-                        + (len(windows) if episode is None else 1) * 16384
-                        + 1024
-                        * len(plan["execution"]["fee_scenarios_bps"])
-                        * len(plan["execution"]["additional_spread_scenarios_bps"]),
-                    )
-                )
-                episode_count += 1
-                episode_id = "continuous" if episode is None else episode["episode_id"]
-                row_key = {**candidate_key, "episode_id": episode_id}
-                economic = summarize_ledger(artifact)
-                if episode is None:
-                    intervals = summarize_windows(artifact, windows_ns=bounds)
-                    observed = None
-                    start, stop = bounds[0][0], envelope_stop
-                else:
-                    start, stop = episode["start_ns"], episode["stop_ns"]
-                    observed = (start, episode["terminal_valuation_ns"])
-                    intervals = [
-                        {
-                            "kind": "episode",
-                            "start_ns": start,
-                            "end_ns": observed[1],
-                            "start_nav": economic["initial_capital"],
-                            "end_nav": economic["nav"],
-                            **{
-                                name: economic[name]
-                                for name in (
-                                    "gross_pnl",
-                                    "net_pnl",
-                                    "fees",
-                                    "funding",
-                                    "turnover",
-                                    "fill_events",
-                                )
-                            },
-                        }
-                    ]
-                    truncated_count += episode["termination"] == "TRUNCATED"
-                if cursor < start:
-                    cover(cursor, start, "missing")
-                cover(start, stop, "covered")
-                cursor = stop
-                covered_ns += stop - start
-                for name in costs_total:
-                    costs_total[name] += economic[name]
-                execution = summarize_execution(artifact)
-                if episode is not None:
-                    execution = {
-                        **execution,
-                        "termination": episode["termination"],
-                        "stop_reasons": ",".join(episode["stop_reasons"]),
-                    }
-                daily, inventory, drawdown = _crypto_ledger_observations(
-                    artifact,
-                    windows,
-                    plan["exposure_limits"][candidate.asset_id][
-                        "max_position_quantity"
-                    ],
-                    observation_window_ns=observed,
-                )
-                for interval in intervals:
-                    interval_rows.append(
-                        {
-                            **row_key,
-                            "kind": interval["kind"],
-                            "start_at": pd.Timestamp(interval["start_ns"]),
-                            "end_at": pd.Timestamp(interval["end_ns"]),
-                            **{
-                                key: interval[key]
-                                for key in (
-                                    "start_nav",
-                                    "end_nav",
-                                    "gross_pnl",
-                                    "net_pnl",
-                                    "fees",
-                                    "funding",
-                                    "turnover",
-                                    "fill_events",
-                                )
-                            },
-                        }
-                    )
-                daily_rows.extend({**row_key, **row} for row in daily)
+    row_key = {}
 
-                for key in (
-                    "initial_capital",
-                    "gross_pnl",
-                    "net_pnl",
-                    "capital_return",
-                    "fees",
-                    "funding",
-                    "turnover",
-                    "fill_events",
-                    "fill_quantity",
-                ):
-                    metric(key, economic[key], int(economic["fill_events"]))
-                metric("terminal_nav", economic["nav"], len(intervals))
-                metric(
-                    "continuous_max_drawdown"
-                    if episode is None
-                    else "episode_max_drawdown",
-                    drawdown,
-                    len(intervals),
+    def consume_episode(episode, artifact, batches):
+        nonlocal covered_ns, episode_count, truncated_count, cursor, row_key
+        observed_start, observed_end = (
+            (bounds[0][0], bounds[-1][1])
+            if episode is None
+            else (episode["start_ns"], episode["terminal_valuation_ns"])
+        )
+        day_ns = 86_400_000_000_000
+        complete_days = sum(
+            max(
+                0,
+                (
+                    min(end, observed_end)
+                    - ((max(start, observed_start) + day_ns - 1) // day_ns) * day_ns
                 )
-                for scope in ("oos", "gap"):
-                    if episode is None:
-                        metric(
-                            f"{scope}_net_pnl",
-                            sum(
-                                row["net_pnl"]
-                                for row in intervals
-                                if row["kind"] == scope
-                            ),
-                            sum(row["kind"] == scope for row in intervals),
+                // day_ns,
+            )
+            for start, end in bounds
+        )
+        lease.grow(
+            max(
+                131072,
+                complete_days * 4096
+                + (len(windows) if episode is None else 1) * 16384
+                + 1024
+                * len(plan["execution"]["fee_scenarios_bps"])
+                * len(plan["execution"]["additional_spread_scenarios_bps"]),
+            )
+        )
+        episode_count += 1
+        episode_id = "continuous" if episode is None else episode["episode_id"]
+        row_key = {**candidate_key, "episode_id": episode_id}
+        observed = (
+            None
+            if episode is None
+            else (episode["start_ns"], episode["terminal_valuation_ns"])
+        )
+        observe, finish = _crypto_observations(
+            artifact,
+            windows,
+            plan["exposure_limits"][candidate.asset_id]["max_position_quantity"],
+            observation_window_ns=observed,
+        )
+        summary = summarize_ledger(
+            artifact,
+            batches,
+            windows_ns=bounds if episode is None else None,
+            consume_batch=observe,
+        )
+        economic = summary["economics"]
+        if episode is None:
+            intervals = summary["intervals"]
+            start, stop = bounds[0][0], envelope_stop
+        else:
+            start, stop = episode["start_ns"], episode["stop_ns"]
+            observed = (start, episode["terminal_valuation_ns"])
+            intervals = [
+                {
+                    "kind": "episode",
+                    "start_ns": start,
+                    "end_ns": observed[1],
+                    "start_nav": economic["initial_capital"],
+                    "end_nav": economic["nav"],
+                    **{
+                        name: economic[name]
+                        for name in (
+                            "gross_pnl",
+                            "net_pnl",
+                            "fees",
+                            "funding",
+                            "turnover",
+                            "fill_events",
                         )
-                    state = inventory[scope]
-                    for name, value in (
-                        ("inventory_mean", state["mean"]),
-                        (
-                            "inventory_variance",
-                            state["m2"] / state["duration"]
-                            if state["duration"]
-                            else None,
-                        ),
-                        (
-                            "inventory_time_at_limit_fraction",
-                            state["at_limit"] / state["duration"]
-                            if state["duration"]
-                            else None,
-                        ),
-                    ):
-                        metric(
-                            f"{scope}_{name}",
-                            value if state["duration"] else None,
-                            int(state["duration"] > 0),
-                            f"no_{scope}_duration",
+                    },
+                }
+            ]
+            truncated_count += episode["termination"] == "TRUNCATED"
+        if cursor < start:
+            cover(cursor, start, "missing")
+        cover(start, stop, "covered")
+        cursor = stop
+        covered_ns += stop - start
+        for name in costs_total:
+            costs_total[name] += economic[name]
+        execution = summary["execution"]
+        if episode is not None:
+            execution = {
+                **execution,
+                "termination": episode["termination"],
+                "stop_reasons": ",".join(episode["stop_reasons"]),
+            }
+        daily, inventory, drawdown = finish()
+        for interval in intervals:
+            interval_rows.append(
+                {
+                    **row_key,
+                    "kind": interval["kind"],
+                    "start_at": pd.Timestamp(interval["start_ns"]),
+                    "end_at": pd.Timestamp(interval["end_ns"]),
+                    **{
+                        key: interval[key]
+                        for key in (
+                            "start_nav",
+                            "end_nav",
+                            "gross_pnl",
+                            "net_pnl",
+                            "fees",
+                            "funding",
+                            "turnover",
+                            "fill_events",
                         )
-                    metric(
-                        f"{scope}_inventory_max_abs",
-                        state["max_abs"] if state["observations"] else None,
-                        state["observations"],
-                        f"no_{scope}_observations",
-                    )
-                values = np.array(
-                    [row["net_return"] for row in daily if row["status"] == "DEFINED"],
-                    dtype=np.float64,
-                )
-                count = len(values)
-                metric("planned_complete_utc_days", len(daily), len(daily))
-                metric("defined_complete_utc_days", count, count)
-                daily_missing = any(row["status"] != "DEFINED" for row in daily)
-                day_reason = (
-                    "planned_utc_day_valuation_undefined"
-                    if daily_missing
-                    else "insufficient_complete_utc_days"
-                )
+                    },
+                }
+            )
+        daily_rows.extend({**row_key, **row} for row in daily)
+
+        for key in (
+            "initial_capital",
+            "gross_pnl",
+            "net_pnl",
+            "capital_return",
+            "fees",
+            "funding",
+            "turnover",
+            "fill_events",
+            "fill_quantity",
+        ):
+            metric(key, economic[key], int(economic["fill_events"]))
+        metric("terminal_nav", economic["nav"], len(intervals))
+        metric(
+            "continuous_max_drawdown" if episode is None else "episode_max_drawdown",
+            drawdown,
+            len(intervals),
+        )
+        for scope in ("oos", "gap"):
+            if episode is None:
                 metric(
-                    "oos_mean_daily_return",
-                    float(values.mean()) if count and not daily_missing else None,
-                    count,
-                    day_reason,
+                    f"{scope}_net_pnl",
+                    sum(row["net_pnl"] for row in intervals if row["kind"] == scope),
+                    sum(row["kind"] == scope for row in intervals),
                 )
-                if (
-                    not daily_missing
-                    and count >= statistics_policy["annualization_minimum_observations"]
-                ):
-                    defined = [row for row in daily if row["status"] == "DEFINED"]
-                    deviation = float(
-                        return_standard_deviation(
+            state = inventory[scope]
+            for name, value in (
+                ("inventory_mean", state["mean"]),
+                (
+                    "inventory_variance",
+                    state["m2"] / state["duration"] if state["duration"] else None,
+                ),
+                (
+                    "inventory_time_at_limit_fraction",
+                    state["at_limit"] / state["duration"]
+                    if state["duration"]
+                    else None,
+                ),
+            ):
+                metric(
+                    f"{scope}_{name}",
+                    value if state["duration"] else None,
+                    int(state["duration"] > 0),
+                    f"no_{scope}_duration",
+                )
+            metric(
+                f"{scope}_inventory_max_abs",
+                state["max_abs"] if state["observations"] else None,
+                state["observations"],
+                f"no_{scope}_observations",
+            )
+        values = np.array(
+            [row["net_return"] for row in daily if row["status"] == "DEFINED"],
+            dtype=np.float64,
+        )
+        count = len(values)
+        metric("planned_complete_utc_days", len(daily), len(daily))
+        metric("defined_complete_utc_days", count, count)
+        daily_missing = any(row["status"] != "DEFINED" for row in daily)
+        day_reason = (
+            "planned_utc_day_valuation_undefined"
+            if daily_missing
+            else "insufficient_complete_utc_days"
+        )
+        metric(
+            "oos_mean_daily_return",
+            float(values.mean()) if count and not daily_missing else None,
+            count,
+            day_reason,
+        )
+        if (
+            not daily_missing
+            and count >= statistics_policy["annualization_minimum_observations"]
+        ):
+            defined = [row for row in daily if row["status"] == "DEFINED"]
+            deviation = float(
+                return_standard_deviation(
+                    values,
+                    roundoff=_nav_return_roundoff(
+                        [row["start_nav"] for row in defined],
+                        [row["end_nav"] for row in defined],
+                        values,
+                    ),
+                )
+            )
+            metric(
+                "annualized_volatility",
+                deviation * np.sqrt(statistics_policy["annualization_periods"]),
+                count,
+                "return_risk_unresolved",
+            )
+            metric(
+                "sharpe",
+                float(
+                    _return_sharpes(
+                        values,
+                        roundoff=_nav_return_roundoff(
+                            [row["start_nav"] for row in defined],
+                            [row["end_nav"] for row in defined],
                             values,
-                            roundoff=_nav_return_roundoff(
-                                [row["start_nav"] for row in defined],
-                                [row["end_nav"] for row in defined],
-                                values,
-                            ),
-                        )
+                        ),
                     )
-                    metric(
-                        "annualized_volatility",
-                        deviation * np.sqrt(statistics_policy["annualization_periods"]),
-                        count,
-                    )
-                    metric(
-                        "sharpe",
-                        float(
-                            values.mean()
-                            / deviation
-                            * np.sqrt(statistics_policy["annualization_periods"])
-                        )
-                        if deviation > 0
-                        else None,
-                        count,
-                        "zero_daily_return_variance",
-                    )
-                else:
-                    metric(
-                        "annualized_volatility",
-                        None,
-                        count,
-                        day_reason,
-                    )
-                    metric("sharpe", None, count, day_reason)
-                metric(
-                    "pnl_per_fill",
-                    economic["net_pnl"] / economic["fill_events"]
-                    if economic["fill_events"]
-                    else None,
-                    int(economic["fill_events"]),
-                    "no_fills",
-                )
-                metric(
-                    "pnl_per_notional",
-                    economic["net_pnl"] / economic["turnover"]
-                    if economic["turnover"]
-                    else None,
-                    int(economic["fill_events"]),
-                    "no_turnover",
-                )
-                for name, value in execution.items():
-                    diagnostics.append(
-                        {
-                            **row_key,
-                            "metric_id": name,
-                            "value": float(value)
-                            if type(value) in (float, int, bool)
-                            else np.nan,
-                            "text": value if type(value) is str else "",
-                            "status": "DEFINED" if value is not None else "UNDEFINED",
-                            "reason": "" if value is not None else f"{name}_undefined",
-                        }
-                    )
-                base_fee = (
-                    plan["execution"]["maker"]["maker_fee_bps"]
-                    if isinstance(candidate, CryptoMakerCandidate)
-                    else plan["execution"]["taker_fee_bps"]
-                )
-                costs.extend(
-                    {**row_key, **row}
-                    for row in fixed_turnover_cost_sensitivity(
-                        turnover=economic["turnover"],
-                        net_pnl=economic["net_pnl"],
-                        base_fee_bps=base_fee,
-                        fee_scenarios_bps=plan["execution"]["fee_scenarios_bps"],
-                        additional_spread_scenarios_bps=plan["execution"][
-                            "additional_spread_scenarios_bps"
-                        ],
-                    )
-                )
+                    * np.sqrt(statistics_policy["annualization_periods"])
+                ),
+                count,
+                "zero_daily_return_variance"
+                if deviation == 0
+                else "return_risk_unresolved",
+            )
+        else:
+            metric(
+                "annualized_volatility",
+                None,
+                count,
+                day_reason,
+            )
+            metric("sharpe", None, count, day_reason)
+        metric(
+            "pnl_per_fill",
+            economic["net_pnl"] / economic["fill_events"]
+            if economic["fill_events"]
+            else None,
+            int(economic["fill_events"]),
+            "no_fills",
+        )
+        metric(
+            "pnl_per_notional",
+            economic["net_pnl"] / economic["turnover"]
+            if economic["turnover"]
+            else None,
+            int(economic["fill_events"]),
+            "no_turnover",
+        )
+        for name, value in execution.items():
+            diagnostics.append(
+                {
+                    **row_key,
+                    "metric_id": name,
+                    "value": float(value)
+                    if type(value) in (float, int, bool)
+                    else np.nan,
+                    "text": value if type(value) is str else "",
+                    "status": "DEFINED" if value is not None else "UNDEFINED",
+                    "reason": "" if value is not None else f"{name}_undefined",
+                }
+            )
+        base_fee = (
+            plan["execution"]["maker"]["maker_fee_bps"]
+            if isinstance(candidate, CryptoMakerCandidate)
+            else plan["execution"]["taker_fee_bps"]
+        )
+        costs.extend(
+            {**row_key, **row}
+            for row in fixed_turnover_cost_sensitivity(
+                turnover=economic["turnover"],
+                net_pnl=economic["net_pnl"],
+                base_fee_bps=base_fee,
+                fee_scenarios_bps=plan["execution"]["fee_scenarios_bps"],
+                additional_spread_scenarios_bps=plan["execution"][
+                    "additional_spread_scenarios_bps"
+                ],
+            )
+        )
+
+    try:
+        root = layout.target_root(target_id, None)
+        identity = upstream_identities[target_id]
+        if mode == "continuous":
+            read_ledger(
+                root,
+                expected_identity=identity,
+                lease=lease,
+                consume_batches=lambda artifact, batches: consume_episode(
+                    None, artifact, batches
+                ),
+            )
+        else:
+            read_episodes(
+                root,
+                expected_identity=identity,
+                lease=lease,
+                consume_episode=consume_episode,
+            )
         if cursor < envelope_stop:
             cover(cursor, envelope_stop, "missing")
         row_key = {**candidate_key, "episode_id": "all"}
@@ -629,7 +654,6 @@ def build_crypto_portfolio_statistics_tables(
         interval_rows = daily_rows = metrics = diagnostics = costs = coverage = (
             records
         ) = None
-        artifact = episode = None
         lease.shrink_to(
             max(
                 1,
@@ -638,7 +662,10 @@ def build_crypto_portfolio_statistics_tables(
         )
         lease.transfer("research.statistics.output")
         return OwnedValue(tables, lease)
-    except BaseException:
+    except BaseException as primary:
+        interval_rows = daily_rows = metrics = diagnostics = costs = coverage = None
+        records = tables = None
+        clear_exception_frames(primary)
         _close_lease_preserving_primary(
             lease, owner="research.crypto.portfolio.statistics"
         )
@@ -663,7 +690,7 @@ def iter_holding_factor_inputs(
         _ENHANCED_PANEL_COLUMNS,
         _enhanced_risk_cross,
         _iter_input_sessions,
-        _risk_context_input_columns,
+        _risk_context_input_sessions,
         _validate_input_keys,
     )
 
@@ -673,14 +700,6 @@ def iter_holding_factor_inputs(
         return
     position = int(sessions.get_loc(intervals.decision_at.iloc[0]))
     history = TimeWindow(sessions[position], pd.Timestamp(time_window.end))
-    risk_inputs = _risk_context_input_columns(
-        roots=tuple(
-            layout.target_root(target, None) for target in risk_context_target_ids
-        ),
-        style_columns=style_columns,
-        timestamp=sessions[position],
-        resource_policy=resource_policy,
-    )
     risk = FactorRiskState(style_columns=style_columns, config=risk_config)
     seen = set()
     panel_window = {}
@@ -707,9 +726,18 @@ def iter_holding_factor_inputs(
                     _ENHANCED_PANEL_COLUMNS,
                     history,
                 )
+                risk_inputs = _risk_context_input_sessions(
+                    roots=tuple(
+                        layout.target_root(target, None)
+                        for target in risk_context_target_ids
+                    ),
+                    style_columns=style_columns,
+                    time_window=history,
+                    resource_policy=resource_policy,
+                    retained=channels,
+                )
                 contexts = {
-                    root: stream(root, projection, history)
-                    for root, projection in risk_inputs.items()
+                    root: frames for root, (_columns, frames) in risk_inputs.items()
                 }
                 context_frames = {
                     root: next(source, None) for root, source in contexts.items()
@@ -1410,9 +1438,15 @@ def _portfolio_statistics_tables(
                 "capital_return": float(wealth.iloc[-1] - 1),
                 "cagr": float(wealth.iloc[-1] ** (252 / count) - 1),
                 "annualized_volatility": deviation * np.sqrt(252),
-                "sharpe": float(selected.net_return.mean() / deviation * np.sqrt(252))
-                if deviation > 0
-                else np.nan,
+                "sharpe": float(
+                    _return_sharpes(
+                        selected.net_return,
+                        roundoff=_nav_return_roundoff(
+                            selected.nav_before, selected.nav_end, selected.net_return
+                        ),
+                    )
+                    * np.sqrt(252)
+                ),
                 "max_drawdown": float(
                     (wealth / wealth.cummax().clip(lower=1) - 1).min()
                 ),
@@ -1455,10 +1489,11 @@ def _portfolio_statistics_tables(
                         ),
                         tracking_error=active_sd * np.sqrt(252),
                         net_information_ratio=float(
-                            selected.active_return.mean() / active_sd * np.sqrt(252)
-                        )
-                        if active_sd > 0
-                        else np.nan,
+                            _return_sharpes(
+                                selected.active_return, roundoff=active_roundoff
+                            )
+                            * np.sqrt(252)
+                        ),
                         relative_wealth=float(relative.iloc[-1]),
                         max_active_drawdown=float(
                             (relative / relative.cummax().clip(lower=1) - 1).min()
@@ -1544,10 +1579,7 @@ def _portfolio_statistics_tables(
                 index=["entry_at", "end_at"], columns="candidate_id", values="nav_end"
             ).reindex(columns=inference_ids)
             roundoff = _nav_return_roundoff(before, after, inference_matrix)
-            deviations = return_standard_deviation(inference_matrix, roundoff=roundoff)
-            trial_sharpes = inference_matrix.mean() / np.where(
-                deviations > 0, deviations, np.nan
-            )
+            trial_sharpes = _return_sharpes(inference_matrix, roundoff=roundoff)
             for candidate_id in ids:
                 if blockers[candidate_id] is not None:
                     outputs = (

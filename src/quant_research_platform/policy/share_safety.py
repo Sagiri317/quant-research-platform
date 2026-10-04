@@ -77,6 +77,14 @@ _ROW_SAMPLE_RE = re.compile(
     r"\bmarket_id\s*=\s*[^\s,;]+.*\basset_id\s*=\s*[^\s,;]+|"
     r"\basset_id\s*=\s*[^\s,;]+.*\btimestamp\s*="
 )
+_ROW_FACT_FIELD_RE = re.compile(r"\b(market_id|asset_id|timestamp)\s*=", re.IGNORECASE)
+
+
+def _row_fact_fields(fields: Iterable[str]) -> bool:
+    names = set(fields)
+    return "asset_id" in names and bool(names.intersection({"market_id", "timestamp"}))
+
+
 _ROW_SAMPLE_MARKER_RE = re.compile(r"(?i)\brow[-_ ]?samples?\b")
 _PROVIDER_SOURCE_FIELD_RE = re.compile(
     r"""(?ix)
@@ -115,7 +123,6 @@ _RAW_EXPORT_FILENAME_RE = re.compile(
     r"(?i)\b[a-z0-9_]+__[^\\/]+__export-\d{8}\.(?:csv|txt)\b"
 )
 _SOURCE_LOCAL_KEY_RE = re.compile(r"(?i)\b(?:source_asset_id|source_market_id)\b")
-SOURCE_LOCAL_KEYS = frozenset({"source_asset_id", "source_market_id"})
 JSON_LOGICAL_PATH_VALUE_KEYS = frozenset(
     {
         "manifest_path",
@@ -159,11 +166,10 @@ def evidence_text_stream_unsafe_reason(
     decoder = codecs.getincrementaldecoder("utf-8")(errors="strict")
     pending = ""
     previous_nonempty_line = ""
-    seen_market_id = False
-    seen_asset_id = False
+    seen_fields: set[str] = set()
 
     def scan_line(line: str) -> str | None:
-        nonlocal previous_nonempty_line, seen_asset_id, seen_market_id
+        nonlocal previous_nonempty_line
         text = previous_nonempty_line + "\n" + line if previous_nonempty_line else line
         reason = evidence_text_unsafe_reason(text)
         if line.strip():
@@ -171,17 +177,13 @@ def evidence_text_stream_unsafe_reason(
         if reason is not None:
             return reason
         prefix_length = len(text) - len(line)
-        has_market_id, has_asset_id, has_timestamp = (
-            any(
-                match.end() > prefix_length
-                for match in re.finditer(rf"\b{field}\s*=", text, re.IGNORECASE)
-            )
-            for field in ("market_id", "asset_id", "timestamp")
+        seen_fields.update(
+            match.group(1).lower()
+            for match in _ROW_FACT_FIELD_RE.finditer(text)
+            if match.end() > prefix_length
         )
-        if (seen_market_id and has_asset_id) or (seen_asset_id and has_timestamp):
+        if _row_fact_fields(seen_fields):
             return "row_sample"
-        seen_market_id = seen_market_id or has_market_id
-        seen_asset_id = seen_asset_id or has_asset_id
         return None
 
     def consume(decoded: str) -> str | None:
@@ -230,8 +232,6 @@ def is_local_only_path(path: Path) -> bool:
     parts = _parts(path)
     if not parts:
         return False
-    if "docs" in parts:
-        return False
     for index, part in enumerate(parts):
         if part == "outputs":
             return True
@@ -273,7 +273,13 @@ def unsafe_for_share_reason(
         value = _REPO_LOCAL_ONLY_PATH_RE.sub("[logical-local-only-path]", value)
     elif _REPO_LOCAL_ONLY_PATH_RE.search(value):
         return "local_only_path"
-    if _ROW_SAMPLE_RE.search(value) or _ROW_SAMPLE_MARKER_RE.search(value):
+    if (
+        _ROW_SAMPLE_RE.search(value)
+        or _ROW_SAMPLE_MARKER_RE.search(value)
+        or _row_fact_fields(
+            match.group(1).lower() for match in _ROW_FACT_FIELD_RE.finditer(value)
+        )
+    ):
         return "row_sample"
     if _RAW_EXPORT_FILENAME_RE.search(value):
         return "raw_export_filename"
@@ -357,6 +363,13 @@ def evidence_json_value_unsafe_reason(
         if key_reason is not None:
             return key_reason
     if isinstance(value, Mapping):
+        count_summary = key == "null_count_summary" and all(
+            type(count) is int and count >= 0 for count in value.values()
+        )
+        if not count_summary and _row_fact_fields(
+            str(item_key).lower() for item_key in value
+        ):
+            return "row_sample"
         for item_key, item in value.items():
             reason = evidence_json_value_unsafe_reason(item, key=str(item_key))
             if reason is not None:
@@ -374,17 +387,6 @@ def evidence_json_value_unsafe_reason(
             allow_logical_local_only_path=key in JSON_LOGICAL_PATH_VALUE_KEYS,
         )
     return None
-
-
-def contains_source_local_key(value: object) -> bool:
-    if isinstance(value, Mapping):
-        return any(
-            str(key) in SOURCE_LOCAL_KEYS or contains_source_local_key(item)
-            for key, item in value.items()
-        )
-    if isinstance(value, list | tuple | set | frozenset):
-        return any(contains_source_local_key(item) for item in value)
-    return isinstance(value, str) and value in SOURCE_LOCAL_KEYS
 
 
 def sanitize_shared_text(text: object) -> str:

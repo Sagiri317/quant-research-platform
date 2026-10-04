@@ -193,6 +193,7 @@ class _WriteStats:
         frame: pd.DataFrame,
         *,
         schema: pa.Schema | None,
+        object_string_columns: tuple[str, ...],
         admit: Callable[[int], None],
     ) -> pa.Table:
         try:
@@ -201,6 +202,14 @@ class _WriteStats:
             raise ValueError("unsupported_dataset_logical_dtype") from exc
         physical_schema = _canonical_storage_schema(table.schema.remove_metadata())
         if self._arrow_schema is None:
+            # A bounded slice can be null-only while its declared frame has strings.
+            for name in object_string_columns:
+                field = physical_schema.field(name)
+                if pa.types.is_null(field.type):
+                    physical_schema = physical_schema.set(
+                        physical_schema.get_field_index(name),
+                        field.with_type(pa.string()),
+                    )
             schema_bytes = physical_schema_working_set_bytes(physical_schema)
             admit(schema_bytes)
             self._arrow_schema = physical_schema
@@ -819,11 +828,20 @@ def _write_contents(
             raise TypeError("invalid_dataset_chunk")
         with ExitStack() as publication_state:
             try:
-                schema_fixed_bytes, schema_per_row_bytes, nested_arrow_per_row_bytes = (
-                    frame_schema_working_set_bounds(
-                        chunk, resource_policy=resource_policy
-                    )
+                (
+                    schema_fixed_bytes,
+                    schema_per_row_bytes,
+                    nested_arrow_per_row_bytes,
+                    object_string_columns,
+                ) = frame_schema_working_set_bounds(
+                    chunk, resource_policy=resource_policy
                 )
+                if accumulator._logical_dtype_plan is None and any(
+                    isinstance(dtype, pd.CategoricalDtype) and dtype.ordered
+                    for dtype in chunk.dtypes
+                ):
+                    # Ordered domains survive the batch; later domains must match.
+                    admit(schema_fixed_bytes)
                 # Each field's container bound also covers its shallow manager/block
                 # wrappers. Index levels add only borrowed views, not value copies.
                 view_bound = schema_fixed_bytes + json_record_working_set_bytes(
@@ -901,7 +919,10 @@ def _write_contents(
                         ):
                             try:
                                 table = accumulator.table_for_frame(
-                                    frame, schema=None, admit=admit
+                                    frame,
+                                    schema=None,
+                                    object_string_columns=object_string_columns,
+                                    admit=admit,
                                 )
                                 del table
                             except BaseException as error:
@@ -983,7 +1004,10 @@ def _write_contents(
                         ):
                             try:
                                 table = accumulator.table_for_frame(
-                                    frame, schema=None, admit=admit
+                                    frame,
+                                    schema=None,
+                                    object_string_columns=object_string_columns,
+                                    admit=admit,
                                 )
                                 if table.nbytes > arrow_bound:
                                     raise ValueError(
@@ -1126,6 +1150,7 @@ def _write_contents(
                                                     table = accumulator.table_for_frame(
                                                         bounded_partition,
                                                         schema=accumulator._arrow_schema,
+                                                        object_string_columns=(),
                                                         admit=admit,
                                                     )
                                                     if table.nbytes > arrow_bound:

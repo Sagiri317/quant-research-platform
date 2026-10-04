@@ -5,9 +5,9 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Any
 
-import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.storage.datasets.schema import date_string
@@ -40,7 +40,7 @@ class DatasetSummaryObserver:
     ) -> None:
         table = pa.Table.from_batches([batch])
         duplicates = self.exact_key_index.add_table(table)
-        self._observe_frame(frame, duplicates=duplicates)
+        self._observe_frame(frame, batch=batch, duplicates=duplicates)
 
     def summary_payload(self) -> dict[str, Any]:
         return {
@@ -55,13 +55,15 @@ class DatasetSummaryObserver:
             "label_nan_profile": dict(sorted(self.label_nan_profile.items())),
         }
 
-    def _observe_frame(self, frame: pd.DataFrame, *, duplicates: int) -> None:
+    def _observe_frame(
+        self, frame: pd.DataFrame, *, batch: pa.RecordBatch, duplicates: int
+    ) -> None:
         self.row_count += int(len(frame))
         self.duplicate_primary_key_count += int(duplicates)
         for column in self.primary_key:
             self.null_count_summary[column] += int(frame[column].isna().sum())
         self._observe_dates(frame)
-        self._observe_numeric_profiles(frame)
+        self._observe_numeric_profiles(frame, batch=batch)
 
     def _observe_dates(self, frame: pd.DataFrame) -> None:
         if self.timestamp_column is None or frame.empty:
@@ -82,7 +84,9 @@ class DatasetSummaryObserver:
             current_max if self.date_max is None else max(self.date_max, current_max)
         )
 
-    def _observe_numeric_profiles(self, frame: pd.DataFrame) -> None:
+    def _observe_numeric_profiles(
+        self, frame: pd.DataFrame, *, batch: pa.RecordBatch
+    ) -> None:
         if frame.empty:
             return
         for column, role in self.column_roles.items():
@@ -98,10 +102,10 @@ class DatasetSummaryObserver:
                 self.label_nan_profile[column] = (
                     self.label_nan_profile.get(column, 0) + nan_count
                 )
-            if not pd.api.types.is_float_dtype(series.dtype):
+            values = batch.column(column)
+            if not pa.types.is_floating(values.type):
                 continue
-            values = series.dropna().to_numpy(copy=False)
-            inf_count = int(np.isinf(values).sum())
+            inf_count = int(pc.sum(pc.is_inf(values)).as_py() or 0)
             if inf_count:
                 self.non_finite_count_summary[column] = (
                     self.non_finite_count_summary.get(column, 0) + inf_count

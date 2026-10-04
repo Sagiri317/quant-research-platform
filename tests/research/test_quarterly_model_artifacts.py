@@ -3,8 +3,6 @@ from __future__ import annotations
 import json
 import pickle
 import warnings
-from contextlib import contextmanager
-from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -81,38 +79,6 @@ def _file_bytes(root: Path) -> dict[Path, bytes]:
         for parent, _directories, files in filesystem_walk(root)
         for name in files
     }
-
-
-def _mock_prediction_dataset(monkeypatch, frame):
-    import pyarrow as pa
-
-    @dataclass
-    class Session:
-        logical_columns: tuple = ()
-        physical_columns: tuple = ()
-        owns_inventory: bool = False
-        owns_lease: bool = False
-
-        @property
-        def arrow_schema(self):
-            return pa.Schema.from_pandas(frame, preserve_index=False)
-
-        @property
-        def spec(self):
-            return {"timestamp_column": "timestamp"}
-
-        @contextmanager
-        def filtered_view(self, _window):
-            yield self
-
-    @contextmanager
-    def open_session(*_args, **_kwargs):
-        yield Session()
-
-    monkeypatch.setattr(runner, "open_dataset_session", open_session)
-    monkeypatch.setattr(
-        runner, "iter_dataset_chunks", lambda *_args, **_kwargs: iter((frame,))
-    )
 
 
 def test_a_share_model_folds_require_formal_history_start_year() -> None:
@@ -214,6 +180,7 @@ def test_training_asset_scope_preserves_consumer_primary_on_early_close() -> Non
 def test_rank_missing_contributes_neutral_without_renormalization() -> None:
     predictor = RankEnsemblePredictor(
         columns=("x", "y"),
+        label_calibration=(0.0, 1.0),
         directions=(1.0, 1.0),
     )
     frame = pd.DataFrame(
@@ -815,6 +782,88 @@ def _republish(case, logical, *, mutate, operational=None):
                 case.root, lease=artifact_lease
             ),
         )
+
+
+@pytest.mark.parametrize("second_family", ["alpha__config_0", "renamed", None])
+def test_validation_members_are_scoped_by_family(tmp_path, second_family):
+    specs = [
+        ModelSpec(
+            model_id="alpha",
+            model_algorithm="ridge_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+        ),
+    ]
+    configurations = [
+        {
+            "model_id": "alpha",
+            "hyperparameters": {},
+            "parameter_candidates": [
+                {"regularization_strength": 0.01},
+                {"regularization_strength": 0.1},
+            ],
+        },
+    ]
+    if second_family is not None:
+        specs.append(
+            ModelSpec(
+                model_id=second_family,
+                model_algorithm="linear_regression",
+                input_factor_columns=("y",),
+                label_column="label",
+            )
+        )
+        configurations.append({"model_id": second_family, "hyperparameters": {}})
+    specs = tuple(specs)
+    preflight_model_specs(specs)
+    with (
+        runtime_resource_policy_scope() as policy,
+        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    ):
+        case = shared_model_case(
+            tmp_path,
+            specs=specs,
+            protocol=shared_model_protocol(
+                specs,
+                development_end="2019-03-31",
+                configurations=configurations,
+            ),
+            lease=artifact_lease,
+        )
+        candidates = case.artifact.candidate_models
+        assert len(candidates) == 5 * (2 + (second_family is not None))
+        paths = [entry["validation_prediction"]["path"] for entry in candidates]
+        assert len(set(paths)) == len(candidates)
+        for entry in candidates:
+            member = entry["validation_prediction"]
+            assert member["path"] == (
+                f"models/{entry['quarter_id']}/{entry['family_id']}/"
+                f"{entry['model_id']}.parquet"
+            )
+            assert filesystem_exists(case.root / member["path"])
+        for quarter in {entry["quarter_id"] for entry in candidates}:
+            quarter_entries = [e for e in candidates if e["quarter_id"] == quarter]
+            assert {
+                e["model_id"] for e in quarter_entries if e["family_id"] == "alpha"
+            } == {"alpha__config_0", "alpha__config_1"}
+            if second_family is not None:
+                assert [
+                    e["model_id"]
+                    for e in quarter_entries
+                    if e["family_id"] == second_family
+                ] == [second_family]
+        assert len(case.artifact.final_models) == 2 * len(specs)
+        for group in ("global", "quarterly"):
+            for spec in specs:
+                with read_quarterly_predictor(
+                    case.artifact, group, spec.model_id, resource_policy=policy
+                ) as predictor:
+                    predictions = predictor.predict(
+                        case.frame.loc[:, list(spec.input_columns)]
+                    )
+                    assert len(predictions) == len(case.frame)
+                    assert np.isfinite(predictions).all()
+        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_candidates_fit_once_and_both_groups_have_real_final_models(
@@ -1606,7 +1655,6 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
                     model_catalog=research_profile().models,
                     dataset_id=dataset.data_id,
                     model_ids=("linear",),
-                    tie_break_order=("linear",),
                     time_window=TimeWindow("2019-01-01", "2019-03-31"),
                     resource_policy=policy,
                     protocol_manifest={
@@ -1962,3 +2010,177 @@ def test_model_metadata_failure_releases_copies_and_preserves_old_good(
         with policy.lease("test.after_model_metadata_failure", 64 * 1024**2):
             assert _file_bytes(good.root) == before
         assert set(good.root.parent.iterdir()) == instances
+
+
+def test_natural_huber_failure_drops_scaled_buffers_before_fit_lease_close(monkeypatch):
+    import weakref
+
+    from sklearn.linear_model import HuberRegressor
+
+    from quant_research_platform.runtime.resources import MemoryLease
+
+    spec = ModelSpec(
+        model_id="huber_failure",
+        model_algorithm="huber_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+        hyperparameters={"max_iter": 1},
+    )
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.bdate_range("2017-01-02", periods=36),
+            "label_available_at": pd.bdate_range("2017-01-02", periods=36),
+            "eligible": True,
+            "x": np.arange(36.0),
+            "label": np.sin(np.arange(36.0)) + np.arange(36.0),
+        }
+    )
+    references = []
+    native_fit = HuberRegressor.fit
+    close = MemoryLease.close
+    observed = []
+
+    def fit(estimator, matrix, target, **kwargs):
+        references.extend((weakref.ref(matrix), weakref.ref(kwargs["sample_weight"])))
+        return native_fit(estimator, matrix, target, **kwargs)
+
+    def checked_close(lease):
+        if lease.owner == "research.model.fitted" and references:
+            assert all(reference() is None for reference in references)
+            observed.append(True)
+        close(lease)
+
+    monkeypatch.setattr(HuberRegressor, "fit", fit)
+    monkeypatch.setattr(MemoryLease, "close", checked_close)
+    estimator = build_estimator_from_model_spec(spec)
+    with runtime_resource_policy_scope() as policy:
+        with pytest.raises(ValueError, match="model_fit_non_converged"):
+            fitting._fit_model_result_owned_from_frames(
+                (frame,),
+                spec,
+                estimator=estimator,
+                fitting_cutoff="2018-12-31",
+            )
+        assert references and observed
+        assert policy.used_memory_bytes == 0
+
+
+def test_non_ols_scaler_traced_peak_is_owned_during_real_fit(monkeypatch):
+    import tracemalloc
+
+    from quant_research_platform.research.models.scaler import ModelMatrixScaler
+
+    count, width = 1024, 104
+    columns = tuple(f"x_{index}" for index in range(width))
+    matrix = np.random.default_rng(42).normal(size=(count, width))
+    frame = pd.DataFrame(matrix, columns=columns)
+    frame["timestamp"] = pd.bdate_range("2010-01-01", periods=count)
+    frame["label_available_at"] = frame.timestamp
+    frame["eligible"] = True
+    frame["label"] = matrix[:, 0] + matrix[:, 1] * 2
+    spec = ModelSpec(
+        model_id="ridge_workspace",
+        model_algorithm="ridge_regression",
+        input_factor_columns=columns,
+        label_column="label",
+        hyperparameters={"alpha": 1.0},
+    )
+    estimator = build_estimator_from_model_spec(spec)
+    original = ModelMatrixScaler.fit
+    observations = []
+    policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
+
+    def measured(matrix, **kwargs):
+        tracemalloc.start()
+        try:
+            baseline, _ = tracemalloc.get_traced_memory()
+            result = original(matrix, **kwargs)
+            _, peak = tracemalloc.get_traced_memory()
+            observations.append((peak - baseline, policy.used_memory_bytes))
+            return result
+        finally:
+            tracemalloc.stop()
+
+    monkeypatch.setattr(ModelMatrixScaler, "fit", measured)
+    with runtime_resource_policy_scope(policy):
+        owned = fitting._fit_model_result_owned_from_frames(
+            (frame,), spec, estimator=estimator, fitting_cutoff="2018-12-31"
+        )
+        try:
+            assert observations and observations[0][0] <= observations[0][1]
+            assert np.isfinite(owned.value.prediction_model.estimator.coef_).all()
+        finally:
+            owned.release(owner="test.ridge.workspace")
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "capacity_case", ["physical", "explicit", "retained", "accepted"]
+)
+def test_predictor_load_checks_physical_workspace_before_pickle(
+    tmp_path, monkeypatch, capacity_case
+):
+    import hashlib
+
+    from quant_research_platform.runtime import resources
+
+    payload = {"parameters": b"x" * (32 * 1024)}
+    encoded = pickle.dumps(payload)
+    path = tmp_path / "predictor.pkl"
+    path.write_bytes(encoded)
+    members = (
+        {
+            "path": path.name,
+            "size": len(encoded),
+            "sha256": hashlib.sha256(encoded).hexdigest(),
+        },
+    )
+    available = 64 * 1024 if capacity_case == "physical" else 4 * 1024**2
+    explicit = 64 * 1024 if capacity_case == "explicit" else None
+    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: available)
+    original = persisted.pickle.load
+    entered = False
+
+    def load(handle):
+        nonlocal entered
+        entered = True
+        return original(handle)
+
+    monkeypatch.setattr(persisted.pickle, "load", load)
+    with resources.runtime_resource_policy_scope(explicit_cap_bytes=explicit) as policy:
+        retained = (
+            available - 64 * 1024
+            if capacity_case == "retained"
+            else policy.memory_budget_bytes
+            if capacity_case == "accepted"
+            else 0
+        )
+        with policy.lease("tests.predictor.existing", retained):
+            if capacity_case == "accepted":
+                assert policy.planning_headroom_bytes == 0
+                with persisted._read_model_member(
+                    tmp_path,
+                    members,
+                    path.name,
+                    model_algorithm="linear_regression",
+                    workspace_factor=4,
+                ) as owned:
+                    assert owned.value == payload
+                    assert policy.used_memory_bytes == retained + 4 * len(encoded)
+                assert entered
+            else:
+                with pytest.raises(
+                    ValueError, match="model_predictor_exceeds_memory_capacity"
+                ):
+                    with persisted._read_model_member(
+                        tmp_path,
+                        members,
+                        path.name,
+                        model_algorithm="linear_regression",
+                        workspace_factor=4,
+                    ):
+                        pytest.fail("predictor decoding exceeded physical capacity")
+                assert not entered
+            assert policy.used_memory_bytes == retained
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"

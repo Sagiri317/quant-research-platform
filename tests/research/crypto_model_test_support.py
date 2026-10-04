@@ -94,7 +94,6 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
                     model_catalog=profile.models,
                     dataset_id=dataset_id,
                     model_ids=ids,
-                    tie_break_order=ids,
                     time_window=requested,
                     resource_policy=policy,
                     protocol_manifest=protocol,
@@ -816,6 +815,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
                             saved.member_records,
                             f"models/final/{entry['model_id']}.pkl",
                             resource_policy=policy,
+                            model_algorithm=entry["model_metadata"]["model_algorithm"],
                             workspace_factor=4,
                         ) as owned:
                             payload = owned.value
@@ -1046,7 +1046,6 @@ def check_crypto_wide_fold_artifact(
                 model_catalog=profile.models,
                 dataset_id=original["scenario_id"],
                 model_ids=ids,
-                tie_break_order=ids,
                 time_window=TimeWindow(
                     envelope.research_window["start"], envelope.research_window["end"]
                 ),
@@ -1343,7 +1342,6 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
                 model_catalog=profile.models,
                 dataset_id=dataset_id,
                 model_ids=(model["model_id"],),
-                tie_break_order=(model["model_id"],),
                 time_window=model_window,
                 resource_policy=policy,
                 protocol_manifest=protocol,

@@ -188,7 +188,10 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
     }
     evidence = {
         "qualification": "REUSE",
-        "prior_runs": [{"run_id": "prior", "identity": "d" * 64}],
+        "prior_runs": [
+            {"run_id": "prior_" + "a" * 64 + str(index), "identity": "d" * 64}
+            for index in range(7500)
+        ],
     }
     operation = unmeasured_operation_evidence("fixture_record")
     record = ResearchRunRecord(
@@ -231,6 +234,7 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
         ),
     )
     original = record.payload()
+    assert len(json.dumps(original["holdout_evidence"]).encode()) > 1024 * 1024
     protocol["scope"]["assets"].append("eth_usdt")
     evidence["prior_runs"].clear()
     operation["environment"]["reason"] = "changed"

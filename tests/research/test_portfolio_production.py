@@ -12,6 +12,7 @@ import pytest
 
 from quant_research_platform.artifacts.portfolio_ledger import (
     read_portfolio_ledger_artifact,
+    write_portfolio_ledger_artifact,
 )
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
@@ -36,9 +37,6 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     require_fee_coverage,
 )
 from quant_research_platform.research.portfolios import production
-from quant_research_platform.research.portfolios.accounting import (
-    execute_continuous_target as _execute_continuous_target,
-)
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskConfig,
     FactorRiskEstimate,
@@ -52,28 +50,11 @@ from quant_research_platform.runtime.resources import (
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.identity import filesystem_mkdir
 from quant_research_platform.storage.layout import StorageLayout
-from tests.helpers.portfolio_ledger import session_frame, write_test_sessions
-
-
-def execute_continuous_target(*args, **kwargs):
-    def totals(assets, amounts, adv):
-        return np.asarray(
-            [
-                kwargs["cost_for_trade"](
-                    kwargs["execution_date"],
-                    asset,
-                    "buy",
-                    float(amount),
-                    float(volume),
-                    kwargs["assumptions"],
-                ).total_cost
-                if amount > 0
-                else 0.0
-                for asset, amount, volume in zip(assets, amounts, adv, strict=True)
-            ]
-        )
-
-    return _execute_continuous_target(*args, cost_totals_for_buys=totals, **kwargs)
+from tests.helpers.portfolio_ledger import (
+    execute_continuous_target,
+    session_frame,
+    write_test_sessions,
+)
 
 
 def test_enhanced_decision_requires_history_for_current_industry_domain() -> None:
@@ -289,6 +270,7 @@ def _build_producer(
     final_calibrations=None,
     access_window: str = "development",
     frozen_calibration: production.AlphaCalibration | None = None,
+    typed_batches: bool = False,
 ):
     final_calibrations = [] if final_calibrations is None else final_calibrations
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
@@ -439,17 +421,29 @@ def _build_producer(
     expected_policy = resource_policy
 
     @contextmanager
-    def schema_session(root, *, columns, time_window, resource_policy):
-        from types import SimpleNamespace
-
+    def input_session(root, *, columns, time_window, resource_policy):
         target = next(key for key, value in roots.items() if value == root)
-        assert columns is None
         assert resource_policy is expected_policy
         yield SimpleNamespace(
-            arrow_schema=SimpleNamespace(names=tuple(frames[target].columns))
+            root=root,
+            time_window=time_window,
+            resource_policy=resource_policy,
+            arrow_schema=SimpleNamespace(names=tuple(frames[target].columns)),
         )
 
-    monkeypatch.setattr(production, "open_dataset_session", schema_session)
+    def file_batches(session, *, columns, target_chunk_bytes):
+        assert target_chunk_bytes > 0
+        for frame in fake_read_dataset(
+            session.root,
+            columns=columns,
+            time_window=session.time_window,
+            mode=DatasetReadMode.CHUNKED,
+            resource_policy=session.resource_policy,
+        ):
+            yield session.root / "synthetic.parquet", frame
+
+    monkeypatch.setattr(production, "open_dataset_session", input_session)
+    monkeypatch.setattr(production, "iter_dataset_file_batches", file_batches)
     monkeypatch.setattr(production, "read_dataset", fake_read_dataset)
     assumptions = ExecutionAssumptions(
         initial_nav=100.0,
@@ -506,7 +500,7 @@ def _build_producer(
                 on_final_calibration=final_calibrations.append,
             )
             for batch in chunks:
-                yield session_frame(batch)
+                yield batch if typed_batches else session_frame(batch)
 
     return output(), calls
 
@@ -522,8 +516,10 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
         frames=frames,
         fee_frame=fee_frame,
         output_window=output_window,
+        typed_batches=True,
     )
-    frames_out = list(chunks)
+    original_batches = list(chunks)
+    frames_out = [session_frame(batch) for batch in original_batches]
     assert frames_out
     assert all(
         tuple(frame.columns) == CONTINUOUS_EXECUTION_COLUMNS for frame in frames_out
@@ -550,10 +546,15 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
             }
         },
     )
-    artifact_root = write_test_sessions(
+
+    def produce(emit):
+        for batch in original_batches:
+            emit(batch)
+
+    artifact_root = write_portfolio_ledger_artifact(
         tmp_path / "artifacts",
         envelope=envelope,
-        ledger_chunks=iter(frames_out),
+        produce=produce,
     )
     with (
         artifact_resource_scope() as artifact_policy,
@@ -563,7 +564,8 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
             artifact_root, expected_identity=artifact_root.name, lease=artifact_lease
         )
         persisted = list(artifact.iter_chunks())
-        assert len(persisted) == len(frames_out)
+        assert persisted == original_batches
+        assert any(batch.trades for batch in persisted)
         for expected, batch in zip(frames_out, persisted, strict=True):
             actual = session_frame(batch)
             np.testing.assert_array_equal(
@@ -571,6 +573,21 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
             )
             assert abs(float(actual.decision_delta_weight.sum())) < 1e-14
         assert np.isclose(frames_out[0]["post_trade_notional"].sum(), 100.0 - 0.04)
+
+    first = original_batches[0]
+    assert first.trades
+    damaged = replace(
+        first,
+        trades=tuple(
+            replace(trade, notional=trade.notional * 2) for trade in first.trades
+        ),
+    )
+    with pytest.raises(ValueError, match="^portfolio_ledger_direction_invalid$"):
+        write_portfolio_ledger_artifact(
+            tmp_path / "damaged_artifacts",
+            envelope=envelope,
+            produce=lambda emit: emit(damaged),
+        )
 
 
 def test_portfolio_stream_count_does_not_scale_with_decision_dates(
@@ -590,7 +607,7 @@ def test_portfolio_stream_count_does_not_scale_with_decision_dates(
     streams = Counter(
         target for target, mode, _window in calls if mode is DatasetReadMode.CHUNKED
     )
-    assert streams == {"panel": 3, "dataset": 1, "execution": 1}
+    assert streams == {"panel": 1, "dataset": 1, "execution": 1}
     assert all(
         target in {"fee", "calendar"}
         for target, mode, _window in calls
@@ -1541,11 +1558,18 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
             candidate=candidate,
             decision_timestamp=pd.Timestamp("2023-01-06"),
             next_timestamp=pd.Timestamp("2023-01-09"),
-            panel=at_date(panel, "2023-01-06"),
+            panel=production._session_frame(
+                at_date(panel, "2023-01-06"), production._ENHANCED_PANEL_COLUMNS
+            ),
             next_panel=at_date(panel, "2023-01-09"),
             endpoint_panel=at_date(panel, "2023-01-10"),
-            dataset=at_date(frames["dataset"], "2023-01-06"),
-            execution=at_date(frames["execution"], "2023-01-06"),
+            dataset=production._session_frame(
+                at_date(frames["dataset"], "2023-01-06"), production._DATASET_COLUMNS
+            ),
+            execution=production._session_frame(
+                at_date(frames["execution"], "2023-01-06"),
+                production._EXECUTION_COLUMNS,
+            ),
             holdings=pd.Series({"a": 45.0, "b": 45.0}),
             cash=10.0,
             nav=100.0,
@@ -2379,3 +2403,141 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
                 selection_group=candidate.selection_group,
             )
         assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+
+
+@pytest.mark.parametrize("nav", [100.0, 1e9])
+@pytest.mark.parametrize("weight", [1e-15, 5e-14, 7.5e-14, 1e-8])
+@pytest.mark.parametrize("blocked", ["market", "adv"])
+def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
+    tmp_path, nav, weight, blocked
+):
+    expected_reason = (
+        None
+        if weight < 1e-10
+        else ("market_blocked" if blocked == "market" else "adv_capacity")
+    )
+    _assert_execution_endpoints_roundtrip(
+        tmp_path,
+        nav=nav,
+        current=0.0,
+        target=weight,
+        can_enter=blocked != "market",
+        adv=0.0 if blocked == "adv" else nav,
+        expected_delta=0.0,
+        expected_reason=expected_reason,
+    )
+
+
+@pytest.mark.parametrize(
+    "nav,current,target",
+    [
+        (100.0, 0.7, 0.7000000000000001),
+        (1e9, 0.4176785340482801, 0.41767853404828015),
+        (1e9, 0.41767853404828015, 0.4176785340482801),
+    ],
+)
+def test_adjacent_weights_execute_the_stored_notional_difference(
+    tmp_path, nav, current, target
+):
+    expected_delta = target * nav - current * nav
+    assert expected_delta != (target - current) * nav
+    _assert_execution_endpoints_roundtrip(
+        tmp_path,
+        nav=nav,
+        current=current,
+        target=target,
+        can_enter=True,
+        adv=nav,
+        expected_delta=expected_delta,
+        expected_reason=None,
+    )
+
+
+def _assert_execution_endpoints_roundtrip(
+    tmp_path,
+    *,
+    nav,
+    current,
+    target,
+    can_enter,
+    adv,
+    expected_delta,
+    expected_reason,
+):
+    from quant_research_platform.contracts.portfolios import TradeCostComponents
+    from quant_research_platform.research.portfolios.accounting import (
+        continuous_ledger_batch,
+    )
+
+    current_weights = pd.Series({"a": current})
+    target_weights = pd.Series({"a": target})
+    zero = pd.Series({"a": 0.0})
+    assumptions = ExecutionAssumptions(nav, 0.0, 0.0, 1.0, (1.0,))
+    account = execute_continuous_target(
+        current_weights,
+        target_weights,
+        nav=nav,
+        average_daily_volume=pd.Series({"a": adv}),
+        can_enter=pd.Series({"a": can_enter}),
+        can_exit=pd.Series({"a": True}),
+        execution_date=pd.Timestamp("2023-01-04").date(),
+        cost_for_trade=lambda _date, _asset, _side, amount, _volume, _settings: (
+            TradeCostComponents(float(amount), 0.0, 0.0, 0.0, 0.0, 0.0, "f" * 64)
+        ),
+        assumptions=assumptions,
+        cost_source_identity="f" * 64,
+    )
+    frame = production._ledger_frame(
+        account=account,
+        decision_timestamp=pd.Timestamp("2023-01-03"),
+        returns=zero,
+        alpha_score=zero,
+        adv20=pd.Series({"a": adv}),
+        enhanced_decision=None,
+        benchmark_weights=None,
+        optimization_result=None,
+        decision_reason=PORTFOLIO_DECISION_REASON_SIMPLE,
+        decision_delta=target_weights - current_weights,
+    )
+    row = frame.set_index("asset_id").loc["a"]
+    assert row.pre_trade_notional == current * nav
+    assert row.target_notional == target * nav
+    assert row.executed_delta_notional == expected_delta
+    assert (None if pd.isna(row.block_reason) else row.block_reason) == expected_reason
+    batch = continuous_ledger_batch(frame, 0, end_timestamp=pd.Timestamp("2023-01-05"))
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="roundoff_ledger",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "2023-01-03",
+            "end": "2023-01-05",
+            "access": "development",
+        },
+        upstream_identities={"prediction": "b" * 64},
+        semantic_metadata={
+            "portfolio_capital": {
+                "candidate_id": "roundoff_ledger",
+                "initial_capital": nav,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
+        },
+    )
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger",
+        envelope=envelope,
+        produce=lambda emit: emit(batch),
+    )
+    with artifact_resource_scope() as policy, policy.lease("test.metadata", 0) as lease:
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=root.name, lease=lease
+        )
+        (saved,) = tuple(artifact.iter_chunks())
+        assert saved == batch
+        if expected_delta:
+            assert len(saved.trades) == 1
+            assert saved.trades[0].notional == expected_delta
+        else:
+            assert not saved.trades

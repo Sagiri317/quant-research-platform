@@ -1,14 +1,16 @@
 from __future__ import annotations
 
+from contextlib import contextmanager
+
 import pandas as pd
 import pyarrow as pa
 
 import quant_research_platform.runtime.resources as runtime_resources
-import quant_research_platform.storage.datasets.writing as dataset_writing
-import quant_research_platform.storage.parquet as dataset_physical
 from quant_research_platform.runtime.resources import (
     RuntimeResourcePolicy,
+    runtime_resource_policy_scope,
 )
+from quant_research_platform.storage.datasets.reading import _prepare_in_filter
 from quant_research_platform.storage.datasets.schema import (
     logical_dtype_metadata_bytes,
     logical_dtype_payload_from_frame,
@@ -16,22 +18,23 @@ from quant_research_platform.storage.datasets.schema import (
 from tests.helpers.runtime_resources import capture_test_policy
 
 
+@contextmanager
+def prepared_in_filter(field, values, *, resource_policy):
+    with (
+        runtime_resource_policy_scope(resource_policy),
+        resource_policy.lease("storage.dataset.session", 0) as session_lease,
+    ):
+        prepared = _prepare_in_filter(
+            field, values, resource_policy=resource_policy, session_lease=session_lease
+        )
+        try:
+            yield prepared
+        finally:
+            prepared = None
+
+
 def _issued_test_policy(task_bytes: int = 16 * 1024**2) -> RuntimeResourcePolicy:
     planning_bytes = task_bytes - max(1, task_bytes // 16)
-    return capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=64 * 1024 + planning_bytes,
-    )
-
-
-def _writer_test_policy(
-    working_headroom_bytes: int = 1024**2,
-) -> RuntimeResourcePolicy:
-    planning_bytes = (
-        dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-        + dataset_physical._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
-        + working_headroom_bytes
-    )
     return capture_test_policy(
         available_memory_bytes=64 * 1024**2,
         explicit_cap_bytes=64 * 1024 + planning_bytes,

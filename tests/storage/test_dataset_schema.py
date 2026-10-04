@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import weakref
 from collections import UserDict
 from dataclasses import replace
@@ -12,6 +13,7 @@ from types import MappingProxyType
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 import pyarrow.parquet as pq
 import pytest
 
@@ -24,10 +26,13 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.runtime.resources import (
+    OwnedValue,
+    pandas_frame_payload_bytes,
     runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
+    compare_datasets,
     read_dataset,
     write_dataset,
 )
@@ -92,22 +97,99 @@ def test_dataset_global_extension_dtype_survives_read_scopes(
         frame,
         spec=make_processed_dataset_spec(f"extension_{dtype}"),
     )
-    materialized = read_dataset(root, columns=("timestamp", "value"))
+    columns = ("asset_id", "timestamp", "value")
+    materialized = read_dataset(root, columns=columns)
     chunked = list(
         read_dataset(
             root,
-            columns=("timestamp", "value"),
+            columns=columns,
             mode=DatasetReadMode.CHUNKED,
         )
     )
     windowed = read_dataset(
         root,
-        columns=("timestamp", "value"),
+        columns=columns,
         time_window=TimeWindow(date(2015, 1, 1), date(2015, 12, 31)),
     )
     assert str(materialized["value"].dtype) == dtype
     assert {str(part["value"].dtype) for part in chunked} == {dtype}
     assert str(windowed["value"].dtype) == dtype
+    expected = frame.loc[:, list(columns)]
+    for observed, selected in (
+        (materialized, expected),
+        (pd.concat(chunked, ignore_index=True), expected),
+        (windowed, expected.loc[expected["timestamp"].dt.year == 2015]),
+    ):
+        pd.testing.assert_frame_equal(
+            observed.sort_values(["asset_id", "timestamp"]).reset_index(drop=True),
+            selected.sort_values(["asset_id", "timestamp"]).reset_index(drop=True),
+            check_dtype=False,
+        )
+
+
+def test_ordered_category_plan_stays_reserved_across_owned_batches(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    def frame(index):
+        categories = ["category" + str(value).zfill(4) for value in range(6000)]
+        return pd.DataFrame(
+            {
+                "market_id": ["a_share"],
+                "asset_id": ["X"],
+                "timestamp": [pd.Timestamp("2015-01-01") + pd.Timedelta(days=index)],
+                "value": pd.Categorical(
+                    [categories[0]], categories=categories, ordered=True
+                ),
+            }
+        )
+
+    prototype = frame(0)
+    bound = pandas_frame_payload_bytes(prototype) + 4096
+    del prototype
+    policy = capture_test_policy(
+        available_memory_bytes=1024**3,
+        explicit_cap_bytes=512 * 1024**2,
+    )
+    observed = []
+    stats = []
+    original = dataset_writing._WriteStats.observe_logical_dtype_payload
+
+    def observe(self, *args, **kwargs):
+        original(self, *args, **kwargs)
+        stats[:] = [weakref.ref(self)]
+
+    def producer():
+        for index in range(2):
+            lease = yield bound
+            current = frame(index)
+            if index:
+                plan = stats[0]()._logical_dtype_plan
+                categories = plan["columns"][-1]["categories"]
+                retained_lower_bound = sum(
+                    sys.getsizeof(item) + sys.getsizeof(item["value"])
+                    for item in categories
+                )
+                observed.append(retained_lower_bound)
+                assert (
+                    retained_lower_bound + pandas_frame_payload_bytes(current)
+                    <= policy.used_memory_bytes
+                )
+                del plan, categories
+            yield OwnedValue(current, lease)
+            del current
+
+    monkeypatch.setattr(
+        dataset_writing._WriteStats, "observe_logical_dtype_payload", observe
+    )
+    dataset_writing.write_dataset(
+        make_dataset_artifact_root(tmp_path, "ordered_plan"),
+        producer(),
+        spec=make_processed_dataset_spec("ordered_plan", value_role=ColumnRole.SOURCE),
+        resource_policy=policy,
+    )
+    assert len(observed) == 1
+    assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
 
 
 def test_writer_rejects_missing_persisted_logical_dtype_metadata(
@@ -557,6 +639,113 @@ def test_arrow_scalar_dtypes_are_stable_across_storage_read_boundaries(
     assert str(materialized["value"].dtype) == expected_dtype
     assert {str(chunk["value"].dtype) for chunk in chunks} == {expected_dtype}
     assert str(windowed["value"].dtype) == expected_dtype
+
+
+@pytest.mark.parametrize("arrow_type", (pa.float32(), pa.float64()))
+@pytest.mark.parametrize("has_nan", (False, True))
+def test_public_arrow_float_validity_survives_reads_rewrite_and_exact_compare(
+    tmp_path, monkeypatch, arrow_type, has_nan
+):
+    from quant_research_platform.contracts.data import ProcessedDataKind
+    from quant_research_platform.runtime import resources
+
+    values = pa.array(
+        [float("nan") if has_nan else 0.5, None, 1.5],
+        type=arrow_type,
+        from_pandas=False,
+    )
+    frame = pd.DataFrame(
+        {
+            "asset_id": pd.Series(
+                [f"synthetic_{index}" for index in range(3)], dtype="string"
+            ),
+            "timestamp": pd.date_range("2024-01-01", periods=3, freq="D").astype(
+                "datetime64[ns]"
+            ),
+            "value": pd.Series(values, dtype=pd.ArrowDtype(arrow_type)),
+        }
+    )
+    original = frame.copy(deep=True)
+    expected = pa.array(frame["value"], from_pandas=False)
+    expected_nan = pc.fill_null(pc.is_nan(expected), False)
+    assert expected.null_count == 1
+    assert pc.sum(expected_nan).as_py() == int(has_nan)
+    assert pc.sum(pc.fill_null(pc.is_finite(expected), False)).as_py() == 2 - int(
+        has_nan
+    )
+    spec = replace(
+        make_processed_dataset_spec(
+            "arrow_float_validity",
+            kind=ProcessedDataKind.PANEL,
+            primary_key=("asset_id", "timestamp"),
+        ),
+        column_roles={
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "value": ColumnRole.CONTEXT,
+        },
+    )
+    root = make_dataset_artifact_root(
+        tmp_path / "source", spec.data_id, kind=ProcessedDataKind.PANEL
+    )
+    policies = []
+    original_capture = resources._capture_runtime_resource_policy
+
+    def capture_policy(*, explicit_cap_bytes=None):
+        policy = original_capture(explicit_cap_bytes=explicit_cap_bytes)
+        policies.append(policy)
+        return policy
+
+    def assert_validity(actual):
+        assert actual.type == arrow_type
+        assert len(actual) == 3
+        assert actual.is_null().equals(expected.is_null())
+        assert pc.fill_null(pc.is_nan(actual), False).equals(expected_nan)
+        assert pc.filter(actual, pc.is_finite(actual)).equals(
+            pc.filter(expected, pc.is_finite(expected))
+        )
+
+    monkeypatch.setattr(resources, "_capture_runtime_resource_policy", capture_policy)
+    write_dataset(root, frame, spec=spec)
+    original_manifest = (root / "_manifest" / "manifest.json").read_bytes()
+    paths = sorted((root / "data").rglob("*.parquet"))
+    persisted = []
+    for path in paths:
+        with pq.ParquetFile(native_filesystem_path(path)) as parquet:
+            persisted.append(parquet.read(columns=["value"]).column(0).combine_chunks())
+    assert_validity(pa.concat_arrays(persisted))
+
+    for mode in (DatasetReadMode.CHUNKED, DatasetReadMode.MATERIALIZED):
+        if mode is DatasetReadMode.CHUNKED:
+            readback = tuple(read_dataset(root, mode=mode))
+            parts = readback
+        else:
+            readback = read_dataset(root, mode=mode)
+            parts = (readback,)
+        assert {str(part["value"].dtype) for part in parts} == {
+            f"Float{arrow_type.bit_width}"
+        }
+        assert_validity(
+            pa.concat_arrays(
+                [pa.array(part["value"], from_pandas=False) for part in parts]
+            )
+        )
+        actual_keys = pd.concat(
+            [part.loc[:, list(spec.primary_key)] for part in parts], ignore_index=True
+        )
+        pd.testing.assert_frame_equal(actual_keys, frame.loc[:, list(spec.primary_key)])
+        rewritten = make_dataset_artifact_root(
+            tmp_path / mode.value, spec.data_id, kind=ProcessedDataKind.PANEL
+        )
+        write_dataset(rewritten, readback, spec=spec)
+        assert compare_datasets(root, rewritten).status == "MATCH"
+    assert (root / "_manifest" / "manifest.json").read_bytes() == original_manifest
+    pd.testing.assert_frame_equal(frame, original)
+    assert policies
+    assert all(
+        policy.used_memory_bytes == 0 and policy.state == "CLOSED"
+        for policy in policies
+    )
 
 
 @pytest.mark.parametrize(

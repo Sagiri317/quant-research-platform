@@ -321,3 +321,31 @@ def test_atomic_failure_preserves_primary_and_session_exclusivity(
 def test_request_rejects_unsafe_or_implicit_cutoff(changes: dict[str, object]) -> None:
     with pytest.raises(ValueError):
         replace(_request("css"), **changes).payload()
+
+
+@pytest.mark.parametrize("metadata", (0, None, "bad", []))
+def test_scalar_saved_metadata_preserves_primary_error_at_read_and_reuse(
+    tmp_path, metadata
+):
+    from quant_research_platform.storage.identity import filesystem_unlink
+
+    sdk = SDK(_response())
+    request = _request()
+    layout = StorageLayout(tmp_path)
+    with choice_session(sdk) as session:
+        root = session.fetch(layout, request)
+        path = root / "response.metadata.json"
+        original = filesystem_read_bytes(path)
+        manifest = json.loads(original)
+        manifest["metadata"] = metadata
+        filesystem_unlink(path)
+        filesystem_write_text(path, json.dumps(manifest), encoding="utf-8")
+        corrupt = filesystem_read_bytes(path)
+        with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
+            with read_choice_response(root, request, resource_policy=session.policy):
+                pytest.fail("invalid metadata admitted")
+        with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
+            session.fetch(layout, request)
+        assert sdk.calls == 1
+        assert filesystem_read_bytes(path) == corrupt
+        assert session.policy.used_memory_bytes == 0

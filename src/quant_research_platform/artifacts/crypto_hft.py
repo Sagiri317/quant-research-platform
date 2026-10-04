@@ -12,7 +12,6 @@ import pyarrow as pa
 from quant_research_platform.artifacts.outputs import validate_output_bundle
 from quant_research_platform.artifacts.portfolio_ledger import (
     PORTFOLIO_LEDGER_TABLE_COLUMNS,
-    PortfolioLedgerArtifact,
     _capital,
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
@@ -128,7 +127,9 @@ def _episode_envelope(parent, start, stop):
     )
 
 
-def _episode_rows(root, envelope, members, identities, manifest_identity=None):
+def _episode_rows(
+    root, envelope, members, identities, manifest_identity=None, consume_episode=None
+):
     """Keep the parent's captured physical member barrier through child consumption."""
     previous_stop = None
     expected_paths = {"episodes.parquet"}
@@ -197,22 +198,30 @@ def _episode_rows(root, envelope, members, identities, manifest_identity=None):
                     expected_paths.update(child_paths)
                     terminal_observed = None
 
-                    def consume(batches):
-                        nonlocal terminal_observed
-                        for batch in batches:
-                            try:
-                                for value in batch.valuations:
-                                    if value.phase == "end":
-                                        terminal_observed = (
-                                            value.timestamp_ns
-                                            if terminal_observed is None
-                                            else max(
-                                                terminal_observed, value.timestamp_ns
+                    def consume(artifact, batches, row=row):
+                        def observe():
+                            nonlocal terminal_observed
+                            for batch in batches:
+                                try:
+                                    for value in batch.valuations:
+                                        if value.phase == "end":
+                                            terminal_observed = (
+                                                value.timestamp_ns
+                                                if terminal_observed is None
+                                                else max(
+                                                    terminal_observed,
+                                                    value.timestamp_ns,
+                                                )
                                             )
-                                        )
+                                    yield batch
+                                finally:
+                                    batch = value = None
 
-                            finally:
-                                batch = value = None
+                        with closing_iterator(observe()) as observed:
+                            if consume_episode is not None:
+                                consume_episode(row, artifact, observed)
+                            for _batch in observed:
+                                _batch = None
 
                     expected_child = _episode_envelope(envelope, start, stop)
                     if row["ledger_identity"] != expected_child.instance_identity:
@@ -277,18 +286,24 @@ class CryptoEpisodeArtifact:
     _identities: dict
     _manifest_identity: object
 
-    def iter_episodes(self):
+    def iter_episodes(self, *, consume_episode=None):
         yield from _episode_rows(
             self.root,
             self._envelope,
             self._members,
             self._identities,
             self._manifest_identity,
+            consume_episode,
         )
 
 
 def read_crypto_episode_artifact(
-    root, *, lease, expected_identity, expected_member_identities=None
+    root,
+    *,
+    lease,
+    expected_identity,
+    expected_member_identities=None,
+    consume_episode=None,
 ):
     root = Path(root)
     identities = {}
@@ -309,7 +324,9 @@ def read_crypto_episode_artifact(
         identities,
         manifest_identity,
     )
-    with closing_iterator(artifact.iter_episodes()) as episodes:
+    with closing_iterator(
+        artifact.iter_episodes(consume_episode=consume_episode)
+    ) as episodes:
         for _row, _ledger in episodes:
             pass
     return artifact
@@ -687,15 +704,21 @@ def produce_crypto_report(
             try:
                 root = _instance_root(layout, reference)
                 if execution_target.execution_mode == "continuous":
-                    ledger = read_portfolio_ledger_artifact(
+                    economics = {}
+                    read_portfolio_ledger_artifact(
                         root,
                         expected_identity=reference.instance_identity,
                         expected_member_identities=captured[reference.target_id],
                         lease=report_lease,
+                        consume_batches=lambda ledger, batches, result=economics: (
+                            result.update(
+                                summarize_portfolio_ledger(ledger.capital, batches)
+                            )
+                        ),
                     )
                     result = {
                         "episode_id": "continuous",
-                        "economics": summarize_portfolio_ledger(ledger),
+                        "economics": economics,
                         "execution_curve": {
                             "artifact_root": reference.artifact_root,
                             "identity": reference.instance_identity,
@@ -707,37 +730,46 @@ def produce_crypto_report(
                     }
                     report_lease.grow(report_payload_working_set(result))
                 else:
-                    collection = read_crypto_episode_artifact(
+                    episode_rows = []
+
+                    def consume_episode(
+                        index,
+                        ledger,
+                        batches,
+                        reference=reference,
+                        episode_rows=episode_rows,
+                    ):
+                        row = {
+                            "episode_id": index["episode_id"],
+                            "start_at": pd.Timestamp(index["start_ns"]).isoformat(),
+                            "stop_at": pd.Timestamp(index["stop_ns"]).isoformat(),
+                            "terminal_valuation_at": pd.Timestamp(
+                                index["terminal_valuation_ns"]
+                            ).isoformat(),
+                            "termination": index["termination"],
+                            "stop_reasons": index["stop_reasons"],
+                            "economics": summarize_portfolio_ledger(
+                                ledger.capital, batches
+                            ),
+                            "execution_curve": {
+                                "artifact_root": reference.artifact_root,
+                                "identity": index["ledger_identity"],
+                                "member": index["ledger_root"] + "/valuations.parquet",
+                                "aggregation": "sum_end_values_by_sequence",
+                                "clock": "persisted_event_time",
+                                "use": "independent_episode_only",
+                            },
+                        }
+                        report_lease.grow(report_payload_working_set(row))
+                        episode_rows.append(row)
+
+                    read_crypto_episode_artifact(
                         root,
                         expected_identity=reference.instance_identity,
                         expected_member_identities=captured[reference.target_id],
                         lease=report_lease,
+                        consume_episode=consume_episode,
                     )
-                    episode_rows = []
-                    with closing_iterator(collection.iter_episodes()) as episodes:
-                        for index, ledger in episodes:
-                            row = {
-                                "episode_id": index["episode_id"],
-                                "start_at": pd.Timestamp(index["start_ns"]).isoformat(),
-                                "stop_at": pd.Timestamp(index["stop_ns"]).isoformat(),
-                                "terminal_valuation_at": pd.Timestamp(
-                                    index["terminal_valuation_ns"]
-                                ).isoformat(),
-                                "termination": index["termination"],
-                                "stop_reasons": index["stop_reasons"],
-                                "economics": summarize_portfolio_ledger(ledger),
-                                "execution_curve": {
-                                    "artifact_root": reference.artifact_root,
-                                    "identity": index["ledger_identity"],
-                                    "member": index["ledger_root"]
-                                    + "/valuations.parquet",
-                                    "aggregation": "sum_end_values_by_sequence",
-                                    "clock": "persisted_event_time",
-                                    "use": "independent_episode_only",
-                                },
-                            }
-                            report_lease.grow(report_payload_working_set(row))
-                            episode_rows.append(row)
                     result = {
                         "episodes": episode_rows,
                         "return_policy": ("per_episode_only"),
@@ -814,116 +846,100 @@ def produce_crypto_report(
     )
 
 
-def summarize_crypto_execution(artifact):
-    result = None
-    with closing_iterator(artifact.iter_chunks()) as chunks:
-        for batch in chunks:
-            try:
-                for diagnostic in batch.diagnostics:
-                    if diagnostic.name != "execution_summary":
-                        continue
-                    if (
-                        result is not None
-                        or type(diagnostic.text) is not str
-                        or len(diagnostic.text) > 65536
-                    ):
-                        raise ValueError("crypto_execution_summary_invalid")
-                    result = parse_qrp_json_object(diagnostic.text.encode("utf-8"))
-                    if PORTFOLIO_ECONOMIC_SUMMARY_FIELDS.intersection(result) or any(
-                        type(value) not in {int, float, str, bool, type(None)}
-                        for value in result.values()
-                    ):
-                        raise ValueError("crypto_execution_duplicate_economic_fields")
-            finally:
-                batch = diagnostic = None
-    if result is None:
-        raise ValueError("crypto_execution_summary_missing")
-    return result
-
-
-def summarize_crypto_ledger_windows(
-    artifact: PortfolioLedgerArtifact,
-    *,
-    windows_ns: tuple[tuple[int, int], ...],
-) -> list[dict[str, object]]:
-    """Project OOS and gap economics from ordered persisted boundary markers."""
-    expected = [
-        (name, float(index), timestamp)
-        for index, bounds in enumerate(windows_ns)
-        for name, timestamp in zip(
-            ("oos_window_start", "oos_window_end"), bounds, strict=True
-        )
-    ]
-    if not expected:
+def summarize_crypto_ledger(artifact, batches, *, windows_ns=None, consume_batch=None):
+    """Project execution and interval diagnostics during the economic summary pass."""
+    expected = (
+        None
+        if windows_ns is None
+        else [
+            (name, float(index), timestamp)
+            for index, bounds in enumerate(windows_ns)
+            for name, timestamp in zip(
+                ("oos_window_start", "oos_window_end"), bounds, strict=True
+            )
+        ]
+    )
+    if expected == []:
         raise ValueError("crypto_ledger_windows_missing")
-    fees = funding = turnover = 0.0
-    fills = marker_index = 0
+    execution = None
+    marker_index = 0
     previous = None
     intervals = []
-    nav = artifact.capital.initial_capital
-    chunks = artifact.iter_chunks()
-    with closing_iterator(chunks):
-        for batch in chunks:
-            try:
-                fees -= sum(
-                    row.amount for row in batch.cashflows if row.kind.endswith("_cost")
+
+    def observe(batch, economics):
+        nonlocal execution, marker_index, previous
+        for diagnostic in batch.diagnostics:
+            if diagnostic.name == "execution_summary":
+                if (
+                    execution is not None
+                    or type(diagnostic.text) is not str
+                    or len(diagnostic.text) > 65536
+                ):
+                    raise ValueError("crypto_execution_summary_invalid")
+                execution = parse_qrp_json_object(diagnostic.text.encode("utf-8"))
+                if PORTFOLIO_ECONOMIC_SUMMARY_FIELDS.intersection(execution) or any(
+                    type(value) not in {int, float, str, bool, type(None)}
+                    for value in execution.values()
+                ):
+                    raise ValueError("crypto_execution_duplicate_economic_fields")
+            if expected is None or diagnostic.name not in {
+                "oos_window_start",
+                "oos_window_end",
+            }:
+                continue
+            if (
+                marker_index >= len(expected)
+                or (
+                    diagnostic.name,
+                    diagnostic.number,
+                    economics["valuation_timestamp_ns"],
                 )
-                funding += sum(
-                    row.amount for row in batch.cashflows if row.kind == "funding"
+                != expected[marker_index]
+            ):
+                raise ValueError("crypto_ledger_window_marker_invalid")
+            current = tuple(
+                economics[name]
+                for name in ("nav", "fees", "funding", "turnover", "fill_events")
+            )
+            if previous is None:
+                if current != (artifact.capital.initial_capital, 0.0, 0.0, 0.0, 0):
+                    raise ValueError("crypto_ledger_before_window_economics")
+            else:
+                net, cost, cash, traded, count = (
+                    value - before
+                    for value, before in zip(current, previous, strict=True)
                 )
-                turnover += sum(abs(row.notional) for row in batch.trades)
-                fills += len(batch.trades)
-                ends = [row for row in batch.valuations if row.phase == "end"]
-                nav = sum(row.value for row in ends)
-                for diagnostic in batch.diagnostics:
-                    if diagnostic.name not in {"oos_window_start", "oos_window_end"}:
-                        continue
-                    if (
-                        marker_index >= len(expected)
-                        or (
-                            diagnostic.name,
-                            diagnostic.number,
-                            ends[0].timestamp_ns,
-                        )
-                        != expected[marker_index]
-                    ):
-                        raise ValueError("crypto_ledger_window_marker_invalid")
-                    current = (nav, fees, funding, turnover, fills)
-                    if previous is None:
-                        if current != (
-                            artifact.capital.initial_capital,
-                            0.0,
-                            0.0,
-                            0.0,
-                            0,
-                        ):
-                            raise ValueError("crypto_ledger_before_window_economics")
-                    else:
-                        net, cost, cash, traded, count = (
-                            value - before
-                            for value, before in zip(current, previous, strict=True)
-                        )
-                        intervals.append(
-                            {
-                                "kind": "oos" if marker_index % 2 else "gap",
-                                "start_ns": expected[marker_index - 1][2],
-                                "end_ns": expected[marker_index][2],
-                                "start_nav": previous[0],
-                                "end_nav": nav,
-                                "net_pnl": net,
-                                "gross_pnl": net + cost - cash,
-                                "fees": cost,
-                                "funding": cash,
-                                "turnover": traded,
-                                "fill_events": count,
-                            }
-                        )
-                    previous = current
-                    marker_index += 1
-            finally:
-                batch = ends = diagnostic = None
-    if marker_index != len(expected):
-        raise ValueError("crypto_ledger_window_marker_missing")
-    if previous != (nav, fees, funding, turnover, fills):
-        raise ValueError("crypto_ledger_after_window_economics")
-    return intervals
+                intervals.append(
+                    {
+                        "kind": "oos" if marker_index % 2 else "gap",
+                        "start_ns": expected[marker_index - 1][2],
+                        "end_ns": expected[marker_index][2],
+                        "start_nav": previous[0],
+                        "end_nav": economics["nav"],
+                        "net_pnl": net,
+                        "gross_pnl": net + cost - cash,
+                        "fees": cost,
+                        "funding": cash,
+                        "turnover": traded,
+                        "fill_events": count,
+                    }
+                )
+            previous = current
+            marker_index += 1
+        if consume_batch is not None:
+            consume_batch(batch)
+
+    economics = summarize_portfolio_ledger(
+        artifact.capital, batches, consume_batch=observe
+    )
+    if execution is None:
+        raise ValueError("crypto_execution_summary_missing")
+    if expected is not None:
+        if marker_index != len(expected):
+            raise ValueError("crypto_ledger_window_marker_missing")
+        if previous != tuple(
+            economics[name]
+            for name in ("nav", "fees", "funding", "turnover", "fill_events")
+        ):
+            raise ValueError("crypto_ledger_after_window_economics")
+    return {"economics": economics, "execution": execution, "intervals": intervals}

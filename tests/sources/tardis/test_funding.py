@@ -49,22 +49,22 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
         ]
     ).encode()
     if source_id == "xoomar":
-        original = json.dumps(
+        rows = [
             {
-                "schema_id": "qrp-xoomar-settlement-extract",
-                "upstream_response_sha256": "a" * 64,
-                "records": [
-                    {
-                        "exchange": "binance",
-                        "baseAsset": "BTC",
-                        "slug": "btc",
-                        "fundingTime": "2026-09-01T00:00:10.000Z",
-                        "fundingRate": "0.1",
-                        "markPrice": "200",
-                    }
-                ],
+                "exchange": "binance",
+                "baseAsset": "BTC",
+                "slug": "btc",
+                "fundingTime": pd.Timestamp(stamp, unit="ms", tz="UTC").isoformat(),
+                "fundingRate": "0.1",
+                "markPrice": "200",
             }
-        ).encode()
+            for stamp in (
+                start_ms + slice_count * 600_000,
+                start_ms + 10000,
+                start_ms - 1,
+            )
+        ]
+        original = json.dumps({"data": {"current": [], "history": rows}}).encode()
     response.write_bytes(original)
     with runtime_resource_policy_scope(
         capture_test_policy(available_memory_bytes=64 * 1024**2)
@@ -81,6 +81,7 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
                 day,
                 symbol="BTCUSDT",
                 source_id=source_id,
+                request_limit=1000 if source_id == "binance" else 5000,
                 response_path=response,
                 http_status=200,
                 start_ms=start_ms,
@@ -198,6 +199,7 @@ def _publish_funding_archive(root, date, policy, *, include_funding=True):
                 archive,
                 symbol="BTCUSDT",
                 source_id="binance",
+                request_limit=1000,
                 response_path=response,
                 http_status=200,
                 start_ms=start_ms,
@@ -352,4 +354,174 @@ def test_selected_archive_or_funding_missing_does_not_fall_back(tmp_path):
                 pytest.fail(
                     "missing declared archive cannot fall back to another source"
                 )
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize(
+    "rate,expected",
+    [("+0.0001", -0.01), ("-0.0001", 0.01), ("0", 0.0), (True, None), (False, None)],
+)
+def test_native_forecast_type_is_checked_before_numeric_conversion(
+    tmp_path, rate, expected
+):
+    start = pd.Timestamp("2026-09-01").value // 1_000_000
+    native = _line(
+        1,
+        "markPrice@1s",
+        {
+            "e": "markPriceUpdate",
+            "s": "BTCUSDT",
+            "E": start + 900,
+            "p": "100",
+            "r": rate,
+            "T": start + 10000,
+        },
+    )
+    response = tmp_path / "settlement.json"
+    response.write_bytes(b"[]")
+    with runtime_resource_policy_scope() as policy:
+        destination = tmp_path / "published"
+        import_slices(
+            destination,
+            date="2026-09-01",
+            slices=_slices(tmp_path / "native", native, count=1),
+            byte_budget=1024**2,
+            resource_policy=policy,
+        )
+        original = {p.name: p.read_bytes() for p in destination.glob("*.gz")}
+        with open_tardis_archive(destination, policy) as archive:
+            kwargs = dict(
+                symbol="BTCUSDT",
+                source_id="binance",
+                response_path=response,
+                http_status=200,
+                start_ms=start,
+                end_ms=start + 600_000 - 1,
+                byte_budget=1024**2,
+                request_limit=1000,
+            )
+            if expected is None:
+                with pytest.raises(
+                    ValueError, match="tardis_funding_forecast_rate_invalid"
+                ):
+                    import_funding_history(archive, **kwargs)
+                assert not (destination / "funding/BTCUSDT").exists()
+            else:
+                import_funding_history(archive, **kwargs)
+                with read_funding_observations(
+                    (destination / "funding/BTCUSDT/observations",), symbol="BTCUSDT"
+                ) as observed:
+                    forecasts = tuple(observed.forecasts)
+                    assert forecasts[0].cashflows[0][1] == pytest.approx(expected)
+        assert {p.name: p.read_bytes() for p in destination.glob("*.gz")} == original
+        assert policy.used_memory_bytes == 0
+
+
+def test_effective_limit_cannot_certify_a_truncated_settlement_window(tmp_path):
+    import hashlib
+
+    start = pd.Timestamp("2026-09-01").value // 1_000_000
+    response = tmp_path / "settlement.json"
+    rows = [
+        {
+            "symbol": "BTCUSDT",
+            "fundingTime": start + offset,
+            "fundingRate": "0.01",
+            "markPrice": "100",
+        }
+        for offset in (10000, 20000)
+    ]
+    response.write_text(json.dumps(rows))
+    with runtime_resource_policy_scope() as policy:
+        destination = _publish_funding_archive(
+            tmp_path, "2026-09-01", policy, include_funding=False
+        )
+        with open_tardis_archive(destination, policy) as archive:
+            kwargs = dict(
+                symbol="BTCUSDT",
+                source_id="binance",
+                response_path=response,
+                http_status=200,
+                start_ms=start,
+                end_ms=start + 600_000 - 1,
+                byte_budget=1024**2,
+            )
+            import_funding_history(archive, **kwargs, request_limit=1000)
+            root = destination / "funding/BTCUSDT/observations"
+            with read_funding_observations((root,), symbol="BTCUSDT") as source:
+                assert len(source.events) == 2
+                assert (
+                    sum(-event.rate * event.mark_price for event in source.events) == -2
+                )
+            old_good = {
+                p.relative_to(root.parent): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in root.parent.rglob("*")
+                if p.is_file()
+            }
+            response.write_text(json.dumps(rows[:1]))
+            with pytest.raises(
+                PortfolioTargetBlocked, match="binance_funding_coverage_unproven"
+            ):
+                import_funding_history(archive, **kwargs, request_limit=1)
+            assert old_good == {
+                p.relative_to(root.parent): hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in root.parent.rglob("*")
+                if p.is_file()
+            }
+            metadata_path = root / "response.metadata.json"
+            metadata = json.loads(metadata_path.read_text())
+            metadata["metadata"]["settlement_source"]["request_limit"] = 1
+            metadata_path.write_text(json.dumps(metadata))
+            with pytest.raises(
+                PortfolioTargetBlocked, match="binance_funding_coverage_unproven"
+            ):
+                with read_funding_observations((root,), symbol="BTCUSDT"):
+                    pass
+        assert policy.used_memory_bytes == 0
+
+
+@pytest.mark.parametrize("body_fails", [False, True])
+def test_settlement_hash_handle_close_preserves_primary(
+    tmp_path, monkeypatch, body_fails
+):
+    import quant_research_platform.sources.binance.funding as funding
+
+    primary = MemoryError("synthetic_hash_read")
+    secondary = OSError("synthetic_hash_close")
+    with runtime_resource_policy_scope() as policy:
+        destination = _publish_funding_archive(tmp_path, "2026-09-01", policy)
+        original = funding.open_filesystem_file
+        handles = []
+
+        class Handle:
+            def __init__(self, handle):
+                self.handle = handle
+
+            def __getattr__(self, name):
+                return getattr(self.handle, name)
+
+            def readinto(self, buffer):
+                if body_fails:
+                    raise primary
+                return self.handle.readinto(buffer)
+
+            def close(self):
+                self.handle.close()
+                raise secondary
+
+        def open_handle(path, *args, **kwargs):
+            handle = original(path, *args, **kwargs)
+            if path.name == "settlements.json":
+                handles.append(handle)
+                return Handle(handle)
+            return handle
+
+        monkeypatch.setattr(funding, "open_filesystem_file", open_handle)
+        with pytest.raises(MemoryError if body_fails else OSError) as caught:
+            with read_funding_observations(
+                (destination / "funding/BTCUSDT/observations",), symbol="BTCUSDT"
+            ):
+                pass
+        assert caught.value is (primary if body_fails else secondary)
+        assert handles and all(handle.closed for handle in handles)
         assert policy.used_memory_bytes == 0

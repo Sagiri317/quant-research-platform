@@ -427,11 +427,6 @@ def test_schema_inventory_streams_accumulated_items_over_budget(
         "_capture_runtime_resource_policy",
         lambda **_kwargs: policy,
     )
-    monkeypatch.setattr(
-        schema_inventory,
-        "_iter_dataset_artifact_roots",
-        lambda _root: (tmp_path / "dataset-a", tmp_path / "dataset-b"),
-    )
     base_item = _valid_inventory_payload()["datasets"][0]
     artifact_roots = tuple(tmp_path / f"dataset-{index:03d}" for index in range(100))
     monkeypatch.setattr(

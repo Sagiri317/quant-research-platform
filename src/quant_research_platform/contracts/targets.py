@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -519,7 +520,7 @@ class ResearchRunRecord:
         object.__setattr__(self, "protocol", _freeze_json_value(protocol))
         object.__setattr__(self, "research_window", MappingProxyType(window))
         evidence = bounded_qrp_json_object_snapshot(
-            dict(self.holdout_evidence), max_bytes=_MAX_RESEARCH_RUN_RECORD_BYTES
+            dict(self.holdout_evidence), max_bytes=sys.maxsize
         )
         if window["access"] == "holdout" and not evidence:
             raise ValueError("research_run_holdout_evidence_invalid")

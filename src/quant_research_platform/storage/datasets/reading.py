@@ -17,6 +17,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 import pyarrow as pa
+import pyarrow.compute as pc
 
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
@@ -108,9 +109,7 @@ class DatasetSession:
     resource_policy: RuntimeResourcePolicy
     owns_inventory: bool
     _lease: MemoryLease
-    plan_base_retained_bytes: int
     owns_lease: bool = True
-    prepared_filter_bytes: int = 0
     path_selection: int | None = None
 
     @property
@@ -479,7 +478,14 @@ def _materialize_dataset_session(
             operation_headroom_bytes=operation_headroom - required_payload_bytes,
         )
         output = _materialized_frame(buffers)
-        output_bytes = pandas_frame_payload_bytes(output)
+        output_bytes = _materialized_buffer_payload_bytes(
+            dtype_plan, row_count=row_count, string_bytes=string_bytes
+        ) + _object_payload_bytes(
+            output,
+            columns=tuple(
+                name for name, (kind, _) in dtype_plan.items() if kind == "object"
+            ),
+        )
         if output_bytes > output_lease.reserved_bytes:
             raise ValueError("dataset_materialized_output_bound_invalid")
         output_lease.shrink_to(output_bytes)
@@ -706,10 +712,22 @@ def _object_payload_bytes(
     *,
     columns: tuple[str, ...],
 ) -> int:
-    view = pd.DataFrame({name: frame[name] for name in columns}, copy=False)
-    pointer_bytes = len(frame) * len(columns) * np.dtype(object).itemsize
-    index_bytes = pandas_frame_payload_bytes(pd.DataFrame(index=frame.index))
-    return max(0, pandas_frame_payload_bytes(view) - pointer_bytes - index_bytes)
+    def retained(value: object) -> int:
+        size = sys.getsizeof(value)
+        if isinstance(value, np.ndarray):
+            if value.base is not None:
+                size += value.nbytes
+            if value.dtype.hasobject:
+                size += sum(retained(child) for child in value.flat)
+        elif isinstance(value, dict):
+            size += sum(retained(key) + retained(child) for key, child in value.items())
+        elif isinstance(value, (list, tuple)):
+            size += sum(retained(child) for child in value)
+        return size
+
+    # Arrow output graphs are acyclic. Counting shared children again is a safe
+    # upper bound and does not require another data-sized identity set.
+    return sum(retained(value) for name in columns for value in frame[name].array)
 
 
 def _arrow_string_payload_bytes(series: pd.Series) -> int:
@@ -840,7 +858,11 @@ def _materialized_frame(
                 validate=False,
             )
         elif isinstance(buffer.dtype, pd.DatetimeTZDtype):
-            columns[name] = pd.array(buffer.values, dtype=buffer.dtype, copy=False)
+            columns[name] = pd.array(
+                buffer.values,
+                dtype=pd.DatetimeTZDtype(unit=buffer.dtype.unit, tz="UTC"),
+                copy=False,
+            ).tz_convert(buffer.dtype.tz)
         elif buffer.kind == "object":
             columns[name] = pd.Series(buffer.values, dtype=object, copy=False)
         else:
@@ -1128,7 +1150,7 @@ def _build_dataset_session(
         current_dtypes = parse_logical_dtype_metadata(metadata.logical_dtype_payload)
         validate_persisted_logical_schema(metadata.schema, current_dtypes)
         logical_dtypes = (
-            current_dtypes
+            merge_logical_dtype_payloads([current_dtypes])
             if logical_dtypes is None
             else merge_logical_dtype_payloads([logical_dtypes, current_dtypes])
         )
@@ -1247,11 +1269,8 @@ def _build_dataset_session(
         resource_policy=resource_policy,
         owns_inventory=owns_inventory,
         _lease=session_lease,
-        plan_base_retained_bytes=plan_base_retained_bytes,
-        prepared_filter_bytes=prepared_filter_bytes,
     )
     session_live_bytes = _dataset_session_retained_memory_bytes(
-        inventory_retained_bytes=0,
         spec_bytes=spec_bytes,
         spec_identity_bytes=spec_identity_bytes,
         manifest_bytes=manifest_bytes,
@@ -1272,7 +1291,6 @@ def _build_dataset_session(
 
 def _dataset_session_retained_memory_bytes(
     *,
-    inventory_retained_bytes: int,
     spec_bytes: bytes,
     spec_identity_bytes: bytes,
     manifest_bytes: bytes,
@@ -1284,8 +1302,7 @@ def _dataset_session_retained_memory_bytes(
     prepared_filter_bytes: int = 0,
 ) -> int:
     return (
-        inventory_retained_bytes
-        + 2 * json_record_working_set_bytes(len(spec_bytes))
+        2 * json_record_working_set_bytes(len(spec_bytes))
         + len(spec_identity_bytes)
         + 2 * json_record_working_set_bytes(len(manifest_bytes))
         + len(manifest_identity_bytes)
@@ -1400,6 +1417,9 @@ def _iter_dataset_chunks(
                 context,
                 context.logical_columns,
             )
+        except GeneratorExit:
+            context.verify()
+            return
         finally:
             _verify_preserving_primary(context)
         return
@@ -1430,6 +1450,9 @@ def _iter_dataset_chunks(
                 context,
                 context.logical_columns,
             )
+        except GeneratorExit:
+            context.verify()
+            return
         finally:
             _verify_preserving_primary(context)
 
@@ -1597,6 +1620,7 @@ def _iter_dataset_file_batches(
                     try:
                         yield path, frame
                     except GeneratorExit:
+                        context.verify()
                         return
     finally:
         _verify_preserving_primary(context)
@@ -1604,7 +1628,7 @@ def _iter_dataset_file_batches(
 
 def _verify_preserving_primary(context: DatasetSession) -> None:
     primary = sys.exception()
-    if primary is None or isinstance(primary, GeneratorExit):
+    if primary is None:
         context.verify()
         return
     try:
@@ -1657,12 +1681,31 @@ def _freeze_filter_value(value: Any) -> Any:
     raise ValueError("invalid_dataset_physical_filter_value")
 
 
+def _filter_value_is_representable(field: pa.Field, value: Any) -> bool:
+    if pa.types.is_timestamp(field.type):
+        source_type = pa.timestamp(
+            value.unit if isinstance(value, pd.Timestamp) else "us", tz=field.type.tz
+        )
+    elif pa.types.is_duration(field.type):
+        source_type = pa.duration(
+            value.unit if isinstance(value, pd.Timedelta) else "us"
+        )
+    else:
+        source_type = None
+    source = pa.scalar(value, type=source_type)
+    try:
+        converted = source.cast(field.type, safe=True)
+    except pa.ArrowInvalid:
+        return False
+    return bool(pc.equal(source, converted).as_py())
+
+
 def _prepare_in_filter(
     field: pa.Field,
     values: tuple[Any, ...],
     *,
     resource_policy: RuntimeResourcePolicy,
-    session_lease: MemoryLease | None = None,
+    session_lease: MemoryLease,
 ) -> PreparedMembershipValues:
     data_type = field.type
     is_string = pa.types.is_string(data_type) or pa.types.is_large_string(data_type)
@@ -1719,7 +1762,7 @@ def _prepare_in_filter(
             max_scalar_bytes = data_type.byte_width
         else:
             max_scalar_bytes = max(1, data_type.bit_width // 8)
-    with runtime_resource_policy_scope(resource_policy), ExitStack() as preparation:
+    with ExitStack() as preparation:
         _require_filter_preparation_overlap(
             preflight_bytes=0,
             input_state_bytes=input_state_bytes,
@@ -1733,7 +1776,9 @@ def _prepare_in_filter(
                 sort_state_bytes + timsort_scratch_bytes,
             )
         )
-        sorted_values = sorted(values)
+        sorted_values = sorted(
+            value for value in values if _filter_value_is_representable(field, value)
+        )
         if sorted_values:
             write_position = 1
             for read_position in range(1, len(sorted_values)):
@@ -1761,21 +1806,15 @@ def _prepare_in_filter(
             timsort_scratch_bytes=0,
             resource_policy=resource_policy,
         )
-        with ExitStack() as arrow_state:
-            if session_lease is not None:
-                session_lease.grow(arrow_bound)
-            else:
-                arrow_state.enter_context(
-                    resource_policy.lease("storage.filter.arrow", arrow_bound)
-                )
-            try:
-                acquired = pa.array(sorted_values, type=data_type)
-            except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
-                raise ValueError("invalid_dataset_physical_filter_value") from None
-            if acquired.nbytes > arrow_bound:
-                raise DatasetReadCapacityExceeded(
-                    "dataset_filter_values_exceed_task_memory_budget"
-                )
+        session_lease.grow(arrow_bound)
+        try:
+            acquired = pa.array(sorted_values, type=data_type)
+        except (pa.ArrowInvalid, pa.ArrowTypeError, OverflowError):
+            raise ValueError("invalid_dataset_physical_filter_value") from None
+        if acquired.nbytes > arrow_bound:
+            raise DatasetReadCapacityExceeded(
+                "dataset_filter_values_exceed_task_memory_budget"
+            )
         return PreparedMembershipValues(acquired, max_scalar_bytes, acquired.nbytes)
 
 
@@ -2041,6 +2080,7 @@ def _arrow_slice_to_pandas(
     dtype_overrides: Mapping[str, object] | None = None,
 ) -> pd.DataFrame:
     native_types = set()
+    nullable_float_columns = []
     for name, dtype in (dtype_overrides or {}).items():
         dtype = pd.api.types.pandas_dtype(dtype)
         data_type = arrow_slice.schema.field(name).type
@@ -2060,14 +2100,18 @@ def _arrow_slice_to_pandas(
                 )
         if pa.types.is_integer(data_type) or pa.types.is_boolean(data_type):
             native_types.add(data_type)
+        if isinstance(dtype, (pd.Float32Dtype, pd.Float64Dtype)):
+            native_types.add(data_type)
+            nullable_float_columns.append(name)
         if (
             isinstance(dtype, np.dtype)
             and dtype.kind in "biu"
             and arrow_slice.column(name).null_count
         ):
             raise ValueError("dataset_nonnullable_value_missing")
-    return arrow_slice.to_pandas(
+    frame = arrow_slice.to_pandas(
         use_threads=False,
+        integer_object_nulls=True,
         types_mapper=(
             lambda data_type: (
                 pd.ArrowDtype(data_type) if data_type in native_types else None
@@ -2076,6 +2120,15 @@ def _arrow_slice_to_pandas(
         if native_types
         else None,
     )
+    for name in nullable_float_columns:
+        values = arrow_slice.column(name)
+        # Nullable astype merges valid NaN with NULL unless the mask is preserved.
+        frame[name] = pd.arrays.FloatingArray(
+            values.to_numpy(zero_copy_only=False),
+            values.is_null().to_numpy(zero_copy_only=False),
+            copy=False,
+        )
+    return frame
 
 
 def iter_bounded_frame_chunks(

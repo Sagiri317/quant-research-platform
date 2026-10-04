@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import errno
 import os
+import queue
 import subprocess
 import sys
 import tempfile
@@ -36,6 +38,123 @@ class _FakeMachineLock:
 
     def close(self) -> None:
         self.closed = True
+
+
+@pytest.mark.parametrize("stage", ("seek", "lock", "construct"))
+@pytest.mark.parametrize("failure_kind", ("interrupt", "oserror"))
+@pytest.mark.parametrize(
+    "close_failure", (False, True), ids=("close_ok", "close_error")
+)
+def test_machine_lock_acquire_closes_failed_owner(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    stage: str,
+    failure_kind: str,
+    close_failure: bool,
+) -> None:
+    lock_path = tmp_path / "interrupted-machine.lock"
+    monkeypatch.setattr(resources, "_machine_lock_path", lambda: lock_path)
+    original_open = os.open
+    original_close = os.close
+    original_seek = os.lseek
+    native = resources.msvcrt if os.name == "nt" else resources.fcntl
+    operation_name = "locking" if os.name == "nt" else "flock"
+    acquire_operation = (
+        native.LK_NBLCK if os.name == "nt" else native.LOCK_EX | native.LOCK_NB
+    )
+    original_lock = getattr(native, operation_name)
+    opened: list[int] = []
+    closed: list[int] = []
+    acquired: list[int] = []
+    primary = (
+        KeyboardInterrupt("synthetic_acquire_interrupt")
+        if failure_kind == "interrupt"
+        else OSError(errno.EIO, "synthetic_acquire_failure")
+    )
+
+    def observed_open(*args, **kwargs):
+        fd = original_open(*args, **kwargs)
+        opened.append(fd)
+        return fd
+
+    def observed_close(fd):
+        original_close(fd)
+        closed.append(fd)
+        if close_failure:
+            raise OSError(errno.EIO, "synthetic_close_failure")
+
+    def interrupted_seek(*args, **kwargs):
+        original_seek(*args, **kwargs)
+        raise primary
+
+    def observed_lock(fd, operation, *args):
+        result = original_lock(fd, operation, *args)
+        if operation == acquire_operation:
+            acquired.append(fd)
+            if stage == "lock":
+                raise primary
+        return result
+
+    def interrupted_construct(_self, *, fd):
+        assert fd == opened[-1]
+        raise primary
+
+    classified_busy = failure_kind == "oserror" and stage != "construct"
+    expected_type = RuntimeError if classified_busy else type(primary)
+    try:
+        with monkeypatch.context() as fault:
+            fault.setattr(os, "open", observed_open)
+            fault.setattr(os, "close", observed_close)
+            fault.setattr(native, operation_name, observed_lock)
+            if stage == "seek":
+                fault.setattr(os, "lseek", interrupted_seek)
+            elif stage == "construct":
+                fault.setattr(resources._MachineLock, "__init__", interrupted_construct)
+            with pytest.raises(expected_type) as caught:
+                resources._MachineLock.acquire()
+
+        if classified_busy:
+            assert str(caught.value) == "runtime_data_scale_lock_busy"
+            assert caught.value.__cause__ is None
+        else:
+            assert caught.value is primary
+        if close_failure:
+            assert caught.value.__notes__ == [
+                "runtime lock acquisition close also failed: OSError"
+            ]
+        else:
+            assert not hasattr(caught.value, "__notes__")
+        assert len(opened) == 1
+        assert acquired == ([] if stage == "seek" else opened)
+        assert closed == opened, "machine_lock_failed_owner_fd_not_closed"
+        with pytest.raises(OSError) as closed_fd:
+            os.fstat(opened[0])
+        assert closed_fd.value.errno == errno.EBADF
+
+        reacquired = resources._MachineLock.acquire()
+        try:
+            assert not reacquired.closed
+        finally:
+            reacquired.close()
+        assert reacquired.closed
+    finally:
+        for fd in opened:
+            if fd not in closed:
+                original_close(fd)
+
+
+def test_machine_lock_acquire_keeps_open_oserror_classification(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def unavailable_open(*_args, **_kwargs):
+        raise OSError(errno.EACCES, "synthetic_open_failure")
+
+    monkeypatch.setattr(os, "open", unavailable_open)
+    with pytest.raises(
+        RuntimeError, match="^runtime_data_scale_lock_failed$"
+    ) as caught:
+        resources._MachineLock.acquire()
+    assert caught.value.__cause__ is None
 
 
 def test_owned_value_release_clears_value_and_lease() -> None:
@@ -284,29 +403,32 @@ def test_concurrent_lease_admission_is_atomic(
         available_memory_bytes=MIB,
         explicit_cap_bytes=100,
     )
+    starts = threading.Barrier(2)
     checks = threading.Barrier(2)
-    original_used = resources.RuntimeResourcePolicy.used_memory_bytes.fget
+    original_used = resources.RuntimeResourcePolicy._used_memory_bytes  # noqa: SLF001
+    reads: list[tuple[int, int, bool]] = []
+    synchronized_reads: list[int] = []
 
     def observed_used(root: resources.RuntimeResourcePolicy) -> int:
-        ledger_lock = getattr(root, "_ledger_lock", None)
-        assert original_used is not None
         value = original_used(root)
-        if (
-            threading.current_thread() is not threading.main_thread()
-            and (ledger_lock is None or not ledger_lock._is_owned())  # noqa: SLF001
-        ):
-            checks.wait(timeout=2)
+        if threading.current_thread() is not threading.main_thread():
+            owns_lock = root._ledger_lock._is_owned()  # noqa: SLF001
+            reads.append((threading.get_ident(), value, owns_lock))
+            if not owns_lock:
+                synchronized_reads.append(value)
+                checks.wait(timeout=2)
         return value
 
     monkeypatch.setattr(
         resources.RuntimeResourcePolicy,
-        "used_memory_bytes",
-        property(observed_used),
+        "_used_memory_bytes",
+        observed_used,
     )
     outcomes: list[str] = []
     leases: list[resources.MemoryLease] = []
 
     def admit() -> None:
+        starts.wait(timeout=2)
         try:
             leases.append(policy.lease("concurrent", 80))
         except MemoryError:
@@ -316,16 +438,31 @@ def test_concurrent_lease_admission_is_atomic(
 
     with runtime_resource_policy_scope(policy):
         threads = [threading.Thread(target=admit) for _ in range(2)]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=2)
-        assert all(not thread.is_alive() for thread in threads)
-        for lease in leases:
-            lease.close()
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+            assert all(not thread.is_alive() for thread in threads)
+        finally:
+            starts.abort()
+            checks.abort()
+            for thread in threads:
+                if thread.is_alive():
+                    thread.join(timeout=5)
+            for lease in leases:
+                lease.close()
 
-    assert sorted(outcomes) == ["accepted", "rejected"]
+    assert len(reads) == 2
+    assert len({thread_id for thread_id, _, _ in reads}) == 2
     assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+    assert sorted(outcomes) == ["accepted", "rejected"], (
+        f"lease_admission_not_atomic: barrier_hits={len(synchronized_reads)}; "
+        f"outcomes={sorted(outcomes)}; reads={synchronized_reads}"
+    )
+    assert all(owns_lock for _, _, owns_lock in reads)
+    assert synchronized_reads == []
 
 
 def test_concurrent_lease_growth_is_atomic(
@@ -335,28 +472,31 @@ def test_concurrent_lease_growth_is_atomic(
         available_memory_bytes=MIB,
         explicit_cap_bytes=100,
     )
+    starts = threading.Barrier(2)
     checks = threading.Barrier(2)
-    original_used = resources.RuntimeResourcePolicy.used_memory_bytes.fget
+    original_used = resources.RuntimeResourcePolicy._used_memory_bytes  # noqa: SLF001
+    reads: list[tuple[int, int, bool]] = []
+    synchronized_reads: list[int] = []
 
     def observed_used(root: resources.RuntimeResourcePolicy) -> int:
-        ledger_lock = getattr(root, "_ledger_lock", None)
-        assert original_used is not None
         value = original_used(root)
-        if (
-            threading.current_thread() is not threading.main_thread()
-            and (ledger_lock is None or not ledger_lock._is_owned())  # noqa: SLF001
-        ):
-            checks.wait(timeout=2)
+        if threading.current_thread() is not threading.main_thread():
+            owns_lock = root._ledger_lock._is_owned()  # noqa: SLF001
+            reads.append((threading.get_ident(), value, owns_lock))
+            if not owns_lock:
+                synchronized_reads.append(value)
+                checks.wait(timeout=2)
         return value
 
     monkeypatch.setattr(
         resources.RuntimeResourcePolicy,
-        "used_memory_bytes",
-        property(observed_used),
+        "_used_memory_bytes",
+        observed_used,
     )
     outcomes: list[str] = []
 
     def grow(lease: resources.MemoryLease) -> None:
+        starts.wait(timeout=2)
         try:
             lease.grow(50)
         except MemoryError:
@@ -371,16 +511,31 @@ def test_concurrent_lease_growth_is_atomic(
             threading.Thread(target=grow, args=(first,)),
             threading.Thread(target=grow, args=(second,)),
         ]
-        for thread in threads:
-            thread.start()
-        for thread in threads:
-            thread.join(timeout=2)
-        assert all(not thread.is_alive() for thread in threads)
-        first.close()
-        second.close()
+        try:
+            for thread in threads:
+                thread.start()
+            for thread in threads:
+                thread.join(timeout=5)
+            assert all(not thread.is_alive() for thread in threads)
+        finally:
+            starts.abort()
+            checks.abort()
+            for thread in threads:
+                if thread.is_alive():
+                    thread.join(timeout=5)
+            first.close()
+            second.close()
 
-    assert sorted(outcomes) == ["accepted", "rejected"]
+    assert len(reads) == 2
+    assert len({thread_id for thread_id, _, _ in reads}) == 2
     assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED"
+    assert sorted(outcomes) == ["accepted", "rejected"], (
+        f"lease_growth_not_atomic: barrier_hits={len(synchronized_reads)}; "
+        f"outcomes={sorted(outcomes)}; reads={synchronized_reads}"
+    )
+    assert all(owns_lock for _, _, owns_lock in reads)
+    assert synchronized_reads == []
 
 
 def test_lease_context_manager_closes_and_preserves_body_primary(
@@ -407,6 +562,23 @@ def test_lease_context_manager_closes_and_preserves_body_primary(
         assert policy.used_memory_bytes == 0
 
 
+def _require_child_ready(child, expected: str, *, timeout: float = 5) -> None:
+    assert child.stdout is not None
+    result: queue.Queue[str] = queue.Queue(maxsize=1)
+    reader = threading.Thread(
+        target=lambda: result.put(child.stdout.readline()), daemon=True
+    )
+    reader.start()
+    try:
+        assert result.get(timeout=timeout) == expected
+    finally:
+        if reader.is_alive():
+            child.kill()
+            child.wait(timeout=5)
+        reader.join(timeout=5)
+        assert not reader.is_alive()
+
+
 def test_leaked_child_keeps_machine_lock_until_process_exit() -> None:
     with subprocess.Popen(
         (
@@ -431,8 +603,7 @@ def test_leaked_child_keeps_machine_lock_until_process_exit() -> None:
         env=_child_environment(),
     ) as child:
         try:
-            assert child.stdout is not None
-            assert child.stdout.readline() == "leak-handled\n"
+            _require_child_ready(child, "leak-handled\n")
             with pytest.raises(RuntimeError, match="runtime_data_scale_lock_busy"):
                 with runtime_resource_policy_scope(explicit_cap_bytes=MIB):
                     pass
@@ -486,8 +657,7 @@ def test_two_process_busy_then_crash_reentry(
         env=environment,
     ) as child:
         try:
-            assert child.stdout is not None
-            assert child.stdout.readline() == "held\n"
+            _require_child_ready(child, "held\n")
             with pytest.raises(RuntimeError, match="runtime_data_scale_lock_busy"):
                 with runtime_resource_policy_scope(explicit_cap_bytes=MIB):
                     pass
@@ -500,19 +670,29 @@ def test_two_process_busy_then_crash_reentry(
 
 
 @pytest.mark.parametrize(
-    "child_limit,parent_limit,current,expected",
+    "child_limit,parent_limit,child_current,parent_current,host_available,expected",
     [
-        ("900", "800", "200", 600),
-        ("max", "800", "200", 600),
-        (None, None, "0", 1000),
-        ("2000", "max", "0", 1000),
-        ("200", "max", "200", 0),
-        ("100", "max", "200", 0),
-        ("invalid", "max", "0", None),
+        ("900", "800", "200", "200", 1000, 600),
+        ("max", "800", "200", "200", 1000, 600),
+        (None, None, "0", "0", 1000, 1000),
+        ("2000", "max", "0", "0", 1000, 1000),
+        ("200", "max", "200", "200", 1000, 0),
+        ("100", "max", "200", "200", 1000, 0),
+        ("invalid", "max", "0", "0", 1000, None),
+        ("900", "800", "200", "500", 1000, 300),
+        ("900", "800", "200", "500", 250, 250),
+        ("900", "max", "200", "500", 1000, 700),
     ],
 )
 def test_cgroup_memory_capture_respects_visible_parent_and_unlimited_bounds(
-    tmp_path, monkeypatch, child_limit, parent_limit, current, expected
+    tmp_path,
+    monkeypatch,
+    child_limit,
+    parent_limit,
+    child_current,
+    parent_current,
+    host_available,
+    expected,
 ):
     from types import SimpleNamespace
 
@@ -524,7 +704,10 @@ def test_cgroup_memory_capture_respects_visible_parent_and_unlimited_bounds(
     (root / "cgroup.controllers").write_text("memory cpu")
     membership = tmp_path / "membership"
     membership.write_text("0::/team/job\n")
-    for directory, limit in ((child, child_limit), (child.parent, parent_limit)):
+    for directory, limit, current in (
+        (child, child_limit, child_current),
+        (child.parent, parent_limit, parent_current),
+    ):
         if limit is not None:
             (directory / "memory.max").write_text(limit)
             (directory / "memory.current").write_text(current)
@@ -539,7 +722,7 @@ def test_cgroup_memory_capture_respects_visible_parent_and_unlimited_bounds(
     monkeypatch.setattr(resources, "Path", paths)
     monkeypatch.setattr(sys, "platform", "linux")
     monkeypatch.setattr(
-        psutil, "virtual_memory", lambda: SimpleNamespace(available=1000)
+        psutil, "virtual_memory", lambda: SimpleNamespace(available=host_available)
     )
     if expected is None:
         with pytest.raises(
@@ -682,3 +865,14 @@ def test_machine_lock_uses_effective_uid(monkeypatch):
     monkeypatch.setattr(os, "getuid", lambda: 1001)
     monkeypatch.setattr(os, "geteuid", lambda: 1002)
     assert resources._machine_lock_path() == Path("/tmp/.qrp-data-scale-1002.lock")
+
+
+def test_child_startup_without_output_is_bounded_and_reaped():
+    with subprocess.Popen(
+        (sys.executable, "-c", "import time; time.sleep(60)"),
+        stdout=subprocess.PIPE,
+        text=True,
+    ) as child:
+        with pytest.raises(queue.Empty):
+            _require_child_ready(child, "ready\n", timeout=0.1)
+        assert child.poll() is not None

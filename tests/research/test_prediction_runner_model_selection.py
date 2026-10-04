@@ -234,6 +234,16 @@ def test_model_selection_drops_candidate_model_alias_before_lease_close(
             lease,
         )
 
+    from quant_research_platform.runtime.resources import MemoryLease
+
+    close = MemoryLease.close
+
+    def checked_close(lease):
+        if lease.owner == "research.test.candidate_model" and lease.active:
+            assert all(reference() is None for reference in created_refs)
+        close(lease)
+
+    monkeypatch.setattr(MemoryLease, "close", checked_close)
     monkeypatch.setattr(model_fitting, "_fit_model_result_owned_from_frames", fit_owned)
     policy = capture_test_policy(
         available_memory_bytes=128 * 1024**2,

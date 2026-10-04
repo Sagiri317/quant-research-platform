@@ -544,9 +544,9 @@ def test_leading_separator_credentials_match_structured_keys(key):
         ("market_id\n=synthetic\nordinary\nasset_id=synthetic", "row_sample"),
         ("asset_id\n=synthetic\nordinary\ntimestamp\n=synthetic", "row_sample"),
         ("market_id\n\n=synthetic\nordinary\nasset_id\n=synthetic\n", "row_sample"),
-        ("asset_id=synthetic market_id=synthetic", None),
-        ("timestamp=synthetic asset_id=synthetic\n", None),
-        ("ASSET_ID=synthetic\nordinary\nMARKET_ID=synthetic\n", None),
+        ("asset_id=synthetic market_id=synthetic", "row_sample"),
+        ("timestamp=synthetic asset_id=synthetic\n", "row_sample"),
+        ("ASSET_ID=synthetic\nordinary\nMARKET_ID=synthetic\n", "row_sample"),
     ],
 )
 def test_streamed_fields_keep_case_boundaries_and_order(text, expected, chunk_size):
