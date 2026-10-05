@@ -3090,11 +3090,15 @@ def test_nullable_index_source_numeric_values_still_reject_invalid_facts(
         interim.normalize_raw_frame(pd.DataFrame(rows), data_id)
 
 
-@pytest.mark.parametrize("cap", (512 * 1024, 8 * 1024**2))
+@pytest.mark.parametrize("cap", (None, 512 * 1024, 8 * 1024**2))
 @pytest.mark.parametrize(
     "payload,expected",
     (
         (b'"1",2\r\n', [["1", "2"]]),
+        (b"a,2\r", [["a", "2"]]),
+        (b"a,2\rb,3", [["a", "2"], ["b", "3"]]),
+        (b"a,2\r\nb,3\rc,4\n", [["a", "2"], ["b", "3"], ["c", "4"]]),
+        ('"中文😀\r\n引号""",2\r'.encode(), [['中文😀\r\n引号"', "2"]]),
         (b'\xef\xbb\xbf"a""b",2\r\n', [['a"b', "2"]]),
         (b'"line\r\nbreak",2\r\n', [["line\r\nbreak", "2"]]),
         (b'"1"\r"2"\n"3"', [["1"], ["2"], ["3"]]),
@@ -3127,7 +3131,11 @@ def test_csv_strict_grammar_matches_across_memory_budgets(
         assert list(oracle) == expected
 
     with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2, explicit_cap_bytes=cap)
+        None
+        if cap is None
+        else capture_test_policy(
+            available_memory_bytes=64 * 1024**2, explicit_cap_bytes=cap
+        )
     ) as policy:
         records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
         actual, modes = [], []
@@ -3184,3 +3192,215 @@ def test_malformed_quoted_numeric_cannot_publish_over_old_good(tmp_path):
         )
         assert filesystem_read_bytes(path) == malformed
         assert policy.used_memory_bytes == 0
+
+
+def _short_analyst_csv_records(count):
+    header = b"Stkcd,ReportID,AnanmID,DeclareDate,Fenddt,InstitutionID,Feps,Fpe"
+    rows = []
+    for position in range(count):
+        fields = [
+            f"{position % 3 + 1:06}",
+            str(9007199254740993 + position),
+            "000007" if position % 3 else "",
+            "2025-01-03",
+            "2025-12-31",
+            "000009",
+            "2.5" if position % 3 != 1 else "",
+            "10.5" if position % 3 != 2 else "",
+        ]
+        fields[5] += "x" * (101 - len(",".join(fields)))
+        assert len(",".join(fields).encode()) == 101
+        rows.append(fields)
+    assert len(header) == 64
+    return header, rows
+
+
+@pytest.fixture
+def real_csv_handles(monkeypatch):
+    from quant_research_platform.storage import _scratch_ownership
+
+    handles, spools = [], []
+    real_open = raw_schemas.open_filesystem_file
+    real_temporary_file = _scratch_ownership.TemporaryFile
+
+    def open_source(*args, **kwargs):
+        handle = real_open(*args, **kwargs)
+        handles.append(handle)
+        return handle
+
+    def open_spool(*args, **kwargs):
+        handle = real_temporary_file(*args, **kwargs)
+        spools.append(handle)
+        return handle
+
+    monkeypatch.setattr(raw_schemas, "open_filesystem_file", open_source)
+    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", open_spool)
+    yield handles, spools
+    assert handles and all(handle.closed for handle in handles)
+    assert all(handle.closed for handle in spools)
+
+
+@pytest.mark.parametrize(
+    "case,count,endings,terminated",
+    (
+        ("large-lf", 10280, (b"\n",), True),
+        ("large-crlf", 10280, (b"\r\n",), True),
+        ("large-cr", 10280, (b"\r",), True),
+        ("short-cr", 2, (b"\r",), True),
+        ("unterminated-cr", 2, (b"\r",), False),
+        ("mixed", 3, (b"\r", b"\r\n", b"\n"), True),
+    ),
+)
+def test_cr_only_physical_fragments_preserve_interim_rows(
+    tmp_path, real_csv_handles, case, count, endings, terminated
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    header, rows = _short_analyst_csv_records(count)
+    records = [header, *(",".join(row).encode() for row in rows)]
+    payload = b"".join(
+        record
+        + (endings[position % len(endings)] if terminated or position < count else b"")
+        for position, record in enumerate(records)
+    )
+    if case in {"large-lf", "large-cr"}:
+        assert len(payload) == 1048625
+    elif case == "short-cr":
+        assert len(payload) == 269
+    layout = StorageLayout(tmp_path)
+    raw_root = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw_root, parents=True)
+    path = raw_root / "csmar__analyst_forecast__synthetic__full__export-20260101.csv"
+    filesystem_write_bytes(path, payload)
+    expected = pd.DataFrame(
+        [
+            {
+                "source_asset_id": row[0],
+                "timestamp": pd.Timestamp(row[3]),
+                "report_id": row[1],
+                "analyst_ids": row[2] or pd.NA,
+                "declare_date": pd.Timestamp(row[3]),
+                "forecast_end_date": pd.Timestamp(row[4]),
+                "institution_id": row[5],
+                "forecast_eps": float(row[6]) if row[6] else float("nan"),
+                "forecast_pe": float(row[7]) if row[7] else float("nan"),
+            }
+            for row in rows
+        ]
+    )
+    for column in ("source_asset_id", "report_id", "analyst_ids", "institution_id"):
+        expected[column] = expected[column].astype("string")
+    for column in ("timestamp", "declare_date", "forecast_end_date"):
+        expected[column] = expected[column].astype("datetime64[ns]")
+    for column in ("forecast_eps", "forecast_pe"):
+        expected[column] = expected[column].astype("Float64")
+    keys = ["source_asset_id", "timestamp", "report_id", "forecast_end_date"]
+    expected = expected.sort_values(keys).reset_index(drop=True)
+    with runtime_resource_policy_scope() as policy:
+        assert policy.explicit_memory_cap_bytes is None
+        assert raw_schemas.read_export_header(path, resource_policy=policy) == tuple(
+            header.decode().split(",")
+        )
+        identity = interim.source_content_identity(raw_root, "analyst_forecast")
+        assert identity is not None
+        result = interim.materialize_interim_data(
+            layout=layout,
+            raw_root=raw_root,
+            data_ids=("analyst_forecast",),
+            resource_policy=policy,
+        )
+        saved = read_dataset(
+            result.artifact_roots["analyst_forecast"], resource_policy=policy
+        )
+        assert len(saved) == count and not saved.duplicated(keys).any()
+        pd.testing.assert_frame_equal(
+            saved.sort_values(keys).reset_index(drop=True), expected, check_exact=True
+        )
+        assert interim.source_content_identity(raw_root, "analyst_forecast") == identity
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED" and policy._lock.closed
+    assert filesystem_read_bytes(path) == payload
+    if case == "large-cr":
+        assert real_csv_handles[1]
+
+
+@pytest.mark.parametrize("ending", (b"\n", b"\r"))
+def test_true_oversize_record_after_short_header_cannot_publish(
+    tmp_path, real_csv_handles, ending
+):
+    from quant_research_platform.storage.layout import StorageLayout
+
+    header, rows = _short_analyst_csv_records(1)
+    row = rows[0]
+    row[5] += "x" * (1048654 - len(",".join(row)))
+    record = ",".join(row).encode()
+    assert len(record) == 1048654 > raw_schemas.MAX_LOGICAL_RECORD_BYTES
+    payload = header + ending + record + ending
+    layout = StorageLayout(tmp_path)
+    raw_root = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw_root, parents=True)
+    path = raw_root / "csmar__analyst_forecast__synthetic__full__export-20260101.csv"
+    filesystem_write_bytes(path, payload)
+    target = layout.interim_data_root("csmar", "analyst_forecast")
+    assert not filesystem_exists(target)
+    with runtime_resource_policy_scope() as policy:
+        assert policy.explicit_memory_cap_bytes is None
+        assert raw_schemas.read_export_header(path, resource_policy=policy) == tuple(
+            header.decode().split(",")
+        )
+        assert interim.source_content_identity(raw_root, "analyst_forecast") is not None
+        with pytest.raises(
+            ValueError, match="^csmar_logical_record_exceeds_source_limit$"
+        ):
+            interim.materialize_interim_data(
+                layout=layout,
+                raw_root=raw_root,
+                data_ids=("analyst_forecast",),
+                resource_policy=policy,
+            )
+        assert not filesystem_exists(target)
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED" and policy._lock.closed
+    assert real_csv_handles[1]
+    assert filesystem_read_bytes(path) == payload
+
+
+def test_large_cr_reader_early_close_releases_real_handles(tmp_path, real_csv_handles):
+    header, rows = _short_analyst_csv_records(10280)
+    payload = b"\r".join([header, *(",".join(row).encode() for row in rows)]) + b"\r"
+    assert len(payload) == 1048625
+    path = tmp_path / "early-close.csv"
+    filesystem_write_bytes(path, payload)
+    with runtime_resource_policy_scope() as policy:
+        assert policy.explicit_memory_cap_bytes is None
+        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
+        try:
+            record, _ = next(records)
+            assert record.materialize() == header.decode().split(",")
+            record, _ = next(records)
+            assert record.materialize() == rows[0]
+        finally:
+            records.close()
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED" and policy._lock.closed
+    assert real_csv_handles[1]
+    assert filesystem_read_bytes(path) == payload
+
+
+@pytest.mark.parametrize("payload", (b"bad\xff,2\n", b'"bad\r\n\xff",2\r\n'))
+def test_invalid_utf8_remains_strict_after_physical_fragment_fallback(
+    tmp_path, real_csv_handles, payload
+):
+    path = tmp_path / "invalid-utf8.csv"
+    filesystem_write_bytes(path, payload)
+    with runtime_resource_policy_scope() as policy:
+        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
+        try:
+            with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
+                next(records)
+        finally:
+            records.close()
+        assert policy.used_memory_bytes == 0
+    assert policy.state == "CLOSED" and policy._lock.closed
+    assert filesystem_read_bytes(path) == payload

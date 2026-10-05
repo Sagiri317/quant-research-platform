@@ -1,1 +1,1 @@
-"""Queryable catalogs for QRP 0.1 platform objects."""
+"""Queryable catalogs for QRP platform objects."""

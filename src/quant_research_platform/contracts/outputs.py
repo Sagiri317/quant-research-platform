@@ -1,4 +1,4 @@
-"""Output contracts for QRP 0.1."""
+"""Output contracts for QRP."""
 
 from __future__ import annotations
 

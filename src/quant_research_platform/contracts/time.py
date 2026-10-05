@@ -1,4 +1,4 @@
-"""Time value marker types for QRP 0.1 contracts."""
+"""Time value marker types for QRP contracts."""
 
 from __future__ import annotations
 

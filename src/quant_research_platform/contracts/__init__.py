@@ -1,1 +1,1 @@
-"""Stable 0.1 platform contracts."""
+"""Stable platform contracts."""

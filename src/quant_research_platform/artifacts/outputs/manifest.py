@@ -47,7 +47,7 @@ _OUTPUT_DEFINITION_FILES = {
 def validate_output_manifest_business_envelope(
     value: object,
 ) -> dict[str, object]:
-    """Validate the current persisted output-manifest business envelope."""
+    """Validate the persisted output-manifest business envelope."""
 
     if type(value) is not dict or set(value) != _OUTPUT_MANIFEST_KEYS:
         raise ValueError("output_manifest_fields_invalid")

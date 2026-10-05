@@ -1,4 +1,4 @@
-"""FastAPI entry point for the QRP 0.1 spec-first API."""
+"""FastAPI entry point for the QRP spec-first API."""
 
 from __future__ import annotations
 
@@ -42,7 +42,7 @@ def _cors_origins_from_env() -> list[str]:
 
 
 def create_app(*, project_root: Path | None = None) -> FastAPI:
-    """Create the QRP 0.1 API app."""
+    """Create the QRP API app."""
 
     app = FastAPI(
         title="Quant Research Platform",

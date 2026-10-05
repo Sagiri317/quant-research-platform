@@ -1,4 +1,4 @@
-"""Column roles used by portable 0.1 data contracts."""
+"""Column roles used by portable data contracts."""
 
 from __future__ import annotations
 

@@ -332,7 +332,7 @@ def test_price_volume_budget_charges_outputs_only_to_core_rows(tmp_path, asset_c
     assert len(definitions) == 50
     lookback = producer.factor_engine.factor_lookback_bars(definitions)
     cap = 32 * 1024**2
-    # Even without source payloads the old one-session estimate exceeded the cap.
+    # A lookback-by-asset-by-factor estimate exceeds the cap before source payloads.
     assert (lookback + 1) * asset_count * len(definitions) * 128 > cap
     write_dataset(
         layout.processed_data_root(

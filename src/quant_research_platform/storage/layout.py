@@ -1,4 +1,4 @@
-"""Portable disk layout for QRP 0.1."""
+"""Portable disk layout for QRP."""
 
 from __future__ import annotations
 

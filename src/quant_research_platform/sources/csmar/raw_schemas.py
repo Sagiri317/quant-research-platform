@@ -480,7 +480,8 @@ class _BoundedCsvRecords:
         source_bytes = len(line)
         ascii_record = line.isascii()
         if source_bytes > self._limit_bytes:
-            raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
+            self._handle.seek(self._handle.tell() - source_bytes)
+            return None
         comma_count = line.count(b",")
         if b'"' in line:
             # A whole-line native decode owns UTF-8/Unicode copies, field strings,

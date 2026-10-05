@@ -13,7 +13,7 @@ class WriteRejectedError(ValueError):
 
 
 class OutputAlreadyExistsError(WriteRejectedError):
-    """Raised when a 0.1 writer would overwrite an existing output."""
+    """Raised when a writer would overwrite an existing output."""
 
     failure_code = "output_already_exists"
 
