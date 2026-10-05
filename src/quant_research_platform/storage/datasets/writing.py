@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from contextlib import ExitStack, nullcontext
@@ -1479,4 +1480,7 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
             write_page_index=False,
             write_page_checksum=False,
         )
+    # Finalize writer-owned metadata before readers freeze the file identity.
+    # FUSE can otherwise expose a deferred mtime update during the first read.
+    os.utime(native_filesystem_path(path), None)
     return path

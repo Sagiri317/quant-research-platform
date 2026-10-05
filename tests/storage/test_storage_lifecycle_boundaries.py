@@ -2538,3 +2538,50 @@ def test_verified_file_handle_binds_decoder_and_preserves_primary(tmp_path, phas
                     "identity verification" in note for note in primary.__notes__
                 )
         assert not handle.closed  # The context borrows; this caller owns close.
+
+
+def test_parquet_writer_finalizes_deferred_mtime_before_read(tmp_path, monkeypatch):
+    import pyarrow as pa
+
+    pending_update = False
+    original_write = dataset_writing.pq.write_table
+    original_utime = os.utime
+    original_verify = physical.verified_file_handle
+
+    def deferred_write(*args, **kwargs):
+        nonlocal pending_update
+        original_write(*args, **kwargs)
+        pending_update = True
+
+    def commit_metadata(*args, **kwargs):
+        nonlocal pending_update
+        original_utime(*args, **kwargs)
+        pending_update = False
+
+    @contextmanager
+    def read_with_deferred_update(path, handle, **kwargs):
+        nonlocal pending_update
+        with original_verify(path, handle, **kwargs):
+            yield handle
+            if pending_update:
+                before = identity.filesystem_stat(path)
+                original_utime(
+                    identity.native_filesystem_path(path),
+                    ns=(before.st_atime_ns, before.st_mtime_ns + 1_000_000),
+                )
+                pending_update = False
+
+    monkeypatch.setattr(dataset_writing.pq, "write_table", deferred_write)
+    monkeypatch.setattr(dataset_writing.os, "utime", commit_metadata)
+    monkeypatch.setattr(physical, "verified_file_handle", read_with_deferred_update)
+    path = tmp_path / "part.parquet"
+    table = pa.table({"value": [1.0, 2.0, 3.0]})
+    dataset_writing.write_parquet_file(table, path)
+    with physical._opened_parquet(path, expected_identity=None) as (parquet, _, _):
+        assert parquet.read().equals(table)
+
+    # A later, unowned metadata change must still fail the strict reader.
+    pending_update = True
+    with pytest.raises(ValueError, match="dataset_file_identity_changed"):
+        with physical._opened_parquet(path, expected_identity=None) as (parquet, _, _):
+            parquet.read()
