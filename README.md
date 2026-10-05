@@ -6,20 +6,20 @@ QRP 是本地量化研究平台，主线为 A 股低频研究和 Binance BTC/ETH
 
 ## 从这里开始
 
-- [A 股：终局能力、已实现功能、短期建议与研究约定](docs/a-share.md)
-- [Crypto：终局能力、已实现功能、短期建议与录制合同](docs/crypto.md)
+- [A 股：研究范围、功能与经济合同](docs/a-share.md)
+- [Crypto：研究范围、功能与事件合同](docs/crypto.md)
 - [架构与工程合同](docs/architecture.md)
 - [数据布局与来源边界](docs/data.md)
 - [只读研究演示 Notebook](notebooks/research-interview-demo.ipynb)
 
-长期文档随代码版本管理；实现、合成验证和真实数据验收分别表述。
-本机采集操作、SSH、当前验收摘要和交付副本放在被忽略的 .run/，不提交 Git。
+代码、配置和长期文档一并纳入 Git；功能实现、合成验证和真实数据验收分别表述。
+本机采集操作、SSH 配置、验收记录和交付副本保存在被忽略的 .run/，不提交 Git。
 两份市场文档中的未来候选不授权预建接口、依赖或第二套研究框架。
 
 ## 环境与操作
 
 环境定义见 environment.yml，Python 与依赖合同见 pyproject.toml。
-使用已配置的 quantlab313；安装项目时复用当前 Conda 环境，不使用 base 运行研究。
+使用已配置的 quantlab313 运行研究，不使用 Conda base。
 下面的日期、项目根和 run 标识由调用者提供。
 
 ~~~text
@@ -47,7 +47,7 @@ HTTP 客户端不能传路径切换项目；未绑定时仅提供目录查询。
 research-datasets/{dataset_id}/requirements、status、inspect/{target_id}、
 runs/{run_id}/reports/{report_identity} 和 runs/{run_id}/portfolios/{target_id}。
 API 使用 profile 查询参数选择市场。报告查询核对 run 与 report_identity 来源关系，
-读取已经保存的 Markdown，不按当前软件重渲染历史报告。
+直接返回保存的 Markdown；查询不重新生成报告正文。
 
 Notebook 使用 quantlab313 kernel，填写项目、profile、run_id 和 report_identity 后运行。
 它只读取已有诊断和聚合 NAV；A 股采用交易日/CNY，Crypto 采用 UTC/USDT 并区分 OOS 与空档。
@@ -63,5 +63,5 @@ python -m ruff check .
 python -m pytest -q
 ~~~
 
-修改后先验证受影响行为。实际执行范围和未执行项写入本机摘要，
-不把旧提交的 PASS 移记到当前版本。
+修改后先验证受影响行为。检查结论绑定受测代码、环境和输入；
+实际执行范围、结果与未执行项写入本机验收记录，不复用其他提交的 PASS。

@@ -1,7 +1,7 @@
 # 架构与工程合同
 
 本文件定义共用工程不变量；市场经济语义见 a-share.md、crypto.md，数据位置见 data.md。
-当前 Git、代码、测试和运行记录提供事实；路线图和历史 PASS 不构成当前实现证明。
+Git、代码、测试和运行记录提供事实；路线图和历史 PASS 不代替被验收代码的实现证明。
 
 ## 唯一责任与调用链
 
@@ -33,7 +33,7 @@ research/protocols 持有配置选择校验、窗口、冻结及统计研究语�
 允许 artifacts→reports，禁止 reports→artifacts。
 可移植模型算法 ID、依赖、输入种类及并行类别由 contracts 定义；研究选择与参数由显式配置提供；
 拟合、预测、缩放、排名、重要性和验证由 research 持有。字段名使用 model_algorithm，
-算法集合使用 model_algorithm_ids。当前合同取代旧入口后直接删除旧入口，不保留兼容支路。
+算法集合使用 model_algorithm_ids；只保留唯一合同入口，不保留兼容支路。
 
 factor 是信号来源，feature 是模型输入，label 是监督目标，prediction 是模型输出，
 signal 是评估/组合使用的排序、权重或交易意图，evaluation 是研究表现，portfolio 是构建与收益路径。
@@ -45,8 +45,8 @@ signal 是评估/组合使用的排序、权重或交易意图，evaluation 是�
 可编辑 JSON 位于 `configs/research/a_share/` 与 `configs/research/crypto/`。
 因子库、评估选择和模型特征是三个不同集合；配置分别声明评估因子、标签与主统计标签、
 每个模型的输入、算法和参数、使用的组合参数，以及 windows.development/windows.holdout。
-research run 不再接受独立的 profile/scenario/start-date/end-date 覆盖参数，避免双重选择来源。
-配置窗口必须位于原有访问边界内；选择窗口不会授予留出访问权。CORE6、PV25、Crypto baseline 是普通示例配置，
+research run 只通过显式研究配置选择 profile、scenario 和研究窗口，不接受独立覆盖参数，避免双重选择来源。
+配置窗口必须位于协议访问边界内；选择窗口不会授予留出访问权。CORE6、PV25、Crypto baseline 是普通示例配置，
 运行入口不隐式选择它们，不动态展开“全部因子”。仅评估和完整研究复用同一 DAG。
 profiles 把确定的配置绑定到现有 catalog/protocol/producer，完整配置保存在 protocol 与 run 记录。
 每个 target 仅绑定真正影响其计算的规范合同；workflow、业务 envelope、trial、writer 和 reader
@@ -58,8 +58,22 @@ Crypto 的训练、评估资产由每个模型的显式范围决定，不由模�
 直接比较在同一时点、同一资产主键的共同有效 OOS 样本上重算，不能只对齐日期。
 经济账本不因模型样本交集而裁剪。只选择一个模型时，比较表为空，联合检验明确为 UNDEFINED。
 
-配置文件不存运行产物。研究数据、模型和报告沿用既有 data 分层与 instances 身份目录；
-研究运行记录仍为 `data/runs/research/<run_id>.json`，trial 沿用 `data/runs/trials/<run_id>/`。
+配置字段必须有真实消费者。A股沿用季度选择 owner，允许按顺序列出
+`parameter_candidates`；Crypto 沿用每个显式模型一组 `hyperparameters` 的 trial，
+不同参数实验写成不同模型/研究配置，不接受会被忽略的 `parameter_candidates`。
+Crypto 的训练、验证和OOS时段必须由 `research_plan` 声明；A股不接受该字段，时间访问范围来自
+`windows`，季度选择规则仍由既有 A股 protocol 管理。
+
+研究配置的 `stage=evaluation` 通过同一 DAG 只生成已选因子评估。
+报告重建从指定 run 记录中的冻结 JSON 重新绑定完整目录，不沿用调用者上一次裁剪的选择。
+配置绑定由既有市场 protocol/catalog owner 完成；artifact reader 只消费绑定后的选择与持久化证据。
+模型、预测、组合和稳健性分析未被请求时，
+相应部分记为 `UNDEFINED / not_requested`，不制造缺产物 blocker。
+A股与 Crypto 的评估报告均从同一个有资源边界的 artifact reader 读取真实评估汇总；
+A股因子评估报告不依赖模型统计产物。
+
+配置文件不存运行产物。研究数据、模型和报告使用 data 分层与 instances 身份目录；
+研究运行记录为 `data/runs/research/<run_id>.json`，trial 为 `data/runs/trials/<run_id>/`。
 
 ## 计划、身份与持久化
 
@@ -70,7 +84,7 @@ Crypto 的训练、评估资产由每个模型的显式范围决定，不由模�
 随后生产者只扫描一次交易日轴，各输出批次读取必要的历史会话。知识截至与标签成熟末端不扩展。
 同时请求 PANEL 与因子时，PANEL 的公开实例仍仅发布请求窗口，因子谱系绑定另一个精确历史实例。
 公开 `targets`、`target_results` 与运行引用仍按逻辑 `target_id` 唯一投影；内部失败按消费方
-绑定的实例传播并计入整体状态，不能因公开投影而隐藏。`research run` 保留原研究窗口定义。
+绑定的实例传播并计入整体状态，不能因公开投影而隐藏。`research run` 使用研究配置声明的窗口定义。
 重建逐实例执行精确比较；`rebuild_evidence` 每条同时记录 `target_id`、被比较的
 `instance_identity`、`candidate_token` 与 `comparison_status`，消费者不得按逻辑 ID 覆盖同目标的多条比较。
 辅助源路径由已有 producer binding 绑定，规划、生产与复用验证读取同一来源根；
@@ -93,7 +107,7 @@ A 股最终拟合为一个合法历史窗，Crypto 保留最后 fold 的两个�
 单候选单 fold 及 budget=1，并绑定父 selection 语义身份。refit 不复用选择预算或伪造验证成绩。
 TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指标，refit 记录真实 n_train。
 选型统计只消费 selection，不能按引用位置猜阶段或把 refit 计为第二次选型。
-受本次合同变更影响的旧机器可读派生产物重建，不保留旧字段别名或双写；raw、归档和旧报告保留。
+与合同不兼容的机器可读派生产物须从已验证上游重建，不保留字段别名或双写；raw、归档和历史报告保留。
 
 数据集身份包含 schema、dtype、PK、逻辑窗口、来源谱系和精确内容。
 指纹仅快速拒绝；只有精确比较才能给出 MATCH。
@@ -103,7 +117,7 @@ TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指�
 默认/正式/定制选择若消费相同语义定义，复用同一身份。
 
 研究 run_id 是不可变尝试标识。查询、报告与 Notebook 只消费指定运行的确切产物引用，
-核对模型、预测、组合、报告之间的身份。旧报告读取保存的 Markdown，不重新训练或重渲染。
+核对模型、预测、组合、报告之间的身份。历史报告读取保存的 Markdown，不重新训练或重渲染。
 预测按持久化 PK 对齐；生产者和统计、组合消费者从同一模型输入有效性 owner 派生必需域，域内缺失、重复或错位稳定失败。
 QRP 自有 JSON 使用严格 UTF-8、顶层对象和精确 schema_id，拒绝重复键及非有限数并确定性写入。
 控制 manifest 保留 1 MiB 边界；报告和 run 证据按实际序列化大小预留 JSON 工作集，写入及精确身份重读使用同一资源准入。语义产物成员由 manifest 字节预算约束，重读只接受已声明成员，不另设固定文件数量上限。
@@ -115,7 +129,7 @@ plan 和事件在发布前按最终 UTF-8 字节数（含末尾换行）验证�
 
 托管数据规模操作先取得同主机、同操作系统账户的本地锁，只捕获一次 available0；
 Linux 锁位于固定 /tmp、按有效运行账户 UID 区分；Windows 锁位于账户主目录。
-任务 TMPDIR/TEMP/TMP 不改变锁域。不同账户不共享预算，跨账户协调不属于当前本地研究合同；
+任务 TMPDIR/TEMP/TMP 不改变锁域。不同账户不共享预算，跨账户协调不属于本地研究合同；
 规划目标为 min(available0×70%, explicit cap)。70% 和 memory_budget_bytes 是软规划参考，
 不是 RSS、真实分配或逻辑工作集的精确硬线，不建立第二百分比阈值。
 bytes 租约只使保守粗估可相加；在读取、解码、分配前选择有界批次。
@@ -151,9 +165,17 @@ Windows 保留宿主资源与原生文件锁。仓库外 RSS/CPU/IO 是校准证
 活动主 BaseException 不得被清理、验证、指标或释放次异常覆盖，不能依赖 GC 完成责任清理。
 必需模型不可通过静默备用后端、伪零值或改为可选依赖绕过。
 
+## 数值与统计结果
+
+数值确定性以固定种子、实际后端/线程及既有精确或容差合同为准，不承诺普遍跨平台逐比特一致。
+直接收益观测的零方差按实际数值一致性判定；NAV派生收益的风险统计使用由浮点NAV及比率运算传播的数值分辨率，不改写账本或收益。不可分辨风险时风险调整指标为UNDEFINED，固定候选宇宙不因退化候选而减员。
+
+IC聚合的真实零方差与不可表示尺度分开：非零标准差若舍入为零，标准差及ICIR保留未定义，原因使用既有nonfinite_result，不标记zero_variance。
+CSCV 每个候选以同一二进制尺度计算 mean/std/ratio，避免可表示有限结果被中间溢出改变排序/PBO；误差区间端点舍入相等时精确复核交集，不额外添加容差。真实常量、并列及样本不足仍保持既有 UNDEFINED 语义。
+
 ## 验证
 
-一项能力的证明链为 owner→真实生产调用→持久化效果→系统性不变量检查→当前可执行证据。
+一项能力的证明链为 owner→真实生产调用→持久化效果→系统性不变量检查→与被验收代码一致的可执行证据。
 检查量化因果、批准能力、单一 owner、数据精确性、故障生命周期、资源、
 身份复现、私有边界、CLI/API/Notebook。关注实际影响，不另造验证框架。
 定向检查优先；默认全量命令是 python -m pytest -q。测试夹具错误与生产错误区分记录。
@@ -164,25 +186,4 @@ Windows 保留宿主资源与原生文件锁。仓库外 RSS/CPU/IO 是校准证
 
 pyproject.toml 定义依赖/Python合同，
 environment.yml 提供对应 Conda 环境；不复制包版本表。
-数值确定性以固定种子、实际后端/线程及既有精确或容差合同为准，不承诺普遍跨平台逐比特一致。
-直接收益观测的零方差按实际数值一致性判定；NAV派生收益的风险统计使用由浮点NAV及比率运算传播的数值分辨率，不改写账本或收益。不可分辨风险时风险调整指标为UNDEFINED，固定候选宇宙不因退化候选而减员。
-当前命令、提交、测试数量和豁免仅记 .run/，不在长期合同中追加验收流水账。
-
-IC聚合的真实零方差与不可表示尺度分开：非零标准差若舍入为零，标准差及ICIR保留未定义，原因使用既有nonfinite_result，不标记zero_variance。
-CSCV 每个候选以同一二进制尺度计算 mean/std/ratio，避免可表示有限结果被中间溢出改变排序/PBO；误差区间端点舍入相等时精确复核交集，不额外添加容差。真实常量、并列及样本不足仍保持既有 UNDEFINED 语义。
-
-
-研究配置的 `stage=evaluation` 通过同一 DAG 只生成已选因子评估。
-报告重建从指定 run 记录中的冻结 JSON 重新绑定完整目录，不沿用调用者上一次裁剪的选择。
-配置绑定由既有市场 protocol/catalog owner 完成；artifact reader 只消费绑定后的选择与持久化证据。
-模型、预测、组合和稳健性分析未被请求时，
-相应部分记为 `UNDEFINED / not_requested`，不制造缺产物 blocker。
-A股与 Crypto 的评估报告均从同一个有资源边界的 artifact reader 读取真实评估汇总；
-A股因子评估报告不依赖模型统计产物。
-
-
-配置字段必须有真实消费者。A股沿用季度选择 owner，允许按顺序列出
-`parameter_candidates`；Crypto 沿用每个显式模型一组 `hyperparameters` 的 trial，
-不同参数实验写成不同模型/研究配置，不接受会被忽略的 `parameter_candidates`。
-Crypto 的训练、验证和OOS时段必须由 `research_plan` 声明；A股不接受该字段，时间访问范围来自
-`windows`，季度选择规则仍由既有 A股 protocol 管理。
+验收命令、提交、测试数量和豁免仅记 .run/，不在长期合同中追加验收流水账。

@@ -1,7 +1,7 @@
 # QRP 代理说明
 
 本文件约束工作方式；长期技术合同见 docs/architecture.md、docs/data.md 和对应市场文档。
-明确任务范围优先，其次是适用的 .run/ 控制记录和本文件；当前代码、Git、测试与运行结果提供事实。
+明确任务范围优先，其次是适用的 .run/ 控制记录和本文件；代码、Git、测试与运行证据须按任务核对。
 历史报告只作线索。修改前检查 git status 并读取目标文件及适用合同，保留无法解释的 WIP。
 仅在用户明确要求时使用子 agent；skill 不提供独立授权。
 
@@ -38,7 +38,7 @@ Windows 使用当前 PowerShell 原生命令；不得未经授权修改全局配
 默认 pytest -q 为全量；用户明确调整范围时记录实际检查和豁免，不宣称未执行项通过。
 不执行安装包验证；研究行为通过源码环境中的必要测试验收。
 
-禁止 force push、rebase、amend、reset、restore、clean、stash；仅在明确授权时合并 main。
+禁止 force push、rebase、amend、reset、restore、clean、stash；仅在明确授权时合并主分支。
 清理仅针对已确认的任务资源；验证绝对路径与归属，不丢弃 WIP 或重写历史。
 文档移动后闭合引用，不保留跳转空壳或手工同步的第二份正文。
 

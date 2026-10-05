@@ -6,6 +6,9 @@
 
 所有来源共用 data/raw，各 owner 只在 data/raw/<source_id> 内递归发现和验证输入。
 来源家族由供应商/表标识及结构证明，不从目录名猜测，不探测备用根。
+
+### CSMAR
+
 CSMAR 提供 A 股市场、指数、行业和分析师事实；其财务只作验证。
 
 CSMAR `index_membership` 是供应商指数成分事件，包含不同市场及证券类型，不能将所有
@@ -19,14 +22,21 @@ CSMAR `index_weights.Weight` 与 `index_market.Idxtrd08` 的原始缺失值在�
 `float64`，缺失表示为 NaN，Parquet 写为 NULL。源表可保留部分事实，不表示完整基准快照；
 基准消费者仍要求所选基准权重非空、严格为正且完整，正式全收益绩效仍要求有效开盘序列。
 
+### Choice
+
 Choice 是正式财务 PIT 唯一来源；原生响应先不可变保存，再由已有 owner 离线处理。
-Binance 当前仅消费录制清单声明的 gzip JSONL 成员和显式资金费归档，
-没有旧独立 JSONL 封装或分钟线适配入口；详细合同见 [Crypto](crypto.md)。
+
+### Binance
+
+Binance 原生录制 reader 仅消费录制清单声明的 gzip JSONL 成员；
+历史归档、辅助状态与资金费按各自显式清单和身份绑定。不提供独立 JSONL 封装或分钟线适配入口；详细来源合同见 [Crypto](crypto.md)。
+
+### Tardis
 
 Tardis 历史下载与导入按连续切片范围运行，保留 Binance 官方实时采集；
 实现就绪状态与输入资格分别记录，不能把下载完成写成研究链已接入。
 公开免费数据可直接请求；需要 API key 而没有授权时明确权限不足，不自动注册或购买。
-历史归档的不可变原始字节正式保存在
+Binance Futures 原生历史归档的不可变原始字节保存在
 `data/raw/tardis/binance-futures/<archive-id>/`；清单绑定供应商、
 交易场所、UTC 起始日期与连续切片范围、原生频道及频率、文件路径与字节哈希、
 稳定行序和可证明的缺口/有效区间。归档和研究均不限制为一天；原件文件名中的日期仅用于寻址。
@@ -38,9 +48,28 @@ Tardis 历史下载与导入按连续切片范围运行，保留 Binance 官方�
 单次研究默认消费一份有明确来源身份的输入，不自动拼接另一来源补洞。
 同一市场的录制与历史归档复用既有 L2、PANEL、因子、标签、模型和账本责任模块。
 
+Tardis native continuity 保留原字节，包括 depth 重复/过期更新。
+显式多归档集合逐原件绑定精确身份，按实际覆盖跨度及请求窗口路由。
+原件的本地 source_sequence/event/segment/observation 可重新起算；
+统一 source owner 为持久化 observation/segment 标识加入原件身份，并保留每段真实 gap。
+按窗口选取的 funding 原件分别验证实际 coverage，不以跨月包络推断未知结算。
+
+下载校验只推进 depth update-id 高水位，旧更新不倒退高水位、不制造新的连续性；
+既有 Binance book engine 负责丢弃不适用的更新。
+断连关闭观察区间，后续更新使用新的观察身份；前向 sequence gap 仍形成 gap。
+aggTrade ID 非单调仍明确失败，并保存频道、slice offset、行号和前后 ID 的诊断注记，
+不输出原始价格、数量或完整 payload。
+
+Binance Spot 和期货辅助状态的原生归档由配置显式选择，格式和消费边界见 [Crypto](crypto.md)。
+Bybit 与 OKX normalized 来源在 `data/raw/tardis/<exchange>/` 下按配置选择归档，
+其中 exchange 为 `bybit` 或 `okex-swap`；每份归档保存不可变 `data.csv.gz` 与 `manifest.json`。
+清单绑定场所、品种、数据类型、日期、观测范围及压缩原件哈希；只证明观测行，不证明原生消息连续性。
+
+### 规范原始输入与归档
+
 完全重复指字节相同。规范暂存仅保留一份，在保留文件附属元数据记录来源名称与哈希。
 同表更新导出成为新的活动候选，保留覆盖/结构差异证据，不为修复导出改写原始字节。
-无法满足当前 adapter 的已知家族标为 KEEP_RAW_ONLY；
+无法满足来源 adapter 合同的已知家族标为 KEEP_RAW_ONLY；
 只有无法证明表标识时才用 unclassified。两者均不以备用路径进入正式生产。
 
 每个保留 CSV 有一份规范 UTF-8 .metadata.json，记录结构、计数、日期、来源、哈希和质量事实。
@@ -48,8 +77,10 @@ Tardis 历史下载与导入按连续切片范围运行，保留 Binance 官方�
 已验证必需字段的派生投影可作为唯一活动规范输入；保留原件于 data/archive/<source_id>/<dataset>，
 该目录不参与 raw 扫描。元数据分别记录原件观察日、未知的原生导出日及真实投影导出日，
 并以原件、转换脚本和投影哈希证明来源；不能把未合规的原文叙述标为结构通过。
-独立历史费率 CSV 是当前 QRP 研究已接受的参考输入；其精确原始内容保持，
+独立历史费率 CSV 是 QRP 研究参考输入；其精确原始内容保持，
 独立外部来源核验状态与实现是否可消费分别说明，不制造第二份规范副本。
+
+### 公开行业参考来源
 
 公开行业快照属于 `reference` 来源，由现有 reference interim owner 读取
 `data/raw/reference/a_share_industry_snapshots/metadata.json`。元数据声明机构对应的官方页面、
@@ -69,7 +100,7 @@ PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资�
 
 数据层分为 raw、interim、processed、research、artifacts、runs，由 storage 布局派生路径。
 每个 QRP 数据集有 spec.json 和 _manifest/manifest.json，
-schema_id 分别为 qrp-dataset-spec 与 qrp-dataset-manifest；运行索引使用 run.json。
+schema_id 分别为 qrp-dataset-spec 与 qrp-dataset-manifest；研究运行记录使用 `data/runs/research/<run_id>.json`，Binance 录制清单使用录制根目录下的 `run.json`。
 数据集 manifest 的 `content_hash` 按规范物理顺序绑定全部成员路径与原始字节摘要；
 新会话在暴露数据前有界核对全部成员，不能把同大小、同统计的替换文件当作旧实例。
 未保存该内容证明的历史实例不静默补证或改写；需要从已验证上游重建新的实例。
@@ -79,14 +110,15 @@ raw 存在、供应商接口成功、字段齐全、范围内 PIT 适用、质�
 正式就绪要求 owner、真实消费者、持久化输出与适用语义检查；
 记录每个缺口只影响的目标，不能把缺失解释成零或完整覆盖。
 Choice 的实际披露、修订及历史版本约定见 [A 股](a-share.md)。
+标签访问与开发末端规则见 [A 股研究数据集语义边界](a-share.md#512-研究数据集语义边界)。
 
 ## 本地操作与交付
 
 采集入口、计划和 SDK 操作资料整理在 .run/acquisition/；
-本地供应商说明书、字段参考资料和历史采集缺口清单保存在 `data/reference/`，不属于 raw 数据发现根，且不进入 Git；历史缺口清单不代表当前覆盖状态。
+本地供应商说明书、字段参考资料和历史采集缺口清单保存在 `data/reference/`，不属于 raw 数据发现根，且不进入 Git；历史缺口清单不构成数据覆盖证明。
 代码所需的已核实单位、字段口径及页码写入对应现有市场合同；
 CSMAR 股数、市值、价格与成交量/额单位见 [A 股价格、收益与市值真值](a-share.md#55-价格收益与市值真值)。
-当前库存和账户额度留在本机操作记录，不进入长期文档。
+库存和账户额度留在本机操作记录，不进入长期文档。
 研究原始数据仍放 data/raw，不能因整理证据删除有效原始来源。
 .run/delivery/ 是仓库文档的生成副本，不维护第二份正文。
 SSH、激活信息、账户状态、供应商原始文档/表格均不进入 Git 或网页版交付。
@@ -95,18 +127,3 @@ Git 只保存代码、合同、结构定义、文档、合成测试和安全模�
 私有原始与生成行数据、供应商载荷、秘密、本地绝对路径、股票代码样本及原始回溯不提交。
 共享检查只输出结构、计数、哈希、状态、逻辑路径及不含私有行的摘要；
 在配置/进程/错误边界先选择安全字段，不能输出完整可能含令牌的内容。
-
-
-Tardis native continuity 保留原字节，包括 depth 重复/过期更新。
-显式多归档集合逐原件绑定精确身份，按实际覆盖跨度及请求窗口路由。
-原件的本地 source_sequence/event/segment/observation 可重新起算；
-统一 source owner 为持久化 observation/segment 标识加入原件身份，并保留每段真实 gap。
-按窗口选取的 funding 原件分别验证实际 coverage，不以跨月包络推断未知结算。
-A 股开发标签 producer 只访问开发可见末端；截至最终开发 cutoff 仍未成熟的尾标签保持不可用，
-不能为保存和重评分提前读取独立 test 事实。历史初始状态仍沿既有生命周期/asof owner 读取。
-
-下载校验只推进 depth update-id 高水位，旧更新不倒退高水位、不制造新的连续性；
-既有 Binance book engine 负责丢弃不适用的更新。
-断连关闭观察区间，后续更新使用新的观察身份；前向 sequence gap 仍形成 gap。
-aggTrade ID 非单调仍明确失败，并保存频道、slice offset、行号和前后 ID 的诊断注记，
-不输出原始价格、数量或完整 payload。
