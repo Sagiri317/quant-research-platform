@@ -889,6 +889,9 @@ FULL_Exp = FULL Fusion features + 4 expectations  # 完整融合特征加预期�
 
 MAD=0 -> 不裁剪并记录诊断。
 
+研究数据 manifest 的 `producer_diagnostics.canonical_features.mad_zero_by_input`
+按输入列累计 MAD=0 的 eligible 日期截面数，包含辅助规模协变量；无有效观测的截面不计入。
+
 1/99 分位仅用于稳健性。
 
 #### 5.10.2 中性化
@@ -938,6 +941,10 @@ neutralization n >= max(100, 5p)  # 中性化样本门槛
 observed canonical values = 0  # 零方差时已观测特征的规范值
 记录诊断
 ```
+
+`producer_diagnostics.canonical_features.zero_variance_by_factor` 按因子累计中性化后
+至少两条有效观测且总体方差为零的日期截面数；诊断在完整日期截面上计算，跨存储分块累计，
+与规范特征一同由原生 writer 发布，并由 reader 读取。
 
 目标零方差或有效样本数不足时，该日期无效。
 

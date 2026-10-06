@@ -754,6 +754,12 @@ class CryptoProtocol:
                 else ("taker_fee_bps", "latency_ms", "markout_horizon_ms")
             )
         }
+        if isinstance(candidate, CryptoTakerCandidate):
+            selected_plan["execution"]["latency_ms"] = (
+                execution["latency_ms"]
+                if candidate.latency_ms is None
+                else candidate.latency_ms
+            )
         result["execution_mode"] = descriptor.execution_mode
         result["execution_target_id"] = descriptor.target_id
         selected_plan.update(

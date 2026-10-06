@@ -2854,6 +2854,8 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
     tmp_path, monkeypatch
 ):
     from quant_research_platform.profiles.research import bind_research_configuration
+    from quant_research_platform.research.evaluations import runner
+    from quant_research_platform.storage.errors import OutputAlreadyExistsError
 
     config = research_configuration()
     config.update(
@@ -2872,6 +2874,29 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
     )
     layout = StorageLayout(tmp_path)
     window = TimeWindow(**config["windows"]["development"])
+    evaluation_spec = profile.evaluations.get(target.target_id)
+    dataset_spec = profile.research_datasets.get(evaluation_spec.research_dataset_id)
+    input_frame = pd.DataFrame(
+        {
+            column: [
+                "a_share"
+                if column == "market_id"
+                else "asset"
+                if column == "asset_id"
+                else pd.Timestamp(window.start)
+                if role is ColumnRole.TIMESTAMP
+                else True
+                if role in (ColumnRole.MASK, ColumnRole.UNIVERSE)
+                else 1.0
+            ]
+            for column, role in dataset_spec.column_roles.items()
+        }
+    )
+    write_dataset(
+        layout.research_dataset_root("a_share", dataset_spec.data_id),
+        input_frame,
+        spec=dataset_spec,
+    )
     window_payload = {**config["windows"]["development"], "access": "development"}
     software = research.production_software_identity()
     envelope = research._target_envelope_for_spec(
@@ -2884,15 +2909,41 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
         software_identity=software,
         raw_content_identity=None,
     )
-    existing = (
-        research._target_logical_root(profile, layout, target.target_id)
-        / envelope.instance_identity
+    existing = layout.instance_root(
+        research._target_logical_root(profile, layout, target.target_id),
+        envelope.instance_identity,
     )
     filesystem_mkdir(existing, parents=True)
     marker = existing / "existing.txt"
     filesystem_write_bytes(marker, b"unchanged")
     actual_write = research.write_semantic_artifact
     observed = []
+    created, consumed, closed, callbacks = [], [], [], []
+    actual_chunks = runner.iter_research_dataset_chunks
+    actual_outputs = research.write_evaluation_outputs_from_chunks
+
+    class ObservedIterator:
+        def __init__(self, source):
+            self.source = source
+
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            consumed.append(True)
+            return next(self.source)
+
+        def close(self):
+            self.source.close()
+            closed.append(True)
+
+    def chunks(*args, **kwargs):
+        created.append(True)
+        return ObservedIterator(actual_chunks(*args, **kwargs))
+
+    def outputs(*args, **kwargs):
+        callbacks.append(True)
+        return actual_outputs(*args, **kwargs)
 
     def publish(*args, **kwargs):
         try:
@@ -2902,7 +2953,11 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
             raise
 
     monkeypatch.setattr(research, "write_semantic_artifact", publish)
-    with pytest.raises(ValueError, match="evaluation_write_failed") as raised:
+    monkeypatch.setattr(runner, "iter_research_dataset_chunks", chunks)
+    monkeypatch.setattr(research, "write_evaluation_outputs_from_chunks", outputs)
+    with pytest.raises(
+        ValueError, match="^evaluation_write_failed:output_already_exists$"
+    ) as raised:
         research._build_semantic_target(
             profile=profile,
             protocol=protocol,
@@ -2919,4 +2974,7 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
             raw_root=tmp_path / "raw",
         )
     assert len(observed) == 1 and raised.value.__cause__ is observed[0]
+    assert isinstance(observed[0], OutputAlreadyExistsError)
+    assert created == closed == [True]
+    assert callbacks == consumed == []
     assert filesystem_read_bytes(marker) == b"unchanged"

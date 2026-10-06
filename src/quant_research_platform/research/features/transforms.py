@@ -43,6 +43,7 @@ def apply_feature_transforms(
     transforms: tuple[FeatureTransformSpec, ...],
     *,
     timestamp_column: str = "timestamp",
+    diagnostics: dict | None = None,
 ) -> pd.DataFrame:
     canonical = tuple(t for t in transforms if t.transform == "a_share_canonical")
     if canonical:
@@ -50,7 +51,7 @@ def apply_feature_transforms(
             raise ValueError("canonical_feature_pipeline_must_be_exclusive")
     if canonical:
         return canonical_feature_pipeline(
-            frame, factor_columns=canonical[0].source_columns
+            frame, factor_columns=canonical[0].source_columns, diagnostics=diagnostics
         )
     result = frame.copy()
     for transform in transforms:
@@ -130,33 +131,57 @@ def _winsorize(
     return values.clip(lower=lower, upper=upper)
 
 
+def _integer_coordinates(values):
+    """Represent finite binary64 values on one exact dyadic integer scale."""
+    ratios = [float(value).as_integer_ratio() for value in values]
+    scale = max((denominator for _, denominator in ratios), default=1)
+    return [
+        numerator * (scale // denominator) for numerator, denominator in ratios
+    ], scale
+
+
 def _mad_winsorize(
-    values: pd.Series, grouped: pd.core.groupby.SeriesGroupBy
+    values: pd.Series,
+    grouped: pd.core.groupby.SeriesGroupBy,
+    *,
+    zero_counts: dict[str, int] | None = None,
+    column: str | None = None,
 ) -> pd.Series:
-    median = grouped.transform("median")
-    mad = grouped.transform(lambda group: (group - group.median()).abs().median())
-    bound = (3.0 * 1.4826 * mad).where(mad.ne(0.0))
-    return values.clip(lower=median - bound, upper=median + bound)
+    lower = np.full(len(values), np.nan)
+    upper = np.full(len(values), np.nan)
+    for positions in grouped.indices.values():
+        exact, scale = _integer_coordinates(grouped.obj.iloc[positions].dropna())
+        if not exact:
+            continue
+        exact.sort()
+        middle = len(exact) // 2
+        twice_center = exact[middle] + exact[-middle - 1]
+        distances = sorted(abs(2 * value - twice_center) for value in exact)
+        mad = Fraction(distances[middle] + distances[-middle - 1], 4 * scale)
+        if mad == 0:
+            if zero_counts is not None:
+                zero_counts[column] += 1
+            continue
+        center = Fraction(twice_center, 2 * scale)
+        bound = 3 * Fraction(1.4826) * mad
+        for output, threshold in ((lower, center - bound), (upper, center + bound)):
+            try:
+                output[positions] = float(threshold)
+            except OverflowError:
+                output[positions] = -np.inf if threshold < 0 else np.inf
+    return values.clip(
+        lower=pd.Series(lower, index=values.index),
+        upper=pd.Series(upper, index=values.index),
+    )
 
 
 def _industry_size_residuals(target, industries, sizes):
     """Project binary64 inputs exactly onto industry intercepts and one size slope."""
     counts = industries.value_counts(sort=False)
-    y_scale = max(float(value).as_integer_ratio()[1] for value in target)
-    x_scale = (
-        1
-        if sizes is None
-        else max(float(value).as_integer_ratio()[1] for value in sizes)
-    )
-
-    def integer(value, scale):
-        numerator, denominator = float(value).as_integer_ratio()
-        return numerator * (scale // denominator)
-
+    y_values, y_scale = _integer_coordinates(target)
+    x_values = (0,) * len(target) if sizes is None else _integer_coordinates(sizes)[0]
     sums = {group: [0, 0, 0, 0] for group in counts.index}
-    for index, (group, value) in enumerate(zip(industries, target, strict=True)):
-        y = integer(value, y_scale)
-        x = 0 if sizes is None else integer(sizes[index], x_scale)
+    for group, y, x in zip(industries, y_values, x_values, strict=True):
         totals = sums[group]
         totals[0] += y
         totals[1] += x
@@ -182,14 +207,12 @@ def _industry_size_residuals(target, industries, sizes):
             return np.full(len(target), np.nan)
         slope = xy / xx
     residuals = np.empty(len(target), dtype="float64")
-    for index, (group, value) in enumerate(zip(industries, target, strict=True)):
+    for index, (group, y, x) in enumerate(
+        zip(industries, y_values, x_values, strict=True)
+    ):
         count = int(counts[group])
-        y = integer(value, y_scale) * count - sums[group][0]
-        x = (
-            0
-            if sizes is None
-            else integer(sizes[index], x_scale) * count - sums[group][1]
-        )
+        y = y * count - sums[group][0]
+        x = x * count - sums[group][1]
         residuals[index] = float((y - slope * x) / (count * y_scale))
     return residuals
 
@@ -273,6 +296,7 @@ def canonical_feature_pipeline(
     factor_columns: tuple[str, ...],
     size_column: str = "log_float_market_cap",
     industry_column: str = "industry_level1_code",
+    diagnostics: dict | None = None,
 ) -> pd.DataFrame:
     """Apply eligible -> MAD winsor -> neutralize -> population zscore."""
     if "eligible" not in frame:
@@ -286,16 +310,25 @@ def canonical_feature_pipeline(
     if factor_columns and size_column not in scoped:
         raise ValueError("feature_size_context_missing")
     winsorized = scoped.copy()
+    mad_counts = variance_counts = None
+    if diagnostics is not None:
+        mad_counts = diagnostics.setdefault("mad_zero_by_input", {})
+        variance_counts = diagnostics.setdefault("zero_variance_by_factor", {})
     for factor in canonical_feature_input_factors(
         factor_columns, size_column=size_column
     ):
+        if mad_counts is not None:
+            mad_counts.setdefault(factor, 0)
         values = strict_finite_numeric_series(
             winsorized[factor],
             error=f"invalid_feature_factor: {factor}",
             allow_null=True,
         )
         winsorized[factor] = _mad_winsorize(
-            values, values.groupby(winsorized["timestamp"], sort=False)
+            values,
+            values.groupby(winsorized["timestamp"], sort=False),
+            zero_counts=mad_counts,
+            column=factor,
         )
     winsorized[industry_column] = _industry_group_codes(winsorized, industry_column)
     residualized = neutralize_cross_section(
@@ -309,8 +342,21 @@ def canonical_feature_pipeline(
     for factor in factor_columns:
         values = residualized[factor]
         raw_missing = scoped[factor].isna()
+        if variance_counts is not None:
+            variance_counts.setdefault(factor, 0)
+
+        def zscore(group, factor=factor):
+            observed = group.dropna()
+            if (
+                variance_counts is not None
+                and len(observed) >= 2
+                and observed.eq(observed.iloc[0]).all()
+            ):
+                variance_counts[factor] += 1
+            return _stable_zscore(group)
+
         scoped_feature = values.groupby(scoped["timestamp"], sort=False).transform(
-            _stable_zscore
+            zscore
         )
         final_missing = raw_missing | scoped_feature.isna()
         feature = pd.Series(np.nan, index=result.index, dtype="float64")

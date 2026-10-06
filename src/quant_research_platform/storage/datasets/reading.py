@@ -62,6 +62,7 @@ from quant_research_platform.storage.manifests import read_bounded_qrp_json
 from quant_research_platform.storage.parquet import (
     DatasetPartMetadata,
     PreparedMembershipValues,
+    _physical_filter_scalar,
     inspect_dataset_part,
     iter_dataset_part_batches,
 )
@@ -625,17 +626,7 @@ def _freeze_filter_value(value: Any) -> Any:
 
 
 def _filter_value_is_representable(field: pa.Field, value: Any) -> bool:
-    if pa.types.is_timestamp(field.type):
-        source_type = pa.timestamp(
-            value.unit if isinstance(value, pd.Timestamp) else "us", tz=field.type.tz
-        )
-    elif pa.types.is_duration(field.type):
-        source_type = pa.duration(
-            value.unit if isinstance(value, pd.Timedelta) else "us"
-        )
-    else:
-        source_type = None
-    source = pa.scalar(value, type=source_type)
+    source = _physical_filter_scalar(field, value)
     try:
         converted = source.cast(field.type, safe=True)
     except pa.ArrowInvalid:

@@ -652,6 +652,7 @@ def test_trade_resends_preserve_raw_bytes_and_count_each_identity_once(
 def test_archive_four_cursors_share_one_native_scan_and_close(
     tmp_path, monkeypatch, cancel
 ):
+    import quant_research_platform.sources.tardis.raw as raw
     import quant_research_platform.sources.tardis.replay as replay
     from quant_research_platform.policy.lifecycle import closing_iterator
 
@@ -695,6 +696,23 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
     published = tmp_path / "published"
     import_slices(published, date="2026-09-01", slices=slices, byte_budget=1024**2)
     original = replay.iter_native_slice
+    native_open = raw.open_filesystem_file
+    temporary_file = replay.TemporaryFile
+    handles, buffers = [], []
+
+    def opened(path, *args, **kwargs):
+        handle = native_open(path, *args, **kwargs)
+        if path.suffix == ".gz":
+            handles.append(handle)
+        return handle
+
+    def buffered(*args, **kwargs):
+        handle = temporary_file(*args, **kwargs)
+        buffers.append(handle)
+        return handle
+
+    monkeypatch.setattr(raw, "open_filesystem_file", opened)
+    monkeypatch.setattr(replay, "TemporaryFile", buffered)
     calls = rows = 0
 
     def counted(*args, **kwargs):
@@ -708,6 +726,7 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
                 yield row
 
     monkeypatch.setattr(replay, "iter_native_slice", counted)
+    interrupted = False
     try:
         with open_market_source(published) as source:
             assert calls == 0
@@ -742,13 +761,18 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
                     )
                     assert len(repeated) == 1 and calls == 1
     except KeyboardInterrupt as error:
+        interrupted = True
         assert cancel and str(error) == "cancel_native_scan"
+    assert interrupted is (cancel is True)
+    assert handles and all(handle.closed for handle in handles)
+    assert buffers and all(handle.closed for handle in buffers)
 
 
-def test_archive_tail_batches_raw_io_and_preserves_replay(tmp_path, monkeypatch):
+def test_archive_tail_shares_native_scan_and_preserves_replay(tmp_path, monkeypatch):
     from collections import Counter
     from functools import partial
 
+    import quant_research_platform.sources.tardis.raw as raw
     import quant_research_platform.sources.tardis.replay as replay
     from quant_research_platform.policy.lifecycle import closing_iterator
 
@@ -794,6 +818,16 @@ def test_archive_tail_batches_raw_io_and_preserves_replay(tmp_path, monkeypatch)
     )
     calls = Counter()
     original_records = replay.iter_native_slice
+    native_open = raw.open_filesystem_file
+    handles = []
+
+    def opened(path, *args, **kwargs):
+        handle = native_open(path, *args, **kwargs)
+        if path.suffix == ".gz":
+            handles.append(handle)
+        return handle
+
+    monkeypatch.setattr(raw, "open_filesystem_file", opened)
 
     def counted_records(*args, **kwargs):
         calls["native_scans"] += 1
@@ -828,6 +862,7 @@ def test_archive_tail_batches_raw_io_and_preserves_replay(tmp_path, monkeypatch)
             == 8
         )
         assert calls["native_scans"] == 1 and calls["native_rows"] == 514
+    assert handles and all(handle.closed for handle in handles)
 
 
 def test_archive_cursors_release_decoded_payloads_and_close_buffers(

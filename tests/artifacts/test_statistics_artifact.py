@@ -416,6 +416,8 @@ def test_research_table_rejects_invalid_values_at_write_and_read(
     tmp_path, tables, envelope, member, mutation
 ):
     name = member.removesuffix(".parquet")
+    if name == "model_group_comparison":
+        tables[name] = pd.DataFrame([_defined_group_comparison_row()])
     if mutation == "status":
         tables[name].loc[0, "status"] = "UNKNOWN"
     elif mutation == "reason":
@@ -425,7 +427,18 @@ def test_research_table_rejects_invalid_values_at_write_and_read(
     else:
         count = "period_count" if name == "fama_macbeth" else "observation_count"
         tables[name].loc[0, count] = -1
-    _assert_rejected_at_write_and_read(tmp_path, tables, envelope, member)
+    error = (
+        "statistics_table_count_invalid"
+        if mutation == "count"
+        else "statistics_group_comparison_invalid"
+        if name == "model_group_comparison"
+        else "statistics_table_status_invalid"
+        if mutation == "status"
+        else "statistics_table_status_value_invalid"
+    )
+    _assert_rejected_at_write_and_read(
+        tmp_path, tables, envelope, member, error=f"^{error}$"
+    )
 
 
 def _assert_rejected_at_write_and_read(
@@ -1361,7 +1374,32 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
 def test_defined_group_comparison_requires_descriptive_facts(
     tmp_path, tables, envelope, corruption
 ):
-    row = dict(
+    row = _defined_group_comparison_row()
+    if corruption != "none":
+        row[corruption] = 0 if corruption == "observation_count" else float("nan")
+    tables["model_group_comparison"] = pd.DataFrame([row])
+    if corruption != "none":
+        _assert_rejected_at_write_and_read(
+            tmp_path,
+            tables,
+            envelope,
+            "model_group_comparison.parquet",
+            error="statistics_group_comparison_invalid",
+        )
+    else:
+        root = statistics.write_statistics_artifact(
+            tmp_path / "group", envelope=envelope, tables=tables
+        )
+        artifact = statistics.read_statistics_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        with artifact.table("model_group_comparison.parquet") as frame:
+            assert frame.global_mean.iloc[0] == 0.2
+            assert frame.observation_count.iloc[0] == 64
+
+
+def _defined_group_comparison_row():
+    return dict(
         family_id="family",
         access_window="holdout",
         status="DEFINED",
@@ -1390,24 +1428,3 @@ def test_defined_group_comparison_requires_descriptive_facts(
         bootstrap_lower=float("nan"),
         bootstrap_upper=float("nan"),
     )
-    if corruption != "none":
-        row[corruption] = 0 if corruption == "observation_count" else float("nan")
-    tables["model_group_comparison"] = pd.DataFrame([row])
-    if corruption != "none":
-        _assert_rejected_at_write_and_read(
-            tmp_path,
-            tables,
-            envelope,
-            "model_group_comparison.parquet",
-            error="statistics_group_comparison_invalid",
-        )
-    else:
-        root = statistics.write_statistics_artifact(
-            tmp_path / "group", envelope=envelope, tables=tables
-        )
-        artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity
-        )
-        with artifact.table("model_group_comparison.parquet") as frame:
-            assert frame.global_mean.iloc[0] == 0.2
-            assert frame.observation_count.iloc[0] == 64

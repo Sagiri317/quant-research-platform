@@ -272,14 +272,10 @@ def _filter_arrow_batch(
         else:
             column_values = batch.column(batch.schema.get_field_index(column))
             scalar = value
-            if pa.types.is_timestamp(column_values.type):
-                scalar = pa.scalar(
-                    value,
-                    type=pa.timestamp(
-                        value.unit if isinstance(value, pd.Timestamp) else "us",
-                        tz=column_values.type.tz,
-                    ),
-                )
+            if pa.types.is_timestamp(column_values.type) or pa.types.is_duration(
+                column_values.type
+            ):
+                scalar = _physical_filter_scalar(batch.schema.field(column), value)
                 if operator == "==":
                     try:
                         scalar = scalar.cast(column_values.type, safe=True)
@@ -290,6 +286,19 @@ def _filter_arrow_batch(
         combined = condition if combined is None else pc.and_kleene(combined, condition)
         del condition
     return batch if combined is None else pc.filter(batch, combined)
+
+
+def _physical_filter_scalar(field: pa.Field, value: Any) -> pa.Scalar:
+    source_type = None
+    if pa.types.is_timestamp(field.type):
+        source_type = pa.timestamp(
+            value.unit if isinstance(value, pd.Timestamp) else "us", tz=field.type.tz
+        )
+    elif pa.types.is_duration(field.type):
+        source_type = pa.duration(
+            value.unit if isinstance(value, pd.Timedelta) else "us"
+        )
+    return pa.scalar(value, type=source_type)
 
 
 @contextmanager

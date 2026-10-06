@@ -1173,20 +1173,27 @@ def test_declared_reader_preserves_observer_generator_exit(
 
 @pytest.mark.parametrize("unit", ("ms", "us", "ns"))
 @pytest.mark.parametrize("offset_ns", (0, 1, 1000, 1000000))
-def test_timestamp_equality_keeps_predicate_precision(tmp_path, unit, offset_ns):
+@pytest.mark.parametrize("kind", ("timestamp", "duration"))
+@pytest.mark.parametrize("operator", ("==", "in"))
+def test_temporal_equality_and_membership_keep_predicate_precision(
+    tmp_path, unit, offset_ns, kind, operator
+):
     from quant_research_platform.contracts.columns import ColumnRole
 
-    root = make_dataset_artifact_root(tmp_path, "timestamp_equality")
+    root = make_dataset_artifact_root(tmp_path, "temporal_equality")
     frame = make_default_dataset_frame().iloc[:2].copy()
-    origin = pd.Timestamp("2020-01-01").as_unit("ns")
+    origin = (
+        pd.Timestamp("2020-01-01") if kind == "timestamp" else pd.Timedelta(1, "s")
+    ).as_unit("ns")
     frame["value"] = pd.Series(
-        [origin, origin + pd.Timedelta(milliseconds=1)], dtype=f"datetime64[{unit}]"
+        [origin, origin + pd.Timedelta(milliseconds=1)],
+        dtype=f"{'datetime' if kind == 'timestamp' else 'timedelta'}64[{unit}]",
     )
     write_dataset(
         root,
         frame,
         spec=make_processed_dataset_spec(
-            "timestamp_equality", value_role=ColumnRole.CONTEXT
+            "temporal_equality", value_role=ColumnRole.CONTEXT
         ),
     )
     predicate = origin + pd.Timedelta(offset_ns, unit="ns")
@@ -1194,9 +1201,13 @@ def test_timestamp_equality_keeps_predicate_precision(tmp_path, unit, offset_ns)
         root,
         columns=("value",),
         time_window=None,
-        row_filters=(("value", "==", predicate),),
+        row_filters=(
+            ("value", operator, predicate if operator == "==" else (predicate,)),
+        ),
     )
-    assert session.arrow_schema.field("value").type == pa.timestamp(unit)
+    assert session.arrow_schema.field("value").type == (
+        pa.timestamp(unit) if kind == "timestamp" else pa.duration(unit)
+    )
     rows = 0
     with closing_iterator(
         dataset_reading.iter_dataset_chunks(session, batch_rows=2048)

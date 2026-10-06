@@ -1,3 +1,4 @@
+from copy import deepcopy
 from dataclasses import asdict
 
 import numpy as np
@@ -88,6 +89,94 @@ def _statistics_plan(quantity_scale=1.0):
             },
         },
     }
+
+
+@pytest.mark.parametrize("explicit", (True, False))
+@pytest.mark.parametrize("kind", ("PORTFOLIO", "STATISTIC"))
+def test_taker_identity_projects_consumed_latency_and_preserves_real_scenarios(
+    explicit, kind
+):
+    plan = _statistics_plan()
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        development=(
+            plan["folds"][0]["validation"]["start"],
+            plan["folds"][-1]["validation"]["end"],
+        ),
+        plan=plan,
+    )
+    candidate = next(item for item in configuration["portfolios"] if "model_id" in item)
+    candidate["latency_ms"] = 100 if explicit else None
+    configuration["portfolios"] = [candidate]
+    software = production_software_identity()
+
+    def bind(config):
+        return bind_research_configuration(
+            research_profile(CRYPTO_PROFILE_ID), config
+        ).protocol(config["scenario_id"], access_window="holdout")
+
+    def envelope(protocol):
+        descriptor = protocol.execution_targets()[0]
+        target_id = (
+            descriptor.target_id
+            if kind == "PORTFOLIO"
+            else descriptor.statistics_target_id
+        )
+        target = next(
+            item
+            for item in protocol.target_specs("research run")
+            if item.target_id == target_id
+        )
+        result = _target_envelope_for_spec(
+            profile=bind_research_configuration(
+                research_profile(CRYPTO_PROFILE_ID), protocol.configuration()
+            ),
+            protocol=protocol,
+            target_spec=target,
+            data_spec=None,
+            research_window={**plan["test"], "access": "holdout"},
+            upstream_identities={},
+            software_identity=software,
+            raw_content_identity=None,
+        )
+        return result.instance_identity, protocol.target_manifest(target_id, kind)
+
+    first = bind(configuration)
+    changed = deepcopy(configuration)
+    changed["research_plan"]["execution"]["latency_ms"] = 200
+    second = bind(changed)
+    first_identity, first_projection = envelope(first)
+    second_identity, second_projection = envelope(second)
+    assert (
+        len(first.portfolio_candidates())
+        == len(second.portfolio_candidates())
+        == (1 if explicit else 3)
+    )
+    assert first_projection["research_plan"]["execution"]["latency_ms"] == (
+        100 if explicit else 0
+    )
+    assert second_projection["research_plan"]["execution"]["latency_ms"] == (
+        100 if explicit else 200
+    )
+    assert (first_identity == second_identity) is explicit
+    if explicit:
+        assert first_projection == second_projection
+        changed["portfolios"][0]["latency_ms"] = 300
+        assert envelope(bind(changed))[0] != first_identity
+    else:
+        assert {item.latency_ms for item in first.portfolio_candidates()} == {
+            None,
+            100,
+            200,
+        }
+        changed["research_plan"]["execution"]["latency_scenarios_ms"] = [0, 100, 300]
+        assert {item.latency_ms for item in bind(changed).portfolio_candidates()} == {
+            None,
+            0,
+            100,
+            300,
+        }
 
 
 @pytest.mark.parametrize("quantity_scale", (1.0, 2.0 ** (-50)))

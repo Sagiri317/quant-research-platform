@@ -486,9 +486,7 @@ def produce_taker_ledger(
     config = TakerConfig(
         order_quantity=limits["max_order_quantity"],
         position_size=limits["max_position_quantity"],
-        latency_ms=execution["latency_ms"]
-        if candidate.latency_ms is None
-        else candidate.latency_ms,
+        latency_ms=execution["latency_ms"],
         taker_fee_bps=execution["taker_fee_bps"],
         markout_horizon_ms=execution["markout_horizon_ms"],
     )

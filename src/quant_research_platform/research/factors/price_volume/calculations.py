@@ -269,7 +269,19 @@ def _calculate_values(
     elif factor == "amplitude_20d":
         result = np.mean((current - extra["low"]) / extra["close"], axis=1)
     elif factor.startswith("amihud_"):
-        result = np.mean(np.abs(current) / extra["amount"], axis=1)
+        return_mantissa, return_exponent = np.frexp(np.abs(current))
+        amount_mantissa, amount_exponent = np.frexp(extra["amount"])
+        quotients = return_mantissa / amount_mantissa
+        exponents = return_exponent - amount_exponent
+        scale = np.max(
+            np.where(
+                quotients != 0, exponents, np.min(exponents, axis=1, keepdims=True)
+            ),
+            axis=1,
+            keepdims=True,
+        )
+        normalized = np.ldexp(quotients, exponents - scale)
+        result = np.ldexp(np.mean(normalized, axis=1), scale[:, 0])
     elif factor.endswith("_corr_20d"):
         result = np.fromiter(
             (

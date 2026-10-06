@@ -91,18 +91,26 @@ def _assemble_research_dataset_from_sessions(
             spec.data_id, layout.research_dataset_root(spec.market_id, spec.data_id)
         )
     )
+    metadata = dict(instance_metadata or {})
+    diagnostics = None
+    if any(t.transform == "a_share_canonical" for t in spec.feature_transforms):
+        metadata["producer_diagnostics"] = dict(
+            metadata.get("producer_diagnostics", {})
+        )
+        diagnostics = {}
+        metadata["producer_diagnostics"]["canonical_features"] = diagnostics
     chunks = _iter_joined_processed_chunks(
         dataset_spec=spec,
         processed_catalog=processed_catalog,
         sessions=input_sessions,
         time_window=time_window,
+        diagnostics=diagnostics,
     )
 
     def verify_input_sessions(_receipt: DatasetWriteReceipt) -> None:
         for session in input_sessions.values():
             session.verify()
 
-    metadata = dict(instance_metadata or {})
     if COMMON_MANIFEST_METADATA_KEY not in metadata:
         metadata["input_dataset_identities"] = _input_dataset_identities(
             dataset_spec=spec, sessions=input_sessions
@@ -128,6 +136,7 @@ def _iter_joined_processed_chunks(
     processed_catalog: ProcessedDataCatalog,
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
+    diagnostics: dict | None = None,
 ) -> Iterator[pd.DataFrame]:
     base_data_id = _base_input_data_id(dataset_spec)
     chunk_windows = _iter_research_chunk_windows_from_base_input(
@@ -145,6 +154,7 @@ def _iter_joined_processed_chunks(
                 sessions=sessions,
                 time_window=chunk_window,
                 base_data_id=base_data_id,
+                diagnostics=diagnostics,
             )
             validate_research_dataset(chunk, dataset_spec)
             yielded_value = chunk.sort_values(
@@ -163,6 +173,7 @@ def _join_processed_inputs(
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     base_data_id: str | None = None,
+    diagnostics: dict | None = None,
 ) -> pd.DataFrame:
     assembled: pd.DataFrame | None = None
     base_keys: pd.DataFrame | None = None
@@ -197,7 +208,9 @@ def _join_processed_inputs(
         raise ValueError("empty_research_dataset_inputs")
     assembled = _add_a_share_semantic_columns(assembled, dataset_spec)
     if dataset_spec.feature_transforms:
-        assembled = apply_feature_transforms(assembled, dataset_spec.feature_transforms)
+        assembled = apply_feature_transforms(
+            assembled, dataset_spec.feature_transforms, diagnostics=diagnostics
+        )
     return assembled.loc[:, list(_ordered_output_columns(dataset_spec))]
 
 

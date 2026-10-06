@@ -381,8 +381,10 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     original = PortfolioLedgerArtifact.iter_chunks
     for mode in ("missing_first", "missing_last", "interrupt", "missing_adv"):
         closed = []
+        started = []
 
-        def altered(self, mode=mode, closed=closed):
+        def altered(self, mode=mode, closed=closed, started=started):
+            started.append(self.identity)
             try:
                 with closing_iterator(original(self)) as source:
                     for index, item in enumerate(source):
@@ -420,6 +422,8 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
                 )
                 with pytest.raises(expected_error):
                     produce()
+        assert started
+        assert sorted(closed) == sorted(started)
     no_fit = [
         replace(item, fitted=None, reason="attribution_pit_history_missing")
         for item in inputs
