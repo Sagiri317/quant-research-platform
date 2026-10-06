@@ -308,54 +308,50 @@ def test_frozen_archive_identity_and_persisted_maker_units(
             replace(new, order_id=3, effective_at_ns=200_000_000),
         ),
     )
-    try:
-        for commands in ((), pending):
-            query = dict(
-                state=state,
-                decision_ns=0,
-                new_order=new,
-                active_order=old,
-                commands=commands,
-                lifetime_ns=500_000_000,
-                prediction=0.02,
-                fee_bps=1.0,
-                funding=[],
-            )
-            expected = baseline.select(**query)
-            actual = historical.select(**query)
-            assert actual[:2] == expected[:2]
-            assert actual[2] == pytest.approx(expected[2])
-            for replacement in (None, 0.0, 1.0):
-                outputs = []
-                for model in (historical, baseline):
-                    sample_stream = model.samples("buy")
-                    try:
-                        sample = next(sample_stream)
-                        outputs.append(
-                            list(
-                                model._response(
-                                    sample,
-                                    state=state,
-                                    decision_ns=0,
-                                    new_order=new,
-                                    active_order=old,
-                                    commands=commands,
-                                    lifetime_ns=500_000_000,
-                                    replace_quantity=replacement,
-                                    events=model.events(
-                                        sample["event_start"],
-                                        sample["event_end"],
-                                    ),
-                                )
+    for commands in ((), pending):
+        query = dict(
+            state=state,
+            decision_ns=0,
+            new_order=new,
+            active_order=old,
+            commands=commands,
+            lifetime_ns=500_000_000,
+            prediction=0.02,
+            fee_bps=1.0,
+            funding=[],
+        )
+        expected = baseline.select(**query)
+        actual = historical.select(**query)
+        assert actual[:2] == expected[:2]
+        assert actual[2] == pytest.approx(expected[2])
+        for replacement in (None, 0.0, 1.0):
+            outputs = []
+            for model in (historical, baseline):
+                sample_stream = model.samples("buy")
+                try:
+                    sample = next(sample_stream)
+                    outputs.append(
+                        list(
+                            model._response(
+                                sample,
+                                state=state,
+                                decision_ns=0,
+                                new_order=new,
+                                active_order=old,
+                                commands=commands,
+                                lifetime_ns=500_000_000,
+                                replace_quantity=replacement,
+                                events=model.events(
+                                    sample["event_start"],
+                                    sample["event_end"],
+                                ),
                             )
                         )
-                    finally:
-                        sample_stream.close()
-                assert outputs[0] == outputs[1]
-                assert outputs[0]
-    finally:
-        historical.close()
-        baseline.close()
+                    )
+                finally:
+                    sample_stream.close()
+            assert outputs[0] == outputs[1]
+            assert outputs[0]
     assert fingerprints() == before
 
 
