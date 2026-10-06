@@ -378,7 +378,9 @@ class TardisArchive:
                 key, record = item
                 buffered = self._records_by_stream.get(key)
                 if buffered is None:
-                    buffered = self._replay_resources.enter_context(TemporaryFile())
+                    buffered = self._replay_resources.enter_context(
+                        closing_iterator(TemporaryFile())
+                    )
                     self._records_by_stream[key] = buffered
                 buffered.seek(0, 2)
                 pickle.dump(record, buffered, protocol=pickle.HIGHEST_PROTOCOL)

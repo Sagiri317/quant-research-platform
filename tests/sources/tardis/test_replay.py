@@ -859,6 +859,43 @@ def test_archive_cursors_release_decoded_payloads_and_close_buffers(
         tracemalloc.stop()
 
 
+def test_archive_buffer_close_keeps_native_decode_failure(tmp_path, monkeypatch):
+    import io
+    from contextlib import ExitStack
+
+    import quant_research_platform.sources.tardis.replay as replay
+
+    primary = ValueError("controlled_native_decode_failure")
+    buffers = []
+
+    class BrokenClose(io.BytesIO):
+        def close(self):
+            if not self.closed:
+                super().close()
+                raise OSError("controlled_buffer_close_failure")
+
+    def temporary_file():
+        stream = BrokenClose()
+        buffers.append(stream)
+        return stream
+
+    def records(self):
+        yield ("BTCUSDT", "agg_trades"), {"payload": "synthetic"}
+        raise primary
+
+    monkeypatch.setattr(replay, "TemporaryFile", temporary_file)
+    monkeypatch.setattr(replay.TardisArchive, "_iter_canonical_records", records)
+    with pytest.raises(ValueError) as caught:
+        with ExitStack() as resources:
+            archive = replay.TardisArchive(tmp_path, {}, {}, None, resources)
+            list(archive._stream_records("BTCUSDT", "agg_trades", None))
+    assert caught.value is primary
+    assert all(stream.closed for stream in buffers)
+    assert any(
+        "iterator close also failed: OSError" in note for note in primary.__notes__
+    )
+
+
 @pytest.mark.parametrize("snapshot_depths", [(12, 12), (12, 13), (13, 12), (12, 9)])
 def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
     tmp_path, snapshot_depths
