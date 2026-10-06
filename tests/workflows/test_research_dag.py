@@ -494,18 +494,17 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     rebuild_record = read_research_run_record(
         layout.research_run_path(rebuilt["run_id"])
     )
-    assert rebuild_record.trial_ledgers
-    assert {item["run_id"] for item in rebuild_record.trial_ledgers} == {
-        rebuilt["run_id"]
-    }
+    assert not rebuild_record.trial_ledgers
     assert filesystem_read_bytes(model_root / "manifest.json") == model_before
     comparisons = {
         item["target_id"]: item["comparison_status"]
         for item in rebuilt["rebuild_evidence"]
     }
-    assert comparisons["pv_all_model_selection_refit"] == "MATCH"
+    assert comparisons == {"pv_all_evaluation": "MATCH"}
+    rebuilt_targets = {item["target_id"]: item for item in rebuilt["target_results"]}
+    assert rebuilt_targets["pv_all_model_selection_refit"]["status"] == "REUSED"
     assert all(
-        comparisons[f"pv_all_{group}_persisted_predictions"] == "MATCH"
+        rebuilt_targets[f"pv_all_{group}_persisted_predictions"]["status"] == "REUSED"
         for group in ("global", "quarterly")
     )
     assert (
@@ -1783,9 +1782,14 @@ def test_rebuild_blocked_before_materialization_cleans_empty_candidate(
     assert not tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
-def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
+@pytest.mark.parametrize(
+    "rebuild_upstream, corrupt_upstream", [(False, False), (False, True), (True, False)]
+)
+def test_rebuild_reuses_published_upstream_unless_explicitly_requested(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    rebuild_upstream: bool,
+    corrupt_upstream: bool,
 ) -> None:
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
@@ -1864,7 +1868,7 @@ def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
-        start_date="2020-01-01",
+        start_date=a_share.DATA_START.isoformat(),
         end_date="2020-12-31",
         data_ids=(descendant_id,),
     )
@@ -1872,17 +1876,48 @@ def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
     assert source_calls["count"] == 1
     assert descendant_calls["count"] == 1
 
+    if corrupt_upstream:
+        upstream = next(
+            t for t in first["target_results"] if t["target_id"] == source_id
+        )
+        manifest = (
+            layout.instance_root(
+                layout.interim_data_root("csmar", source_id),
+                upstream["instance_identity"],
+            )
+            / "_manifest"
+            / "manifest.json"
+        )
+        filesystem_write_bytes(manifest, b"{}")
+
     failed = research.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
-        start_date="2020-01-01",
+        start_date=a_share.DATA_START.isoformat(),
         end_date="2020-12-31",
-        data_ids=(descendant_id,),
+        data_ids=(source_id, descendant_id) if rebuild_upstream else (descendant_id,),
         rebuild=True,
     )
 
     results = {item["target_id"]: item for item in failed["target_results"]}
+    if corrupt_upstream:
+        assert failed["status"] == "BLOCKED"
+        assert results[source_id]["reason"] == "persisted_instance_invalid"
+        assert results[descendant_id]["status"] == "BLOCKED"
+        assert source_calls["count"] == descendant_calls["count"] == 1
+        assert filesystem_read_bytes(manifest) == b"{}"
+        return
+    if not rebuild_upstream:
+        assert failed["status"] == "COMPLETE"
+        assert results[source_id]["status"] == "REUSED"
+        assert results[descendant_id]["status"] == "BUILT"
+        assert source_calls["count"] == 1
+        assert descendant_calls["count"] == 2
+        assert {item["target_id"] for item in failed["rebuild_evidence"]} == {
+            descendant_id
+        }
+        return
     assert failed["status"] == "FAILED"
     assert results[source_id]["status"] == "FAILED"
     assert results[source_id]["reason"] == ("rebuild_comparison_content_mismatch")
@@ -2196,7 +2231,7 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
     missing = CliRunner().invoke(app, args)
     assert missing.exit_code == 2 and "research-plan" in missing.output
     result = CliRunner().invoke(app, [*args, "--research-plan", str(plan_file)])
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == 3, result.output
     published = json.loads(result.output)
     assert published["protocol"]["research_plan"] == _crypto_plan_payload()
     assert "holdout_status" not in published["protocol"]

@@ -12,6 +12,8 @@ from quant_research_platform.markets.implementations.a_share.processed.panels im
     _apply_suspension_semantics,
     _asof_industry,
     _industry_version_active_mask,
+    _prepare_industry_inputs,
+    _prepare_market_panel_inputs,
     compute_market_panel,
 )
 from quant_research_platform.research.labels.engine import calculate_labels_for_panel
@@ -56,7 +58,10 @@ def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
 
 
 @pytest.mark.parametrize("missing_caps", [False, True])
-def test_market_panel_keeps_suspension_and_excludes_holiday_fill(missing_caps) -> None:
+@pytest.mark.parametrize("other_exchange_open", [False, True])
+def test_market_panel_keeps_suspension_and_excludes_holiday_fill(
+    missing_caps, other_exchange_open
+) -> None:
     sessions = pd.DatetimeIndex(
         pd.to_datetime(["2024-01-02", "2024-01-03", "2024-01-04", "2024-01-05"])
     )
@@ -114,11 +119,17 @@ def test_market_panel_keeps_suspension_and_excludes_holiday_fill(missing_caps) -
         }
     )
 
+    if other_exchange_open:
+        calendar = pd.concat(
+            [calendar, calendar.assign(source_market_type=4, is_trading_day=True)],
+            ignore_index=True,
+        )
+
     result = compute_market_panel(
         bars,
-        stock_master=stock_master,
-        market_cap=market_cap,
-        trading_calendar=calendar,
+        **_prepare_market_panel_inputs(
+            stock_master=stock_master, market_cap=market_cap, trading_calendar=calendar
+        ),
     )
 
     assert result["timestamp"].tolist() == [sessions[0], sessions[2], sessions[3]]
@@ -192,9 +203,11 @@ def test_holiday_fill_on_open_session_fails_without_cross_asset_deletion() -> No
     with pytest.raises(ValueError, match="holiday_fill_conflicts_with_open_session"):
         compute_market_panel(
             bars,
-            stock_master=stock_master,
-            market_cap=market_cap,
-            trading_calendar=calendar,
+            **_prepare_market_panel_inputs(
+                stock_master=stock_master,
+                market_cap=market_cap,
+                trading_calendar=calendar,
+            ),
         )
 
 
@@ -251,9 +264,9 @@ def test_market_panel_physical_order_is_time_major_without_changing_rows() -> No
 
     result = compute_market_panel(
         bars,
-        stock_master=stock_master,
-        market_cap=market_cap,
-        trading_calendar=calendar,
+        **_prepare_market_panel_inputs(
+            stock_master=stock_master, market_cap=market_cap, trading_calendar=calendar
+        ),
     )
 
     assert list(
@@ -380,10 +393,12 @@ def test_no_limit_history_overrides_historical_limit_status() -> None:
 
     panel = compute_market_panel(
         bars,
-        stock_master=stock_master,
-        market_cap=market_cap,
-        trading_calendar=calendar,
-        no_limit_history=no_limit,
+        **_prepare_market_panel_inputs(
+            stock_master=stock_master,
+            market_cap=market_cap,
+            trading_calendar=calendar,
+            no_limit_history=no_limit,
+        ),
     )
     mask = derive_execution_mask(panel)
 
@@ -425,16 +440,15 @@ def test_missing_listing_lifecycle_does_not_enter_the_panel() -> None:
 
     result = compute_market_panel(
         bars,
-        stock_master=pd.DataFrame(
-            columns=["source_asset_id", "listing_date", "delisting_date"]
+        **_prepare_market_panel_inputs(
+            stock_master=pd.DataFrame(
+                columns=["source_asset_id", "listing_date", "delisting_date"]
+            ),
+            market_cap=pd.DataFrame(
+                {"source_asset_id": ["000001"], "timestamp": [sessions[0]]}
+            ),
+            trading_calendar=calendar,
         ),
-        market_cap=pd.DataFrame(
-            {
-                "source_asset_id": ["000001"],
-                "timestamp": [sessions[0]],
-            }
-        ),
-        trading_calendar=calendar,
     )
 
     assert result.empty
@@ -534,13 +548,15 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
     )
     result = compute_market_panel(
         bars,
-        stock_master=stock_master,
-        market_cap=market_cap,
-        trading_calendar=calendar,
-        industry_history=history,
-        industry_changes=changes,
-        industry_sets=industry_sets,
-        industry_versions=industry_versions,
+        **_prepare_market_panel_inputs(
+            stock_master=stock_master,
+            market_cap=market_cap,
+            trading_calendar=calendar,
+            industry_history=history,
+            industry_changes=changes,
+            industry_sets=industry_sets,
+            industry_versions=industry_versions,
+        ),
     )
 
     assert result["industry_standard_id"].tolist() == [
@@ -559,13 +575,15 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
     ]
     missing_transition = compute_market_panel(
         bars,
-        stock_master=stock_master,
-        market_cap=market_cap,
-        trading_calendar=calendar,
-        industry_history=history.iloc[[0]],
-        industry_changes=changes,
-        industry_sets=industry_sets.iloc[[0]],
-        industry_versions=industry_versions,
+        **_prepare_market_panel_inputs(
+            stock_master=stock_master,
+            market_cap=market_cap,
+            trading_calendar=calendar,
+            industry_history=history.iloc[[0]],
+            industry_changes=changes,
+            industry_sets=industry_sets.iloc[[0]],
+            industry_versions=industry_versions,
+        ),
     )
     assert (
         missing_transition.loc[
@@ -601,14 +619,16 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
 
     abandoned = compute_market_panel(
         bars,
-        stock_master=stock_master,
-        market_cap=market_cap,
-        trading_calendar=calendar,
-        industry_history=history,
-        industry_changes=changes,
-        industry_sets=industry_sets,
-        industry_versions=industry_versions.assign(
-            abandon_date=[pd.Timestamp("2023-05-05"), pd.Timestamp("2023-05-05")]
+        **_prepare_market_panel_inputs(
+            stock_master=stock_master,
+            market_cap=market_cap,
+            trading_calendar=calendar,
+            industry_history=history,
+            industry_changes=changes,
+            industry_sets=industry_sets,
+            industry_versions=industry_versions.assign(
+                abandon_date=[pd.Timestamp("2023-05-05"), pd.Timestamp("2023-05-05")]
+            ),
         ),
     )
     assert (
@@ -692,10 +712,12 @@ def test_industry_cutover_uses_valid_versions_without_backfill(cutover) -> None:
 
     result = _asof_industry(
         panel,
-        history,
-        industry_sets=None,
-        industry_versions=versions,
-        industry_changes=changes,
+        **_prepare_industry_inputs(
+            history,
+            industry_sets=None,
+            industry_versions=versions,
+            industry_changes=changes,
+        ),
     )
     assert result["industry_standard_id"].iloc[:2].tolist() == ["CSRC2012", "CAPCO"]
     assert result["industry_level1_code"].iloc[:2].tolist() == ["A", "B"]
@@ -705,22 +727,27 @@ def test_industry_cutover_uses_valid_versions_without_backfill(cutover) -> None:
 
     early_only = _asof_industry(
         panel,
-        history.iloc[:2],
-        industry_sets=None,
-        industry_versions=versions,
-        industry_changes=changes,
+        **_prepare_industry_inputs(
+            history.iloc[:2],
+            industry_sets=None,
+            industry_versions=versions,
+            industry_changes=changes,
+        ),
     )
     assert early_only["industry_standard_id"].tolist() == ["CSRC2012"] * len(panel)
     missing_versions = _asof_industry(
-        panel, history, industry_sets=None, industry_versions=None
+        panel,
+        **_prepare_industry_inputs(history, industry_sets=None, industry_versions=None),
     )
     pd.testing.assert_frame_equal(missing_versions, panel)
     csrc_only = _asof_industry(
         panel,
-        history.iloc[:1],
-        industry_sets=None,
-        industry_versions=versions.iloc[:1],
-        industry_changes=changes,
+        **_prepare_industry_inputs(
+            history.iloc[:1],
+            industry_sets=None,
+            industry_versions=versions.iloc[:1],
+            industry_changes=changes,
+        ),
     )
     assert csrc_only["industry_standard_id"].tolist() == ["CSRC2012"] * len(panel)
 
@@ -800,10 +827,12 @@ def test_industry_publication_orders_known_events_and_unknown_coverage(
     before = [frame.copy(deep=True) for frame in (panel, history, versions, changes)]
     result = _asof_industry(
         panel,
-        history,
-        industry_sets=dictionary,
-        industry_versions=versions,
-        industry_changes=changes,
+        **_prepare_industry_inputs(
+            history,
+            industry_sets=dictionary,
+            industry_versions=versions,
+            industry_changes=changes,
+        ),
     )
     assert result["industry_level1_code"].fillna("NULL").tolist() == [
         "A",
@@ -830,10 +859,12 @@ def test_industry_publication_orders_known_events_and_unknown_coverage(
 
     known_future = _asof_industry(
         panel,
-        history.iloc[:2],
-        industry_sets=None,
-        industry_versions=versions,
-        industry_changes=changes.iloc[:2],
+        **_prepare_industry_inputs(
+            history.iloc[:2],
+            industry_sets=None,
+            industry_versions=versions,
+            industry_changes=changes.iloc[:2],
+        ),
     )
     assert known_future["industry_level1_code"].tolist() == [
         "A",
@@ -845,26 +876,34 @@ def test_industry_publication_orders_known_events_and_unknown_coverage(
     ]
     missing_initial = _asof_industry(
         panel,
-        history,
-        industry_sets=None,
-        industry_versions=versions,
-        industry_changes=changes.iloc[0:0],
+        **_prepare_industry_inputs(
+            history,
+            industry_sets=None,
+            industry_versions=versions,
+            industry_changes=changes.iloc[0:0],
+        ),
     )
     assert missing_initial[industry_columns].isna().all().all()
     wrong_item = _asof_industry(
         panel,
-        history,
-        industry_sets=None,
-        industry_versions=versions,
-        industry_changes=changes.assign(changed_item=provider),
+        **_prepare_industry_inputs(
+            history,
+            industry_sets=None,
+            industry_versions=versions,
+            industry_changes=changes.assign(changed_item=provider),
+        ),
     )
     assert wrong_item[industry_columns].isna().all().all()
     wrong_value = _asof_industry(
         panel,
-        history.iloc[:1],
-        industry_sets=None,
-        industry_versions=versions,
-        industry_changes=changes.iloc[:1].assign(value_after="different native name"),
+        **_prepare_industry_inputs(
+            history.iloc[:1],
+            industry_sets=None,
+            industry_versions=versions,
+            industry_changes=changes.iloc[:1].assign(
+                value_after="different native name"
+            ),
+        ),
     )
     assert wrong_value[industry_columns].isna().all().all()
 
@@ -1130,7 +1169,10 @@ def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
         stock_master=stocks,
     )
     result = panels._asof_industry(
-        panel, history, industry_snapshots=snapshots, **options
+        panel,
+        **panels._prepare_industry_inputs(
+            history, industry_snapshots=snapshots, **options
+        ),
     )
     assert result["industry_level1_code"].fillna("unknown").tolist() == [
         "A",
@@ -1147,7 +1189,10 @@ def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
         "CAPCO",
     ]
     earlier = panels._asof_industry(
-        panel.iloc[:4], history, industry_snapshots=snapshots.iloc[:1], **options
+        panel.iloc[:4],
+        **panels._prepare_industry_inputs(
+            history, industry_snapshots=snapshots.iloc[:1], **options
+        ),
     )
     pd.testing.assert_frame_equal(result.iloc[:4], earlier)
     pd.testing.assert_frame_equal(snapshots, before)
@@ -1157,17 +1202,21 @@ def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
     with pytest.raises(ValueError, match="industry_history_conflict"):
         panels._asof_industry(
             panel,
-            history,
-            industry_snapshots=pd.concat([snapshots, conflicting]),
-            **options,
+            **panels._prepare_industry_inputs(
+                history,
+                industry_snapshots=pd.concat([snapshots, conflicting]),
+                **options,
+            ),
         )
 
     duplicate = snapshots.iloc[[1]].assign(timestamp=pd.Timestamp("2023-01-11"))
     repeated = panels._asof_industry(
         panel,
-        history,
-        industry_snapshots=pd.concat([snapshots, duplicate], ignore_index=True),
-        **options,
+        **panels._prepare_industry_inputs(
+            history,
+            industry_snapshots=pd.concat([snapshots, duplicate], ignore_index=True),
+            **options,
+        ),
     )
     assert repeated.loc[
         repeated.timestamp.eq(pd.Timestamp("2023-01-11")), "industry_level1_code"
@@ -1179,14 +1228,18 @@ def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
     with pytest.raises(ValueError, match="industry_history_conflict"):
         panels._asof_industry(
             panel,
-            history,
-            industry_snapshots=pd.concat([snapshots, same_parent], ignore_index=True),
-            **{
-                **options,
-                "industry_sets": pd.concat(
-                    [dictionary, same_parent_leaf], ignore_index=True
+            **panels._prepare_industry_inputs(
+                history,
+                industry_snapshots=pd.concat(
+                    [snapshots, same_parent], ignore_index=True
                 ),
-            },
+                **{
+                    **options,
+                    "industry_sets": pd.concat(
+                        [dictionary, same_parent_leaf], ignore_index=True
+                    ),
+                },
+            ),
         )
 
 
@@ -1224,7 +1277,13 @@ def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
 
     def compute():
         return producer._compute_processed_frame(
-            spec, source=source, dependencies={}, trading_sessions=dates
+            spec,
+            source={
+                **producer._prepare_panel_source(source),
+                "market_bars_1d": source["market_bars_1d"],
+            },
+            dependencies={},
+            trading_sessions=dates,
         )
 
     if damage != "missing":

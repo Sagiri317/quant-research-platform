@@ -353,6 +353,8 @@ def test_streaming_ic_summary_matches_stable_canonical_values(epsilon: float) ->
 
 
 def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
+    import weakref
+
     grouped = pd.DataFrame(
         {
             "timestamp": pd.to_datetime(
@@ -373,20 +375,30 @@ def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
         label_columns=("label",),
     )
     state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
-    state.consume(
-        pd.DataFrame(),
-        grouped,
-        {
-            "rows_input": 4,
-            "rows_after_filter_mode": 4,
-            "filter_columns_used": ["eligible"],
-            "filter_definition": "eligible == True",
-            "timestamp_count": 2,
-            "min_timestamp": "2024-01-02",
-            "max_timestamp": "2024-01-03",
-            "skipped_timestamp_count": 0,
-        },
-    )
+    references = []
+
+    def chunks():
+        for offset in (0, 2):
+            assert all(reference() is None for reference in references)
+            chunk = grouped.iloc[offset : offset + 2].copy()
+            references.append(weakref.ref(chunk))
+            yield chunk
+            del chunk
+
+    metadata = {
+        "rows_input": 4,
+        "rows_after_filter_mode": 4,
+        "filter_columns_used": ["eligible"],
+        "filter_definition": "eligible == True",
+        "timestamp_count": 2,
+        "min_timestamp": "2024-01-02",
+        "max_timestamp": "2024-01-03",
+        "skipped_timestamp_count": 0,
+    }
+    for chunk in chunks():
+        state.consume(pd.DataFrame(), chunk, metadata)
+        del chunk
+    assert all(reference() is None for reference in references)
     actual = state.group_spread_summary()
     assert len(actual) == 1
     row = actual.iloc[0]
@@ -756,6 +768,13 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
         bind_research_configuration,
         research_profile,
     )
+    from quant_research_platform.storage.identity import (
+        filesystem_glob,
+        filesystem_is_file,
+        filesystem_read_bytes,
+        filesystem_read_text,
+        native_filesystem_path,
+    )
     from quant_research_platform.storage.layout import StorageLayout
     from quant_research_platform.storage.semantic_artifacts import (
         read_semantic_artifact,
@@ -864,11 +883,13 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
         ]
         bundle = root / "outputs" / spec.evaluation_id
         validate_output_bundle(bundle)
-        metrics = pd.read_parquet(bundle / "metrics.parquet").set_index("signal")
+        metrics = pd.read_parquet(
+            native_filesystem_path(bundle / "metrics.parquet")
+        ).set_index("signal")
         expected = [1.0, 1.0, 1.0] if active is old_profile else [-1.0, -1.0, 1.0]
         assert metrics.loc[factors, "ic"].tolist() == pytest.approx(expected)
         assert metrics.loc[factors, "rankic"].tolist() == pytest.approx(expected)
-        summary = (bundle / "summary.md").read_text()
+        summary = filesystem_read_text(bundle / "summary.md", encoding="utf-8")
         for factor, value in zip(factors, expected, strict=True):
             row = next(
                 line
@@ -880,21 +901,23 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
             )
         if active is old_profile:
             old_bytes = {
-                p.relative_to(root): p.read_bytes()
-                for p in root.rglob("*")
-                if p.is_file()
+                p.relative_to(root): filesystem_read_bytes(p)
+                for p in filesystem_glob(root, "**/*")
+                if filesystem_is_file(p)
             }
         else:
-            groups = pd.read_parquet(bundle / "grouped_label_values.parquet")
+            groups = pd.read_parquet(
+                native_filesystem_path(bundle / "grouped_label_values.parquet")
+            )
             top = groups.loc[groups.group.eq(3)].set_index("signal")
             assert top.loc[factors, "mean_label_value"].tolist() == pytest.approx(
                 [0.1, 0.1, 0.3]
             )
     assert roots[0] != roots[1]
     assert {
-        p.relative_to(roots[0]): p.read_bytes()
-        for p in roots[0].rglob("*")
-        if p.is_file()
+        p.relative_to(roots[0]): filesystem_read_bytes(p)
+        for p in filesystem_glob(roots[0], "**/*")
+        if filesystem_is_file(p)
     } == old_bytes
 
 

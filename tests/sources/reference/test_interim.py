@@ -383,12 +383,14 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     )
     panel = panels.compute_market_panel(
         inputs["market_bars_1d"],
-        stock_master=stocks,
-        market_cap=inputs["market_cap"],
-        trading_calendar=inputs["trading_calendar"],
-        industry_sets=dictionary,
-        industry_versions=versions,
-        industry_snapshots=snapshots,
+        **panels._prepare_market_panel_inputs(
+            stock_master=stocks,
+            market_cap=inputs["market_cap"],
+            trading_calendar=inputs["trading_calendar"],
+            industry_sets=dictionary,
+            industry_versions=versions,
+            industry_snapshots=snapshots,
+        ),
     )
     asset = panel.loc[panel["asset_id"].eq("000001")]
     assert asset["timestamp"].tolist() == list(dates)

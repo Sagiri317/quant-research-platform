@@ -399,7 +399,7 @@ def _windowed_source_profile(frames, calls, *, reject_before=None, reject_at=Non
     calendar = pd.bdate_range(sessions[0] - pd.offsets.BDay(300), sessions[-1]).as_unit(
         "ns"
     )
-    frames["trading_calendar"] = pd.DataFrame(
+    history_calendar = pd.DataFrame(
         dict(
             timestamp=calendar,
             calendar_date=calendar,
@@ -408,6 +408,13 @@ def _windowed_source_profile(frames, calls, *, reject_before=None, reject_at=Non
             source_day_of_week=calendar.dayofweek,
             source_state="O",
         )
+    )
+    frames["trading_calendar"] = pd.concat(
+        [
+            history_calendar.loc[history_calendar.calendar_date.lt(sessions[0])],
+            frames["trading_calendar"],
+        ],
+        ignore_index=True,
     )
 
     def identity(_raw_root, data_id):
@@ -707,10 +714,10 @@ def test_mixed_window_rebuild_reports_each_instance_and_preserves_old_good(
         for entry in rebuilt["rebuild_evidence"]
         if entry["target_id"] == "market_panel_1d"
     ]
-    assert len(evidence) == 2
+    assert len(evidence) == 1
     assert {
         entry["instance_identity"]: entry["comparison_status"] for entry in evidence
-    } == {core_identity: "CONTENT_MISMATCH", history_identity: "MATCH"}
+    } == {core_identity: "CONTENT_MISMATCH"}
     assert originals() == before
     public = {entry["target_id"]: entry for entry in rebuilt["target_results"]}
     assert public["market_panel_1d"]["status"] == "FAILED"
@@ -828,7 +835,10 @@ def test_public_narrow_panel_retains_preceding_suspension_state(tmp_path, barrie
 
 
 @pytest.mark.parametrize("missing", (0, 2, 4))
-def test_public_panel_keeps_calendar_endpoints_without_market_bars(tmp_path, missing):
+@pytest.mark.parametrize("closed_market", (False, True))
+def test_public_panel_keeps_calendar_endpoints_without_market_bars(
+    tmp_path, missing, closed_market
+):
     dates = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
     frames = _synthetic_interim_frames(dates)
     frames["market_bars_1d"] = (
@@ -836,6 +846,15 @@ def test_public_panel_keeps_calendar_endpoints_without_market_bars(tmp_path, mis
         .loc[frames["market_bars_1d"].timestamp.ne(dates[missing])]
         .copy()
     )
+    if closed_market:
+        calendar = frames["trading_calendar"]
+        calendar.loc[calendar.calendar_date.eq(dates[1]), "is_trading_day"] = False
+        frames["trading_calendar"] = pd.concat(
+            [calendar, calendar.assign(source_market_type=4, is_trading_day=True)],
+            ignore_index=True,
+        )
+        bars = frames["market_bars_1d"]
+        bars.loc[bars.timestamp.eq(dates[1]), "filling_flag"] = 2
     profile = _windowed_source_profile(frames, [])
     layout = StorageLayout(tmp_path)
     result = research.data_materialize(
@@ -857,10 +876,62 @@ def test_public_panel_keeps_calendar_endpoints_without_market_bars(tmp_path, mis
             item["instance_identity"],
         )
     )
-    assert len(saved) == 15 and saved.timestamp.nunique() == 5
+    assert len(saved) == (12 if closed_market else 15)
+    assert saved.timestamp.nunique() == (4 if closed_market else 5)
+    if closed_market:
+        assert not saved.timestamp.eq(dates[1]).any()
     missing_rows = saved.loc[saved.timestamp.eq(dates[missing])]
     assert len(missing_rows) == 3
     assert missing_rows[["close", "adj_close", "is_trading"]].isna().all().all()
+
+
+@pytest.mark.parametrize("block_rows", [3, 65536])
+def test_public_panel_keeps_market_changes_across_closed_and_missing_slabs(
+    tmp_path, monkeypatch, block_rows
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    bars = frames["market_bars_1d"]
+    bars.loc[bars.timestamp.ge(dates[1]), "market_type"] = 4
+    bars.loc[bars.timestamp.eq(dates[1]), "filling_flag"] = 2
+    frames["market_bars_1d"] = bars.loc[bars.timestamp.ne(dates[2])].copy()
+    calendar = frames["trading_calendar"]
+    moved = calendar.assign(source_market_type=4)
+    moved.loc[moved.calendar_date.eq(dates[1]), "is_trading_day"] = False
+    frames["trading_calendar"] = pd.concat([calendar, moved], ignore_index=True)
+    profile = _windowed_source_profile(frames, [])
+    layout = StorageLayout(tmp_path)
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=tmp_path / "raw",
+        start_date=str(dates[0].date()),
+        end_date=str(dates[-1].date()),
+        data_ids=("market_panel_1d",),
+    )
+    assert result["status"] == "COMPLETE", result["blockers"]
+    item = next(
+        row for row in result["target_results"] if row["target_id"] == "market_panel_1d"
+    )
+    spec = profile.processed.get("market_panel_1d")
+    saved = read_dataset(
+        layout.instance_root(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            item["instance_identity"],
+        )
+    )
+    assert saved.timestamp.nunique() == 4
+    assert not saved.timestamp.eq(dates[1]).any()
+    assert saved.loc[saved.timestamp.eq(dates[0]), "market_type"].eq(1).all()
+    assert saved.loc[saved.timestamp.ge(dates[2]), "market_type"].eq(4).all()
+    missing = saved.loc[saved.timestamp.eq(dates[2])]
+    assert len(missing) == 3
+    assert missing[["close", "adj_close", "is_trading"]].isna().all().all()
 
 
 def test_public_expectations_window_preserves_fresh_preceding_forecasts(tmp_path):

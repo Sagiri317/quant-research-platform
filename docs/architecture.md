@@ -69,7 +69,7 @@ Crypto 的训练、验证和OOS时段必须由 `research_plan` 声明；A股不�
 配置绑定由既有市场 protocol/catalog owner 完成；artifact reader 只消费绑定后的选择与持久化证据。
 模型、预测、组合和稳健性分析未被请求时，
 相应部分记为 `UNDEFINED / not_requested`，不制造缺产物 blocker。
-A股与 Crypto 的评估报告均从同一个有资源边界的 artifact reader 读取真实评估汇总；
+A股与 Crypto 的评估报告均从同一个验证精确身份的 artifact reader 读取真实评估汇总；
 A股因子评估报告不依赖模型统计产物。
 
 配置文件不存运行产物。研究数据、模型和报告使用 data 分层与 instances 身份目录；
@@ -85,12 +85,18 @@ A股因子评估报告不依赖模型统计产物。
 同时请求 PANEL 与因子时，PANEL 的公开实例仍仅发布请求窗口，因子谱系绑定另一个精确历史实例。
 公开 `targets`、`target_results` 与运行引用仍按逻辑 `target_id` 唯一投影；内部失败按消费方
 绑定的实例传播并计入整体状态，不能因公开投影而隐藏。`research run` 使用研究配置声明的窗口定义。
-重建逐实例执行精确比较；`rebuild_evidence` 每条同时记录 `target_id`、被比较的
+`--rebuild` 仅重建本次明确请求的终端输出实例；已发布且经现有 reader 校验的精确匹配上游
+直接 REUSE，包括同一逻辑目标仅为下游提供的历史窗口实例。缺失的上游正常构建，身份变化
+仍沿依赖图传播；无效上游明确阻塞，不能因发布过就跳过身份或内容校验。
+明确请求的重建逐实例执行精确比较；`rebuild_evidence` 每条同时记录 `target_id`、被比较的
 `instance_identity`、`candidate_token` 与 `comparison_status`，消费者不得按逻辑 ID 覆盖同目标的多条比较。
 辅助源路径由已有 producer binding 绑定，规划、生产与复用验证读取同一来源根；
 数据计算参数仍属于 processed 规格，路径不进入共享证据，原始内容身份进入谱系。
 数据问题只阻塞依赖子图；已发布的其他组合和产物保持可见。
 运行尝试与目标真实状态来自持久化记录，不能将部分输出概括成完整成功。
+CLI 先输出原有结构化结果，再将顶层 `COMPLETE`、`FAILED`、`BLOCKED` 映射为退出码
+0、1、3；参数及输入错误继续返回 2。计划与指定状态查询遵循相同映射，没有顶层终态的
+列表查询正常返回 0。失败与阻塞的 JSON 内容不因非零退出码而省略。
 模型拟合前先在现有 trial ledger 发布 attempted 事件，结束后追加同 attempt 的不可变终态事件；
 读取者核对不变身份后投影当前状态。硬退出留下 attempted，不能宣称从未开始或已完成；
 不自动重试、不改写旧事件，也不因此解锁 HOLDOUT_LOCKED。
@@ -182,7 +188,7 @@ CSCV 每个候选以同一二进制尺度计算 mean/std/ratio，避免可表示
 定向检查优先；默认全量命令是 python -m pytest -q。测试夹具错误与生产错误区分记录。
 验收使用独立的、已验证容量与挂载类型的任务临时目录，并在新进程导入数值库前固定原生线程环境。
 性能对照使用相同测试、相同线程设置和独立进程，记录 call 时间及真实产物身份；
-改变 `TMPDIR` 也可能改变 pytest fixture 产物位置，不能把总差异直接归因某个 SQLite 调用。
+改变 `TMPDIR` 也可能改变 pytest fixture 产物位置，不能把总差异直接归因某个计算或 I/O 调用。
 内存文件系统仅在任务规模和内存余量允许时使用。
 
 pyproject.toml 定义依赖/Python合同，

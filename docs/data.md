@@ -25,6 +25,13 @@ CSMAR `index_weights.Weight` 与 `index_market.Idxtrd08` 的原始缺失值在�
 ### Choice
 
 Choice 是正式财务 PIT 唯一来源；原生响应先不可变保存，再由已有 owner 离线处理。
+[官方 SDK 下载包](https://cftdlcdn.eastmoney.com/Choice/EMQuantAPI/EMQuantAPI_Python.zip)
+中的指标手册 V2.7.3.0 对沪深一般企业可回测财务指标明确使用 CSS `Type`：
+1 为合并报表，2 为母公司报表，3 为调整后的合并报表，4 为调整后的母公司报表。
+现有正式财务消费者只接受 `Type=1/3`。CTR 财务报表的 `ReportType` 则按
+1、2、3、4 分别表示合并、调整合并、母公司、调整母公司，不能将其数字直接用于 CSS。
+Raw 原样保留请求；已知财务 CSS 指标若带 `ReportType`，正式 source identity 与 interim
+消费明确拒绝，不默认为 `Type=1`，不增加 CTR 到 CSS 的兼容映射。
 
 ### Binance
 
@@ -59,6 +66,10 @@ Tardis native continuity 保留原字节，包括 depth 重复/过期更新。
 断连关闭观察区间，后续更新使用新的观察身份；前向 sequence gap 仍形成 gap。
 aggTrade ID 非单调仍明确失败，并保存频道、slice offset、行号和前后 ID 的诊断注记，
 不输出原始价格、数量或完整 payload。
+前向 ID 跳号的供应商保证尚未核实：Tardis 原生导入按现有规则记录 gap，官方录制 reader
+仅验证单调性。[Binance 聚合成交流说明](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/market#aggregate-trade-streams)
+定义聚合 ID，但未明确保证订阅消息逐 ID 加一；[Tardis 来源说明](https://docs.tardis.dev/historical-data-details/binance-futures)
+也不能替代该保证。当前不把 adapter 严格度差异当作已证实漏消息或自动放宽现有 gap。
 
 Binance Spot 和期货辅助状态的原生归档由配置显式选择，格式和消费边界见 [Crypto](crypto.md)。
 Bybit 与 OKX normalized 来源在 `data/raw/tardis/<exchange>/` 下按配置选择归档，
@@ -120,7 +131,7 @@ Choice 的实际披露、修订及历史版本约定见 [A 股](a-share.md)。
 CSMAR 股数、市值、价格与成交量/额单位见 [A 股价格、收益与市值真值](a-share.md#55-价格收益与市值真值)。
 库存和账户额度留在本机操作记录，不进入长期文档。
 研究原始数据仍放 data/raw，不能因整理证据删除有效原始来源。
-.run/delivery/ 是仓库文档的生成副本，不维护第二份正文。
+交付副本按需由仓库文档生成，不维护第二份正文。
 SSH、激活信息、账户状态、供应商原始文档/表格均不进入 Git 或网页版交付。
 
 Git 只保存代码、合同、结构定义、文档、合成测试和安全模板。

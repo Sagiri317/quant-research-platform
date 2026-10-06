@@ -324,7 +324,12 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
         eager[data_id] = (
             producer._compute_processed_frame(
                 spec,
-                source=source,
+                source={
+                    **producer._prepare_panel_source(source),
+                    "market_bars_1d": source["market_bars_1d"],
+                }
+                if data_id == "market_panel_1d"
+                else source,
                 dependencies={key: eager[key] for key in spec.processed_input_data_ids},
                 trading_sessions=tuple(dates),
             )
@@ -610,7 +615,13 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     }
     compute = producer._compute_processed_frame
     expected = compute(
-        spec, source=decoded, dependencies={}, trading_sessions=tuple(dates)
+        spec,
+        source={
+            **producer._prepare_panel_source(decoded),
+            "market_bars_1d": decoded["market_bars_1d"],
+        },
+        dependencies={},
+        trading_sessions=tuple(dates),
     )
     slabs = []
 
@@ -675,7 +686,13 @@ def test_processed_narrow_output_uses_existing_panel_history(
     panel_spec = profile.processed.get("market_panel_1d")
     spec = profile.processed.get(target)
     panel = producer._compute_processed_frame(
-        panel_spec, source=source, dependencies={}, trading_sessions=tuple(dates)
+        panel_spec,
+        source={
+            **producer._prepare_panel_source(source),
+            "market_bars_1d": source["market_bars_1d"],
+        },
+        dependencies={},
+        trading_sessions=tuple(dates),
     )
     expected = producer._compute_processed_frame(
         spec,

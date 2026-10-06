@@ -381,14 +381,25 @@ def test_taker_markout_does_not_use_state_past_observed_coverage() -> None:
     assert diagnostics["markout_undefined_fill_events"] == 1
 
 
-def test_taker_markout_uses_latest_state_as_of_target() -> None:
+@pytest.mark.parametrize(
+    "at_target, tail", [(False, True), (True, True), (True, False)]
+)
+def test_taker_markout_uses_latest_state_as_of_target(at_target, tail) -> None:
     fills: list[dict[str, object]] = []
+    stamp = 100 if at_target else 50
+    books = [
+        _state(0, bid_index=1000, ask_index=1005),
+        _state(stamp, bid_index=995, ask_index=1005),
+        replace(
+            _state(stamp, bid_index=1005, ask_index=1015),
+            source_sequence=stamp + 2,
+            update_id=stamp + 2,
+        ),
+    ]
+    if tail:
+        books.append(_state(200, bid_index=1095, ask_index=1105))
     diagnostics = simulate_taker(
-        [
-            _state(0, bid_index=1000, ask_index=1005),
-            _state(50, bid_index=1005, ask_index=1015),
-            _state(200, bid_index=1095, ask_index=1105),
-        ],
+        books,
         [{"timestamp_ms": 0, "prediction": 0.1}],
         funding_forecasts=KNOWN_NO_FUNDING,
         prediction_horizon_ms=500,

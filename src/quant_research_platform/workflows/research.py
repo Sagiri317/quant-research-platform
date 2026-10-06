@@ -334,6 +334,7 @@ def _plan_targets(
     requests = _target_requests(profile, action, protocol, ordered, terminals, window)
     for request in requests:
         spec = request.spec
+        rebuild_target = rebuild and request.publish and spec.target_id in requested
         dependencies = {
             dependency: by_request[(dependency, dependency_window)]
             for dependency, dependency_window in request.dependencies
@@ -490,7 +491,7 @@ def _plan_targets(
                     )
                     if (
                         blocker == "persisted_instance_invalid"
-                        and rebuild
+                        and rebuild_target
                         and _instance_path_exists(
                             profile=profile,
                             layout=layout,
@@ -503,7 +504,7 @@ def _plan_targets(
                     if blocker is None:
                         decision = (
                             PlanDecision.BUILD
-                            if rebuild or matching_instance_identity is None
+                            if rebuild_target or matching_instance_identity is None
                             else PlanDecision.REUSE
                         )
         if blocker is not None:
@@ -517,7 +518,7 @@ def _plan_targets(
             requested_identity=requested_identity,
             matching_instance_identity=matching_instance_identity,
             upstream_identities=upstream_identities,
-            rebuild=rebuild,
+            rebuild=rebuild_target,
             producer_kind=producer_kind,
             schema_identity=schema_identity,
             artifact_root=artifact_root,
@@ -1218,7 +1219,9 @@ def _execute_targets(
                     ),
                 )
                 continue
-            is_candidate = rebuild and planned["matching_instance_identity"] is not None
+            is_candidate = (
+                planned["rebuild"] and planned["matching_instance_identity"] is not None
+            )
             try:
                 if planned["decision"] == PlanDecision.REUSE.value:
                     result = _reuse_target(

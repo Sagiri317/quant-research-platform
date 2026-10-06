@@ -174,9 +174,12 @@ def _raw_requests(raw_root: Path, *, financial: bool):
             )
             fields = set(request.arguments[1].upper().split(","))
             disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
+            financial_fields = bool(set(_INDICATORS).intersection(fields))
+            if financial and financial_fields and "reporttype" in options:
+                raise ValueError("choice_financial_css_reporttype_unsupported")
             snapshot = (
                 financial
-                and bool(set(_INDICATORS).intersection(fields))
+                and financial_fields
                 and (options.get("type", "1") in {"1", "3"})
             )
             if "reportdate" not in options or not (disclosure or snapshot):

@@ -203,6 +203,10 @@ def inspect(
 
 def _echo_result(result: dict[str, object]) -> None:
     typer.echo(json.dumps(result, ensure_ascii=False, sort_keys=True))
+    if result.get("status") == "FAILED":
+        raise typer.Exit(code=1)
+    if result.get("status") == "BLOCKED":
+        raise typer.Exit(code=3)
 
 
 def main() -> None:

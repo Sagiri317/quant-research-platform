@@ -46,6 +46,7 @@ from quant_research_platform.markets.implementations.a_share.processed.catalog i
     processed_catalog as a_share_processed_catalog,
 )
 from quant_research_platform.markets.implementations.a_share.processed.panels import (
+    _prepare_market_panel_inputs,
     compute_market_panel,
     validate_market_bar_calendar,
 )
@@ -215,7 +216,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     sessions, asset_types = _processed_axis(
         reference,
         panel_source=panel_source,
-        calendar=calendar,
+        calendar=source["trading_calendar"] if panel_source else None,
         validation_window=time_window if panel_source else None,
     )
     lower, upper, closed = time_window_timestamp_interval(time_window)
@@ -252,6 +253,8 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     first = 0 if panel_source else bisect_left(sessions, lower)
     stop = bisect_right(sessions, upper) if closed else bisect_left(sessions, upper)
     history = None
+    if panel_source and first < stop:
+        source = _prepare_panel_source(source)
     for start in range(first, stop, block_sessions):
         end = min(stop, start + block_sessions)
         core = sessions[start:end]
@@ -315,8 +318,16 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
             )
             del combined, ordered
         if panel_source:
+            bars = current_source["market_bars_1d"]
+            asset_types.update(
+                bars.loc[bars["market_type"].isin(CURRENT_MARKET_TYPES)]
+                .sort_values("timestamp", kind="mergesort")
+                .drop_duplicates("source_asset_id", keep="last")
+                .set_index("source_asset_id")["market_type"]
+            )
             output = output.loc[output["timestamp"].ge(lower)].reset_index(drop=True)
-        yield output
+        if not output.empty:
+            yield output
         del output, frames, current_source
 
 
@@ -397,6 +408,21 @@ def _processed_axis(
     return (sessions, asset_types)
 
 
+def _prepare_panel_source(source):
+    return _prepare_market_panel_inputs(
+        stock_master=source["stock_master"],
+        market_cap=source["market_cap"],
+        trading_calendar=source["trading_calendar"],
+        industry_history=source.get("industry_classification"),
+        industry_sets=source.get("industry_classification_sets"),
+        industry_versions=source.get("industry_classification_versions"),
+        industry_changes=source.get("stock_info_changes"),
+        industry_snapshots=source["a_share_industry_snapshots"],
+        no_limit_history=source.get("trading_no_limit"),
+        special_treatment_history=source.get("special_treatment_changes"),
+    )
+
+
 def _compute_processed_frame(
     spec,
     *,
@@ -409,29 +435,9 @@ def _compute_processed_frame(
     financial_events=None,
 ):
     if spec.data_id == "market_panel_1d":
-        required = {
-            "market_bars_1d",
-            "stock_master",
-            "market_cap",
-            "trading_calendar",
-            "trading_no_limit",
-            "special_treatment_changes",
-            "a_share_industry_snapshots",
-        }
-        if not required.issubset(source):
-            raise ValueError("a_share_panel_source_data_missing")
         panel = compute_market_panel(
             source["market_bars_1d"],
-            stock_master=source["stock_master"],
-            market_cap=source["market_cap"],
-            trading_calendar=source["trading_calendar"],
-            industry_history=source.get("industry_classification"),
-            industry_sets=source.get("industry_classification_sets"),
-            industry_versions=source.get("industry_classification_versions"),
-            industry_changes=source.get("stock_info_changes"),
-            industry_snapshots=source["a_share_industry_snapshots"],
-            no_limit_history=source.get("trading_no_limit"),
-            special_treatment_history=source.get("special_treatment_changes"),
+            **{key: value for key, value in source.items() if key != "market_bars_1d"},
             session_window=panel_sessions,
             asset_market_types=asset_market_types,
             suspension_history=suspension_history,

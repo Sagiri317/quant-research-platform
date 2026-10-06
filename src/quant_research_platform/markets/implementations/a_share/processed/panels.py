@@ -14,6 +14,7 @@ from quant_research_platform.contracts.validation import (
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
     compute_listing_age_trading_days,
+    market_type_trading_sessions,
     unified_trading_sessions,
 )
 from quant_research_platform.markets.implementations.a_share.ids import MARKET_ID
@@ -27,6 +28,24 @@ INDUSTRY_STANDARD_BY_PROVIDER_ID = {
 FINANCIAL_INDUSTRY_LEVEL1_CODES = frozenset({"J"})
 
 
+def _prepare_market_panel_inputs(
+    *, stock_master, market_cap, industry_history=None, **inputs
+):
+    """Prepare request-wide facts for all slabs without retaining a cache."""
+    stocks = _canonical_stock_master(stock_master)
+    caps = _canonical_market_cap(market_cap)
+    industry = _prepare_industry_inputs(
+        industry_history,
+        industry_sets=inputs.pop("industry_sets", None),
+        industry_versions=inputs.pop("industry_versions", None),
+        industry_changes=inputs.pop("industry_changes", None),
+        industry_snapshots=inputs.pop("industry_snapshots", None),
+        stock_master=stocks,
+    )
+    industry["industry_history"] = industry.pop("history")
+    return {**inputs, **industry, "market_cap": caps}
+
+
 def compute_market_panel(
     market_bars: pd.DataFrame,
     *,
@@ -36,7 +55,6 @@ def compute_market_panel(
     industry_history: pd.DataFrame | None = None,
     industry_sets: pd.DataFrame | None = None,
     industry_versions: pd.DataFrame | None = None,
-    industry_changes: pd.DataFrame | None = None,
     industry_snapshots: pd.DataFrame | None = None,
     no_limit_history: pd.DataFrame | None = None,
     special_treatment_history: pd.DataFrame | None = None,
@@ -44,7 +62,7 @@ def compute_market_panel(
     asset_market_types: pd.Series | None = None,
     suspension_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
-    """Build lifecycle × open-session facts with suspension rows retained."""
+    """Build one slab from prepared facts, retaining suspension rows."""
 
     bars = _canonical_bars(market_bars)
     if bars.empty and asset_market_types is None:
@@ -55,10 +73,7 @@ def compute_market_panel(
         calendar_bars = bars.loc[
             bars["timestamp"].between(session_window[0], session_window[-1])
         ]
-    validate_market_bar_calendar(calendar_bars, sessions)
-    bars = bars.loc[bars["filling_flag"].ne(2)].copy()
-    if bars.empty and asset_market_types is None:
-        return bars
+    validate_market_bar_calendar(calendar_bars, trading_calendar)
     if session_window is None:
         session_window = sessions[
             (sessions >= bars["timestamp"].min())
@@ -66,25 +81,28 @@ def compute_market_panel(
         ]
     if session_window.empty:
         return bars.iloc[0:0].copy()
-    stocks = _canonical_stock_master(stock_master)
-    caps = _canonical_market_cap(market_cap)
     dense = _dense_lifecycle_panel(
         bars,
-        stocks,
+        stock_master,
         session_window,
         asset_market_types=asset_market_types,
     )
+    open_session = pd.Series(False, index=dense.index)
+    for market_type, group in dense.groupby("market_type", sort=False):
+        open_session.loc[group.index] = group["timestamp"].isin(
+            market_type_trading_sessions(trading_calendar, market_type)
+        )
+    dense = dense.loc[open_session].copy()
     if dense.empty:
         return dense
-    dense = _asof_market_cap(dense, caps)
+    dense = _asof_market_cap(dense, market_cap)
     dense = _asof_industry(
         dense,
         industry_history,
         industry_sets=industry_sets,
         industry_versions=industry_versions,
-        industry_changes=industry_changes,
         industry_snapshots=industry_snapshots,
-        stock_master=stocks,
+        stock_master=stock_master,
     )
     dense = _apply_no_limit_exceptions(dense, no_limit_history)
     dense = _apply_special_treatment(dense, special_treatment_history)
@@ -108,17 +126,19 @@ def compute_market_panel(
     ).reset_index(drop=True)
 
 
-def validate_market_bar_calendar(
-    bars: pd.DataFrame, sessions: pd.DatetimeIndex
-) -> None:
-    if sessions.empty:
+def validate_market_bar_calendar(bars: pd.DataFrame, calendar: pd.DataFrame) -> None:
+    if unified_trading_sessions(calendar).empty:
         raise ValueError("a_share_trading_calendar_empty")
-    holiday_fill_dates = bars.loc[bars["filling_flag"].eq(2), "timestamp"]
-    if bool(holiday_fill_dates.isin(sessions).any()):
-        raise ValueError("holiday_fill_conflicts_with_open_session")
-    observed_sessions = bars.loc[bars["filling_flag"].isin((0, 1)), "timestamp"]
-    if not observed_sessions.isin(sessions).all():
-        raise ValueError("market_bar_session_missing_from_calendar")
+    for market_type, group in bars.groupby("market_type", sort=False):
+        sessions = market_type_trading_sessions(calendar, market_type)
+        if sessions.empty:
+            raise ValueError("a_share_trading_calendar_empty")
+        holiday_fill_dates = group.loc[group["filling_flag"].eq(2), "timestamp"]
+        if bool(holiday_fill_dates.isin(sessions).any()):
+            raise ValueError("holiday_fill_conflicts_with_open_session")
+        observed_sessions = group.loc[group["filling_flag"].isin((0, 1)), "timestamp"]
+        if not observed_sessions.isin(sessions).all():
+            raise ValueError("market_bar_session_missing_from_calendar")
 
 
 def _canonical_bars(frame: pd.DataFrame) -> pd.DataFrame:
@@ -212,7 +232,6 @@ def _canonical_stock_master(frame: pd.DataFrame) -> pd.DataFrame:
     )
     for column in (
         "stock_name",
-        "market_type",
         "company_status",
         "industry_standard_id",
         "industry_level1_code",
@@ -298,14 +317,12 @@ def _dense_lifecycle_panel(
             continue
         base = pd.DataFrame({"asset_id": asset_id, "timestamp": dates})
         raw = bars.iloc[bar_groups.get(asset_id, [])]
-        base["market_type"] = asset_market_types.loc[asset_id]
         base = base.merge(
             raw.drop(
                 columns=[
                     "market_id",
                     "session_date",
                     "available_at",
-                    "market_type",
                 ],
                 errors="ignore",
             ),
@@ -313,10 +330,17 @@ def _dense_lifecycle_panel(
             how="left",
             validate="one_to_one",
         )
+        base["market_type"] = (
+            base["market_type"]
+            .ffill()
+            .fillna(asset_market_types.loc[asset_id])
+            .astype("object")
+        )
         rows.append(base)
     if not rows:
         return bars.iloc[0:0].copy()
     result = pd.concat(rows, ignore_index=True)
+    result["asset_id"] = result["asset_id"].astype(stocks["asset_id"].dtype)
     result["market_id"] = str(MARKET_ID)
     result["session_date"] = result["timestamp"]
     result["available_at"] = result["timestamp"]
@@ -327,7 +351,6 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
     output: list[pd.DataFrame] = []
     columns = (
         "stock_name",
-        "market_type",
         "listing_date",
         "delisting_date",
         "company_status",
@@ -434,21 +457,28 @@ def _asof_market_cap(panel: pd.DataFrame, caps: pd.DataFrame) -> pd.DataFrame:
     return pd.concat(outputs, ignore_index=True)
 
 
-def _asof_industry(
-    panel: pd.DataFrame,
-    history: pd.DataFrame | None,
+def _prepare_industry_inputs(
+    history,
     *,
-    industry_sets: pd.DataFrame | None,
-    industry_versions: pd.DataFrame | None,
-    industry_changes: pd.DataFrame | None = None,
-    industry_snapshots: pd.DataFrame | None = None,
-    stock_master: pd.DataFrame | None = None,
-) -> pd.DataFrame:
+    industry_sets=None,
+    industry_versions=None,
+    industry_changes=None,
+    industry_snapshots=None,
+    stock_master=None,
+):
+    """Normalize whole source history once, retaining window-dependent checks."""
+    prepared = dict(
+        history=None,
+        industry_sets=industry_sets,
+        industry_versions=industry_versions,
+        industry_snapshots=industry_snapshots,
+        stock_master=stock_master,
+    )
     if industry_versions is None or (
         (history is None or history.empty)
         and (industry_snapshots is None or industry_snapshots.empty)
     ):
-        return panel
+        return prepared
     if history is None:
         history = pd.DataFrame(
             columns=(
@@ -461,7 +491,7 @@ def _asof_industry(
         )
     if industry_changes is None:
         if not history.empty:
-            return panel
+            return prepared
         industry_changes = pd.DataFrame(
             columns=(
                 "source_asset_id",
@@ -471,10 +501,6 @@ def _asof_industry(
                 "value_after",
             )
         )
-    panel = panel.copy()
-    panel["asset_id"] = strict_string_series(
-        panel["asset_id"], error="invalid_industry_asset_id"
-    )
     history = history.rename(columns={"source_asset_id": "asset_id"}).copy()
     required = {
         "asset_id",
@@ -571,6 +597,25 @@ def _asof_industry(
             "is_nonfinancial_industry",
         ):
             history.loc[known, column] = resolved[column]
+    prepared["history"] = history
+    return prepared
+
+
+def _asof_industry(
+    panel: pd.DataFrame,
+    history: pd.DataFrame | None,
+    *,
+    industry_sets: pd.DataFrame | None,
+    industry_versions: pd.DataFrame | None,
+    industry_snapshots: pd.DataFrame | None = None,
+    stock_master: pd.DataFrame | None = None,
+) -> pd.DataFrame:
+    if history is None:
+        return panel
+    panel = panel.copy()
+    panel["asset_id"] = strict_string_series(
+        panel["asset_id"], error="invalid_industry_asset_id"
+    )
     if industry_snapshots is not None:
         snapshots = industry_snapshots.loc[
             industry_snapshots["source_asset_id"].isin(panel["asset_id"])
@@ -611,7 +656,11 @@ def _asof_industry(
     right = history.loc[
         :,
         [
-            *required,
+            "asset_id",
+            "timestamp",
+            "industry_standard_id",
+            "industry_level1_code",
+            "industry_level1_name",
             "is_nonfinancial_industry",
             "_industry_event_timestamp",
             "_industry_known",

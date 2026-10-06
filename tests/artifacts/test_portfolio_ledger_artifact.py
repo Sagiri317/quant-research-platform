@@ -151,6 +151,89 @@ def test_perpetual_quantity_cannot_be_created_within_nav_amount_tolerance(
 
 
 @pytest.mark.parametrize("mode", ("maker", "taker"))
+@pytest.mark.parametrize("tail", (False, True))
+def test_markout_roundtrip_uses_final_book_at_exact_target(tmp_path, mode, tail):
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        simulate_maker,
+        simulate_taker,
+    )
+    from tests.markets.crypto.test_hft_execution import (
+        _coverage,
+        _maker_config,
+        _quote,
+        _state,
+        _taker_config,
+        _trade,
+    )
+
+    capital = PortfolioCapital(mode, 1000.0, "USDT", "linear_perpetual")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=mode,
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "1970-01-01",
+            "end": "1970-01-02",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+    target = 150 if mode == "maker" else 100
+    books = [
+        _state(0),
+        _state(target, bid_index=1005, ask_index=1015),
+        replace(
+            _state(target, bid_index=1015, ask_index=1025),
+            source_sequence=target + 2,
+            update_id=target + 2,
+        ),
+    ]
+    if tail:
+        books.append(_state(200, bid_index=1095, ask_index=1105))
+
+    def produce(emit):
+        common = dict(
+            capital=capital,
+            asset_id="btc_usdt",
+            funding_events=(),
+            on_ledger=emit,
+            observed_coverage={"s1": _coverage(0, 201)},
+        )
+        if mode == "maker":
+            return simulate_maker(
+                books,
+                [_trade(50, price="99.4", quantity="1", maker_buyer=True)],
+                [_quote(0, book_segment_id="s1")],
+                config=_maker_config(),
+                trade_coverage={"trade-connection-1": _coverage(0, 201)},
+                **common,
+            )
+        return simulate_taker(
+            books,
+            [{"timestamp_ms": 0, "prediction": 0.1}],
+            prediction_column="prediction",
+            prediction_horizon_ms=500,
+            funding_forecasts=KNOWN_NO_FUNDING,
+            config=_taker_config(),
+            **common,
+        )
+
+    root = ledger_artifact.write_portfolio_ledger_artifact(
+        tmp_path / mode, envelope=envelope, produce=produce
+    )
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    markouts = [
+        row.number
+        for batch in artifact.iter_chunks()
+        for row in batch.diagnostics
+        if row.name == "markout_per_unit"
+    ]
+    assert markouts == pytest.approx([2.5 if mode == "maker" else 1.5])
+
+
+@pytest.mark.parametrize("mode", ("maker", "taker"))
 @pytest.mark.parametrize("funding_rate", (0.001, -0.001))
 def test_perpetual_execution_roundtrip_keeps_collateral_funding_and_delayed_fill_links(
     tmp_path, mode, funding_rate

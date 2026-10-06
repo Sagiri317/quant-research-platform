@@ -222,42 +222,6 @@ class _PendingMarkouts:
     def add(self, fill):
         self._pending.append(dict(fill))
 
-    def resolve(
-        self,
-        state: BookState,
-        *,
-        previous_state: BookState | None,
-        coverage: Mapping[str, tuple[int, int]],
-    ) -> None:
-        current_mid = _mid(state)
-        previous_mid = None if previous_state is None else _mid(previous_state)
-        while (fill := self._peek()) is not None:
-            if fill["segment_id"] != state.segment_id:
-                try:
-                    self._finalize(fill, future_mid=None)
-                finally:
-                    del fill
-                    self._pop()
-                continue
-            target = fill["markout_target_time_ns"]
-            if state.observed_time_ns < target:
-                break
-            if target == state.observed_time_ns:
-                markout_mid = current_mid
-            elif (
-                previous_state is not None
-                and previous_state.segment_id == fill["segment_id"]
-                and _covered(coverage, fill["segment_id"], target)
-            ):
-                markout_mid = previous_mid
-            else:
-                markout_mid = None
-            try:
-                self._finalize(fill, future_mid=markout_mid)
-            finally:
-                del fill
-                self._pop()
-
     def advance(
         self,
         timestamp_ns: int,
@@ -408,16 +372,16 @@ def _resolve_observed_markouts(
     *,
     previous_state: BookState | None,
 ) -> None:
+    # The previous timestamp is complete; equal-time updates still need replaying.
     pending.advance(state.observed_time_ns - 1, previous_state, coverage)
     bounds = coverage.get(state.segment_id)
-    if bounds is None or state.observed_time_ns >= bounds[1]:
+    if (
+        bounds is None
+        or state.observed_time_ns >= bounds[1]
+        or previous_state is not None
+        and previous_state.segment_id != state.segment_id
+    ):
         pending.expire_all()
-    elif state.observed_time_ns >= bounds[0]:
-        pending.resolve(
-            state,
-            previous_state=previous_state,
-            coverage=coverage,
-        )
 
 
 def _taker_order_quantity(

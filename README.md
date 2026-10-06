@@ -40,6 +40,8 @@ Crypto 配置的 research_plan 还须给出时间切分与执行假设；可选�
 研究运行返回不可变尝试标识 run_id；报告只消费指定运行引用的已发布产物。
 默认运行开发区间；没有合法开发冻结产物时，--holdout 必须明确拒绝。
 status 未指定 run_id 时只列已有运行；空目录返回空列表，不规划或启动研究。
+结构化状态的退出码、`--rebuild` 的终端目标范围及已发布上游复用规则见
+[计划、身份与持久化](docs/architecture.md#计划身份与持久化)。
 
 本地 API 使用 create_app(project_root=Path("YOUR_PROJECT")) 绑定项目。
 HTTP 客户端不能传路径切换项目；未绑定时仅提供目录查询。

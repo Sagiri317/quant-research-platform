@@ -17,7 +17,10 @@ from quant_research_platform.markets.implementations.a_share.fundamentals import
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.sources.choice import interim
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
-from quant_research_platform.sources.choice.raw_exports import choice_session
+from quant_research_platform.sources.choice.raw_exports import (
+    ChoiceRequest,
+    choice_session,
+)
 from quant_research_platform.storage.datasets.reading import (
     DatasetReadMode,
     read_dataset,
@@ -84,6 +87,44 @@ def _read(result):
         data_id: read_dataset(root, mode=DatasetReadMode.MATERIALIZED)
         for data_id, root in result.artifact_roots.items()
     }
+
+
+@pytest.mark.parametrize("extra", ["ReportType=3", "Type=1,ReportType=2"])
+def test_financial_css_rejects_ctr_report_type_without_remapping(tmp_path, extra):
+    from datetime import date
+
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout)
+        session.sdk.response = response(
+            Codes=[CODE],
+            Indicators=list(FIELDS),
+            Dates=["2020-01-30"],
+            Data={CODE: [100.0] * len(FIELDS)},
+        )
+        request = ChoiceRequest(
+            "css",
+            (
+                CODE,
+                ",".join(FIELDS),
+                f"ReportDate=2019-12-31,EndDate=2020-01-30,{extra}",
+            ),
+            "synthetic-official-shape",
+            date(2025, 12, 31),
+            1024 * 1024,
+        )
+        session.fetch(layout, request)
+    before = _file_hashes(layout.raw_source_root("choice"))
+    with pytest.raises(ValueError, match="choice_financial_css_reporttype_unsupported"):
+        interim.source_content_identity(
+            layout.raw_source_root("choice"), "financial_balance"
+        )
+    with pytest.raises(ValueError, match="choice_financial_css_reporttype_unsupported"):
+        interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
+    assert _file_hashes(layout.raw_source_root("choice")) == before
+    assert not filesystem_exists(
+        layout.interim_data_root("choice", "financial_balance")
+    )
 
 
 @pytest.mark.parametrize("field", ["TINCOMESTATEMENT_61", "TBALANCESTATEMENT_88"])

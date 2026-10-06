@@ -236,7 +236,8 @@ def test_cli_exposes_only_current_research_surface(tmp_path, monkeypatch) -> Non
         ("report", "build", "--help"),
     ):
         result = runner.invoke(app, list(args))
-        assert result.exit_code == 0, result.output
+        expected = 3 if "--plan" in args else 0
+        assert result.exit_code == expected, result.output
         _assert_public_text_is_sanitized(result.output)
 
     missing_run_id = runner.invoke(app, ["report", "build", "--plan"])
@@ -460,15 +461,20 @@ def _assert_public_text_is_sanitized(text: str) -> None:
     assert all(marker.lower() not in lowered for marker in FORBIDDEN_PUBLIC_MARKERS)
 
 
+@pytest.mark.parametrize(
+    "status, exit_code", [("COMPLETE", 0), ("FAILED", 1), ("BLOCKED", 3)]
+)
 def test_cli_materialize_leaves_raw_root_resolution_to_project_layout(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
+    status,
+    exit_code,
 ) -> None:
     captured: dict[str, object] = {}
 
     def materialize(**kwargs: object) -> dict[str, object]:
         captured.update(kwargs)
-        return {"status": "BLOCKED"}
+        return {"status": status}
 
     monkeypatch.setattr(cli_commands.research, "data_materialize", materialize)
     result = CliRunner().invoke(
@@ -482,7 +488,8 @@ def test_cli_materialize_leaves_raw_root_resolution_to_project_layout(
         ],
     )
 
-    assert result.exit_code == 0, result.output
+    assert result.exit_code == exit_code, result.output
+    assert json.loads(result.stdout)["status"] == status
     assert captured["raw_root"] is None
     assert captured["layout"].project_root == tmp_path
 
