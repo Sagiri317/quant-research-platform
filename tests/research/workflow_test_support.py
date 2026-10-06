@@ -31,7 +31,7 @@ from tests.helpers.research_specs import make_demo_research_dataset_spec
 
 def _column_predictor(column: str, offset: float = 0.0) -> LinearScaledPredictor:
     return LinearScaledPredictor(
-        (offset, 1.0), ModelMatrixScaler((column,), (0.0,), (1.0,))
+        (offset, 1.0), ModelMatrixScaler((column,), (0.0,), (0.0,), (1.0,))
     )
 
 

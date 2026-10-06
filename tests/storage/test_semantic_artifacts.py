@@ -27,7 +27,7 @@ def _immediate_file_bytes(root: Path) -> dict[str, bytes]:
     return {path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)}
 
 
-def _envelope() -> object:
+def _envelope(*, seed=None) -> object:
     return build_business_manifest_envelope(
         logical_artifact_id="model-artifact",
         schema_identity="a" * 64,
@@ -39,7 +39,7 @@ def _envelope() -> object:
             "access": "development",
         },
         upstream_identities={},
-        semantic_metadata={},
+        semantic_metadata={} if seed is None else {"seed": seed},
     )
 
 
@@ -50,6 +50,47 @@ def _write_artifact(tmp_path: Path) -> Path:
         filesystem_write_bytes(staging / "model.pkl", b"predictor")
 
     return write_semantic_artifact(tmp_path / "model", _envelope(), writer)
+
+
+def test_discovery_during_real_semantic_publication_keeps_published_instances(tmp_path):
+    first = _write_artifact(tmp_path)
+    logical_root = tmp_path / "model"
+    old_bytes = _immediate_file_bytes(first)
+
+    def writer(staging):
+        assert discover_semantic_artifact_instances(logical_root) == (first,)
+        filesystem_write_bytes(staging / "model.bin", b"new")
+
+    second = write_semantic_artifact(logical_root, _envelope(seed=2), writer)
+    published = tuple(sorted((first, second), key=lambda path: path.name))
+    assert discover_semantic_artifact_instances(logical_root) == published
+    assert _immediate_file_bytes(first) == old_bytes
+
+    def failed_writer(staging):
+        assert discover_semantic_artifact_instances(logical_root) == published
+        filesystem_write_bytes(staging / "model.bin", b"aborted")
+        raise RuntimeError("publication_failed")
+
+    with pytest.raises(RuntimeError, match="^publication_failed$"):
+        write_semantic_artifact(logical_root, _envelope(seed=3), failed_writer)
+    assert discover_semantic_artifact_instances(logical_root) == published
+    assert _immediate_file_bytes(first) == old_bytes
+
+
+@pytest.mark.parametrize(
+    "name", [".a-000000000000", ".a-00000000000g", ".a-000000000000-extra"]
+)
+def test_semantic_discovery_rejects_atomic_named_files_and_invalid_scratch_names(
+    tmp_path, name
+):
+    _write_artifact(tmp_path)
+    candidate = tmp_path / "model/instances" / name
+    if name == ".a-000000000000":
+        filesystem_write_bytes(candidate, b"not-a-directory")
+    else:
+        filesystem_mkdir(candidate)
+    with pytest.raises(ValueError, match="^semantic_artifact_instance_child_invalid$"):
+        discover_semantic_artifact_instances(tmp_path / "model")
 
 
 def test_discovery_accepts_more_than_1024_published_semantic_instances(

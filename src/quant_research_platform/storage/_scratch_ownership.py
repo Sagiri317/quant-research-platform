@@ -7,12 +7,9 @@ import os
 import stat
 import sys
 from collections.abc import Callable
-from contextlib import contextmanager
 from pathlib import Path
-from tempfile import TemporaryFile
 from typing import Any
 
-from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     filesystem_open_descriptor,
     filesystem_remove_tree,
@@ -99,10 +96,3 @@ def owned_scratch_name(prefix: str, unique: str) -> str:
     if not prefix or not unique or any(part in unique for part in ("/", "\\")):
         raise ValueError("invalid_storage_scratch_name")
     return f"{prefix}{unique}"
-
-
-@contextmanager
-def temporary_file():
-    """Own a binary temporary file and preserve the primary failure on close."""
-    with closing_iterator(TemporaryFile(mode="w+b")) as handle:
-        yield handle

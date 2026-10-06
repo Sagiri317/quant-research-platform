@@ -50,6 +50,36 @@ def _collect_inventory(
         return {"schema_id": "qrp-schema-inventory", "datasets": list(items)}
 
 
+@pytest.mark.parametrize(
+    "names", [("foo", "foo-bar"), ("foo", "foo.bar"), ("foo", "foo_bar")]
+)
+def test_schema_inventory_uses_full_posix_path_order_for_prefix_names(tmp_path, names):
+    from tests.storage.low_level_fixtures import make_processed_dataset_spec
+    from tests.storage.test_dataset_instances import _envelope, _write_instance
+
+    layout = StorageLayout(tmp_path)
+    roots = []
+    for name in names:
+        spec = make_processed_dataset_spec(name)
+        roots.append(
+            _write_instance(
+                layout.processed_data_root("a_share", "factor", name),
+                spec,
+                _envelope(spec, seed=1),
+            )
+        )
+    output = tmp_path / "inventory.json"
+    schema_inventory.write_schema_inventory(tmp_path, output)
+    items = json.loads(filesystem_read_text(output, encoding="utf-8"))["datasets"]
+    assert [item["logical_relative_root"] for item in items] == sorted(
+        root.relative_to(tmp_path).as_posix() for root in roots
+    )
+    assert all(
+        item["row_count"] == 3 and item["duplicate_primary_key_count"] == 0
+        for item in items
+    )
+
+
 @pytest.mark.parametrize("deep_root", (False, True))
 def test_schema_inventory_keeps_all_current_roots_and_instances(
     tmp_path: Path, deep_root: bool

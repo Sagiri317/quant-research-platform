@@ -1138,6 +1138,9 @@ refit 不伪造重叠 train/validation，也不建立假的第四角色。
 训练期零方差列的冻结 scale=1，训练样本变换为 0，不删除该列。
 OOS 始终使用训练期 mean/scale；新值按 (x-mean)/scale 变换，不能永久置零。
 fit、持久化、reload、transform 和 predict 共用 ModelMatrixScaler。
+加权中心以 `weighted_mean_origin + weighted_mean_offset` 保存，变换使用同一相对坐标
+`((x - origin) - offset) / scale`，避免相邻浮点值的均值舍入破坏零中心。
+模型 reader 校验完整拆分中心与总体尺度；旧单一中心 payload 不兼容，须由已验证上游重建。
 
 排名集成和单因子不使用该缩放器。
 
@@ -1475,6 +1478,8 @@ Value         = earnings_yield
 
 风险估计范围是所有符合资格且具有完整合法 PIT 风险输入的 A 股。
 随后将得到的风险事实投影到活动基准成分股。
+若 eligible 拟合截面的某一风险风格总体方差为零，该期风格无法提供截面差异信息，
+其全域投影约定为零，包括原始值不同的活动基准资产；不删除域外基准风险能力。
 
 ```text
 beta_252d = rolling 252-session regression of stock period_return  # 个股收益的滚动回归
@@ -1909,11 +1914,14 @@ Hansen SPA 与 StepM 是正式诊断；MCS 仅用于稳健性。
 
 因变量：
 
-`原始 forward_return_20d`
+研究配置所选 `evaluation.primary_label` 的原始标签；默认是 `forward_return_20d`。
+选择 `forward_return_5d` 等其他批准期限时，FMB 使用同一标签及其可用时点确定成熟样本，
+输出的经济解释与该期限一致，不独立读取二十日标签或借用其成熟域。
 
 单因子回归分别运行；多因子回归仅使用 CORE。
 
 每日带截距等权 OLS；系数时间序列使用 HAC lag19。
+HAC lag19 为协议固定统计参数，不随主标签期限自动缩短。
 
 开发和留出区间保持分离。
 

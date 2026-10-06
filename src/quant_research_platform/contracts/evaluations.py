@@ -270,6 +270,15 @@ def _validate_signals(signals: tuple[_SignalSpec, ...]) -> None:
     columns = [signal.source_column for signal in signals]
     if len(set(columns)) != len(columns):
         raise ValueError("evaluation_signal_columns_must_not_contain_duplicates")
+    reserved = sorted(
+        set(signal_ids)
+        .union(columns)
+        .intersection({"timestamp", "asset_id", "market_id"})
+    )
+    if reserved:
+        raise ValueError(
+            "evaluation_signal_structural_column_overlap: " + ", ".join(reserved)
+        )
     overlaps = _cross_signal_id_column_overlaps(signals)
     if overlaps:
         raise ValueError("evaluation_signal_id_column_overlap: " + ", ".join(overlaps))

@@ -174,9 +174,13 @@ def hac_mean(
         raise ValueError("hac_max_lags_invalid")
     if not 0.0 < confidence < 1.0:
         raise ValueError("confidence_invalid")
-    if float(np.ptp(data)) <= 8 * np.finfo("float64").eps * float(np.max(np.abs(data))):
+    _, exponent = np.frexp(np.max(np.abs(data)))
+    normalized = np.ldexp(data, -int(exponent))
+    if float(np.ptp(normalized)) <= 8 * np.finfo("float64").eps * float(
+        np.max(np.abs(normalized))
+    ):
         raise ValueError("hac_inference_undefined")
-    fit = sm.OLS(data, np.ones((len(data), 1))).fit(
+    fit = sm.OLS(normalized, np.ones((len(data), 1))).fit(
         cov_type="HAC", cov_kwds={"maxlags": max_lags}
     )
     interval = fit.conf_int(alpha=1.0 - confidence)[0]
@@ -184,6 +188,8 @@ def hac_mean(
         [fit.params[0], fit.bse[0], fit.tvalues[0], fit.pvalues[0], *interval],
         dtype="float64",
     )
+    with np.errstate(over="ignore", under="ignore"):
+        outputs[[0, 1, 4, 5]] = np.ldexp(outputs[[0, 1, 4, 5]], int(exponent))
     if (
         not bool(np.isfinite(outputs).all())
         or outputs[1] <= 0
@@ -192,11 +198,11 @@ def hac_mean(
     ):
         raise ValueError("hac_inference_undefined")
     return MeanInference(
-        mean=float(fit.params[0]),
-        standard_error=float(fit.bse[0]),
-        t_statistic=float(fit.tvalues[0]),
-        p_value=float(fit.pvalues[0]),
-        confidence_interval=(float(interval[0]), float(interval[1])),
+        mean=float(outputs[0]),
+        standard_error=float(outputs[1]),
+        t_statistic=float(outputs[2]),
+        p_value=float(outputs[3]),
+        confidence_interval=(float(outputs[4]), float(outputs[5])),
         observation_count=len(data),
     )
 

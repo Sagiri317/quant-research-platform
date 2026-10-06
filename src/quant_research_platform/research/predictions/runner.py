@@ -353,6 +353,7 @@ def build_crypto_predictions(
             test_end=pd.Timestamp(time_window.end).isoformat(),
             training_asset_ids=tuple(entries[0]["training_asset_ids"]),
             evaluation_asset_ids=tuple(entries[0]["evaluation_asset_ids"]),
+            sample_filter_mode=entries[0]["model_metadata"]["sample_filter_mode"],
         )
         state = _PredictionMetadataState(inputs)
 

@@ -14,11 +14,12 @@ SignalTransform = Literal["identity", "rank", "zscore"]
 
 def _cross_signal_id_column_overlaps(signals: tuple[SignalSpec, ...]) -> list[str]:
     return sorted(
-        {
+        {signal.signal_id for signal in signals}
+        & {signal.source_column for signal in signals}
+        - {
             signal.signal_id
-            for index, signal in enumerate(signals)
-            for other_index, other in enumerate(signals)
-            if index != other_index and signal.signal_id == other.source_column
+            for signal in signals
+            if signal.signal_id == signal.source_column
         }
     )
 

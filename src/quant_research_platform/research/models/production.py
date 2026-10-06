@@ -923,6 +923,7 @@ def build_crypto_fold_models(
                     label_column=spec.label_column,
                     prediction_column=prediction.prediction_column,
                     expected_coverage=validation_coverage,
+                    validation_axis=validation_coverage.scope["validation_axis"],
                 )
                 if metrics["validation_rows"] <= 0 or not pd.notna(
                     metrics["validation_mse"]

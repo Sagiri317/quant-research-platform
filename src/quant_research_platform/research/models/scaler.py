@@ -16,8 +16,16 @@ class ModelMatrixScaler:
     """Weighted population scaler fitted only on the training matrix."""
 
     columns: tuple[str, ...]
-    mean_: tuple[float, ...]
+    origin_: tuple[float, ...]
+    offset_: tuple[float, ...]
     scale_: tuple[float, ...]
+
+    @property
+    def mean_(self) -> tuple[float, ...]:
+        return tuple(
+            origin + offset
+            for origin, offset in zip(self.origin_, self.offset_, strict=True)
+        )
 
     @classmethod
     def fit(
@@ -43,7 +51,7 @@ class ModelMatrixScaler:
         magnitude[constant] = 1.0
         normalized = differences / magnitude
         center = (weights[:, None] * normalized).sum(axis=0) / total
-        mean = origin + center * magnitude
+        offset = center * magnitude
         variance = (weights[:, None] * (normalized - center) ** 2).sum(axis=0) / total
         scale = np.sqrt(variance) * magnitude
         scale[constant] = 1.0
@@ -51,7 +59,8 @@ class ModelMatrixScaler:
             raise ValueError("model_scaler_scale_unrepresentable")
         return cls(
             columns=columns,
-            mean_=tuple(float(value) for value in mean),
+            origin_=tuple(float(value) for value in origin),
+            offset_=tuple(float(value) for value in offset),
             scale_=tuple(float(value) for value in scale),
         )
 
@@ -59,23 +68,27 @@ class ModelMatrixScaler:
         if tuple(str(column) for column in frame.columns) != self.columns:
             raise ValueError("model_scaler_columns_mismatch")
         values = _finite_matrix(frame, self.columns)
-        mean = np.asarray(self.mean_)
+        origin = np.asarray(self.origin_)
+        offset = np.asarray(self.offset_)
         scale = np.asarray(self.scale_)
         with np.errstate(over="ignore"):
-            differences = values - mean
+            differences = (values - origin) - offset
         overflow = ~np.isfinite(differences)
         differences /= scale
         if overflow.any():
             rows, columns = np.nonzero(overflow)
             differences[rows, columns] = (
-                values[rows, columns] / scale[columns] - mean[columns] / scale[columns]
+                values[rows, columns] / scale[columns]
+                - origin[columns] / scale[columns]
+                - offset[columns] / scale[columns]
             )
         return pd.DataFrame(differences, index=frame.index, columns=self.columns)
 
     def to_payload(self) -> dict[str, object]:
         return {
             "columns": list(self.columns),
-            "weighted_mean": list(self.mean_),
+            "weighted_mean_origin": list(self.origin_),
+            "weighted_mean_offset": list(self.offset_),
             "weighted_population_scale": list(self.scale_),
         }
 

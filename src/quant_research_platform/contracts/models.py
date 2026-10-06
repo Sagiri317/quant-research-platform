@@ -448,16 +448,25 @@ def validate_model_metadata_core(
     if scaler is not None:
         if (
             type(scaler) is not dict
-            or set(scaler) != {"columns", "weighted_mean", "weighted_population_scale"}
+            or set(scaler)
+            != {
+                "columns",
+                "weighted_mean_origin",
+                "weighted_mean_offset",
+                "weighted_population_scale",
+            }
             or scaler["columns"] != metadata["input_columns"]
-            or type(scaler["weighted_mean"]) is not list
+            or type(scaler["weighted_mean_origin"]) is not list
+            or type(scaler["weighted_mean_offset"]) is not list
             or type(scaler["weighted_population_scale"]) is not list
-            or len(scaler["columns"]) != len(scaler["weighted_mean"])
+            or len(scaler["columns"]) != len(scaler["weighted_mean_origin"])
+            or len(scaler["columns"]) != len(scaler["weighted_mean_offset"])
             or len(scaler["columns"]) != len(scaler["weighted_population_scale"])
             or any(
                 type(number) not in {int, float} or not np.isfinite(float(number))
                 for number in (
-                    *scaler["weighted_mean"],
+                    *scaler["weighted_mean_origin"],
+                    *scaler["weighted_mean_offset"],
                     *scaler["weighted_population_scale"],
                 )
             )
@@ -466,6 +475,14 @@ def validate_model_metadata_core(
                 or not np.isfinite(float(number))
                 or float(number) <= 0.0
                 for number in scaler["weighted_population_scale"]
+            )
+            or any(
+                not np.isfinite(float(origin) + float(offset))
+                for origin, offset in zip(
+                    scaler["weighted_mean_origin"],
+                    scaler["weighted_mean_offset"],
+                    strict=True,
+                )
             )
         ):
             raise ValueError("invalid_model_metadata")
@@ -728,7 +745,10 @@ def _validate_model_selection_trial_record(trial: object) -> None:
             or abs(float(metric_value)) > 1.0
         ):
             raise ValueError("invalid_model_metadata")
-        if rows < 2:
+        if metric == "validation_rankic" and reason == "not_applicable":
+            if metric_value is not None:
+                raise ValueError("invalid_model_metadata")
+        elif rows < 2:
             if metric_value is not None or reason != "no_valid_observations":
                 raise ValueError("invalid_model_metadata")
         elif metric_value is None:

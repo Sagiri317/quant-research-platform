@@ -8,6 +8,7 @@ from pathlib import Path
 from quant_research_platform.contracts.business_manifest import (
     validate_business_manifest_envelope,
 )
+from quant_research_platform.storage.atomic import is_atomic_directory_staging_name
 from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.identity import (
     filesystem_exists,
@@ -41,6 +42,9 @@ def discover_dataset_instances(logical_root: Path) -> tuple[Path, ...]:
         entry = instances_root / name
         if path_is_filesystem_alias(entry):
             raise ValueError("dataset_instance_child_invalid")
+        if is_atomic_directory_staging_name(name):
+            _directory_identity(entry, "dataset_instance_child_invalid")
+            continue
         try:
             validate_instance_identity(name)
         except ValueError as exc:

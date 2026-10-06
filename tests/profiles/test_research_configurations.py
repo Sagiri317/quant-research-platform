@@ -57,6 +57,35 @@ def configuration(profile_id, scenario, model=None):
     }
 
 
+@pytest.mark.parametrize(
+    "model_id",
+    ["timestamp", "asset_id", "market_id", "renamed_model", "prediction_score"],
+)
+def test_crypto_model_names_cannot_overwrite_evaluation_structure(model_id):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "baseline")
+    model = next(
+        item
+        for item in config["models"]
+        if item["model_algorithm"] == "linear_regression"
+    )
+    model["model_id"] = model_id
+    config.update(models=[model], portfolios=[], comparison_model_id=model_id)
+    base = research_profile("crypto_binance_hft")
+    if model_id in {"timestamp", "asset_id", "market_id"}:
+        with pytest.raises(
+            ValueError,
+            match="^evaluation_signal_structural_column_overlap: " + model_id + "$",
+        ):
+            bind_research_configuration(base, config)
+    else:
+        selected = bind_research_configuration(base, config)
+        signal = selected.evaluations.get(model_id + "_oos_evaluation").signals[0]
+        assert signal.signal_id == model_id
+        assert signal.source_column == "prediction_score"
+
+
 def test_factor_only_selection_has_no_model_or_financial_dependency():
     profile = research_profile("a_share_csmar_choice")
     config = configuration(profile.profile_id, "pv_expanded")

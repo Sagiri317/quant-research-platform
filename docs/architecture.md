@@ -39,6 +39,8 @@ factor 是信号来源，feature 是模型输入，label 是监督目标，predi
 signal 是评估/组合使用的排序、权重或交易意图，evaluation 是研究表现，portfolio 是构建与收益路径。
 多资产同一时点采用 cross_sectional；单资产 HFT 跨时间采用 single_asset_time_series。
 后者以有界在线矩计算 Pearson；尚未有精确有界实现的 RankIC/分组价差明确不适用。
+评估 signal ID 和来源列不得覆盖 `timestamp`、`asset_id`、`market_id` 结构列；
+配置绑定时由 EvaluationSpec 拒绝该命名冲突。
 
 ## 研究配置
 
@@ -108,6 +110,10 @@ A 股最终拟合为一个合法历史窗，Crypto 保留最后 fold 的两个�
 任何拟合/选择/监督校准均按自己的 cutoff 验证 label maturity；test 不参与冻结状态生成。
 模型候选预测和经济使用由既有模型 artifact owner 持久化：
 同一成员保留候选自身合法预测及共同评分资格，评分域不得削去经济预测行。
+模型包遵循可信发布者的不可变产物合同。Crypto reader 核对成员内容身份、冻结合同、
+trial 引用及验证 PK/覆盖，不重算持久化验证预测的 IC/MSE；模型状态在实际加载并消费时
+由同一 fitting owner 校验。协同改写成员和 manifest 后建立的新读取会话不享有更强的
+评分一致性或提前状态加载保证；普通成员损坏和旧读取快照变化仍须拒绝。
 
 同一 TrialRecorder/存储机制分别记录选择与真实 refit；refit 使用实际 resolved spec、seed、
 单候选单 fold 及 budget=1，并绑定父 selection 语义身份。refit 不复用选择预算或伪造验证成绩。
@@ -169,6 +175,8 @@ CPU 参数结合物理核、affinity 和实际 bandwidth quota 解析，避免�
 事务使用同父目录 UUID 暂存及平台原生不覆盖移动，
 或归属明确的替换。成功才原子发布，失败保留原有已验证产物；
 只清理本次操作能证明创建的资源。
+实例发现器忽略原子目录 owner 的合法 `.a-` 加十二位小写十六进制暂存目录；
+别名、同名普通文件和其他非法正式成员仍拒绝，读取间变化检查保持有效。
 活动主 BaseException 不得被清理、验证、指标或释放次异常覆盖，不能依赖 GC 完成责任清理。
 必需模型不可通过静默备用后端、伪零值或改为可选依赖绕过。
 

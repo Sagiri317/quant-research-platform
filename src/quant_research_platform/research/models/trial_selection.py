@@ -14,6 +14,10 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _CorrelationMoments,
     _summarize_correlation_aggregates,
 )
+from quant_research_platform.contracts.evaluations import (
+    EVALUATION_AXES,
+    EvaluationAxis,
+)
 from quant_research_platform.contracts.experiments import (
     label_maturity_mask,
     resolve_training_availability_column,
@@ -154,6 +158,9 @@ def crypto_validation_coverage_scope(plan, spec, asset_ids):
         "availability": training_availability_columns(spec.label_column)[0],
         "inputs": list(spec.input_columns),
         "asset_ids": list(asset_ids),
+        "validation_axis": (
+            "single_asset_time_series" if len(asset_ids) == 1 else "cross_sectional"
+        ),
     }
 
 
@@ -207,8 +214,11 @@ def evaluate_model_trial_metrics_from_chunks(
     label_column: str,
     prediction_column: str,
     expected_coverage: ModelSampleCoverage | None = None,
+    validation_axis: EvaluationAxis = "cross_sectional",
 ) -> dict[str, object]:
     """Evaluate model-selection metrics from bounded prediction chunks."""
+    if type(validation_axis) is not str or validation_axis not in EVALUATION_AXES:
+        raise ValueError("model_validation_axis_invalid")
     coverage = (
         None
         if expected_coverage is None
@@ -238,11 +248,14 @@ def evaluate_model_trial_metrics_from_chunks(
     values = pd.concat(parts, ignore_index=True).sort_values(
         "timestamp_ns", kind="stable"
     )
-    ranks = values.groupby("timestamp_ns", sort=False)[["label", "prediction"]].rank(
-        method="average", pct=True
-    )
-    values["label_rank"] = ranks["label"]
-    values["prediction_rank"] = ranks["prediction"]
+    if validation_axis == "cross_sectional":
+        ranks = values.groupby("timestamp_ns", sort=False)[
+            ["label", "prediction"]
+        ].rank(method="average", pct=True)
+        values["label_rank"] = ranks["label"]
+        values["prediction_rank"] = ranks["prediction"]
+    else:
+        values["label_rank"] = values["prediction_rank"] = 0.0
     (
         validation_rows,
         validation_mse,
@@ -250,7 +263,9 @@ def evaluate_model_trial_metrics_from_chunks(
         validation_ic_reason,
         validation_rankic,
         validation_rankic_reason,
-    ) = _cross_sectional_metric_summary(values.itertuples(index=False, name=None))
+    ) = _cross_sectional_metric_summary(
+        values.itertuples(index=False, name=None), validation_axis=validation_axis
+    )
     return {
         "model_id": model_id,
         "validation_rows": validation_rows,
@@ -264,6 +279,8 @@ def evaluate_model_trial_metrics_from_chunks(
 
 def _cross_sectional_metric_summary(
     rows,
+    *,
+    validation_axis: EvaluationAxis,
 ) -> tuple[int, float, float | None, str | None, float | None, str | None]:
     stats: dict[str, int | Fraction] = {
         "ic_count": 0,
@@ -280,7 +297,7 @@ def _cross_sectional_metric_summary(
     current_timestamp: int | None = None
     timestamp_state: _TimestampMetricState | None = None
     for timestamp_ns, label, prediction, label_rank, prediction_rank in rows:
-        timestamp_ns = int(timestamp_ns)
+        timestamp_ns = int(timestamp_ns) if validation_axis == "cross_sectional" else 0
         if current_timestamp != timestamp_ns:
             if timestamp_state is not None:
                 row_count += timestamp_state.count
@@ -306,8 +323,16 @@ def _cross_sectional_metric_summary(
         row_count += timestamp_state.count
         _add_correlation_aggregate(stats, "ic", timestamp_state.correlation()[0])
         _add_correlation_aggregate(stats, "rankic", timestamp_state.rank.result()[0])
-    ic = _trial_correlation_summary(stats, "ic")
-    rankic = _trial_correlation_summary(stats, "rankic")
+    if validation_axis == "single_asset_time_series":
+        ic = (
+            timestamp_state.correlation()
+            if row_count >= 2
+            else (None, "no_valid_observations")
+        )
+        rankic = (None, "not_applicable")
+    else:
+        ic = _trial_correlation_summary(stats, "ic")
+        rankic = _trial_correlation_summary(stats, "rankic")
     return (
         row_count,
         squared_errors.result(row_count),

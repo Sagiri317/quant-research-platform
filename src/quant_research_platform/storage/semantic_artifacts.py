@@ -29,7 +29,10 @@ from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
 )
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
-from quant_research_platform.storage.atomic import atomic_write_directory
+from quant_research_platform.storage.atomic import (
+    atomic_write_directory,
+    is_atomic_directory_staging_name,
+)
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.experiments import read_trial_ledger_reference
 from quant_research_platform.storage.identity import (
@@ -495,13 +498,15 @@ def discover_semantic_artifact_instances(logical_root: Path) -> tuple[Path, ...]
     names = instance_names()
     result: list[Path] = []
     for name in names:
+        entry = instances_root / name
+        if path_is_filesystem_alias(entry) or not filesystem_is_dir(entry):
+            raise ValueError("semantic_artifact_instance_child_invalid")
+        if is_atomic_directory_staging_name(name):
+            continue
         try:
             validate_instance_identity(name)
         except ValueError as exc:
             raise ValueError("semantic_artifact_instance_child_invalid") from exc
-        entry = instances_root / name
-        if path_is_filesystem_alias(entry) or not filesystem_is_dir(entry):
-            raise ValueError("semantic_artifact_instance_child_invalid")
         read_semantic_artifact(entry, expected_identity=name)
         result.append(entry)
     if instance_names() != names:

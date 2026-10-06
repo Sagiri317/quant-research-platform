@@ -28,7 +28,20 @@ from tests.helpers.binance_hft import hft_research_plan
 from tests.helpers.research_configuration import research_configuration
 
 
-def crypto_rank_case(output, *, missing_rank_input=False):
+def crypto_rank_case(
+    output,
+    *,
+    missing_rank_input=False,
+    algorithms=(
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+        "linear_regression",
+    ),
+    training_assets=("btc_usdt", "eth_usdt"),
+    sample_filter_mode="eligible",
+    ineligible_holdout=False,
+    time_series_inputs=False,
+):
     plan = hft_research_plan()
     plan["folds"] = plan["folds"][:1]
     window = TimeWindow(**plan["folds"][0]["validation"])
@@ -40,11 +53,7 @@ def crypto_rank_case(output, *, missing_rank_input=False):
     )
     template = deepcopy(configuration["models"][0])
     models = []
-    for algorithm in (
-        "equal_weight_rank_ensemble",
-        "ic_weighted_rank_ensemble",
-        "linear_regression",
-    ):
+    for algorithm in algorithms:
         model = deepcopy(template)
         model.update(
             model_id="probe_" + algorithm,
@@ -52,8 +61,9 @@ def crypto_rank_case(output, *, missing_rank_input=False):
             input_factor_columns=["imbalance_1"],
             input_feature_columns=[],
             hyperparameters={},
-            training_asset_ids=["btc_usdt", "eth_usdt"],
+            training_asset_ids=list(training_assets),
             evaluation_asset_ids=["btc_usdt", "eth_usdt"],
+            sample_filter_mode=sample_filter_mode,
         )
         model.pop("parameter_candidates", None)
         models.append(model)
@@ -103,6 +113,8 @@ def crypto_rank_case(output, *, missing_rank_input=False):
     timestamps = stamps.repeat(2)
     count = len(timestamps)
     signs = np.tile([-1.0, 1.0], len(stamps))
+    if time_series_inputs:
+        signs = np.repeat(np.arange(len(stamps), dtype="float64") + 1.0, 2)
     values = {}
     for column in dataset.required_columns:
         if column == "market_id":
@@ -135,6 +147,14 @@ def crypto_rank_case(output, *, missing_rank_input=False):
             & frame.asset_id.eq("btc_usdt")
         ][0]
         frame.loc[first, "imbalance_1"] = np.nan
+    if ineligible_holdout:
+        frame.loc[
+            frame.timestamp.between(
+                pd.Timestamp(plan["test"]["start"]), pd.Timestamp(plan["test"]["end"])
+            )
+            & frame.asset_id.eq("btc_usdt"),
+            "eligible",
+        ] = False
     ids = tuple(model["model_id"] for model in models)
     write_dataset(dataset_root, frame, spec=dataset)
     session = open_dataset_session(
@@ -180,6 +200,7 @@ def crypto_rank_case(output, *, missing_rank_input=False):
         layout=layout,
         profile=profile,
         holdout=TimeWindow(**plan["test"]),
+        frame=frame,
     )
 
 
@@ -192,6 +213,21 @@ def test_crypto_rank_roundtrip_and_frozen_holdout(tmp_path, missing_rank_input):
             [-0.001, 0.001] if algorithm == "linear_regression" else [-0.25, 0.25]
         )
         model = persisted.read_crypto_model_member(case.saved, entry)
+        if algorithm == "linear_regression":
+            from quant_research_platform.contracts.models import (
+                validate_model_metadata_core,
+            )
+
+            assert entry["model_metadata"]["scaler"] == model.scaler.to_payload()
+            validate_model_metadata_core(entry["model_metadata"])
+            legacy = deepcopy(entry["model_metadata"])
+            legacy["scaler"] = {
+                "columns": list(model.scaler.columns),
+                "weighted_mean": list(model.scaler.mean_),
+                "weighted_population_scale": list(model.scaler.scale_),
+            }
+            with pytest.raises(ValueError, match="invalid_model_metadata"):
+                validate_model_metadata_core(legacy)
         probe = pd.DataFrame(
             {
                 "timestamp": [pd.Timestamp(case.holdout.start)] * 2,
@@ -321,3 +357,129 @@ def test_rank_economic_consumers_use_frozen_training_label_units(tmp_path):
             assert [row.prediction_score for row in validation] == pytest.approx(
                 [expected] * len(validation)
             )
+
+
+def test_crypto_unfiltered_frozen_predictions_preserve_exact_holdout_domain(tmp_path):
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.artifacts.outputs import (
+        read_prediction_output_bundle,
+        write_prediction_outputs,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import (
+        build_hft_prediction_catalog,
+    )
+    from quant_research_platform.storage.identity import native_filesystem_path
+    from quant_research_platform.workflows.research import _output_spec_for_target
+
+    case = crypto_rank_case(
+        tmp_path,
+        algorithms=("linear_regression",),
+        sample_filter_mode="unfiltered",
+        ineligible_holdout=True,
+    )
+    entry = case.saved.final_models[0]
+    assert entry["model_metadata"]["sample_filter_mode"] == "unfiltered"
+    configuration = case.manifest["research_configuration"]
+    configured = build_hft_prediction_catalog(
+        configuration=configuration,
+        train_end=case.saved.models[0]["training_window"]["end"],
+        test_start=case.holdout.start.isoformat(),
+        test_end=case.holdout.end.isoformat(),
+    ).get(entry["model_id"] + "_prediction")
+    assert configured.sample_filter_mode == "unfiltered"
+    output = StorageLayout(tmp_path / "prediction_outputs")
+    with closing_iterator(
+        build_crypto_predictions(
+            layout=case.layout,
+            dataset_catalog=case.profile.research_datasets,
+            persisted_model=case.saved,
+            time_window=case.holdout,
+            access_window="holdout",
+        )
+    ) as results:
+        for result in results:
+            assert result.spec.sample_filter_mode == "unfiltered"
+            with result:
+                output_root = write_prediction_outputs(
+                    spec=result.spec,
+                    output_spec=_output_spec_for_target(
+                        result.spec.prediction_id, "crypto", "prediction"
+                    ),
+                    layout=output,
+                    output_chunks=result.output_chunks,
+                    model_metadata=result.model_metadata,
+                    prediction_metadata_factory=result.prediction_metadata_factory,
+                )
+    manifest, lookup = read_prediction_output_bundle(
+        output_root, expected_output_id=configured.prediction_id
+    )
+    expected = case.frame.loc[
+        case.frame.timestamp.between(
+            pd.Timestamp(case.holdout.start), pd.Timestamp(case.holdout.end)
+        ),
+        ["timestamp", "asset_id"],
+    ].sort_values(["timestamp", "asset_id"], ignore_index=True)
+    expected["asset_id"] = expected.asset_id.astype("str")
+    expected["timestamp"] = expected.timestamp.astype("datetime64[ns]")
+    with pq.ParquetFile(
+        native_filesystem_path(output_root / "prediction.parquet")
+    ) as reader:
+        predictions = reader.read().to_pandas()
+    actual = predictions.loc[:, ["timestamp", "asset_id"]]
+    pd.testing.assert_frame_equal(actual, expected)
+    scores, found = lookup.values_for_frame(expected, mark_matched=True)
+    assert list(found) == [1] * len(expected)
+    assert list(scores) == predictions.prediction_score.tolist()
+    assert lookup.coverage_counts() == (0, 0)
+    assert len(actual) == 10
+    assert (
+        manifest["metadata"]["prediction_metadata"]["sample_filter_mode"]
+        == "unfiltered"
+    )
+
+
+@pytest.mark.parametrize("training_assets", [("btc_usdt",), ("btc_usdt", "eth_usdt")])
+def test_crypto_validation_ic_uses_declared_training_scope(tmp_path, training_assets):
+    from quant_research_platform.storage.experiments import (
+        read_model_trial_ledger_reference,
+        research_run_trial_references,
+    )
+
+    case = crypto_rank_case(
+        tmp_path,
+        algorithms=("linear_regression",),
+        training_assets=training_assets,
+        time_series_inputs=True,
+    )
+    entry = case.saved.models[0]
+    reference = next(
+        item
+        for item in research_run_trial_references(case.layout, "run_rank_roundtrip")
+        if item["semantic_identity"] == entry["trial_semantic_identity"]
+    )
+    plan, records = read_model_trial_ledger_reference(case.layout, reference)
+    metrics = records[0].metrics
+    with closing_iterator(
+        case.saved.validation_chunks(
+            fold_id=entry["fold_id"], model_id=entry["model_id"]
+        )
+    ) as chunks:
+        validation = pd.concat(list(chunks), ignore_index=True)
+    assert validation.asset_id.unique().tolist() == list(training_assets)
+    assert len(validation) == metrics["validation_rows"] == 6 * len(training_assets)
+    assert plan.folds[0].validation.end == pd.Timestamp("1970-01-01T00:00:05")
+    if len(training_assets) == 1:
+        expected = np.corrcoef(validation["label"], validation.prediction_score)[0, 1]
+        assert expected == pytest.approx(1.0)
+        assert metrics["validation_ic"] == pytest.approx(expected)
+        assert metrics["validation_ic_reason"] is None
+        assert metrics["validation_rankic"] is None
+        assert metrics["validation_rankic_reason"] == "not_applicable"
+    else:
+        assert metrics["validation_ic"] is None
+        assert metrics["validation_ic_reason"] == "no_valid_observations"
+        assert metrics["validation_rankic_reason"] == "no_valid_observations"
+    assert metrics["validation_mse"] == pytest.approx(
+        np.mean((validation.prediction_score - validation["label"]) ** 2), abs=1e-28
+    )

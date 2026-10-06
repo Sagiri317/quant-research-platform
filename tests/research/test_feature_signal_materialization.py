@@ -1,17 +1,67 @@
 from __future__ import annotations
 
+from itertools import permutations
+
 import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.features import FeatureTransformSpec
-from quant_research_platform.contracts.signals import SignalSpec
+from quant_research_platform.contracts.signals import (
+    SignalSpec,
+    _cross_signal_id_column_overlaps,
+)
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
 )
 from quant_research_platform.research.signals.materialization import (
     normalize_signal_frame,
 )
+
+
+def test_signal_overlap_sets_preserve_unique_contract_and_error_order():
+    names = ("a", "b", "c", "prediction_score")
+    count = 0
+    for length in range(1, len(names) + 1):
+        for ids in permutations(names, length):
+            for columns in permutations(names, length):
+                signals = tuple(
+                    SignalSpec(
+                        signal_id=signal_id,
+                        source_kind="prediction",
+                        source_column=column,
+                    )
+                    for signal_id, column in zip(ids, columns, strict=True)
+                )
+                expected = sorted(
+                    {
+                        signal_id
+                        for position, signal_id in enumerate(ids)
+                        for other, column in enumerate(columns)
+                        if position != other and signal_id == column
+                    }
+                )
+                assert _cross_signal_id_column_overlaps(signals) == expected
+                arguments = dict(
+                    evaluation_id="case",
+                    market_id="crypto",
+                    research_dataset_id="case",
+                    signals=signals,
+                    label_columns=("label",),
+                )
+                if expected:
+                    with pytest.raises(
+                        ValueError,
+                        match="^evaluation_signal_id_column_overlap: "
+                        + ", ".join(expected)
+                        + "$",
+                    ):
+                        EvaluationSpec(**arguments)
+                else:
+                    assert EvaluationSpec(**arguments).signals == signals
+                count += 1
+    assert count == 1312
 
 
 def test_winsorize_clips_by_timestamp_quantiles_instead_of_zscore() -> None:

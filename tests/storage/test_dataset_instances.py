@@ -26,6 +26,7 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_is_dir,
     filesystem_mkdir,
+    filesystem_read_bytes,
     filesystem_rename,
     filesystem_unlink,
     filesystem_write_bytes,
@@ -86,6 +87,67 @@ def test_two_immutable_instances_round_trip_and_discover_deterministically(
     discovered = discover_dataset_instances(logical_root)
     assert discovered == tuple(sorted((first, second), key=lambda path: path.name))
     assert filesystem_is_dir(logical_root / "instances")
+
+
+def test_discovery_during_real_dataset_publication_keeps_published_instances(tmp_path):
+    spec = make_processed_dataset_spec("demo")
+    logical_root = make_dataset_artifact_root(tmp_path, "demo")
+    first = _write_instance(logical_root, spec, _envelope(spec, seed=1))
+    old_manifest = filesystem_read_bytes(first / "_manifest/manifest.json")
+    second_envelope = _envelope(spec, seed=2)
+    second = StorageLayout().instance_root(
+        logical_root, second_envelope.instance_identity
+    )
+
+    def frames():
+        assert discover_dataset_instances(logical_root) == (first,)
+        yield make_default_dataset_frame()
+
+    write_dataset(
+        second,
+        frames(),
+        spec=spec,
+        instance_metadata={"common_manifest": second_envelope},
+    )
+    published = tuple(sorted((first, second), key=lambda path: path.name))
+    assert discover_dataset_instances(logical_root) == published
+    assert filesystem_read_bytes(first / "_manifest/manifest.json") == old_manifest
+    for root in published:
+        assert len(read_dataset(root)) == len(make_default_dataset_frame())
+    third_envelope = _envelope(spec, seed=3)
+
+    def failed_frames():
+        assert discover_dataset_instances(logical_root) == published
+        raise RuntimeError("publication_failed")
+        yield
+
+    with pytest.raises(RuntimeError, match="^publication_failed$"):
+        write_dataset(
+            StorageLayout().instance_root(
+                logical_root, third_envelope.instance_identity
+            ),
+            failed_frames(),
+            spec=spec,
+            instance_metadata={"common_manifest": third_envelope},
+        )
+    assert discover_dataset_instances(logical_root) == published
+    assert filesystem_read_bytes(first / "_manifest/manifest.json") == old_manifest
+
+
+@pytest.mark.parametrize(
+    "name", [".a-000000000000", ".a-00000000000g", ".a-000000000000-extra"]
+)
+def test_discovery_rejects_atomic_named_files_and_invalid_scratch_names(tmp_path, name):
+    spec = make_processed_dataset_spec("demo")
+    logical_root = make_dataset_artifact_root(tmp_path, "demo")
+    _write_instance(logical_root, spec, _envelope(spec, seed=1))
+    candidate = logical_root / "instances" / name
+    if name == ".a-000000000000":
+        filesystem_write_bytes(candidate, b"not-a-directory")
+    else:
+        filesystem_mkdir(candidate)
+    with pytest.raises(ValueError, match="^dataset_instance_child_invalid$"):
+        discover_dataset_instances(logical_root)
 
 
 def test_discovery_accepts_more_than_1024_published_dataset_instances(

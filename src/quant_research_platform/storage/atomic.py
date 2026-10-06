@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from collections.abc import Callable, Iterable
 from pathlib import Path
 from uuid import uuid4
@@ -21,6 +22,11 @@ from quant_research_platform.storage.identity import (
     filesystem_mkdir,
     require_unaliased_path,
 )
+
+
+def is_atomic_directory_staging_name(name: str) -> bool:
+    """Identify unpublished directory transactions created by this owner."""
+    return re.fullmatch(r"\.a-[0-9a-f]{12}", name) is not None
 
 
 def reject_if_exists(path: Path) -> None:

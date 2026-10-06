@@ -1789,6 +1789,17 @@ def _validate_crypto_model_payload(
                     plan, expected_spec, prediction.training_asset_ids
                 )
             )
+            time_series = (
+                validation_coverage.scope["validation_axis"]
+                == "single_asset_time_series"
+            )
+            rankic = records[0].metrics["validation_rankic"]
+            rankic_reason = records[0].metrics["validation_rankic_reason"]
+            if (
+                time_series
+                and (rankic is not None or rankic_reason != "not_applicable")
+            ) or (not time_series and rankic_reason == "not_applicable"):
+                raise ValueError("crypto_model_validation_axis_invalid")
             with closing_iterator(
                 _crypto_validation_chunks(
                     root, entry, member_identities=member_identities

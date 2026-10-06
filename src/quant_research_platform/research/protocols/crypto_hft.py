@@ -1147,6 +1147,7 @@ def build_hft_prediction_catalog(
             test_end=test_end,
             training_asset_ids=tuple(item["training_asset_ids"]),
             evaluation_asset_ids=tuple(item["evaluation_asset_ids"]),
+            sample_filter_mode=item.get("sample_filter_mode", "eligible"),
         )
         for item in configuration["models"]
     )

@@ -311,6 +311,7 @@ def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
         def fail_walk(error: OSError) -> None:
             raise ValueError("schema_inventory_dataset_invalid") from error
 
+        roots = []
         for parent, dirnames, filenames in filesystem_walk(
             layer_root,
             follow_symlinks=False,
@@ -330,7 +331,10 @@ def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
                 require_unaliased_path(
                     spec_path, error="schema_inventory_dataset_invalid"
                 )
-                yield parent
+                roots.append(parent)
+        yield from sorted(
+            roots, key=lambda path: path.relative_to(project_root).as_posix()
+        )
 
 
 def _inventory_item(

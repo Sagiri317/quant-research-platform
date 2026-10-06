@@ -87,6 +87,46 @@ def test_model_selection_rejects_nonfinite_values() -> None:
         )
 
 
+def test_time_series_trial_metrics_keep_axis_across_chunks_and_degeneracy():
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2024-01-01", periods=6),
+            "asset_id": "a",
+            "label": [2.0, 4.0, 1.0, 6.0, 3.0, 5.0],
+            "prediction": [5.0, 9.0, 3.0, 13.0, 7.0, 11.0],
+        }
+    )
+    arguments = dict(
+        model_id="model", label_column="label", prediction_column="prediction"
+    )
+    whole = evaluate_model_trial_metrics_from_chunks(
+        (frame,), **arguments, validation_axis="single_asset_time_series"
+    )
+    split = evaluate_model_trial_metrics_from_chunks(
+        (frame.iloc[:2], frame.iloc[:0], frame.iloc[2:5], frame.iloc[5:]),
+        **arguments,
+        validation_axis="single_asset_time_series",
+    )
+    assert split == whole
+    assert whole["validation_ic"] == 1.0
+    assert whole["validation_rankic"] is None
+    assert whole["validation_rankic_reason"] == "not_applicable"
+    cross_sectional = evaluate_model_trial_metrics_from_chunks((frame,), **arguments)
+    assert cross_sectional["validation_ic"] is None
+    assert cross_sectional["validation_ic_reason"] == "no_valid_observations"
+    single = evaluate_model_trial_metrics_from_chunks(
+        (frame.iloc[:1],), **arguments, validation_axis="single_asset_time_series"
+    )
+    assert single["validation_ic_reason"] == "no_valid_observations"
+    assert single["validation_rankic_reason"] == "not_applicable"
+    constant = evaluate_model_trial_metrics_from_chunks(
+        (frame.assign(prediction=1.0),),
+        **arguments,
+        validation_axis="single_asset_time_series",
+    )
+    assert constant["validation_ic_reason"] == "zero_variance"
+
+
 @pytest.mark.parametrize("residual", [1e155, 1e-155, 2e-161, 3e-161, 0.0, 2.0])
 def test_model_selection_mse_scales_before_squaring(residual: float) -> None:
     frame = pd.DataFrame(
