@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import warnings
-import weakref
 from datetime import timedelta, timezone
 from decimal import Decimal
 from zoneinfo import ZoneInfo
@@ -11,34 +10,6 @@ import pandas as pd
 import pytest
 
 import quant_research_platform.contracts.validation as validation
-
-
-def test_clear_exception_frames_releases_distinct_cause_and_context() -> None:
-    released: list[str] = []
-
-    class Payload:
-        pass
-
-    def capture(error_type, payload):  # noqa: ANN001, ANN202
-        try:
-            raise error_type("validation failure")
-        except error_type as error:
-            return error
-
-    cause_payload = Payload()
-    context_payload = Payload()
-    weakref.finalize(cause_payload, released.append, "cause")
-    weakref.finalize(context_payload, released.append, "context")
-    cause = capture(TypeError, cause_payload)
-    context = capture(ValueError, context_payload)
-    primary = RuntimeError("primary")
-    primary.__cause__ = cause
-    primary.__context__ = context
-    del cause_payload, context_payload
-
-    validation.clear_exception_frames(primary)
-
-    assert sorted(released) == ["cause", "context"]
 
 
 @pytest.mark.parametrize(

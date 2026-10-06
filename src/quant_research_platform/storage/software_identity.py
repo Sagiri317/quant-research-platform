@@ -15,7 +15,7 @@ from pathlib import Path
 from types import MappingProxyType
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     filesystem_scandir,
@@ -84,7 +84,6 @@ def production_software_identity(
     dependency_versions: Mapping[str, str] | None = None,
 ) -> ProductionSoftwareIdentity:
     """Hash production package content plus resolved backend versions."""
-
     root = (
         Path(package_root)
         if package_root is not None
@@ -96,9 +95,7 @@ def production_software_identity(
         "dependency_versions": _dependency_versions(dependency_versions),
     }
     return ProductionSoftwareIdentity(
-        payload=payload,
-        identity_hash=canonical_json_hash(payload),
-        sources=sources,
+        payload=payload, identity_hash=canonical_json_hash(payload), sources=sources
     )
 
 
@@ -113,8 +110,6 @@ def _artifact_software_identity(
     invalidates callers that use another function in that module. Orchestration
     is hashed directly; its dispatch imports are covered by the selected writers.
     """
-
-    # ponytail: module-wide invalidation; split owners when false invalidation hurts.
     if software._module_graph is None:
         object.__setattr__(
             software, "_module_graph", _source_module_graph(software._sources)
@@ -134,9 +129,6 @@ def _artifact_software_identity(
         elif callable(producer):
             roots.add(producer.__module__)
             callables.add(f"{producer.__module__}.{producer.__qualname__}")
-
-    # Only these owners are operational. Frame slicing and all numerical,
-    # storage, schema, source and protocol implementations remain dependencies.
     operational = {
         "quant_research_platform.runtime.resources",
         "quant_research_platform.runtime.execution_metrics",
@@ -156,23 +148,19 @@ def _artifact_software_identity(
             continue
         component = graph.get(module)
         if component is None:
-            # Injected implementations outside the package still participate;
-            # their package imports use the same conservative module graph.
             source_path = inspect.getsourcefile(sys.modules[module])
             if source_path is None:
                 raise ValueError("producer_source_unavailable")
             path = Path(source_path)
             expected = DatasetFileIdentity(*_file_identity(path))
-            with (
-                handle_preserving_primary(open_filesystem_file(path)) as handle,
-                verified_file_handle(
+            with closing_iterator(open_filesystem_file(path)) as handle:
+                with verified_file_handle(
                     path,
                     handle,
                     expected_identity=expected,
                     error="production_package_identity_changed",
-                ),
-            ):
-                source = handle.read()
+                ):
+                    source = handle.read()
             component = (
                 hashlib.sha256(source).hexdigest(),
                 _source_imports(
@@ -243,12 +231,8 @@ def _source_imports(name, source, *, is_package, modules):
 def _package_content_hash(
     root: Path, *, sources: dict[str, bytes] | None = None
 ) -> str:
-    root = require_unaliased_path(
-        Path(root),
-        error="production_package_root_invalid",
-    )
+    root = require_unaliased_path(Path(root), error="production_package_root_invalid")
     files, directories = _package_inventory(root)
-
     if not files:
         raise ValueError("production_package_empty")
     digest = hashlib.sha256()
@@ -261,19 +245,17 @@ def _package_content_hash(
             digest.update(len(relative_bytes).to_bytes(8, "big"))
             digest.update(relative_bytes)
             digest.update(expected_identity[2].to_bytes(8, "big"))
-            with (
-                handle_preserving_primary(open_filesystem_file(path)) as handle,
-                verified_file_handle(
+            with closing_iterator(open_filesystem_file(path)) as handle:
+                with verified_file_handle(
                     path,
                     handle,
                     expected_identity=DatasetFileIdentity(*expected_identity),
                     error="production_package_identity_changed",
-                ),
-            ):
-                while content := handle.read(1024 * 1024):
-                    digest.update(content)
-                    if source is not None:
-                        source.extend(content)
+                ):
+                    while content := handle.read(1024 * 1024):
+                        digest.update(content)
+                        if source is not None:
+                            source.extend(content)
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("production_package_file_unreadable") from exc
         if _file_identity(path) != expected_identity:
@@ -293,7 +275,7 @@ def _package_inventory(root: Path):
     while pending:
         directory, relative_parent = pending.pop()
         try:
-            with handle_preserving_primary(filesystem_scandir(directory)) as entries:
+            with closing_iterator(filesystem_scandir(directory)) as entries:
                 for entry in entries:
                     entry_path = require_unaliased_path(
                         directory / entry.name, error="production_package_alias"
@@ -325,11 +307,10 @@ def _package_inventory(root: Path):
             raise ValueError("production_package_enumeration_failed") from exc
         if _directory_identity(directory) != directories[directory]:
             raise ValueError("production_package_identity_changed")
-
     for directory, expected_identity in directories.items():
         if _directory_identity(directory) != expected_identity:
             raise ValueError("production_package_identity_changed")
-    return tuple(sorted(files, key=lambda item: item[0])), directories
+    return (tuple(sorted(files, key=lambda item: item[0])), directories)
 
 
 def _file_identity(path: Path) -> tuple[int, int, int, int]:
@@ -352,16 +333,19 @@ def _directory_identity(path: Path) -> tuple[int, int, int, int]:
     return (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns)
 
 
-def _dependency_versions(
-    supplied: Mapping[str, str] | None,
-) -> dict[str, str]:
+def _dependency_versions(supplied: Mapping[str, str] | None) -> dict[str, str]:
     if supplied is not None:
         if not isinstance(supplied, Mapping):
             raise ValueError("software_dependency_versions_invalid")
         result = dict(supplied)
         if set(result) != set(NUMERICAL_MODEL_DISTRIBUTIONS) or any(
-            type(name) is not str or not name or type(value) is not str or not value
-            for name, value in result.items()
+            (
+                type(name) is not str
+                or not name
+                or type(value) is not str
+                or (not value)
+                for name, value in result.items()
+            )
         ):
             raise ValueError("software_dependency_versions_invalid")
         return dict(sorted(result.items()))
@@ -389,11 +373,13 @@ def _validate_payload(value: object) -> None:
     ):
         raise ValueError("software_dependency_versions_invalid")
     if any(
-        type(name) is not str
-        or not name
-        or type(version_value) is not str
-        or not version_value
-        for name, version_value in versions.items()
+        (
+            type(name) is not str
+            or not name
+            or type(version_value) is not str
+            or (not version_value)
+            for name, version_value in versions.items()
+        )
     ):
         raise ValueError("software_dependency_versions_invalid")
 

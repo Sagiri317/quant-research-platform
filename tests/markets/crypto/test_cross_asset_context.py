@@ -244,7 +244,6 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
     from quant_research_platform.research.datasets.assembler import (
         _iter_research_chunk_windows_from_base_input,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.datasets.reading import (
         iter_dataset_chunks,
         open_dataset_session,
@@ -254,11 +253,10 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
     from quant_research_platform.storage.datasets.writing import write_dataset
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.binance_hft import _coverage, coverage_lookup
-    from tests.helpers.runtime_resources import capture_test_policy
     from tests.markets.crypto.test_hft import _state
 
     start = pd.Timestamp("2026-08-01T00:00:01")
-    start_ms = start.value // 1_000_000
+    start_ms = start.value // 1000000
     window = TimeWindow(
         start - pd.Timedelta(milliseconds=100), start + pd.Timedelta(milliseconds=400)
     )
@@ -300,81 +298,58 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
     ).sort_values(["timestamp", "asset_id"], ignore_index=True)
     sol = source("sol_usdt", start_ms - 100, start_ms + 400)
     inputs = {HFT_PANEL_DATA_ID: base, HFT_SOL_PANEL_DATA_ID: sol}
-    policy = capture_test_policy(available_memory_bytes=128 * 1024**2)
-    with runtime_resource_policy_scope(policy):
-        with policy.lease("test.information.union.readback", 2 * 1024**2):
-            expected_parts = []
-            expected_identities = {}
-            for data_id, frame in inputs.items():
-                source_spec = processed.get(data_id)
-                root = layout.processed_data_root(
-                    source_spec.market_id, source_spec.kind, data_id
-                )
-                write_dataset(
-                    root,
-                    (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
-                    spec=source_spec,
-                    resource_policy=policy,
-                    borrowed_input=True,
-                )
-                expected_parts.append(read_dataset(root, resource_policy=policy))
-                with open_dataset_session(
-                    root, columns=None, time_window=None, resource_policy=policy
-                ) as session:
-                    expected_identities[data_id] = dataset_identity_payload(
-                        session.spec, session.manifest
-                    )
-            expected = pd.concat(expected_parts, ignore_index=True).sort_values(
-                ["timestamp", "asset_id"], ignore_index=True
-            )
-            expected_parts.clear()
-            spec = processed.get(HFT_INFORMATION_PANEL_DATA_ID)
-            root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-            with producer.produce_information_panel(
-                spec,
-                layout=layout,
-                time_window=window,
-                processed_catalog=processed,
-                source_catalog=None,
-                resource_policy=policy,
-            ) as (frames, metadata, verify):
-                write_dataset(
-                    root,
-                    frames,
-                    spec=spec,
-                    resource_policy=policy,
-                    instance_metadata=metadata,
-                    staged_validator=verify,
-                )
-            frames = verify = None
-            restored = read_dataset(root, resource_policy=policy)
-            pd.testing.assert_frame_equal(restored, expected, check_exact=True)
-            assert len(restored) == len(base) + len(sol)
-            assert restored["timestamp"].is_monotonic_increasing
-            assert not restored.duplicated(list(spec.primary_key)).any()
-            with open_dataset_session(
-                root, columns=None, time_window=None, resource_policy=policy
-            ) as session:
-                assert (
-                    session.manifest["input_dataset_identities"] == expected_identities
-                )
-                previous = None
-                rows = 0
-                for frame in iter_dataset_chunks(session, target_chunk_bytes=1024):
-                    if len(frame):
-                        if previous is not None:
-                            assert frame["timestamp"].iloc[0] >= previous
-                        previous = frame["timestamp"].iloc[-1]
-                    rows += len(frame)
-                    frame = None
-                assert rows == len(expected)
-                windows = list(
-                    _iter_research_chunk_windows_from_base_input(
-                        session, time_window=window
-                    )
-                )
-                assert windows[0].start == window.start
-                assert windows[-1].end == window.end
-            restored = expected = None
-        assert policy.used_memory_bytes == 0
-    assert policy.state == "CLOSED"
+    expected_parts = []
+    expected_identities = {}
+    for data_id, frame in inputs.items():
+        source_spec = processed.get(data_id)
+        root = layout.processed_data_root(
+            source_spec.market_id, source_spec.kind, data_id
+        )
+        write_dataset(
+            root, (frame.iloc[:1].copy(), frame.iloc[1:].copy()), spec=source_spec
+        )
+        expected_parts.append(read_dataset(root))
+        session = open_dataset_session(root, columns=None, time_window=None)
+        expected_identities[data_id] = dataset_identity_payload(
+            session.spec, session.manifest
+        )
+    expected = pd.concat(expected_parts, ignore_index=True).sort_values(
+        ["timestamp", "asset_id"], ignore_index=True
+    )
+    expected_parts.clear()
+    spec = processed.get(HFT_INFORMATION_PANEL_DATA_ID)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with producer.produce_information_panel(
+        spec,
+        layout=layout,
+        time_window=window,
+        processed_catalog=processed,
+        source_catalog=None,
+    ) as (frames, metadata, verify):
+        write_dataset(
+            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
+        )
+    frames = verify = None
+    restored = read_dataset(root)
+    pd.testing.assert_frame_equal(restored, expected, check_exact=True)
+    assert len(restored) == len(base) + len(sol)
+    assert restored["timestamp"].is_monotonic_increasing
+    assert not restored.duplicated(list(spec.primary_key)).any()
+    session = open_dataset_session(root, columns=None, time_window=None)
+    assert session.manifest["input_dataset_identities"] == expected_identities
+    previous = None
+    rows = 0
+    for frame in iter_dataset_chunks(session):
+        if len(frame):
+            if previous is not None:
+                assert frame["timestamp"].iloc[0] >= previous
+            previous = frame["timestamp"].iloc[-1]
+        rows += len(frame)
+        frame = None
+    assert rows == len(expected)
+    windows = list(
+        _iter_research_chunk_windows_from_base_input(session, time_window=window)
+    )
+    assert windows[0].start == window.start
+    assert windows[-1].end == window.end
+    restored = expected = None

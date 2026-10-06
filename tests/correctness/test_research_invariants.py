@@ -20,7 +20,7 @@ from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
 from quant_research_platform.research.models.fitting import (
-    _fit_model_result_owned_from_frames,
+    _fit_model_result_from_frames,
 )
 from quant_research_platform.research.models.scaler import (
     ModelMatrixScaler,
@@ -47,13 +47,11 @@ from quant_research_platform.research.protocols.a_share import (
     SCENARIO_IDS,
     protocol,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.csmar.interim import interim_catalog
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
-from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_research_protocol_identity_and_surfaces_are_explicit() -> None:
@@ -225,18 +223,16 @@ def test_supervised_models_persist_a_training_only_scaler() -> None:
             "eligible": True,
         }
     )
-    with runtime_resource_policy_scope(None):
-        result = _fit_model_result_owned_from_frames(
-            [frame],
-            spec,
-            estimator=build_estimator_from_model_spec(spec),
-            fitting_cutoff="2024-01-02",
-        )
-        fitted = result.value
-        assert fitted.metadata["scaler"]["columns"] == ["feature"]
-        assert fitted.prediction_model.scaler.mean_ == (1.5,)
-        assert fitted.prediction_model.scaler.scale_ == (0.5,)
-        result.release(owner="test.scaler")
+    result = _fit_model_result_from_frames(
+        [frame],
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+        fitting_cutoff="2024-01-02",
+    )
+    fitted = result
+    assert fitted.metadata["scaler"]["columns"] == ["feature"]
+    assert fitted.prediction_model.scaler.mean_ == (1.5,)
+    assert fitted.prediction_model.scaler.scale_ == (0.5,)
 
 
 @pytest.mark.parametrize(
@@ -268,31 +264,22 @@ def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
             "label_available_at": timestamp,
         }
     )
-    with runtime_resource_policy_scope() as policy:
-        result = _fit_model_result_owned_from_frames(
-            (frame,),
-            spec,
-            estimator=build_estimator_from_model_spec(spec),
-            fitting_cutoff=timestamp,
+    result = _fit_model_result_from_frames(
+        (frame,),
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+        fitting_cutoff=timestamp,
+    )
+    metadata = validate_model_metadata_core(result.metadata)
+    assert metadata["hyperparameters"] == metadata["resolved_hyperparameters"] == {}
+    if algorithm == "linear_regression":
+        np.testing.assert_allclose(
+            result.prediction_model.predict(frame[["x"]]), frame.y
         )
-        try:
-            metadata = validate_model_metadata_core(result.value.metadata)
-            assert (
-                metadata["hyperparameters"]
-                == metadata["resolved_hyperparameters"]
-                == {}
-            )
-            if algorithm == "linear_regression":
-                np.testing.assert_allclose(
-                    result.value.prediction_model.predict(frame[["x"]]), frame.y
-                )
-            metadata["hyperparameters"] = {"fit_intercept": False}
-            metadata["resolved_hyperparameters"] = {"fit_intercept": False}
-            with pytest.raises(ValueError, match="^invalid_model_metadata$"):
-                validate_model_metadata_core(metadata)
-        finally:
-            result.release(owner="test.fixed_parameters")
-        assert policy.used_memory_bytes == 0
+    metadata["hyperparameters"] = {"fit_intercept": False}
+    metadata["resolved_hyperparameters"] = {"fit_intercept": False}
+    with pytest.raises(ValueError, match="^invalid_model_metadata$"):
+        validate_model_metadata_core(metadata)
 
 
 def test_model_fitting_excludes_labels_unavailable_at_fitting_cutoff() -> None:
@@ -319,18 +306,15 @@ def test_model_fitting_excludes_labels_unavailable_at_fitting_cutoff() -> None:
         }
     )
 
-    with runtime_resource_policy_scope(None):
-        result = _fit_model_result_owned_from_frames(
-            [frame],
-            spec,
-            estimator=build_estimator_from_model_spec(spec),
-            fitting_cutoff="2024-01-02",
-        )
-        fitted = result.value
-        assert fitted.metadata["rows_after_input_label_dropna"] == 2
-        assert fitted.metadata["train_end"] == "2024-01-01"
-        if hasattr(result, "release"):
-            result.release(owner="test.cutoff")
+    result = _fit_model_result_from_frames(
+        [frame],
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+        fitting_cutoff="2024-01-02",
+    )
+    fitted = result
+    assert fitted.metadata["rows_after_input_label_dropna"] == 2
+    assert fitted.metadata["train_end"] == "2024-01-01"
 
 
 def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
@@ -354,22 +338,20 @@ def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
             "eligible": True,
         }
     )
-    with runtime_resource_policy_scope(None):
-        result = _fit_model_result_owned_from_frames(
-            [frame],
-            spec,
-            estimator=build_estimator_from_model_spec(spec),
-            fitting_cutoff="2024-01-02",
-        )
-        fitted = result.value
-        predictions = fitted.prediction_model.predict(
-            frame.loc[:, ["timestamp", "factor_a", "factor_b"]]
-        )
-        assert fitted.prediction_model.directions == (1.0, -1.0)
-        assert predictions[-1] == pytest.approx(1.0 / 6.0)
-        assert np.isfinite(predictions).all()
-        assert fitted.metadata["scaler"] is None
-        result.release(owner="test.rank")
+    result = _fit_model_result_from_frames(
+        [frame],
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+        fitting_cutoff="2024-01-02",
+    )
+    fitted = result
+    predictions = fitted.prediction_model.predict(
+        frame.loc[:, ["timestamp", "factor_a", "factor_b"]]
+    )
+    assert fitted.prediction_model.directions == (1.0, -1.0)
+    assert predictions[-1] == pytest.approx(1.0 / 6.0)
+    assert np.isfinite(predictions).all()
+    assert fitted.metadata["scaler"] is None
 
 
 def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
@@ -1317,40 +1299,33 @@ def test_missing_raw_identity_blocks_dataset_build(tmp_path) -> None:
         }
     )
     layout = StorageLayout(project_root=tmp_path)
-    policy = capture_test_policy(
-        available_memory_bytes=512 * 1024 * 1024,
-        explicit_cap_bytes=256 * 1024 * 1024,
-    )
     source_frames = {
         "market_bars_1d": bars,
         "stock_master": stock,
         "market_cap": cap,
         "trading_calendar": calendar,
     }
-    with runtime_resource_policy_scope(policy):
-        for data_id, frame in source_frames.items():
-            spec = interim_catalog().get(data_id)
-            write_dataset(
-                layout.interim_data_root(spec.source_id, spec.data_id),
-                frame.loc[:, list(spec.required_columns)],
-                spec=spec,
-                resource_policy=policy,
-                borrowed_input=True,
-            )
-        from quant_research_platform.profiles.research import research_profile
+    for data_id, frame in source_frames.items():
+        spec = interim_catalog().get(data_id)
+        write_dataset(
+            layout.interim_data_root(spec.source_id, spec.data_id),
+            frame.loc[:, list(spec.required_columns)],
+            spec=spec,
+        )
+    from quant_research_platform.profiles.research import research_profile
 
-        result = research.dataset_build(
-            profile=research_profile(),
-            layout=layout,
-            dataset_id="pv_all",
-            start_date=sessions[0].date().isoformat(),
-            end_date=sessions[-1].date().isoformat(),
-        )
-        assert result["status"] == "BLOCKED"
-        assert any(
-            item["reason"] == "raw_content_identity_unavailable"
-            for item in result["blockers"]
-        )
+    result = research.dataset_build(
+        profile=research_profile(),
+        layout=layout,
+        dataset_id="pv_all",
+        start_date=sessions[0].date().isoformat(),
+        end_date=sessions[-1].date().isoformat(),
+    )
+    assert result["status"] == "BLOCKED"
+    assert any(
+        item["reason"] == "raw_content_identity_unavailable"
+        for item in result["blockers"]
+    )
 
 
 def test_factor_return_wls_uses_sqrt_cap_statistical_weight():
@@ -1677,96 +1652,3 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
         )
     )
     assert chunks[0].asset_id.tolist() == ["a", "b"]
-
-
-@pytest.mark.parametrize(
-    "capacity_case", ["physical", "explicit", "retained", "accepted"]
-)
-@pytest.mark.parametrize("fixed", [False, True])
-def test_optimizer_admits_native_workspace_before_solver_entry(
-    monkeypatch, capacity_case, fixed
-):
-    from scipy.optimize import _slsqp_py
-
-    from quant_research_platform.research.portfolios import optimizer
-    from quant_research_platform.runtime import resources
-
-    rows = 8 if capacity_case == "accepted" else 128
-    assets = pd.DataFrame(
-        {
-            "asset_id": [f"asset_{index}" for index in range(rows)],
-            "expected_alpha": np.linspace(-0.01, 0.01, rows),
-            "current_weight": 1.0 / rows,
-            "benchmark_weight": 1.0 / rows,
-            "specific_variance": 0.01,
-            "adv": 1e10,
-            "industry": 1.0,
-            "eligible": [not fixed or index % 2 == 0 for index in range(rows)],
-        }
-    )
-    covariance = pd.DataFrame([[0.0]], index=["industry"], columns=["industry"])
-    available = 64 * 1024 if capacity_case == "physical" else 4 * 1024**2
-    explicit = 64 * 1024 if capacity_case == "explicit" else None
-    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: available)
-    original_minimize = optimizer.minimize
-    native_slsqp = _slsqp_py.slsqp
-    entered = False
-    observed_native = False
-    retained = 0
-
-    def minimize(*args, **kwargs):
-        nonlocal entered
-        entered = True
-        return original_minimize(*args, **kwargs)
-
-    def slsqp(*args, **kwargs):
-        nonlocal observed_native
-        observed_native = True
-        arrays = {id(value): value for value in args if isinstance(value, np.ndarray)}
-        native_bytes = sum(value.nbytes for value in arrays.values())
-        assert policy.used_memory_bytes - retained >= native_bytes
-        assert policy.used_memory_bytes <= available
-        return native_slsqp(*args, **kwargs)
-
-    monkeypatch.setattr(optimizer, "minimize", minimize)
-    monkeypatch.setattr(_slsqp_py, "slsqp", slsqp)
-
-    def optimize():
-        return optimizer.optimize_portfolio(
-            assets,
-            factor_covariance=covariance,
-            industry_columns=("industry",),
-            expected_transaction_cost=lambda _weights: 0.0,
-            nav=1e9,
-            assumptions=EXECUTION_ASSUMPTIONS,
-            eligibility_column="eligible",
-        )
-
-    with resources.runtime_resource_policy_scope(explicit_cap_bytes=explicit) as policy:
-        retained = (
-            available - 64 * 1024
-            if capacity_case == "retained"
-            else policy.memory_budget_bytes
-            if capacity_case == "accepted"
-            else 0
-        )
-        with policy.lease("tests.optimizer.existing", retained):
-            if capacity_case == "accepted":
-                assert policy.planning_headroom_bytes == 0
-                result = optimize()
-                assert entered and observed_native
-                assert result.weights.sum() == pytest.approx(1.0)
-                assert result.predicted_tracking_error <= 0.05 + 1e-8
-                assert result.target_turnover <= 0.2 + 1e-8
-                assert result.maximum_adv_participation <= 0.05 + 1e-8
-                if fixed:
-                    np.testing.assert_allclose(result.weights.iloc[1::2], 1.0 / rows)
-            else:
-                with pytest.raises(
-                    ValueError, match="optimizer_working_set_exceeds_memory_capacity"
-                ):
-                    optimize()
-                assert not entered and not observed_native
-            assert policy.used_memory_bytes == retained
-        assert policy.used_memory_bytes == 0
-    assert policy.state == "CLOSED"

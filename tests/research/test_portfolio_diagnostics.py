@@ -4,9 +4,6 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.targets import unmeasured_operation_evidence
-from quant_research_platform.runtime.resources import (
-    runtime_resource_policy_scope as artifact_resource_scope,
-)
 
 
 def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
@@ -19,7 +16,6 @@ def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
     from quant_research_platform.research.portfolios.diagnostics import (
         iter_holding_factor_inputs,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.datasets import write_dataset
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.research_configuration import research_configuration
@@ -67,24 +63,19 @@ def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
         root = layout.processed_data_root("a_share", spec.kind, spec.data_id)
         write_dataset(root, frame, spec=spec)
         roots[spec.data_id] = root
-    with runtime_resource_policy_scope() as policy:
-        source = iter_holding_factor_inputs(
-            layout=layout.with_target_roots(roots),
-            calendar=pd.DataFrame({"calendar_date": dates}),
-            time_window=TimeWindow(dates[0], dates[-1]),
-            resource_policy=policy,
-            unified_trading_sessions=lambda frame: pd.DatetimeIndex(
-                frame.calendar_date
-            ),
-            style_columns=candidate.risk_style_columns,
-            risk_context_target_ids=candidate.risk_context_target_ids,
-            benchmark_required=False,
-        )
-        with closing_iterator(source):
-            first = next(source)
-            assert first.entry_at == dates[1] and first.end_at == dates[2]
-            assert first.reason == "holding_factor_fit_unidentified"
-        assert policy.used_memory_bytes == 0
+    source = iter_holding_factor_inputs(
+        layout=layout.with_target_roots(roots),
+        calendar=pd.DataFrame({"calendar_date": dates}),
+        time_window=TimeWindow(dates[0], dates[-1]),
+        unified_trading_sessions=lambda frame: pd.DatetimeIndex(frame.calendar_date),
+        style_columns=candidate.risk_style_columns,
+        risk_context_target_ids=candidate.risk_context_target_ids,
+        benchmark_required=False,
+    )
+    with closing_iterator(source):
+        first = next(source)
+        assert first.entry_at == dates[1] and first.end_at == dates[2]
+        assert first.reason == "holding_factor_fit_unidentified"
 
 
 def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
@@ -117,7 +108,6 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     from quant_research_platform.research.portfolios.diagnostics import (
         _portfolio_statistics_tables,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from tests.helpers.portfolio_ledger import write_test_sessions
     from tests.helpers.research_configuration import research_configuration
 
@@ -154,7 +144,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
                 end_notional=0.0 if cash else end[index],
                 decision_delta_weight=-decision_delta if cash else decision_delta,
                 adv20=10000.0,
-                block_reason="cash_pro_rata" if index == 0 and not cash else None,
+                block_reason="cash_pro_rata" if index == 0 and (not cash) else None,
                 decision_reason="simple_rule" if cash else np.nan,
             )
             row.update({name: 0.0 for name in PORTFOLIO_LEDGER_COST_COLUMNS})
@@ -164,41 +154,9 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         frame.attrs["end_timestamp"] = start + pd.Timedelta(days=1)
         frames.append(frame)
     artifacts = {}
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        for candidate in candidates:
-            envelope = build_business_manifest_envelope(
-                logical_artifact_id=candidate.candidate_id,
-                schema_identity="a" * 64,
-                protocol_or_spec_identity="b" * 64,
-                software_identity="c" * 64,
-                research_window={
-                    "start": "2023-01-02",
-                    "end": "2023-01-06",
-                    "access": "development",
-                },
-                upstream_identities={},
-                semantic_metadata={
-                    "portfolio_capital": {
-                        "candidate_id": candidate.candidate_id,
-                        "initial_capital": 1000.0,
-                        "valuation_currency": "CNY",
-                        "valuation_method": "adjusted_notional",
-                    }
-                },
-            )
-            root = write_test_sessions(
-                tmp_path / candidate.candidate_id,
-                envelope=envelope,
-                ledger_chunks=iter(frames),
-            )
-            artifacts[candidate.candidate_id] = read_portfolio_ledger_artifact(
-                root, expected_identity=envelope.instance_identity, lease=artifact_lease
-            )
+    for candidate in candidates:
         envelope = build_business_manifest_envelope(
-            logical_artifact_id="pv_all_portfolio_statistics",
+            logical_artifact_id=candidate.candidate_id,
             schema_identity="a" * 64,
             protocol_or_spec_identity="b" * 64,
             software_identity="c" * 64,
@@ -208,440 +166,386 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
                 "access": "development",
             },
             upstream_identities={},
-            semantic_metadata={},
-        )
-        from quant_research_platform.research.portfolios.risk import (
-            FactorRiskState,
-            HoldingFactorInputs,
-        )
-        from quant_research_platform.research.protocols.a_share import (
-            RISK_STYLE_COLUMNS,
-        )
-
-        rng = np.random.default_rng(179)
-        assets = ["a", *[f"asset_{i:03d}" for i in range(1, 100)]]
-        inputs = []
-        for index, frame in enumerate(frames):
-            entry = pd.Timestamp(frame.execution_date.iloc[0])
-            cross = pd.DataFrame(
-                {
-                    "timestamp": entry - pd.Timedelta(days=1),
-                    "asset_id": assets,
-                    "industry_standard_id": "CSRC2012",
-                    "industry_level1_code": ["A01"] * 50 + ["B01"] * 50,
-                    "float_market_cap": np.geomspace(100.0, 1e8, 100),
-                    "asset_return": rng.normal(scale=0.03, size=100),
-                    "eligible": True,
-                    **{name: rng.normal(size=100) for name in RISK_STYLE_COLUMNS},
+            semantic_metadata={
+                "portfolio_capital": {
+                    "candidate_id": candidate.candidate_id,
+                    "initial_capital": 1000.0,
+                    "valuation_currency": "CNY",
+                    "valuation_method": "adjusted_notional",
                 }
-            )
-            cross.loc[0, "asset_return"] = end[index] / after[index] - 1
-            fitted = FactorRiskState(
-                style_columns=RISK_STYLE_COLUMNS
-            ).fit_return_session(cross, require_complete=True)
-            assert fitted is not None
-            snapshots = pd.DataFrame(
-                [
-                    {"benchmark_id": benchmark, "asset_id": asset, "weight": 0.01}
-                    for benchmark in ("csi500", "csi1000")
-                    for asset in assets
-                ]
-            )
-            inputs.append(
-                HoldingFactorInputs(
-                    entry - pd.Timedelta(days=1),
-                    entry,
-                    entry + pd.Timedelta(days=1),
-                    fitted,
-                    pd.Series(100.0, index=assets),
-                    pd.Series(np.linspace(95.0, 105.0, 100), index=assets),
-                    snapshots,
-                )
-            )
-        benchmark = pd.DataFrame(
+            },
+        )
+        root = write_test_sessions(
+            tmp_path / candidate.candidate_id,
+            envelope=envelope,
+            ledger_chunks=iter(frames),
+        )
+        artifacts[candidate.candidate_id] = read_portfolio_ledger_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="pv_all_portfolio_statistics",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "2023-01-02",
+            "end": "2023-01-06",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={},
+    )
+    from quant_research_platform.research.portfolios.risk import (
+        FactorRiskState,
+        HoldingFactorInputs,
+    )
+    from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
+
+    rng = np.random.default_rng(179)
+    assets = ["a", *[f"asset_{i:03d}" for i in range(1, 100)]]
+    inputs = []
+    for index, frame in enumerate(frames):
+        entry = pd.Timestamp(frame.execution_date.iloc[0])
+        cross = pd.DataFrame(
+            {
+                "timestamp": entry - pd.Timedelta(days=1),
+                "asset_id": assets,
+                "industry_standard_id": "CSRC2012",
+                "industry_level1_code": ["A01"] * 50 + ["B01"] * 50,
+                "float_market_cap": np.geomspace(100.0, 100000000.0, 100),
+                "asset_return": rng.normal(scale=0.03, size=100),
+                "eligible": True,
+                **{name: rng.normal(size=100) for name in RISK_STYLE_COLUMNS},
+            }
+        )
+        cross.loc[0, "asset_return"] = end[index] / after[index] - 1
+        fitted = FactorRiskState(style_columns=RISK_STYLE_COLUMNS).fit_return_session(
+            cross, require_complete=True
+        )
+        assert fitted is not None
+        snapshots = pd.DataFrame(
             [
-                {
-                    "benchmark_id": name,
-                    "timestamp": pd.Timestamp("2023-01-03") + pd.Timedelta(days=index),
-                    "open": value,
-                }
-                for name in ("csi500", "csi1000")
-                for index, value in enumerate((100.0, 101.0, 103.0, 104.0))
+                {"benchmark_id": benchmark, "asset_id": asset, "weight": 0.01}
+                for benchmark in ("csi500", "csi1000")
+                for asset in assets
             ]
         )
-        benchmark_scans = []
-        original_eq = pd.Series.eq
-
-        def counted_eq(series, other, *args, **kwargs):
-            if series.name == "benchmark_id" and len(series) == len(benchmark):
-                benchmark_scans.append(len(series))
-            return original_eq(series, other, *args, **kwargs)
-
-        monkeypatch.setattr(pd.Series, "eq", counted_eq)
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease("test.artifact.metadata", 0) as nested_artifact_lease,
-        ):
-            owned = _portfolio_statistics_tables(
-                ledgers=artifacts,
-                candidates=candidates,
-                protocol_manifest=selected_protocol.manifest(),
-                time_window=TimeWindow("2023-01-02", "2023-01-06"),
-                resource_policy=policy,
-                benchmark_opens=benchmark,
-                holding_inputs=iter(inputs),
-                calendar=pd.DataFrame(
-                    {"calendar_date": pd.bdate_range("2023-01-02", "2023-01-06")}
-                ),
-                unified_trading_sessions=lambda frame: pd.DatetimeIndex(
-                    frame.calendar_date
-                ),
+        inputs.append(
+            HoldingFactorInputs(
+                entry - pd.Timedelta(days=1),
+                entry,
+                entry + pd.Timedelta(days=1),
+                fitted,
+                pd.Series(100.0, index=assets),
+                pd.Series(np.linspace(95.0, 105.0, 100), index=assets),
+                snapshots,
             )
-            assert benchmark_scans == [len(benchmark), len(benchmark)]
-            try:
-                root = write_statistics_artifact(
-                    tmp_path / "statistics",
-                    envelope=envelope,
-                    tables=owned.value,
-                    table_group="portfolio",
-                )
-            finally:
-                owned.release(owner="research.portfolio.statistics.output")
-            artifact = read_statistics_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                lease=nested_artifact_lease,
-            )
-            with artifact.table("portfolio_daily.parquet") as daily:
-                rows = daily.loc[daily.candidate_id.eq(candidates[0].candidate_id)]
-                np.testing.assert_allclose(
-                    rows.net_return,
-                    [
-                        float(Fraction(1, 25)),
-                        float(Fraction(-35, 1040)),
-                        float(Fraction(30, 1005)),
-                    ],
-                )
-                assert np.prod(1 + rows.net_return) == pytest.approx(1.035)
-                np.testing.assert_allclose(
-                    rows.gross_return - rows.cost_drag, rows.net_return
-                )
-                assert rows.nav_post.tolist() == [990.0, 1020.0, 1005.0]
-                assert (
-                    (rows.nav_end - rows.nav_post).sum(),
-                    (rows.nav_end - rows.nav_before).sum(),
-                    (rows.cost_drag * rows.nav_before).sum(),
-                ) == pytest.approx((65.0, 35.0, 30.0))
-            with artifact.table("portfolio_performance.parquet") as performance:
-                cagr = performance.loc[performance.metric_id.eq("cagr")]
-                assert len(cagr) == len(candidates)
-                assert cagr.status.eq("DEFINED").all()
-                assert cagr.observation_count.eq(3).all()
-                np.testing.assert_allclose(
-                    cagr.value, float(Fraction(207, 200) ** 84 - 1), rtol=1e-12
-                )
-            with artifact.table("portfolio_attribution.parquet") as attribution:
-                assert attribution.status.eq("DEFINED").all()
-                actual = (
-                    attribution.loc[attribution.component_type.eq("additive")]
-                    .groupby(["candidate_id", "entry_at"])
-                    .value.sum()
-                )
-                for candidate in candidates:
-                    np.testing.assert_allclose(
-                        actual.loc[candidate.candidate_id],
-                        [0.04, -35 / 1040, 30 / 1005],
-                        atol=1e-12,
-                    )
-                detail = (
-                    attribution.loc[
-                        attribution.candidate_id.eq(candidates[-1].candidate_id)
-                        & attribution.entry_at.eq(inputs[0].entry_at)
-                    ]
-                    .set_index("component_id")
-                    .value
-                )
-                ref = inputs[0].entry_open / inputs[0].decision_close
-                ref /= ref.sum()
-                w = pd.Series(0.0, index=assets)
-                w.loc["a"] = 0.99
-                assert detail["stock_residual_difference"] == pytest.approx(
-                    (w - ref).dot(inputs[0].fitted.residuals)
-                )
-                assert detail["benchmark_replication_gap"] != 0.0
-                assert detail["residual_unexplained"] == pytest.approx(
-                    detail["stock_residual_difference"]
-                    + detail["benchmark_replication_gap"]
-                )
-            with artifact.table("portfolio_exposures.parquet") as exposures:
-                first = (
-                    exposures.loc[
-                        exposures.candidate_id.eq(candidates[0].candidate_id)
-                        & exposures.entry_at.eq(inputs[0].entry_at)
-                    ]
-                    .set_index("factor_id")
-                    .value
-                )
-                np.testing.assert_allclose(
-                    first.reindex(inputs[0].fitted.exposures.columns),
-                    inputs[0].fitted.exposures.loc["a"],
-                )
-            assert (
-                policy.used_memory_bytes
-                == nested_artifact_lease.reserved_bytes + artifact_lease.reserved_bytes
-            )
-
-        from dataclasses import replace
-
-        from quant_research_platform.artifacts.portfolio_ledger import (
-            PortfolioLedgerArtifact,
         )
-        from quant_research_platform.policy.lifecycle import closing_iterator
-
-        def produce(policy, *, factor_inputs=inputs, benchmark_frame=benchmark):
-            return _portfolio_statistics_tables(
-                ledgers=artifacts,
-                candidates=candidates,
-                protocol_manifest=selected_protocol.manifest(),
-                time_window=TimeWindow("2023-01-02", "2023-01-06"),
-                resource_policy=policy,
-                benchmark_opens=benchmark_frame,
-                holding_inputs=iter(factor_inputs),
-                calendar=pd.DataFrame(
-                    {"calendar_date": pd.bdate_range("2023-01-02", "2023-01-06")}
-                ),
-                unified_trading_sessions=lambda frame: pd.DatetimeIndex(
-                    frame.calendar_date
-                ),
-            )
-
-        original = PortfolioLedgerArtifact.iter_chunks
-        for mode in ("missing_first", "missing_last", "interrupt", "missing_adv"):
-            closed = []
-
-            def altered(self, mode=mode, closed=closed):
-                try:
-                    with closing_iterator(original(self)) as source:
-                        for index, item in enumerate(source):
-                            if mode == "interrupt" and index == 1:
-                                raise KeyboardInterrupt("fixture interruption")
-                            if (mode == "missing_first" and index == 0) or (
-                                mode == "missing_last" and index == 2
-                            ):
-                                continue
-                            if mode == "missing_adv":
-                                item = replace(
-                                    item,
-                                    diagnostics=tuple(
-                                        row
-                                        for row in item.diagnostics
-                                        if row.name != "adv20"
-                                    ),
-                                )
-                            yield item
-                            item = None
-                finally:
-                    closed.append(self.identity)
-
-            with (
-                monkeypatch.context() as patch,
-                runtime_resource_policy_scope() as policy,
-            ):
-                patch.setattr(PortfolioLedgerArtifact, "iter_chunks", altered)
-                if mode == "missing_adv":
-                    owned = produce(policy)
-                    try:
-                        assert (
-                            owned.value["portfolio_capacity"].status.eq("BLOCKED").all()
-                        )
-                        assert (
-                            owned.value["portfolio_capacity_summary"]
-                            .status.eq("BLOCKED")
-                            .all()
-                        )
-                    finally:
-                        owned.release(owner="research.portfolio.statistics.output")
-                else:
-                    expected_error = (
-                        KeyboardInterrupt if mode == "interrupt" else ValueError
-                    )
-                    with pytest.raises(expected_error):
-                        produce(policy)
-                assert (
-                    closed and policy.used_memory_bytes == artifact_lease.reserved_bytes
-                )
-
-        no_fit = [
-            replace(item, fitted=None, reason="attribution_pit_history_missing")
-            for item in inputs
+    benchmark = pd.DataFrame(
+        [
+            {
+                "benchmark_id": name,
+                "timestamp": pd.Timestamp("2023-01-03") + pd.Timedelta(days=index),
+                "open": value,
+            }
+            for name in ("csi500", "csi1000")
+            for index, value in enumerate((100.0, 101.0, 103.0, 104.0))
         ]
-        absent_benchmark = benchmark.assign(open=np.nan)
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease("test.artifact.metadata", 0) as nested_artifact_lease,
-        ):
-            owned = produce(
-                policy, factor_inputs=no_fit, benchmark_frame=absent_benchmark
-            )
-            try:
-                root = write_statistics_artifact(
-                    tmp_path / "data/artifacts/a_share/pv_all_portfolio_statistics",
-                    envelope=envelope,
-                    tables=owned.value,
-                    table_group="portfolio",
-                )
-            finally:
-                owned.release(owner="research.portfolio.statistics.output")
-            artifact = read_statistics_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                lease=nested_artifact_lease,
-            )
-            with artifact.table("holding_factor_returns.parquet") as rows:
-                assert rows.empty
-            with artifact.table("portfolio_exposures.parquet") as rows:
-                assert rows.empty
-            with artifact.table("portfolio_performance.parquet") as rows:
-                assert (
-                    rows.loc[rows.metric_id.eq("tracking_error"), "status"]
-                    .eq("BLOCKED")
-                    .all()
-                )
-                assert (
-                    rows.loc[rows.metric_id.eq("net_pnl"), "status"].eq("DEFINED").all()
-                )
-            assert (
-                policy.used_memory_bytes
-                == nested_artifact_lease.reserved_bytes + artifact_lease.reserved_bytes
-            )
+    )
+    benchmark_scans = []
+    original_eq = pd.Series.eq
 
-        from quant_research_platform.artifacts.research import load_a_share_run_evidence
-        from quant_research_platform.contracts.json_codec import canonical_json_hash
-        from quant_research_platform.contracts.targets import (
-            ProducerKind,
-            ResearchRunRecord,
-            ResearchRunTargetResult,
-            RunStatus,
-            TargetStatus,
+    def counted_eq(series, other, *args, **kwargs):
+        if series.name == "benchmark_id" and len(series) == len(benchmark):
+            benchmark_scans.append(len(series))
+        return original_eq(series, other, *args, **kwargs)
+
+    monkeypatch.setattr(pd.Series, "eq", counted_eq)
+    owned = _portfolio_statistics_tables(
+        ledgers=artifacts,
+        candidates=candidates,
+        protocol_manifest=selected_protocol.manifest(),
+        time_window=TimeWindow("2023-01-02", "2023-01-06"),
+        benchmark_opens=benchmark,
+        holding_inputs=iter(inputs),
+        calendar=pd.DataFrame(
+            {"calendar_date": pd.bdate_range("2023-01-02", "2023-01-06")}
+        ),
+        unified_trading_sessions=lambda frame: pd.DatetimeIndex(frame.calendar_date),
+    )
+    assert benchmark_scans == [len(benchmark), len(benchmark)]
+    root = write_statistics_artifact(
+        tmp_path / "statistics",
+        envelope=envelope,
+        tables=owned,
+        table_group="portfolio",
+    )
+    artifact = read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with artifact.table("portfolio_daily.parquet") as daily:
+        rows = daily.loc[daily.candidate_id.eq(candidates[0].candidate_id)]
+        np.testing.assert_allclose(
+            rows.net_return,
+            [
+                float(Fraction(1, 25)),
+                float(Fraction(-35, 1040)),
+                float(Fraction(30, 1005)),
+            ],
         )
-        from quant_research_platform.reports.a_share import build_a_share_report
-        from quant_research_platform.storage.layout import StorageLayout
+        assert np.prod(1 + rows.net_return) == pytest.approx(1.035)
+        np.testing.assert_allclose(rows.gross_return - rows.cost_drag, rows.net_return)
+        assert rows.nav_post.tolist() == [990.0, 1020.0, 1005.0]
+        assert (
+            (rows.nav_end - rows.nav_post).sum(),
+            (rows.nav_end - rows.nav_before).sum(),
+            (rows.cost_drag * rows.nav_before).sum(),
+        ) == pytest.approx((65.0, 35.0, 30.0))
+    with artifact.table("portfolio_performance.parquet") as performance:
+        cagr = performance.loc[performance.metric_id.eq("cagr")]
+        assert len(cagr) == len(candidates)
+        assert cagr.status.eq("DEFINED").all()
+        assert cagr.observation_count.eq(3).all()
+        np.testing.assert_allclose(
+            cagr.value, float(Fraction(207, 200) ** 84 - 1), rtol=1e-12
+        )
+    with artifact.table("portfolio_attribution.parquet") as attribution:
+        assert attribution.status.eq("DEFINED").all()
+        actual = (
+            attribution.loc[attribution.component_type.eq("additive")]
+            .groupby(["candidate_id", "entry_at"])
+            .value.sum()
+        )
+        for candidate in candidates:
+            np.testing.assert_allclose(
+                actual.loc[candidate.candidate_id],
+                [0.04, -35 / 1040, 30 / 1005],
+                atol=1e-12,
+            )
+        detail = (
+            attribution.loc[
+                attribution.candidate_id.eq(candidates[-1].candidate_id)
+                & attribution.entry_at.eq(inputs[0].entry_at)
+            ]
+            .set_index("component_id")
+            .value
+        )
+        ref = inputs[0].entry_open / inputs[0].decision_close
+        ref /= ref.sum()
+        w = pd.Series(0.0, index=assets)
+        w.loc["a"] = 0.99
+        assert detail["stock_residual_difference"] == pytest.approx(
+            (w - ref).dot(inputs[0].fitted.residuals)
+        )
+        assert detail["benchmark_replication_gap"] != 0.0
+        assert detail["residual_unexplained"] == pytest.approx(
+            detail["stock_residual_difference"] + detail["benchmark_replication_gap"]
+        )
+    with artifact.table("portfolio_exposures.parquet") as exposures:
+        first = (
+            exposures.loc[
+                exposures.candidate_id.eq(candidates[0].candidate_id)
+                & exposures.entry_at.eq(inputs[0].entry_at)
+            ]
+            .set_index("factor_id")
+            .value
+        )
+        np.testing.assert_allclose(
+            first.reindex(inputs[0].fitted.exposures.columns),
+            inputs[0].fitted.exposures.loc["a"],
+        )
+    from dataclasses import replace
 
-        manifest = selected_protocol.manifest()
-        record = ResearchRunRecord(
-            operation_evidence=unmeasured_operation_evidence("fixture_record"),
-            run_id="run_portfolio_statistics",
-            profile_id="fixture",
-            scenario_id="pv_all",
-            protocol=manifest,
-            protocol_identity=canonical_json_hash(manifest),
-            research_window=envelope.research_window,
-            software_identity="c" * 64,
-            terminal_targets=("pv_all_portfolio_statistics",),
-            target_results=(
-                ResearchRunTargetResult(
-                    target_id="pv_all_portfolio_statistics",
-                    producer_kind=ProducerKind.STATISTIC,
-                    status=TargetStatus.BUILT,
-                    instance_identity=envelope.instance_identity,
-                    schema_identity=envelope.schema_identity,
-                    artifact_root="data/artifacts/a_share/pv_all_portfolio_statistics",
-                ),
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        PortfolioLedgerArtifact,
+    )
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    def produce(*, factor_inputs=inputs, benchmark_frame=benchmark):
+        return _portfolio_statistics_tables(
+            ledgers=artifacts,
+            candidates=candidates,
+            protocol_manifest=selected_protocol.manifest(),
+            time_window=TimeWindow("2023-01-02", "2023-01-06"),
+            benchmark_opens=benchmark_frame,
+            holding_inputs=iter(factor_inputs),
+            calendar=pd.DataFrame(
+                {"calendar_date": pd.bdate_range("2023-01-02", "2023-01-06")}
             ),
-            status=RunStatus.COMPLETE,
-        )
-        from quant_research_platform.artifacts.research import (
-            report_payload_working_set,
+            unified_trading_sessions=lambda frame: pd.DatetimeIndex(
+                frame.calendar_date
+            ),
         )
 
-        with (
-            runtime_resource_policy_scope() as report_policy,
-            report_policy.lease(
-                "reports.test_payload", report_payload_working_set(record.payload())
-            ) as report_lease,
-        ):
-            evidence = load_a_share_run_evidence(
-                layout=StorageLayout(tmp_path),
-                record=record,
-                report_lease=report_lease,
-                selections={},
+    original = PortfolioLedgerArtifact.iter_chunks
+    for mode in ("missing_first", "missing_last", "interrupt", "missing_adv"):
+        closed = []
+
+        def altered(self, mode=mode, closed=closed):
+            try:
+                with closing_iterator(original(self)) as source:
+                    for index, item in enumerate(source):
+                        if mode == "interrupt" and index == 1:
+                            raise KeyboardInterrupt("fixture interruption")
+                        if (
+                            mode == "missing_first"
+                            and index == 0
+                            or (mode == "missing_last" and index == 2)
+                        ):
+                            continue
+                        if mode == "missing_adv":
+                            item = replace(
+                                item,
+                                diagnostics=tuple(
+                                    row
+                                    for row in item.diagnostics
+                                    if row.name != "adv20"
+                                ),
+                            )
+                        yield item
+                        item = None
+            finally:
+                closed.append(self.identity)
+
+        with monkeypatch.context() as patch:
+            patch.setattr(PortfolioLedgerArtifact, "iter_chunks", altered)
+            if mode == "missing_adv":
+                owned = produce()
+                assert owned["portfolio_capacity"].status.eq("BLOCKED").all()
+                assert owned["portfolio_capacity_summary"].status.eq("BLOCKED").all()
+            else:
+                expected_error = (
+                    KeyboardInterrupt if mode == "interrupt" else ValueError
+                )
+                with pytest.raises(expected_error):
+                    produce()
+    no_fit = [
+        replace(item, fitted=None, reason="attribution_pit_history_missing")
+        for item in inputs
+    ]
+    absent_benchmark = benchmark.assign(open=np.nan)
+    owned = produce(factor_inputs=no_fit, benchmark_frame=absent_benchmark)
+    root = write_statistics_artifact(
+        tmp_path / "data/artifacts/a_share/pv_all_portfolio_statistics",
+        envelope=envelope,
+        tables=owned,
+        table_group="portfolio",
+    )
+    artifact = read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with artifact.table("holding_factor_returns.parquet") as rows:
+        assert rows.empty
+    with artifact.table("portfolio_exposures.parquet") as rows:
+        assert rows.empty
+    with artifact.table("portfolio_performance.parquet") as rows:
+        assert (
+            rows.loc[rows.metric_id.eq("tracking_error"), "status"].eq("BLOCKED").all()
+        )
+        assert rows.loc[rows.metric_id.eq("net_pnl"), "status"].eq("DEFINED").all()
+    from quant_research_platform.artifacts.research import load_a_share_run_evidence
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.targets import (
+        ProducerKind,
+        ResearchRunRecord,
+        ResearchRunTargetResult,
+        RunStatus,
+        TargetStatus,
+    )
+    from quant_research_platform.reports.a_share import build_a_share_report
+    from quant_research_platform.storage.layout import StorageLayout
+
+    manifest = selected_protocol.manifest()
+    record = ResearchRunRecord(
+        operation_evidence=unmeasured_operation_evidence("fixture_record"),
+        run_id="run_portfolio_statistics",
+        profile_id="fixture",
+        scenario_id="pv_all",
+        protocol=manifest,
+        protocol_identity=canonical_json_hash(manifest),
+        research_window=envelope.research_window,
+        software_identity="c" * 64,
+        terminal_targets=("pv_all_portfolio_statistics",),
+        target_results=(
+            ResearchRunTargetResult(
+                target_id="pv_all_portfolio_statistics",
+                producer_kind=ProducerKind.STATISTIC,
+                status=TargetStatus.BUILT,
+                instance_identity=envelope.instance_identity,
+                schema_identity=envelope.schema_identity,
+                artifact_root="data/artifacts/a_share/pv_all_portfolio_statistics",
+            ),
+        ),
+        status=RunStatus.COMPLETE,
+    )
+    evidence = load_a_share_run_evidence(
+        layout=StorageLayout(tmp_path), record=record, selections={}
+    )
+    report = build_a_share_report(record=record, evidence=evidence)
+    assert {
+        row["candidate_id"] for row in report["sections"]["portfolio"]["results"]
+    } == {candidate.candidate_id for candidate in candidates}
+    assert "artifact_status" in evidence["portfolio_statistics"], evidence[
+        "portfolio_statistics"
+    ]
+    assert evidence["portfolio_statistics"]["artifact_status"] == "DEFINED"
+    capacity_detail = report["sections"]["capacity"]["detail"]
+    assert capacity_detail == {
+        "artifact_identity": envelope.instance_identity,
+        "table": "portfolio_capacity.parquet",
+        "key_columns": ["candidate_id", "entry_at", "participation"],
+        "value_column": "bottleneck_asset_id",
+    }
+    with artifact.table(capacity_detail["table"]) as capacity_table:
+        assert set(capacity_detail["key_columns"]) | {
+            capacity_detail["value_column"]
+        } <= set(capacity_table.columns)
+    assert report["sections"]["risk"]["status"] == "BLOCKED"
+    exposures = report["sections"]["risk"]["exposures"]
+    assert exposures["artifact_identity"] == envelope.instance_identity
+    assert exposures["table"] == "portfolio_exposures.parquet"
+    with artifact.table(exposures["table"]) as exposure_table:
+        expected = exposure_table.loc[
+            exposure_table.entry_at.eq(
+                exposure_table.groupby("candidate_id").entry_at.transform("max")
             )
-            report = build_a_share_report(record=record, evidence=evidence)
-            assert {
-                row["candidate_id"]
-                for row in report["sections"]["portfolio"]["results"]
-            } == {candidate.candidate_id for candidate in candidates}
-            assert "artifact_status" in evidence["portfolio_statistics"], evidence[
-                "portfolio_statistics"
-            ]
-            assert evidence["portfolio_statistics"]["artifact_status"] == "DEFINED"
-            capacity_detail = report["sections"]["capacity"]["detail"]
-            assert capacity_detail == {
-                "artifact_identity": envelope.instance_identity,
-                "table": "portfolio_capacity.parquet",
-                "key_columns": ["candidate_id", "entry_at", "participation"],
-                "value_column": "bottleneck_asset_id",
-            }
-            with artifact.table(capacity_detail["table"]) as capacity_table:
-                assert set(capacity_detail["key_columns"]) | {
-                    capacity_detail["value_column"]
-                } <= set(capacity_table.columns)
-            assert report["sections"]["risk"]["status"] == "BLOCKED"
-            exposures = report["sections"]["risk"]["exposures"]
-            assert exposures["artifact_identity"] == envelope.instance_identity
-            assert exposures["table"] == "portfolio_exposures.parquet"
-            with artifact.table(exposures["table"]) as exposure_table:
-                expected = exposure_table.loc[
-                    exposure_table.entry_at.eq(
-                        exposure_table.groupby("candidate_id").entry_at.transform("max")
-                    )
-                ]
-                actual = pd.DataFrame(exposures["latest"])
-                assert len(actual) == len(expected)
-                if not actual.empty:
-                    keys = ["candidate_id", "factor_id"]
-                    np.testing.assert_allclose(
-                        actual.sort_values(keys).value, expected.sort_values(keys).value
-                    )
-                    assert actual.factor_id.str.startswith("industry_").any()
-                    assert (~actual.factor_id.str.startswith("industry_")).any()
-            assert report["source_run_status"] == "COMPLETE"
-            blocker = "global_development_selection_reuses_validation"
-            sections = report["sections"]
-            assert sections["portfolio"]["development_robustness_groups"] == [
-                "quarterly"
-            ]
-            assert sections["OOS prediction"]["global"]["inference_qualification"] == {
-                "status": "UNDEFINED",
-                "reason": blocker,
-            }
-            assert sections["OOS prediction"]["quarterly"][
-                "inference_qualification"
-            ] == {
-                "status": "ELIGIBLE",
-                "reason": None,
-            }
-            robustness = pd.DataFrame(evidence["portfolio_statistics"]["robustness"])
-            blocked_ids = [
-                item.candidate_id
-                for item in candidates
-                if item.selection_group == "global"
-            ]
-            global_rows = robustness.loc[robustness.candidate_id.isin(blocked_ids)]
-            assert len(global_rows) == 10 and global_rows.status.eq("UNDEFINED").all()
-            assert (
-                global_rows.reason.eq(blocker).all() and global_rows.value.isna().all()
+        ]
+        actual = pd.DataFrame(exposures["latest"])
+        assert len(actual) == len(expected)
+        if not actual.empty:
+            keys = ["candidate_id", "factor_id"]
+            np.testing.assert_allclose(
+                actual.sort_values(keys).value, expected.sort_values(keys).value
             )
-            assert robustness.candidate_count.eq(5).all()
-            assert sections["portfolio"]["paired_comparison"]
-            assert all(
-                row["reason"] == row["bootstrap_reason"] == blocker
-                for row in sections["portfolio"]["paired_comparison"]
-            )
-            assert any(
-                row.get("test_id") == "psr" for row in report["sections"]["robustness"]
-            )
-        assert report_policy.used_memory_bytes == artifact_lease.reserved_bytes
+            assert actual.factor_id.str.startswith("industry_").any()
+            assert (~actual.factor_id.str.startswith("industry_")).any()
+    assert report["source_run_status"] == "COMPLETE"
+    blocker = "global_development_selection_reuses_validation"
+    sections = report["sections"]
+    assert sections["portfolio"]["development_robustness_groups"] == ["quarterly"]
+    assert sections["OOS prediction"]["global"]["inference_qualification"] == {
+        "status": "UNDEFINED",
+        "reason": blocker,
+    }
+    assert sections["OOS prediction"]["quarterly"]["inference_qualification"] == {
+        "status": "ELIGIBLE",
+        "reason": None,
+    }
+    robustness = pd.DataFrame(evidence["portfolio_statistics"]["robustness"])
+    blocked_ids = [
+        item.candidate_id for item in candidates if item.selection_group == "global"
+    ]
+    global_rows = robustness.loc[robustness.candidate_id.isin(blocked_ids)]
+    assert len(global_rows) == 10 and global_rows.status.eq("UNDEFINED").all()
+    assert global_rows.reason.eq(blocker).all() and global_rows.value.isna().all()
+    assert robustness.candidate_count.eq(5).all()
+    assert sections["portfolio"]["paired_comparison"]
+    assert all(
+        row["reason"] == row["bootstrap_reason"] == blocker
+        for row in sections["portfolio"]["paired_comparison"]
+    )
+    assert any(row.get("test_id") == "psr" for row in report["sections"]["robustness"])
 
 
 def test_holding_input_reader_replays_real_history_and_freezes_decision_universe(
@@ -655,7 +559,6 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
         iter_holding_factor_inputs,
     )
     from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.datasets import write_dataset
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.research_specs import make_demo_research_dataset_spec
@@ -675,10 +578,10 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
             "asset_id": assets * 350,
             "adj_open": prices.ravel(),
             "adj_close": prices.ravel(),
-            "amount": 1e6,
+            "amount": 1000000.0,
             "market_type": 1,
             "period_return": returns.ravel(),
-            "float_market_cap": np.tile(np.geomspace(100.0, 1e6, 105), 350),
+            "float_market_cap": np.tile(np.geomspace(100.0, 1000000.0, 105), 350),
             "industry_standard_id": "CSRC2012",
             "industry_level1_code": np.tile(["A01"] * 52 + ["B01"] * 53, 350),
         }
@@ -761,45 +664,37 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
     layout = StorageLayout(tmp_path).with_target_roots(roots)
     calendar = pd.DataFrame({"calendar_date": dates})
     window = TimeWindow(dates[-4], dates[-1])
-    with runtime_resource_policy_scope() as policy:
-        source = iter_holding_factor_inputs(
-            benchmark_required=True,
-            layout=layout,
-            calendar=calendar,
-            time_window=window,
-            resource_policy=policy,
-            unified_trading_sessions=lambda frame: pd.DatetimeIndex(
-                frame.calendar_date
-            ),
-            style_columns=RISK_STYLE_COLUMNS,
-            risk_context_target_ids=risk_targets,
+    source = iter_holding_factor_inputs(
+        benchmark_required=True,
+        layout=layout,
+        calendar=calendar,
+        time_window=window,
+        unified_trading_sessions=lambda frame: pd.DatetimeIndex(frame.calendar_date),
+        style_columns=RISK_STYLE_COLUMNS,
+        risk_context_target_ids=risk_targets,
+    )
+    with closing_iterator(source):
+        first = next(source)
+        assert first.reason is None and first.fitted is not None
+        assert len(first.fitted.asset_returns) == 104
+        assert assets[-1] not in first.fitted.exposures.index
+        assert (
+            first.decision_at == dates[-4]
+            and first.entry_at == dates[-3]
+            and (first.end_at == dates[-2])
         )
-        with closing_iterator(source):
-            first = next(source)
-            assert first.reason is None and first.fitted is not None
-            assert len(first.fitted.asset_returns) == 104
-            assert assets[-1] not in first.fitted.exposures.index
-            assert (
-                first.decision_at == dates[-4]
-                and first.entry_at == dates[-3]
-                and first.end_at == dates[-2]
-            )
-            expected = (
-                panel.loc[panel.timestamp.eq(first.end_at)]
-                .set_index("asset_id")
-                .adj_open
-                / panel.loc[panel.timestamp.eq(first.entry_at)]
-                .set_index("asset_id")
-                .adj_open
-                - 1
-            )
-            np.testing.assert_allclose(
-                first.fitted.asset_returns,
-                expected.reindex(first.fitted.asset_returns.index),
-            )
-            first = None
-        assert policy.used_memory_bytes == 0
-
+        expected = (
+            panel.loc[panel.timestamp.eq(first.end_at)].set_index("asset_id").adj_open
+            / panel.loc[panel.timestamp.eq(first.entry_at)]
+            .set_index("asset_id")
+            .adj_open
+            - 1
+        )
+        np.testing.assert_allclose(
+            first.fitted.asset_returns,
+            expected.reindex(first.fitted.asset_returns.index),
+        )
+        first = None
     missing_panel = panel.copy()
     missing_panel.loc[
         missing_panel.timestamp.eq(dates[-2]) & missing_panel.asset_id.eq(assets[0]),
@@ -815,25 +710,20 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
     missing_layout = missing_layout.with_target_roots(
         {**roots, "market_panel_1d": missing_root}
     )
-    with runtime_resource_policy_scope() as policy:
-        source = iter_holding_factor_inputs(
-            benchmark_required=True,
-            layout=missing_layout,
-            calendar=calendar,
-            time_window=window,
-            resource_policy=policy,
-            unified_trading_sessions=lambda frame: pd.DatetimeIndex(
-                frame.calendar_date
-            ),
-            style_columns=RISK_STYLE_COLUMNS,
-            risk_context_target_ids=risk_targets,
-        )
-        with closing_iterator(source):
-            first = next(source)
-            assert first.fitted is None
-            assert first.reason == "holding_returns_incomplete"
-            first = None
-        assert policy.used_memory_bytes == 0
+    source = iter_holding_factor_inputs(
+        benchmark_required=True,
+        layout=missing_layout,
+        calendar=calendar,
+        time_window=window,
+        unified_trading_sessions=lambda frame: pd.DatetimeIndex(frame.calendar_date),
+        style_columns=RISK_STYLE_COLUMNS,
+        risk_context_target_ids=risk_targets,
+    )
+    with closing_iterator(source):
+        first = next(source)
+        assert first.fitted is None
+        assert first.reason == "holding_returns_incomplete"
+        first = None
 
 
 @pytest.mark.parametrize(
@@ -871,7 +761,6 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
         _portfolio_statistics_tables,
     )
     from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from tests.helpers.portfolio_ledger import write_test_sessions
     from tests.helpers.research_configuration import research_configuration
 
@@ -881,7 +770,6 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
     ).protocol("pv_all")
     candidates = selected_protocol.portfolio_candidates()
     if swap_group_metadata:
-        # Candidate IDs are opaque for inference eligibility.
         targets = dict(
             zip(
                 ("global", "quarterly"),
@@ -917,332 +805,271 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
         "access": "development",
     }
 
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-
-        def persisted_ledger(candidate, series, destination):
-            envelope = build_business_manifest_envelope(
-                logical_artifact_id=candidate.candidate_id,
-                schema_identity="a" * 64,
-                protocol_or_spec_identity="b" * 64,
-                software_identity="c" * 64,
-                research_window=window,
-                upstream_identities={},
-                semantic_metadata={
-                    "fixture_returns": series.tolist(),
-                    "portfolio_capital": {
-                        "candidate_id": candidate.candidate_id,
-                        "initial_capital": 1000.0,
-                        "valuation_currency": "CNY",
-                        "valuation_method": "adjusted_notional",
-                    },
-                },
-            )
-            frames = []
-            nav = 1000.0
-            for index in range(73):
-                rows = []
-                for asset in ("asset", "__cash__"):
-                    cash = asset == "__cash__"
-                    value = 0.0 if cash else nav
-                    rate = 0.0 if cash else series[index]
-                    row = {name: np.nan for name in CONTINUOUS_EXECUTION_COLUMNS}
-                    row.update(
-                        decision_timestamp=dates[index],
-                        execution_date=dates[index + 1],
-                        asset_id=asset,
-                        pre_trade_notional=value,
-                        target_notional=value,
-                        executed_delta_notional=0.0,
-                        post_trade_notional=value,
-                        holding_return=rate,
-                        end_notional=value * (1 + rate),
-                        decision_delta_weight=0.0,
-                        decision_reason="simple_rule" if cash else np.nan,
-                    )
-                    row.update({name: 0.0 for name in PORTFOLIO_LEDGER_COST_COLUMNS})
-                    rows.append(row)
-                frame = pd.DataFrame(rows, columns=CONTINUOUS_EXECUTION_COLUMNS)
-                frame.attrs["end_timestamp"] = dates[index + 2]
-                frames.append(frame)
-                nav *= 1 + series[index]
-            root = write_test_sessions(
-                destination,
-                envelope=envelope,
-                ledger_chunks=iter(frames),
-            )
-            return read_portfolio_ledger_artifact(
-                root, expected_identity=envelope.instance_identity, lease=artifact_lease
-            )
-
-        ledgers = {}
-        for group in (qualified, blocked):
-            for column, candidate in enumerate(group):
-                series = returns[:, column]
-                if candidate.selection_group == "global":
-                    series = 0.015 + 2 * series
-                ledgers[candidate.candidate_id] = persisted_ledger(
-                    candidate, series, tmp_path / candidate.candidate_id
-                )
-        inputs = [
-            HoldingFactorInputs(
-                dates[i],
-                dates[i + 1],
-                dates[i + 2],
-                None,
-                pd.Series(dtype=float),
-                pd.Series(dtype=float),
-                pd.DataFrame(columns=("benchmark_id", "asset_id", "weight")),
-                "attribution_pit_history_missing",
-            )
-            for i in range(73)
-        ]
+    def persisted_ledger(candidate, series, destination):
         envelope = build_business_manifest_envelope(
-            logical_artifact_id="pv_all_portfolio_statistics",
+            logical_artifact_id=candidate.candidate_id,
             schema_identity="a" * 64,
             protocol_or_spec_identity="b" * 64,
             software_identity="c" * 64,
             research_window=window,
             upstream_identities={},
-            semantic_metadata={},
+            semantic_metadata={
+                "fixture_returns": series.tolist(),
+                "portfolio_capital": {
+                    "candidate_id": candidate.candidate_id,
+                    "initial_capital": 1000.0,
+                    "valuation_currency": "CNY",
+                    "valuation_method": "adjusted_notional",
+                },
+            },
+        )
+        frames = []
+        nav = 1000.0
+        for index in range(73):
+            rows = []
+            for asset in ("asset", "__cash__"):
+                cash = asset == "__cash__"
+                value = 0.0 if cash else nav
+                rate = 0.0 if cash else series[index]
+                row = {name: np.nan for name in CONTINUOUS_EXECUTION_COLUMNS}
+                row.update(
+                    decision_timestamp=dates[index],
+                    execution_date=dates[index + 1],
+                    asset_id=asset,
+                    pre_trade_notional=value,
+                    target_notional=value,
+                    executed_delta_notional=0.0,
+                    post_trade_notional=value,
+                    holding_return=rate,
+                    end_notional=value * (1 + rate),
+                    decision_delta_weight=0.0,
+                    decision_reason="simple_rule" if cash else np.nan,
+                )
+                row.update({name: 0.0 for name in PORTFOLIO_LEDGER_COST_COLUMNS})
+                rows.append(row)
+            frame = pd.DataFrame(rows, columns=CONTINUOUS_EXECUTION_COLUMNS)
+            frame.attrs["end_timestamp"] = dates[index + 2]
+            frames.append(frame)
+            nav *= 1 + series[index]
+        root = write_test_sessions(
+            destination, envelope=envelope, ledger_chunks=iter(frames)
+        )
+        return read_portfolio_ledger_artifact(
+            root, expected_identity=envelope.instance_identity
         )
 
-        def produce(policy, selected_ledgers):
-            return _portfolio_statistics_tables(
-                ledgers=selected_ledgers,
-                candidates=candidates,
-                protocol_manifest=selected_protocol.manifest(),
-                time_window=TimeWindow(dates[0], dates[-1]),
-                resource_policy=policy,
-                benchmark_opens=pd.DataFrame(
-                    columns=("benchmark_id", "timestamp", "open")
-                ),
-                calendar=pd.DataFrame({"calendar_date": dates}),
-                unified_trading_sessions=lambda frame: pd.DatetimeIndex(
-                    frame.calendar_date
-                ),
-                holding_inputs=iter(inputs),
+    ledgers = {}
+    for group in (qualified, blocked):
+        for column, candidate in enumerate(group):
+            series = returns[:, column]
+            if candidate.selection_group == "global":
+                series = 0.015 + 2 * series
+            ledgers[candidate.candidate_id] = persisted_ledger(
+                candidate, series, tmp_path / candidate.candidate_id
             )
+    inputs = [
+        HoldingFactorInputs(
+            dates[i],
+            dates[i + 1],
+            dates[i + 2],
+            None,
+            pd.Series(dtype=float),
+            pd.Series(dtype=float),
+            pd.DataFrame(columns=("benchmark_id", "asset_id", "weight")),
+            "attribution_pit_history_missing",
+        )
+        for i in range(73)
+    ]
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="pv_all_portfolio_statistics",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window=window,
+        upstream_identities={},
+        semantic_metadata={},
+    )
 
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease("test.artifact.metadata", 0) as nested_artifact_lease,
-        ):
-            owned = produce(policy, ledgers)
-            try:
-                root = write_statistics_artifact(
-                    tmp_path / "statistics",
-                    envelope=envelope,
-                    tables=owned.value,
-                    table_group="portfolio",
+    def produce(selected_ledgers):
+        return _portfolio_statistics_tables(
+            ledgers=selected_ledgers,
+            candidates=candidates,
+            protocol_manifest=selected_protocol.manifest(),
+            time_window=TimeWindow(dates[0], dates[-1]),
+            benchmark_opens=pd.DataFrame(columns=("benchmark_id", "timestamp", "open")),
+            calendar=pd.DataFrame({"calendar_date": dates}),
+            unified_trading_sessions=lambda frame: pd.DatetimeIndex(
+                frame.calendar_date
+            ),
+            holding_inputs=iter(inputs),
+        )
+
+    owned = produce(ledgers)
+    root = write_statistics_artifact(
+        tmp_path / "statistics",
+        envelope=envelope,
+        tables=owned,
+        table_group="portfolio",
+    )
+    corrupt = dict(owned)
+    corrupt["portfolio_daily"] = pd.concat(
+        [corrupt["portfolio_daily"], corrupt["portfolio_daily"].iloc[:1]],
+        ignore_index=True,
+    )
+    rejected = build_business_manifest_envelope(
+        logical_artifact_id="pv_all_portfolio_statistics",
+        schema_identity="d" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window=window,
+        upstream_identities={},
+        semantic_metadata={},
+    )
+    with pytest.raises(ValueError, match="statistics_table_duplicate_keys"):
+        write_statistics_artifact(
+            tmp_path / "statistics",
+            envelope=rejected,
+            tables=corrupt,
+            table_group="portfolio",
+        )
+    assert not (root.parent / rejected.instance_identity).exists()
+    corrupt = None
+    artifact = read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with artifact.table("portfolio_robustness.parquet") as rows:
+        assert len(rows) == 21 and rows.candidate_count.eq(5).all()
+        global_rows = rows.loc[rows.candidate_id.isin(blocked_ids)]
+        assert len(global_rows) == 10
+        assert global_rows.status.eq("UNDEFINED").all()
+        assert global_rows.reason.eq(reason).all()
+        assert global_rows.value.isna().all()
+        baseline_qualified = (
+            rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
+            .reset_index(drop=True)
+            .copy()
+        )
+    with artifact.table("portfolio_group_comparison.parquet") as rows:
+        assert len(rows) == 5
+        assert rows.status.eq("UNDEFINED").all()
+        assert rows.reason.eq(reason).all()
+        assert rows.bootstrap_status.eq("UNDEFINED").all()
+        assert rows.bootstrap_reason.eq(reason).all()
+        assert (
+            rows[["p_value", "bootstrap_lower", "bootstrap_upper"]].isna().all().all()
+        )
+        assert rows.global_mean.notna().all() and rows.quarterly_mean.notna().all()
+    if constant:
+        with artifact.table("portfolio_performance.parquet") as rows:
+            selected = rows.loc[
+                rows.candidate_id.eq(qualified[0].candidate_id)
+            ].set_index("metric_id")
+            assert selected.loc["sharpe", "status"] == "UNDEFINED"
+            assert selected.loc["annualized_volatility", "value"] == 0.0
+        with artifact.table("portfolio_robustness.parquet") as rows:
+            rows = rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
+            assert len(rows) == 11
+            assert rows.candidate_count.eq(5).all()
+            assert rows.loc[rows.test_id.eq("dsr"), "status"].eq("UNDEFINED").all()
+            assert rows.loc[rows.test_id.eq("cscv_pbo"), "status"].eq("UNDEFINED").all()
+            psr = rows.loc[rows.test_id.eq("psr")].set_index("candidate_id")
+            assert psr.loc[qualified[0].candidate_id, "status"] == "UNDEFINED"
+            assert psr.loc[qualified_ids[1:], "status"].eq("DEFINED").all()
+        return
+    with artifact.table("portfolio_robustness.parquet") as rows:
+        rows = rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
+        assert len(rows) == 11 and rows.status.eq("DEFINED").all()
+        sharpes = returns.mean(axis=0) / returns.std(axis=0, ddof=1)
+        reference = sharpes.std(ddof=1) * (
+            (1 - np.euler_gamma) * norm.ppf(0.8)
+            + np.euler_gamma * norm.ppf(1 - 1 / (5 * np.e))
+        )
+        for column, candidate in enumerate(qualified):
+            series = returns[:, column]
+            score = sharpes[column]
+            se = np.sqrt(
+                (
+                    1
+                    - skew(series, bias=False) * score
+                    + (kurtosis(series, fisher=False, bias=False) - 1) * score**2 / 4
                 )
-                corrupt = dict(owned.value)
-                corrupt["portfolio_daily"] = pd.concat(
-                    [corrupt["portfolio_daily"], corrupt["portfolio_daily"].iloc[:1]],
-                    ignore_index=True,
-                )
-                rejected = build_business_manifest_envelope(
-                    logical_artifact_id="pv_all_portfolio_statistics",
-                    schema_identity="d" * 64,
-                    protocol_or_spec_identity="b" * 64,
-                    software_identity="c" * 64,
-                    research_window=window,
-                    upstream_identities={},
-                    semantic_metadata={},
-                )
-                with pytest.raises(ValueError, match="statistics_table_duplicate_keys"):
-                    write_statistics_artifact(
-                        tmp_path / "statistics",
-                        envelope=rejected,
-                        tables=corrupt,
-                        table_group="portfolio",
-                    )
-                assert not (root.parent / rejected.instance_identity).exists()
-                corrupt = None
-            finally:
-                owned.release(owner="research.portfolio.statistics.output")
-            artifact = read_statistics_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                lease=nested_artifact_lease,
+                / 72
             )
-            with artifact.table("portfolio_robustness.parquet") as rows:
-                assert len(rows) == 21 and rows.candidate_count.eq(5).all()
-                global_rows = rows.loc[rows.candidate_id.isin(blocked_ids)]
-                assert len(global_rows) == 10
-                assert global_rows.status.eq("UNDEFINED").all()
-                assert global_rows.reason.eq(reason).all()
-                assert global_rows.value.isna().all()
-                baseline_qualified = (
-                    rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
-                    .reset_index(drop=True)
-                    .copy()
-                )
-            with artifact.table("portfolio_group_comparison.parquet") as rows:
-                assert len(rows) == 5
-                assert rows.status.eq("UNDEFINED").all()
-                assert rows.reason.eq(reason).all()
-                assert rows.bootstrap_status.eq("UNDEFINED").all()
-                assert rows.bootstrap_reason.eq(reason).all()
-                assert (
-                    rows[["p_value", "bootstrap_lower", "bootstrap_upper"]]
-                    .isna()
-                    .all()
-                    .all()
-                )
-                assert (
-                    rows.global_mean.notna().all() and rows.quarterly_mean.notna().all()
-                )
-            if constant:
-                with artifact.table("portfolio_performance.parquet") as rows:
-                    selected = rows.loc[
-                        rows.candidate_id.eq(qualified[0].candidate_id)
-                    ].set_index("metric_id")
-                    assert selected.loc["sharpe", "status"] == "UNDEFINED"
-                    assert selected.loc["annualized_volatility", "value"] == 0.0
-                with artifact.table("portfolio_robustness.parquet") as rows:
-                    rows = rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
-                    assert len(rows) == 11
-                    assert rows.candidate_count.eq(5).all()
-                    assert (
-                        rows.loc[rows.test_id.eq("dsr"), "status"].eq("UNDEFINED").all()
-                    )
-                    assert (
-                        rows.loc[rows.test_id.eq("cscv_pbo"), "status"]
-                        .eq("UNDEFINED")
-                        .all()
-                    )
-                    psr = rows.loc[rows.test_id.eq("psr")].set_index("candidate_id")
-                    assert psr.loc[qualified[0].candidate_id, "status"] == "UNDEFINED"
-                    assert psr.loc[qualified_ids[1:], "status"].eq("DEFINED").all()
-                assert (
-                    policy.used_memory_bytes
-                    == nested_artifact_lease.reserved_bytes
-                    + artifact_lease.reserved_bytes
-                )
-                return
-            with artifact.table("portfolio_robustness.parquet") as rows:
-                rows = rows.loc[rows.candidate_id.isin([*qualified_ids, "joint"])]
-                assert len(rows) == 11 and rows.status.eq("DEFINED").all()
-                sharpes = returns.mean(axis=0) / returns.std(axis=0, ddof=1)
-                reference = sharpes.std(ddof=1) * (
-                    (1 - np.euler_gamma) * norm.ppf(0.8)
-                    + np.euler_gamma * norm.ppf(1 - 1 / (5 * np.e))
-                )
-                for column, candidate in enumerate(qualified):
-                    series = returns[:, column]
-                    score = sharpes[column]
-                    se = np.sqrt(
-                        (
-                            1
-                            - skew(series, bias=False) * score
-                            + (kurtosis(series, fisher=False, bias=False) - 1)
-                            * score**2
-                            / 4
-                        )
-                        / 72
-                    )
-                    actual = (
-                        rows.loc[rows.candidate_id.eq(candidate.candidate_id)]
-                        .set_index("test_id")
-                        .value
-                    )
-                    assert actual.psr == pytest.approx(norm.cdf(score / se))
-                    assert actual.dsr == pytest.approx(
-                        norm.cdf((score - reference) / se)
-                    )
-                blocks = np.array_split(np.arange(73), 10)
-                outcomes = []
-                for chosen in combinations(range(10), 5):
-                    train = returns[np.concatenate([blocks[i] for i in chosen])]
-                    test = returns[
-                        np.concatenate(
-                            [blocks[i] for i in range(10) if i not in chosen]
-                        )
-                    ]
-                    winner = np.argmax(train.mean(axis=0) / train.std(axis=0, ddof=1))
-                    rank = rankdata(test.mean(axis=0) / test.std(axis=0, ddof=1))[
-                        winner
-                    ]
-                    outcomes.append(rank / 6 <= 0.5)
-                assert len(outcomes) == 252
-                assert rows.loc[rows.test_id.eq("cscv_pbo"), "value"].iloc[
-                    0
-                ] == pytest.approx(np.mean(outcomes))
-            with artifact.table("portfolio_capacity.parquet") as rows:
-                assert rows.empty
-            with artifact.table("portfolio_capacity_summary.parquet") as rows:
-                assert (
-                    rows.status.eq("UNDEFINED").all()
-                    and rows.reason.eq("no_rebalance_requests").all()
-                )
-            if not swap_group_metadata:
-                altered_ledgers = dict(ledgers)
-                for column, candidate in enumerate(blocked):
-                    extreme = np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10)
-                    altered_ledgers[candidate.candidate_id] = persisted_ledger(
-                        candidate,
-                        extreme,
-                        tmp_path / "changed_global" / candidate.candidate_id,
-                    )
-                changed = produce(policy, altered_ledgers)
-                try:
-                    changed_envelope = build_business_manifest_envelope(
-                        logical_artifact_id="pv_all_portfolio_statistics",
-                        schema_identity="a" * 64,
-                        protocol_or_spec_identity="b" * 64,
-                        software_identity="c" * 64,
-                        research_window=window,
-                        upstream_identities={
-                            key: ledger.identity
-                            for key, ledger in altered_ledgers.items()
-                        },
-                        semantic_metadata={},
-                    )
-                    changed_root = write_statistics_artifact(
-                        tmp_path / "changed_statistics",
-                        envelope=changed_envelope,
-                        tables=changed.value,
-                        table_group="portfolio",
-                    )
-                    saved = read_statistics_artifact(
-                        changed_root,
-                        expected_identity=changed_envelope.instance_identity,
-                        lease=nested_artifact_lease,
-                    )
-                    with saved.table("portfolio_robustness.parquet") as changed_rows:
-                        pd.testing.assert_frame_equal(
-                            changed_rows.loc[
-                                changed_rows.candidate_id.isin(
-                                    [*qualified_ids, "joint"]
-                                )
-                            ].reset_index(drop=True),
-                            baseline_qualified,
-                            check_exact=True,
-                        )
-                    changed_rows = changed.value["portfolio_robustness"]
-                    global_rows = changed_rows.loc[
-                        changed_rows.candidate_id.isin(blocked_ids)
-                    ]
-                    assert global_rows.status.eq("UNDEFINED").all()
-                    assert global_rows.reason.eq(reason).all()
-                    assert global_rows.value.isna().all()
-                    actual = changed.value["portfolio_daily"]
-                    for column, candidate in enumerate(blocked):
-                        selected = actual.loc[
-                            actual.candidate_id.eq(candidate.candidate_id)
-                        ]
-                        np.testing.assert_allclose(
-                            selected.net_return,
-                            np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10),
-                        )
-                finally:
-                    changed.release(owner="research.portfolio.statistics.output")
-            assert (
-                policy.used_memory_bytes
-                == nested_artifact_lease.reserved_bytes + artifact_lease.reserved_bytes
+            actual = (
+                rows.loc[rows.candidate_id.eq(candidate.candidate_id)]
+                .set_index("test_id")
+                .value
+            )
+            assert actual.psr == pytest.approx(norm.cdf(score / se))
+            assert actual.dsr == pytest.approx(norm.cdf((score - reference) / se))
+        blocks = np.array_split(np.arange(73), 10)
+        outcomes = []
+        for chosen in combinations(range(10), 5):
+            train = returns[np.concatenate([blocks[i] for i in chosen])]
+            test = returns[
+                np.concatenate([blocks[i] for i in range(10) if i not in chosen])
+            ]
+            winner = np.argmax(train.mean(axis=0) / train.std(axis=0, ddof=1))
+            rank = rankdata(test.mean(axis=0) / test.std(axis=0, ddof=1))[winner]
+            outcomes.append(rank / 6 <= 0.5)
+        assert len(outcomes) == 252
+        assert rows.loc[rows.test_id.eq("cscv_pbo"), "value"].iloc[0] == pytest.approx(
+            np.mean(outcomes)
+        )
+    with artifact.table("portfolio_capacity.parquet") as rows:
+        assert rows.empty
+    with artifact.table("portfolio_capacity_summary.parquet") as rows:
+        assert (
+            rows.status.eq("UNDEFINED").all()
+            and rows.reason.eq("no_rebalance_requests").all()
+        )
+    if not swap_group_metadata:
+        altered_ledgers = dict(ledgers)
+        for column, candidate in enumerate(blocked):
+            extreme = np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10)
+            altered_ledgers[candidate.candidate_id] = persisted_ledger(
+                candidate, extreme, tmp_path / "changed_global" / candidate.candidate_id
+            )
+        changed = produce(altered_ledgers)
+        changed_envelope = build_business_manifest_envelope(
+            logical_artifact_id="pv_all_portfolio_statistics",
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity="c" * 64,
+            research_window=window,
+            upstream_identities={
+                key: ledger.identity for key, ledger in altered_ledgers.items()
+            },
+            semantic_metadata={},
+        )
+        changed_root = write_statistics_artifact(
+            tmp_path / "changed_statistics",
+            envelope=changed_envelope,
+            tables=changed,
+            table_group="portfolio",
+        )
+        saved = read_statistics_artifact(
+            changed_root, expected_identity=changed_envelope.instance_identity
+        )
+        with saved.table("portfolio_robustness.parquet") as changed_rows:
+            pd.testing.assert_frame_equal(
+                changed_rows.loc[
+                    changed_rows.candidate_id.isin([*qualified_ids, "joint"])
+                ].reset_index(drop=True),
+                baseline_qualified,
+                check_exact=True,
+            )
+        changed_rows = changed["portfolio_robustness"]
+        global_rows = changed_rows.loc[changed_rows.candidate_id.isin(blocked_ids)]
+        assert global_rows.status.eq("UNDEFINED").all()
+        assert global_rows.reason.eq(reason).all()
+        assert global_rows.value.isna().all()
+        actual = changed["portfolio_daily"]
+        for column, candidate in enumerate(blocked):
+            selected = actual.loc[actual.candidate_id.eq(candidate.candidate_id)]
+            np.testing.assert_allclose(
+                selected.net_return,
+                np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10),
             )
 
 
@@ -1275,10 +1102,6 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     )
     from quant_research_platform.research.portfolios.diagnostics import (
         build_portfolio_statistics_tables,
-    )
-    from quant_research_platform.runtime.resources import (
-        current_runtime_resource_policy,
-        runtime_resource_policy_scope,
     )
     from quant_research_platform.storage.datasets import write_dataset
     from quant_research_platform.storage.identity import (
@@ -1364,31 +1187,26 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     ledger_frame = pd.DataFrame(ledger_rows, columns=CONTINUOUS_EXECUTION_COLUMNS)
     ledger_frame.attrs["end_timestamp"] = dates[2]
     ledgers = {}
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        for candidate in candidates:
-            contract = envelope(
-                candidate.candidate_id,
-                metadata={
-                    "portfolio_capital": {
-                        "candidate_id": candidate.candidate_id,
-                        "initial_capital": 1000.0,
-                        "valuation_currency": "CNY",
-                        "valuation_method": "adjusted_notional",
-                    }
-                },
-            )
-            root = write_test_sessions(
-                tmp_path / "ledgers" / candidate.candidate_id,
-                envelope=contract,
-                ledger_chunks=iter((ledger_frame,)),
-            )
-            ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(
-                root, expected_identity=contract.instance_identity, lease=artifact_lease
-            )
-
+    for candidate in candidates:
+        contract = envelope(
+            candidate.candidate_id,
+            metadata={
+                "portfolio_capital": {
+                    "candidate_id": candidate.candidate_id,
+                    "initial_capital": 1000.0,
+                    "valuation_currency": "CNY",
+                    "valuation_method": "adjusted_notional",
+                }
+            },
+        )
+        root = write_test_sessions(
+            tmp_path / "ledgers" / candidate.candidate_id,
+            envelope=contract,
+            ledger_chunks=iter((ledger_frame,)),
+        )
+        ledgers[candidate.candidate_id] = read_portfolio_ledger_artifact(
+            root, expected_identity=contract.instance_identity
+        )
     market = pd.DataFrame(
         [
             {
@@ -1410,11 +1228,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         ]
     )
     cases = [("derived_and_native", (), None)]
-    for code, field in (
-        ("000905", "open"),
-        ("000905", "close"),
-        ("H00905", "close"),
-    ):
+    for code, field in (("000905", "open"), ("000905", "close"), ("H00905", "close")):
         for label, value in (
             ("missing", np.nan),
             ("negative", -1.0),
@@ -1453,8 +1267,7 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         source = market.copy(deep=True)
         for code, field, value in mutations:
             source.loc[
-                source.source_asset_id.eq(code) & source.timestamp.eq(dates[1]),
-                field,
+                source.source_asset_id.eq(code) & source.timestamp.eq(dates[1]), field
             ] = value
         if case == "unconsumed_invalid":
             unused = source.timestamp.eq(dates[0])
@@ -1473,112 +1286,93 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         if expected_status == "WRITE_ERROR":
             with pytest.raises(ValueError, match="^dataset_infinite_value$"):
                 write_dataset(
-                    index_root,
-                    source,
-                    spec=_interim_specs().get("index_market"),
+                    index_root, source, spec=_interim_specs().get("index_market")
                 )
             assert not index_root.exists()
-            assert current_runtime_resource_policy() is None
             pd.testing.assert_frame_equal(source, original, check_exact=True)
             assert tree_hash(good_root) == good_hash
             continue
-        write_dataset(
-            index_root,
-            source,
-            spec=_interim_specs().get("index_market"),
-        )
+        write_dataset(index_root, source, spec=_interim_specs().get("index_market"))
         before = tree_hash(index_root)
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease("test.artifact.metadata", 0) as nested_artifact_lease,
-        ):
-            kwargs = dict(
-                ledgers=ledgers,
-                candidates=candidates,
-                protocol_manifest=manifest,
-                time_window=TimeWindow(dates[0], dates[-1]),
-                resource_policy=policy,
-                unified_trading_sessions=lambda calendar: pd.DatetimeIndex(
-                    calendar.calendar_date
-                ),
-                layout=layout.with_target_roots({**roots, "index_market": index_root}),
+        kwargs = dict(
+            ledgers=ledgers,
+            candidates=candidates,
+            protocol_manifest=manifest,
+            time_window=TimeWindow(dates[0], dates[-1]),
+            unified_trading_sessions=lambda calendar: pd.DatetimeIndex(
+                calendar.calendar_date
+            ),
+            layout=layout.with_target_roots({**roots, "index_market": index_root}),
+        )
+        if expected_status == "ERROR":
+            with pytest.raises(ValueError, match="^benchmark_return_open_invalid$"):
+                build_portfolio_statistics_tables(**kwargs)
+        else:
+            owned = build_portfolio_statistics_tables(**kwargs)
+            contract = envelope(
+                "pv_all_portfolio_statistics", metadata={"fixture_case": case}
             )
-            if expected_status == "ERROR":
-                with pytest.raises(ValueError, match="^benchmark_return_open_invalid$"):
-                    build_portfolio_statistics_tables(**kwargs)
-            else:
-                owned = build_portfolio_statistics_tables(**kwargs)
-                contract = envelope(
-                    "pv_all_portfolio_statistics", metadata={"fixture_case": case}
-                )
-                try:
-                    root = write_statistics_artifact(
-                        tmp_path / "statistics",
-                        envelope=contract,
-                        tables=owned.value,
-                        table_group="portfolio",
-                    )
-                finally:
-                    owned.release(owner="research.portfolio.statistics.output")
-                artifact = read_statistics_artifact(
-                    root,
-                    expected_identity=contract.instance_identity,
-                    lease=nested_artifact_lease,
-                )
-                with artifact.table("portfolio_daily.parquet") as daily:
-                    for candidate in candidates:
-                        if candidate.benchmark_id is None:
-                            continue
-                        row = daily.loc[
-                            daily.candidate_id.eq(candidate.candidate_id)
-                        ].iloc[0]
-                        if (
-                            candidate.benchmark_id == "csi500"
-                            and expected_status == "BLOCKED"
-                        ):
-                            assert row.benchmark_status == "BLOCKED"
-                            assert (
-                                row.benchmark_reason
-                                == "benchmark_total_return_open_missing"
-                            )
-                            assert pd.isna(row.benchmark_return) and pd.isna(
-                                row.active_return
-                            )
-                        else:
-                            expected = (
-                                Fraction(71, 1000)
-                                if candidate.benchmark_id == "csi500"
-                                else Fraction(1, 20)
-                            )
-                            assert row.benchmark_status == "DEFINED"
-                            assert row.benchmark_return == pytest.approx(
-                                float(expected), abs=1e-14
-                            )
-                            assert row.active_return == pytest.approx(
-                                float(Fraction(1, 25) - expected), abs=1e-14
-                            )
-                            assert row.relative_wealth == pytest.approx(
-                                float(Fraction(26, 25) / (1 + expected)), abs=1e-14
-                            )
-                with artifact.table("portfolio_performance.parquet") as summary:
-                    for candidate in candidates:
-                        if candidate.benchmark_id != "csi500":
-                            continue
-                        value = summary.loc[
-                            summary.candidate_id.eq(candidate.candidate_id)
-                            & summary.metric_id.eq("annualized_active_return")
-                        ].iloc[0]
-                        if expected_status == "BLOCKED":
-                            assert value.status == "BLOCKED" and pd.isna(value.value)
-                        else:
-                            assert value.status == "DEFINED"
-                            assert value.value == pytest.approx(
-                                float(Fraction(-31, 1000) * 252), abs=1e-12
-                            )
-                if case == "derived_and_native":
-                    good_root, good_hash = root, tree_hash(root)
-            assert policy.used_memory_bytes == nested_artifact_lease.reserved_bytes
-        assert policy.state == "CLOSED"
+            root = write_statistics_artifact(
+                tmp_path / "statistics",
+                envelope=contract,
+                tables=owned,
+                table_group="portfolio",
+            )
+            artifact = read_statistics_artifact(
+                root, expected_identity=contract.instance_identity
+            )
+            with artifact.table("portfolio_daily.parquet") as daily:
+                for candidate in candidates:
+                    if candidate.benchmark_id is None:
+                        continue
+                    row = daily.loc[daily.candidate_id.eq(candidate.candidate_id)].iloc[
+                        0
+                    ]
+                    if (
+                        candidate.benchmark_id == "csi500"
+                        and expected_status == "BLOCKED"
+                    ):
+                        assert row.benchmark_status == "BLOCKED"
+                        assert (
+                            row.benchmark_reason
+                            == "benchmark_total_return_open_missing"
+                        )
+                        assert pd.isna(row.benchmark_return) and pd.isna(
+                            row.active_return
+                        )
+                    else:
+                        expected = (
+                            Fraction(71, 1000)
+                            if candidate.benchmark_id == "csi500"
+                            else Fraction(1, 20)
+                        )
+                        assert row.benchmark_status == "DEFINED"
+                        assert row.benchmark_return == pytest.approx(
+                            float(expected), abs=1e-14
+                        )
+                        assert row.active_return == pytest.approx(
+                            float(Fraction(1, 25) - expected), abs=1e-14
+                        )
+                        assert row.relative_wealth == pytest.approx(
+                            float(Fraction(26, 25) / (1 + expected)), abs=1e-14
+                        )
+            with artifact.table("portfolio_performance.parquet") as summary:
+                for candidate in candidates:
+                    if candidate.benchmark_id != "csi500":
+                        continue
+                    value = summary.loc[
+                        summary.candidate_id.eq(candidate.candidate_id)
+                        & summary.metric_id.eq("annualized_active_return")
+                    ].iloc[0]
+                    if expected_status == "BLOCKED":
+                        assert value.status == "BLOCKED" and pd.isna(value.value)
+                    else:
+                        assert value.status == "DEFINED"
+                        assert value.value == pytest.approx(
+                            float(Fraction(-31, 1000) * 252), abs=1e-12
+                        )
+            if case == "derived_and_native":
+                good_root, good_hash = (root, tree_hash(root))
         assert tree_hash(index_root) == before
         pd.testing.assert_frame_equal(source, original, check_exact=True)
         assert tree_hash(good_root) == good_hash

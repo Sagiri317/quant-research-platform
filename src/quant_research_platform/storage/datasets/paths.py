@@ -21,19 +21,16 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.share_safety import is_local_only_path
 from quant_research_platform.storage.identity import validate_instance_identity
 
-_YEAR_PARTITION_PATTERN = re.compile(r"^year=([0-9]{4})$")
+_YEAR_PARTITION_PATTERN = re.compile("^year=([0-9]{4})$")
 
 
 def partition_timestamp_series(
-    frame: pd.DataFrame,
-    *,
-    timestamp_column: str,
+    frame: pd.DataFrame, *, timestamp_column: str
 ) -> pd.Series:
     if timestamp_column not in frame:
         raise ValueError("missing_partition_timestamp_column")
     timestamp = strict_timestamp_series(
-        frame[timestamp_column],
-        error="invalid_partition_timestamp",
+        frame[timestamp_column], error="invalid_partition_timestamp"
     )
     if timestamp.isna().any():
         raise ValueError("missing_partition_timestamp_column")
@@ -49,7 +46,7 @@ def partition_frames(
     if frame.empty:
         return
     if partition_columns == ():
-        yield "", frame
+        yield ("", frame)
         return
     if partition_columns != ("year",):
         raise ValueError("unsupported_partitioning")
@@ -64,7 +61,7 @@ def partition_frames(
         end = pd.Timestamp(year=year + 1, month=1, day=1, tz=timezone)
         mask = (timestamp >= start) & (timestamp < end)
         if bool(mask.any()):
-            yield format_year_partition_label(int(year)), frame.loc[mask]
+            yield (format_year_partition_label(int(year)), frame.loc[mask])
 
 
 def parse_year_partition_label(label: object) -> int:
@@ -119,15 +116,14 @@ def validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
 
 
 def _unique_matching_suffix(
-    parts: tuple[str, ...],
-    predicate: Any,
+    parts: tuple[str, ...], predicate: Any
 ) -> tuple[str, ...] | None:
     candidates = [parts[index:] for index, part in enumerate(parts) if part == "data"]
     matches = [candidate for candidate in candidates if predicate(candidate)]
     storage_like_invalid = [
         candidate
         for candidate in candidates
-        if _starts_storage_layout(candidate) and not predicate(candidate)
+        if _starts_storage_layout(candidate) and (not predicate(candidate))
     ]
     if len(matches) != 1 or storage_like_invalid:
         return None
@@ -138,19 +134,12 @@ def _starts_storage_layout(parts: tuple[str, ...]) -> bool:
     return (
         len(parts) >= 2
         and parts[0] == "data"
-        and parts[1]
-        in {
-            "interim",
-            "processed",
-            "research",
-        }
+        and (parts[1] in {"interim", "processed", "research"})
     )
 
 
 def _matches_artifact_path(
-    parts: tuple[str, ...],
-    prefix: tuple[str, ...],
-    expected: str,
+    parts: tuple[str, ...], prefix: tuple[str, ...], expected: str
 ) -> bool:
     if parts[: len(prefix)] != prefix:
         return False
@@ -160,7 +149,7 @@ def _matches_artifact_path(
     return (
         len(suffix) == 3
         and suffix[0] == expected
-        and suffix[1] == "instances"
+        and (suffix[1] == "instances")
         and _valid_instance_segment(suffix[2])
     )
 

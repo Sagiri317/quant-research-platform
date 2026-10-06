@@ -10,9 +10,7 @@ from quant_research_platform.storage.identity import (
 
 
 @contextmanager
-def open_market_source(
-    root, resource_policy=None, *, archive_paths=None, time_window=None
-):
+def open_market_source(root, *, archive_paths=None, time_window=None):
     """Select one immutable native format; never fall back after validation fails."""
     from quant_research_platform.sources.binance.replay import open_recorder_run
     from quant_research_platform.sources.tardis.replay import open_tardis_archive
@@ -20,7 +18,7 @@ def open_market_source(
     root = require_unaliased_path(root, error="crypto_source_path_invalid")
     if archive_paths is not None:
         with open_tardis_archive(
-            root, resource_policy, archive_paths=archive_paths, time_window=time_window
+            root, archive_paths=archive_paths, time_window=time_window
         ) as source:
             yield source
         return
@@ -32,7 +30,7 @@ def open_market_source(
         raise FileNotFoundError("crypto_source_manifest_missing")
     opener = open_recorder_run if official else open_tardis_archive
     kwargs = {} if official else {"time_window": time_window}
-    with opener(root, resource_policy, **kwargs) as source:
+    with opener(root, **kwargs) as source:
         yield source
 
 

@@ -8,7 +8,6 @@ from pathlib import Path
 import pytest
 
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.reference import interim
 from quant_research_platform.sources.reference.a_share_fees import (
     FEE_CSV_COLUMNS,
@@ -60,22 +59,8 @@ def _write_reference_root(root: Path, *, commission: float = 0.0003) -> Path:
             "买入+卖出",
             commission,
         ),
-        _row(
-            "TRANSFER_FEE",
-            "2019-01-01",
-            "2025-12-31",
-            "沪深",
-            "买入+卖出",
-            0.00001,
-        ),
-        _row(
-            "STAMP_DUTY",
-            "2019-01-01",
-            "2025-12-31",
-            "沪深",
-            "卖出",
-            0.001,
-        ),
+        _row("TRANSFER_FEE", "2019-01-01", "2025-12-31", "沪深", "买入+卖出", 1e-05),
+        _row("STAMP_DUTY", "2019-01-01", "2025-12-31", "沪深", "卖出", 0.001),
     ]
     with open_filesystem_file(
         csv_path, "w", encoding="utf-8-sig", newline=""
@@ -98,12 +83,7 @@ def _write_reference_root(root: Path, *, commission: float = 0.0003) -> Path:
 
 
 def _row(
-    fee_code: str,
-    start: str,
-    end: str,
-    market: str,
-    direction: str,
-    rate: float,
+    fee_code: str, start: str, end: str, market: str, direction: str, rate: float
 ) -> dict[str, str]:
     row = dict.fromkeys(FEE_CSV_COLUMNS, "")
     row.update(
@@ -115,8 +95,8 @@ def _row(
             "方向": direction,
             "计费基数": "成交金额",
             "十进制费率": str(rate),
-            "费率(‰)": str(rate * 1_000.0),
-            "费率(bps)": str(rate * 10_000.0),
+            "费率(‰)": str(rate * 1000.0),
+            "费率(bps)": str(rate * 10000.0),
             "进入正式账本": "是",
         }
     )
@@ -132,7 +112,6 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
     ).source_identity
     layout = StorageLayout(project_root=tmp_path)
     profile = research_profile()
-
     plan = research.plan_targets(
         profile=profile,
         action="data materialize",
@@ -143,7 +122,6 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
     planned = plan["targets"][0]
     assert planned["decision"] == "BUILD"
     assert planned["requested_identity"]
-
     first = research.data_materialize(
         profile=profile,
         layout=layout,
@@ -154,14 +132,12 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
     )
     first_target = first["target_results"][0]
     assert first_target["status"] == "BUILT"
-    with runtime_resource_policy_scope(None) as policy:
-        first_frame = read_dataset(
-            layout.instance_root(
-                layout.interim_data_root("reference", A_SHARE_FEE_SCHEDULE_DATA_ID),
-                first_target["instance_identity"],
-            ),
-            resource_policy=policy,
+    first_frame = read_dataset(
+        layout.instance_root(
+            layout.interim_data_root("reference", A_SHARE_FEE_SCHEDULE_DATA_ID),
+            first_target["instance_identity"],
         )
+    )
     manifest = read_dataset_manifest_evidence(
         layout.instance_root(
             layout.interim_data_root("reference", A_SHARE_FEE_SCHEDULE_DATA_ID),
@@ -183,7 +159,6 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
         "included_in_ledger",
         "included_in",
     )
-
     second = research.data_materialize(
         profile=profile,
         layout=layout,
@@ -193,16 +168,13 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
         data_ids=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
     )
     assert second["target_results"][0]["status"] == "REUSED"
-
     sidecar_path = (
         raw_root / "reference" / "a_share_fee_schedule" / A_SHARE_FEE_SIDECAR_NAME
     )
     sidecar = json.loads(filesystem_read_text(sidecar_path, encoding="utf-8"))
     sidecar["notes"] = "identity mutation"
     filesystem_write_text(
-        sidecar_path,
-        json.dumps(sidecar, ensure_ascii=False),
-        encoding="utf-8",
+        sidecar_path, json.dumps(sidecar, ensure_ascii=False), encoding="utf-8"
     )
     third = research.data_materialize(
         profile=profile,
@@ -277,20 +249,17 @@ def test_fee_source_identity_race_preserves_old_good(
             return value
 
         monkeypatch.setattr(interim, "_frame_from_rows", frame)
-    with runtime_resource_policy_scope() as policy:
-        expected_error = (
-            "dataset_exists"
-            if existing_target and mutation == "staged"
-            else "reference_raw_identity_changed"
+    expected_error = (
+        "dataset_exists"
+        if existing_target and mutation == "staged"
+        else "reference_raw_identity_changed"
+    )
+    with pytest.raises(ValueError, match=expected_error):
+        interim.materialize_interim_data(
+            layout=target_layout,
+            raw_root=raw_root / "reference",
+            instance_metadata=metadata,
         )
-        with pytest.raises(ValueError, match=expected_error):
-            interim.materialize_interim_data(
-                layout=target_layout,
-                raw_root=raw_root / "reference",
-                instance_metadata=metadata,
-                resource_policy=policy,
-            )
-        assert policy.used_memory_bytes == 0
     assert _file_bytes(root) == old_good
     assert set(filesystem_iterdir(target.parent)) == previous_members
     assert filesystem_read_text(unrelated, encoding="utf-8") == "keep"
@@ -386,7 +355,7 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     root = layout.instance_root(
         layout.interim_data_root("reference", data_id), target["instance_identity"]
     )
-    snapshots = read_dataset(root, resource_policy=None)
+    snapshots = read_dataset(root)
     assert str(snapshots["timestamp"].dtype) == "datetime64[ns]"
     spec = json.loads(filesystem_read_text(root / "spec.json", encoding="utf-8"))
     assert spec["primary_key"] == ["source_asset_id", "timestamp", "snapshot_id"]
@@ -476,9 +445,7 @@ def test_industry_snapshot_range_uses_publication_not_observation(tmp_path):
         start_date="2011-01-01",
         end_date="2023-12-31",
     )
-    frame = read_dataset(
-        layout.interim_data_root("reference", data_id), resource_policy=None
-    )
+    frame = read_dataset(layout.interim_data_root("reference", data_id))
     assert frame["snapshot_id"].tolist() == ["snapshot"]
     assert frame["industry_standard_id"].tolist() == ["CSRC2012"]
 
@@ -524,43 +491,12 @@ def test_industry_reference_boundary_rejects_unproved_source(tmp_path, failure):
     filesystem_write_text(
         root / "metadata.json", json.dumps(metadata), encoding="utf-8"
     )
-    with runtime_resource_policy_scope(None) as policy:
-        with pytest.raises(ValueError, match="industry_snapshot_"):
-            interim.materialize_interim_data(
-                layout=StorageLayout(tmp_path),
-                raw_root=root.parent,
-                data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
-                resource_policy=policy,
-            )
-        assert policy.used_memory_bytes == 0
-
-
-def test_industry_reference_admission_precedes_decode(tmp_path, monkeypatch):
-    from tests.helpers.a_share_raw import write_industry_reference_fixture
-
-    root = write_industry_reference_fixture(
-        tmp_path / "raw", observations=_industry_observations()
-    )
-    calls = []
-    reader = interim.read_bounded_qrp_json
-
-    def observed(*args, **kwargs):
-        calls.append(True)
-        return reader(*args, **kwargs)
-
-    monkeypatch.setattr(interim, "read_bounded_qrp_json", observed)
-    with runtime_resource_policy_scope(explicit_cap_bytes=4096) as policy:
-        with pytest.raises(
-            ValueError, match="^industry_metadata_exceeds_task_memory_budget$"
-        ):
-            interim.materialize_interim_data(
-                layout=StorageLayout(tmp_path),
-                raw_root=root.parent,
-                data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
-                resource_policy=policy,
-            )
-        assert calls == []
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(ValueError, match="industry_snapshot_"):
+        interim.materialize_interim_data(
+            layout=StorageLayout(tmp_path),
+            raw_root=root.parent,
+            data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
+        )
 
 
 def test_industry_source_change_before_publish_preserves_old_good(
@@ -589,20 +525,13 @@ def test_industry_source_change_before_publish_preserves_old_good(
         return writer(*args, **kwargs)
 
     monkeypatch.setattr(interim, "write_dataset", mutate_source)
-    with runtime_resource_policy_scope(None) as policy:
-        with pytest.raises(ValueError, match="industry_snapshot_member_hash_mismatch"):
-            interim.materialize_interim_data(
-                layout=candidate_layout,
-                raw_root=root.parent,
-                data_ids=(data_id,),
-                resource_policy=policy,
-            )
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(ValueError, match="industry_snapshot_member_hash_mismatch"):
+        interim.materialize_interim_data(
+            layout=candidate_layout, raw_root=root.parent, data_ids=(data_id,)
+        )
     assert not filesystem_exists(candidate_root)
     assert _file_bytes(output) == before
-    assert read_dataset(output, resource_policy=None)["snapshot_id"].tolist() == [
-        "snapshot"
-    ]
+    assert read_dataset(output)["snapshot_id"].tolist() == ["snapshot"]
 
 
 @pytest.mark.parametrize("document_suffix", [".docx", ".xls"])
@@ -619,62 +548,12 @@ def test_industry_reference_preserves_table_row_locator(tmp_path, document_suffi
     interim.materialize_interim_data(
         layout=layout, raw_root=root.parent, data_ids=(data_id,)
     )
-    frame = read_dataset(
-        layout.interim_data_root("reference", data_id), resource_policy=None
-    )
+    frame = read_dataset(layout.interim_data_root("reference", data_id))
     assert frame["source_locator"].tolist() == ["table:2;row:7"]
     assert "source_page" not in frame
 
 
-def test_industry_snapshot_capture_admission_precedes_candidate_decode(
-    tmp_path, monkeypatch
-):
-    from quant_research_platform.contracts.json_codec import (
-        json_record_working_set_bytes,
-    )
-    from quant_research_platform.runtime import resources
-    from tests.helpers.a_share_raw import write_industry_reference_fixture
-
-    observations = _industry_observations()
-    rows = [{**observations[0][-1][0], "code": f"{index:06d}"} for index in range(1024)]
-    observations = ((*observations[0][:-1], rows),)
-    root = write_industry_reference_fixture(tmp_path / "raw", observations=observations)
-    metadata = json.loads(
-        filesystem_read_text(root / "metadata.json", encoding="utf-8")
-    )
-    candidate_name = metadata["snapshots"][0]["candidate_file"]
-    budget = (
-        2 * json_record_working_set_bytes((root / "metadata.json").stat().st_size)
-        + 1024 * 1024
-    )
-    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: budget)
-    original = interim.read_bounded_qrp_json
-    decoded = []
-
-    def observed(path, **kwargs):
-        decoded.append(path.name)
-        return original(path, **kwargs)
-
-    monkeypatch.setattr(interim, "read_bounded_qrp_json", observed)
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(
-            ValueError, match="industry_snapshot_exceeds_task_memory_budget"
-        ):
-            interim.materialize_interim_data(
-                layout=StorageLayout(tmp_path),
-                raw_root=root.parent,
-                data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
-                resource_policy=policy,
-            )
-        assert candidate_name not in decoded
-        assert policy.used_memory_bytes == 0
-
-
-def test_fee_csv_header_is_rejected_before_decode_and_preserves_previous_artifact(
-    tmp_path, monkeypatch
-):
-    from quant_research_platform.sources.reference import a_share_fees as owner
-
+def test_invalid_fee_csv_header_preserves_previous_artifact(tmp_path):
     raw = _write_reference_root(tmp_path / "raw") / "reference"
     layout = StorageLayout(project_root=tmp_path / "project")
     result = interim.materialize_interim_data(layout=layout, raw_root=raw)
@@ -683,35 +562,15 @@ def test_fee_csv_header_is_rejected_before_decode_and_preserves_previous_artifac
     source = raw / "a_share_fee_schedule"
     csv_path = source / A_SHARE_FEE_CSV_NAME
     original = csv_path.read_bytes()
-    hostile = b"," * 150000 + original
+    hostile = b"unexpected_column," + original
     csv_path.write_bytes(hostile)
     sidecar = source / A_SHARE_FEE_SIDECAR_NAME
     metadata = json.loads(sidecar.read_text())
     metadata["file_sha256"] = hashlib.sha256(hostile).hexdigest()
     metadata["file_bytes"] = len(hostile)
     sidecar.write_text(json.dumps(metadata), encoding="utf-8")
-    decoded_lines = 0
-    native_reader = owner.csv.reader
-
-    def reader(lines, *args, **kwargs):
-        def observe():
-            nonlocal decoded_lines
-            for text in lines:
-                decoded_lines += 1
-                yield text
-
-        return native_reader(observe(), *args, **kwargs)
-
-    monkeypatch.setattr(owner.csv, "reader", reader)
-    with runtime_resource_policy_scope(explicit_cap_bytes=2 * 1024**2) as policy:
-        with pytest.raises(
-            ValueError, match="a_share_fee_source_record_exceeds_capacity"
-        ):
-            interim.materialize_interim_data(
-                layout=layout, raw_root=raw, resource_policy=policy
-            )
-        assert decoded_lines == 0
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(ValueError, match="a_share_fee_source_schema_invalid"):
+        interim.materialize_interim_data(layout=layout, raw_root=raw)
     assert _file_bytes(root) == before
 
 
@@ -733,7 +592,5 @@ def test_fee_csv_bounded_decoder_preserves_quoted_multiline_fields(tmp_path):
         file_bytes=len(payload), file_sha256=hashlib.sha256(payload).hexdigest()
     )
     sidecar.write_text(json.dumps(metadata), encoding="utf-8")
-    with runtime_resource_policy_scope(explicit_cap_bytes=2 * 1024**2) as policy:
-        result = load_a_share_fee_source(reference_root=raw)
-        assert len(result.rows) == 5
-        assert policy.used_memory_bytes == 0
+    result = load_a_share_fee_source(reference_root=raw)
+    assert len(result.rows) == 5

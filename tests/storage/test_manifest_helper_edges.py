@@ -4,7 +4,6 @@ from pathlib import Path
 
 import pytest
 
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage import manifests
 
 
@@ -13,7 +12,6 @@ def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
 ) -> None:
     review_safe_path = tmp_path / "review-safe" / "manifest.json"
     internal_path = tmp_path / "internal" / "manifest.json"
-
     manifests.write_manifest(
         review_safe_path,
         {"schema_id": "qrp-output-manifest", "status": "PASS", "rows": [1, 2]},
@@ -28,7 +26,6 @@ def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
         },
     )
     loaded = manifests.read_manifest(internal_path)
-
     assert review_safe_path.read_text(encoding="utf-8").endswith("\n")
     assert loaded["source_id"] == "csmar"
 
@@ -38,31 +35,25 @@ def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
     (("write_internal_artifact_manifest", "assert_internal_artifact_metadata_safe"),),
 )
 def test_manifest_writers_render_the_snapshot_checked_for_safety(
-    writer_name: str,
-    safety_name: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    writer_name: str, safety_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     payload = {"schema_id": "qrp-test", "value": "safe"}
     original = getattr(manifests, safety_name)
 
-    def mutate_caller_after_check(value):  # noqa: ANN001, ANN202
+    def mutate_caller_after_check(value):
         result = original(value)
         payload["value"] = "C:" + chr(92) + "private" + chr(92) + "report"
         return result
 
     monkeypatch.setattr(manifests, safety_name, mutate_caller_after_check)
     path = tmp_path / writer_name / "manifest.json"
-
     getattr(manifests, writer_name)(path, payload)
-
     assert manifests.read_manifest(path)["value"] == "safe"
 
 
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
-        # Intentional fake provider/source markers for negative safety coverage.
         ({"path": "data/raw/vendor/file.csv"}, "local_only_path"),
         ({"path": "data/research/a_share/demo"}, "local_only_path"),
         ({"path": "/workspace/qrp/data/research/a_share/demo"}, "local_only_path"),
@@ -75,17 +66,13 @@ def test_manifest_writers_render_the_snapshot_checked_for_safety(
     ],
 )
 def test_internal_manifest_rejects_private_or_row_level_metadata(
-    payload: dict[str, object],
-    reason: str,
-    tmp_path: Path,
+    payload: dict[str, object], reason: str, tmp_path: Path
 ) -> None:
     with pytest.raises(
-        ValueError,
-        match=f"unsafe_internal_artifact_metadata: {reason}",
+        ValueError, match=f"unsafe_internal_artifact_metadata: {reason}"
     ):
         manifests.write_internal_artifact_manifest(
-            tmp_path / "manifest.json",
-            {"schema_id": "qrp-dataset-manifest", **payload},
+            tmp_path / "manifest.json", {"schema_id": "qrp-dataset-manifest", **payload}
         )
     assert not (tmp_path / "manifest.json").exists()
 
@@ -122,13 +109,7 @@ def test_json_directory_rechecks_members_with_constant_directory_identity(
         ValueError,
         match="dataset_metadata_(directory_identity_changed|member_limit_exceeded)",
     ):
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease("test.json", 0) as lease,
-        ):
-            manifests.read_bounded_qrp_json_directory(
-                tmp_path, max_members=max_members, lease=lease
-            )
+        manifests.read_bounded_qrp_json_directory(tmp_path, max_members=max_members)
     assert reads == ["a.json"]
 
 
@@ -143,10 +124,4 @@ def test_json_directory_limit_precedes_content_reads(tmp_path: Path, monkeypatch
 
     monkeypatch.setattr(manifests, "read_bounded_qrp_json", forbidden)
     with pytest.raises(ValueError, match="dataset_metadata_member_limit_exceeded"):
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease("test.json", 0) as lease,
-        ):
-            manifests.read_bounded_qrp_json_directory(
-                tmp_path, max_members=1, lease=lease
-            )
+        manifests.read_bounded_qrp_json_directory(tmp_path, max_members=1)

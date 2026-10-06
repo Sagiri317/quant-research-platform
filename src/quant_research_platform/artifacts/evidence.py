@@ -3,20 +3,13 @@
 from __future__ import annotations
 
 import hashlib
-import sys
-from contextlib import contextmanager, nullcontext
 from pathlib import Path
 from typing import Any
 
-from quant_research_platform.contracts.json_codec import (
-    bounded_rendered_qrp_json_object_size,
-    json_record_working_set_bytes,
-)
 from quant_research_platform.policy.share_safety import (
     evidence_json_value_unsafe_reason,
     evidence_text_unsafe_reason,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.atomic import atomic_write_json, atomic_write_text
 from quant_research_platform.storage.manifests import (
     _qrp_json_file_identity,
@@ -31,56 +24,28 @@ def write_json_evidence(path: Path, payload: dict[str, Any]) -> Path:
     unsafe = evidence_json_value_unsafe_reason(payload)
     if unsafe is not None:
         raise ValueError(f"unsafe_evidence: {unsafe}")
-    encoded = (
-        bounded_rendered_qrp_json_object_size(
-            payload, lazy_arrays={}, max_bytes=sys.maxsize
-        )
-        + 1
-    )
-    with runtime_resource_policy_scope() as policy:
-        required = json_record_working_set_bytes(encoded)
-        cap = policy.explicit_memory_cap_bytes
-        if cap is None or policy.used_memory_bytes + required <= cap:
-            policy.require_working_set(
-                required, error="evidence_json_working_set_exceeds_capacity"
-            )
-        with policy.lease("evidence.json.write", required):
-            return atomic_write_json(path, payload)
+    return atomic_write_json(path, payload)
 
 
-@contextmanager
 def read_json_evidence(
-    path: Path, *, expected_schema_id: str, error: str, lease=None, expected_member=None
+    path: Path, *, expected_schema_id: str, error: str, expected_member=None
 ):
-    """Keep decoded evidence admitted until its consumer exits or releases its lease."""
+    """Read evidence against its exact captured identity and optional member hash."""
     identity = _qrp_json_file_identity(path)
     if expected_member is not None and identity.size != expected_member["size"]:
         raise ValueError(error)
-    with runtime_resource_policy_scope() as policy:
-        with (
-            policy.lease("evidence.json.read", 0)
-            if lease is None
-            else nullcontext(lease)
-        ) as owned:
-            required = json_record_working_set_bytes(identity.size)
-            cap = policy.explicit_memory_cap_bytes
-            if cap is None or policy.used_memory_bytes + required <= cap:
-                policy.require_working_set(
-                    required, error="evidence_json_working_set_exceeds_capacity"
-                )
-            owned.grow(required)
-            raw, payload = read_bounded_qrp_json(
-                path, expected_identity=identity, max_bytes=identity.size
-            )
-            if (
-                expected_member is not None
-                and hashlib.sha256(raw).hexdigest() != expected_member["sha256"]
-            ):
-                raise ValueError(error)
-            del raw
-            if payload.get("schema_id") != expected_schema_id:
-                raise ValueError(error)
-            yield payload
+    raw, payload = read_bounded_qrp_json(
+        path, expected_identity=identity, max_bytes=identity.size
+    )
+    if (
+        expected_member is not None
+        and hashlib.sha256(raw).hexdigest() != expected_member["sha256"]
+    ):
+        raise ValueError(error)
+
+    if payload.get("schema_id") != expected_schema_id:
+        raise ValueError(error)
+    return payload
 
 
 def write_markdown_evidence(path: Path, text: str) -> Path:

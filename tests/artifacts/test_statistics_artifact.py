@@ -12,7 +12,6 @@ from quant_research_platform.artifacts import statistics
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_glob,
@@ -23,7 +22,6 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.semantic_artifacts import write_semantic_artifact
 from tests.helpers.research_configuration import research_configuration
-from tests.helpers.runtime_resources import capture_test_policy
 
 MAKER_MODEL_IDS = next(
     (item["price_model_id"], item["proxy_model_id"])
@@ -156,13 +154,13 @@ def maker_calibration_tables():
         for candidate in research_protocol.portfolio_candidates()
         if isinstance(candidate, CryptoMakerCandidate)
         and candidate.asset_id == "btc_usdt"
-        and candidate.model_ids == MAKER_MODEL_IDS
+        and (candidate.model_ids == MAKER_MODEL_IDS)
     )
     manifest = research_protocol.target_manifest(
         candidate.calibration_target_id, "STATISTIC"
     )
     reference = manifest["research_plan"]["execution"]["maker"]
-    samples, events = [], []
+    samples, events = ([], [])
 
     def on_sample(**sample):
         samples.append(
@@ -194,33 +192,30 @@ def maker_calibration_tables():
             {"fold_id": "fold_1", **row} for row in maker_event_rows(event_id, event)
         )
 
-    with runtime_resource_policy_scope() as policy:
-        replay_maker_calibration(
-            [_state(stamp) for stamp in (2100, 2150, 2650, 2700)],
-            [
-                _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
-                for stamp in (2180, 2400)
-            ],
-            [
-                {
-                    **_quote(stamp, book_segment_id="s1"),
-                    "price_prediction": 0.0,
-                    "price_label": 0.0,
-                    "proxy_prediction": 1.0,
-                    "label_available_at_ns": (stamp + 500) * 1000000,
-                }
-                for stamp in (2100, 2200)
-            ],
-            order_quantity=reference["order_quantity"],
-            latency_ms=reference["latency_ms"],
-            observed_coverage={"s1": (2100000000, 2800000000)},
-            trade_coverage={"trade-connection-1": (2100000000, 2800000000)},
-            cutoff_ns=3500000000,
-            resource_policy=policy,
-            on_sample=on_sample,
-            on_event=on_event,
-        )
-        assert policy.used_memory_bytes == 0
+    replay_maker_calibration(
+        [_state(stamp) for stamp in (2100, 2150, 2650, 2700)],
+        [
+            _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
+            for stamp in (2180, 2400)
+        ],
+        [
+            {
+                **_quote(stamp, book_segment_id="s1"),
+                "price_prediction": 0.0,
+                "price_label": 0.0,
+                "proxy_prediction": 1.0,
+                "label_available_at_ns": (stamp + 500) * 1000000,
+            }
+            for stamp in (2100, 2200)
+        ],
+        order_quantity=reference["order_quantity"],
+        latency_ms=reference["latency_ms"],
+        observed_coverage={"s1": (2100000000, 2800000000)},
+        trade_coverage={"trade-connection-1": (2100000000, 2800000000)},
+        cutoff_ns=3500000000,
+        on_sample=on_sample,
+        on_event=on_event,
+    )
     frames = {
         "crypto_maker_samples": pd.DataFrame(
             samples,
@@ -276,7 +271,7 @@ def maker_calibration_tables():
         upstream_identities={},
         semantic_metadata={"target_contract": {"protocol": manifest}},
     )
-    return frames, envelope
+    return (frames, envelope)
 
 
 @pytest.mark.parametrize(
@@ -310,132 +305,115 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
         read_semantic_artifact_record,
     )
 
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
+    root = statistics.write_statistics_artifact(
+        tmp_path / "valid",
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=validate_maker_calibration,
+    )
+    original = read_semantic_artifact_record(root)
+    artifact = statistics.read_statistics_artifact(
+        root,
+        expected_identity=envelope.instance_identity,
+        validate_tables=validate_maker_calibration,
+    )
+    for member in statistics.STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
+        with artifact.table(member) as actual:
+            pd.testing.assert_frame_equal(
+                actual, tables[member.removesuffix(".parquet")]
+            )
+    assert "crypto_maker_fills.parquet" not in artifact._members
+    if mutation is None:
+        for missing_validator in (None, object()):
+            with pytest.raises(
+                ValueError, match="statistics_business_validator_required"
+            ):
+                statistics.write_statistics_artifact(
+                    tmp_path / "missing-validator",
+                    envelope=envelope,
+                    tables=produce,
+                    table_group="crypto_maker_calibration",
+                    validate_tables=missing_validator,
+                )
+            with pytest.raises(
+                ValueError, match="statistics_business_validator_required"
+            ):
+                statistics.read_statistics_artifact(
+                    root,
+                    expected_identity=envelope.instance_identity,
+                    validate_tables=missing_validator,
+                )
+        assert not filesystem_exists(tmp_path / "missing-validator")
+        return
+    if mutation == "truncate":
+        tables["crypto_maker_events"] = (
+            tables["crypto_maker_events"].loc[lambda frame: frame.event_id.lt(4)].copy()
+        )
+    elif mutation == "immature":
+        tables["crypto_maker_samples"].loc[0, "label_available_at"] = pd.Timestamp(
+            "1970-01-01T00:00:04"
+        )
+    elif mutation == "coordinate":
+        tables["crypto_maker_samples"].loc[0, "initial_book_event_id"] = 2
+    elif mutation == "book_zero":
+        tables["crypto_maker_events"].loc[0, "quantity"] = 0.0
+    elif mutation == "level_order":
+        tables["crypto_maker_events"].loc[1, "price_index"] = 1000
+    elif mutation == "reference":
+        tables["crypto_maker_samples"].loc[0, "filled_quantity"] = 0.5
+    elif mutation == "unit_invalid":
+        tables["crypto_maker_calibration"]["price_unit"] = "invalid"
+    elif mutation == "unit_mixed":
+        tables["crypto_maker_calibration"].loc[0, "price_unit"] = "0.01"
+    else:
+        tables["crypto_maker_samples"].loc[1, "price_prediction"] = 0.001
+        tables["crypto_maker_samples"].loc[1, "forecast_error"] = -0.001
+    with pytest.raises(
+        ValueError,
+        match="order_book_price_unit_invalid"
+        if mutation == "unit_invalid"
+        else "crypto_calibration_",
     ):
-        root = statistics.write_statistics_artifact(
-            tmp_path / "valid",
+        statistics.write_statistics_artifact(
+            tmp_path / "rejected",
             envelope=envelope,
             tables=produce,
             table_group="crypto_maker_calibration",
             validate_tables=validate_maker_calibration,
         )
-        original = read_semantic_artifact_record(root, lease=artifact_lease)
-        artifact = statistics.read_statistics_artifact(
-            root,
+    assert not tuple(filesystem_glob(tmp_path / "rejected" / "instances", "*"))
+
+    def write_corruption(staging):
+        for name, frame in tables.items():
+            pq.write_table(
+                pa.Table.from_pandas(
+                    frame,
+                    schema=statistics._ARROW_SCHEMAS[f"{name}.parquet"],
+                    preserve_index=False,
+                ),
+                native_filesystem_path(staging / f"{name}.parquet"),
+            )
+
+    bad = write_semantic_artifact(tmp_path / "corrupted", envelope, write_corruption)
+    with pytest.raises(
+        ValueError,
+        match="order_book_price_unit_invalid"
+        if mutation == "unit_invalid"
+        else "crypto_calibration_",
+    ):
+        statistics.read_statistics_artifact(
+            bad,
             expected_identity=envelope.instance_identity,
             validate_tables=validate_maker_calibration,
-            lease=artifact_lease,
         )
-        for member in statistics.STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
-            with artifact.table(member) as actual:
-                pd.testing.assert_frame_equal(
-                    actual, tables[member.removesuffix(".parquet")]
-                )
-        assert "crypto_maker_fills.parquet" not in artifact._members
-        if mutation is None:
-            for missing_validator in (None, object()):
-                with pytest.raises(
-                    ValueError, match="statistics_business_validator_required"
-                ):
-                    statistics.write_statistics_artifact(
-                        tmp_path / "missing-validator",
-                        envelope=envelope,
-                        tables=produce,
-                        table_group="crypto_maker_calibration",
-                        validate_tables=missing_validator,
-                    )
-                with pytest.raises(
-                    ValueError, match="statistics_business_validator_required"
-                ):
-                    statistics.read_statistics_artifact(
-                        root,
-                        expected_identity=envelope.instance_identity,
-                        validate_tables=missing_validator,
-                        lease=artifact_lease,
-                    )
-            assert not filesystem_exists(tmp_path / "missing-validator")
-            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-            return
-        if mutation == "truncate":
-            tables["crypto_maker_events"] = (
-                tables["crypto_maker_events"]
-                .loc[lambda frame: frame.event_id.lt(4)]
-                .copy()
-            )
-        elif mutation == "immature":
-            tables["crypto_maker_samples"].loc[0, "label_available_at"] = pd.Timestamp(
-                "1970-01-01T00:00:04"
-            )
-        elif mutation == "coordinate":
-            tables["crypto_maker_samples"].loc[0, "initial_book_event_id"] = 2
-        elif mutation == "book_zero":
-            tables["crypto_maker_events"].loc[0, "quantity"] = 0.0
-        elif mutation == "level_order":
-            tables["crypto_maker_events"].loc[1, "price_index"] = 1000
-        elif mutation == "reference":
-            tables["crypto_maker_samples"].loc[0, "filled_quantity"] = 0.5
-        elif mutation == "unit_invalid":
-            tables["crypto_maker_calibration"]["price_unit"] = "invalid"
-        elif mutation == "unit_mixed":
-            tables["crypto_maker_calibration"].loc[0, "price_unit"] = "0.01"
-        else:
-            tables["crypto_maker_samples"].loc[1, "price_prediction"] = 0.001
-            tables["crypto_maker_samples"].loc[1, "forecast_error"] = -0.001
-        with pytest.raises(
-            ValueError,
-            match="order_book_price_unit_invalid"
-            if mutation == "unit_invalid"
-            else "crypto_calibration_",
-        ):
-            statistics.write_statistics_artifact(
-                tmp_path / "rejected",
-                envelope=envelope,
-                tables=produce,
-                table_group="crypto_maker_calibration",
-                validate_tables=validate_maker_calibration,
-            )
-        assert not tuple(filesystem_glob(tmp_path / "rejected" / "instances", "*"))
-
-        def write_corruption(staging):
-            for name, frame in tables.items():
-                pq.write_table(
-                    pa.Table.from_pandas(
-                        frame,
-                        schema=statistics._ARROW_SCHEMAS[f"{name}.parquet"],
-                        preserve_index=False,
-                    ),
-                    native_filesystem_path(staging / f"{name}.parquet"),
-                )
-
-        bad = write_semantic_artifact(
-            tmp_path / "corrupted", envelope, write_corruption
-        )
-        with pytest.raises(
-            ValueError,
-            match="order_book_price_unit_invalid"
-            if mutation == "unit_invalid"
-            else "crypto_calibration_",
-        ):
-            statistics.read_statistics_artifact(
-                bad,
-                expected_identity=envelope.instance_identity,
-                validate_tables=validate_maker_calibration,
-                lease=artifact_lease,
-            )
-        assert read_semantic_artifact_record(root, lease=artifact_lease) == original
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+    assert read_semantic_artifact_record(root) == original
 
 
 @pytest.mark.parametrize("member", statistics.STATISTICS_TABLE_GROUPS["research"])
 @pytest.mark.parametrize("mutation", ["status", "reason", "count", "undefined"])
 def test_research_table_rejects_invalid_values_at_write_and_read(
-    tmp_path,
-    tables,
-    envelope,
-    member,
-    mutation,
+    tmp_path, tables, envelope, member, mutation
 ):
     name = member.removesuffix(".parquet")
     if mutation == "status":
@@ -459,42 +437,33 @@ def _assert_rejected_at_write_and_read(
     table_group="research",
     error="statistics_table_",
 ):
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-    with (
-        runtime_resource_policy_scope(policy) as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(ValueError, match=error):
-            statistics.write_statistics_artifact(
-                tmp_path / "rejected",
-                envelope=envelope,
-                tables=tables,
-                table_group=table_group,
+    with pytest.raises(ValueError, match=error):
+        statistics.write_statistics_artifact(
+            tmp_path / "rejected",
+            envelope=envelope,
+            tables=tables,
+            table_group=table_group,
+        )
+
+    def write_unvalidated(staging):
+        for table_name, frame in tables.items():
+            table_member = f"{table_name}.parquet"
+            pq.write_table(
+                pa.Table.from_pandas(
+                    frame,
+                    schema=statistics._ARROW_SCHEMAS[table_member],
+                    preserve_index=False,
+                ),
+                native_filesystem_path(staging / table_member),
             )
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
-        def write_unvalidated(staging):
-            for table_name, frame in tables.items():
-                table_member = f"{table_name}.parquet"
-                pq.write_table(
-                    pa.Table.from_pandas(
-                        frame,
-                        schema=statistics._ARROW_SCHEMAS[table_member],
-                        preserve_index=False,
-                    ),
-                    native_filesystem_path(staging / table_member),
-                )
-
-        root = write_semantic_artifact(
-            tmp_path / "persisted", envelope, write_unvalidated
-        )
-        artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity, lease=artifact_lease
-        )
-        with pytest.raises(ValueError, match=error):
-            with artifact.table(member):
-                pytest.fail("invalid persisted values must not reach the consumer")
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+    root = write_semantic_artifact(tmp_path / "persisted", envelope, write_unvalidated)
+    artifact = statistics.read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with pytest.raises(ValueError, match=error):
+        with artifact.table(member):
+            pytest.fail("invalid persisted values must not reach the consumer")
 
 
 @pytest.mark.parametrize(
@@ -511,11 +480,7 @@ def _assert_rejected_at_write_and_read(
     ],
 )
 def test_defined_research_measurements_cannot_be_missing(
-    tmp_path,
-    tables,
-    envelope,
-    name,
-    column,
+    tmp_path, tables, envelope, name, column
 ):
     tables[name].loc[0, column] = float("nan")
     _assert_rejected_at_write_and_read(tmp_path, tables, envelope, f"{name}.parquet")
@@ -529,11 +494,10 @@ def test_research_table_counts_reject_lossy_coercion(
     name = member.removesuffix(".parquet")
     count = "period_count" if name == "fama_macbeth" else "observation_count"
     tables[name][count] = pd.Series([value], dtype=object)
-    with runtime_resource_policy_scope():
-        with pytest.raises(ValueError, match="statistics_table_count_invalid"):
-            statistics.write_statistics_artifact(
-                tmp_path / "rejected", envelope=envelope, tables=tables
-            )
+    with pytest.raises(ValueError, match="statistics_table_count_invalid"):
+        statistics.write_statistics_artifact(
+            tmp_path / "rejected", envelope=envelope, tables=tables
+        )
 
 
 @pytest.mark.parametrize(
@@ -560,10 +524,7 @@ def test_research_measurement_domains(tmp_path, tables, envelope, table, column,
     "factor_case", ["formal", "diagnostic_only", "no_factor_columns"]
 )
 def test_research_tables_complete_sequentially_under_16_mib(
-    tmp_path,
-    tables,
-    envelope,
-    factor_case,
+    tmp_path, tables, envelope, factor_case
 ):
     factor = tables["factor_diagnostics"]
     if factor_case != "formal":
@@ -594,156 +555,38 @@ def test_research_tables_complete_sequentially_under_16_mib(
                 "missing_hypothesis_count",
             ],
         ] = 0
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2, explicit_cap_bytes=16 * 1024**2
+    root = statistics.write_statistics_artifact(
+        tmp_path / "statistics", envelope=envelope, tables=tables
     )
-    with (
-        runtime_resource_policy_scope(policy) as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        root = statistics.write_statistics_artifact(
-            tmp_path / "statistics", envelope=envelope, tables=tables
-        )
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-        artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity, lease=artifact_lease
-        )
-        for member in statistics.STATISTICS_TABLE_GROUPS["research"]:
-            with artifact.table(member) as actual:
-                pd.testing.assert_frame_equal(
-                    actual, tables[member.removesuffix(".parquet")]
-                )
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-
-
-def test_validation_is_admitted_before_copying(tmp_path, tables, envelope, monkeypatch):
-    first = next(iter(tables))
-    tables[first] = pd.concat([tables[first]] * 10000, ignore_index=True)
-
-    def not_admitted(*args, **kwargs):
-        pytest.fail("validation copy must not run without working memory")
-
-    monkeypatch.setattr(statistics, "_validated_frame", not_admitted)
-    policy = capture_test_policy(available_memory_bytes=8 * 1024**2)
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(
-            ValueError, match="statistics_validation_exceeds_task_memory_budget"
-        ):
-            statistics.write_statistics_artifact(
-                tmp_path / "statistics", envelope=envelope, tables=tables
+    artifact = statistics.read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    for member in statistics.STATISTICS_TABLE_GROUPS["research"]:
+        with artifact.table(member) as actual:
+            pd.testing.assert_frame_equal(
+                actual, tables[member.removesuffix(".parquet")]
             )
-        assert policy.used_memory_bytes == 0
-
-
-def test_reader_admits_complete_working_set_before_decode(
-    tmp_path,
-    tables,
-    envelope,
-    monkeypatch,
-):
-    tables["factor_diagnostics"] = pd.concat(
-        [tables["factor_diagnostics"]] * 10000, ignore_index=True
-    )
-    writer_policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    with runtime_resource_policy_scope(writer_policy):
-        root = statistics.write_statistics_artifact(
-            tmp_path / "statistics", envelope=envelope, tables=tables
-        )
-        assert writer_policy.used_memory_bytes == 0
-
-    def not_admitted(*args, **kwargs):
-        pytest.fail("full Arrow decode must not run without working memory")
-
-    monkeypatch.setattr(pq.ParquetFile, "read", not_admitted)
-    reader_policy = capture_test_policy(available_memory_bytes=8 * 1024**2)
-    with (
-        runtime_resource_policy_scope(reader_policy) as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity, lease=artifact_lease
-        )
-        with pytest.raises(
-            ValueError, match="statistics_table_exceeds_task_memory_budget"
-        ):
-            with artifact.table("factor_diagnostics.parquet"):
-                pytest.fail("oversized full table must not reach the consumer")
-        assert reader_policy.used_memory_bytes == artifact_lease.reserved_bytes
-
-
-def test_statistics_plain_dictionary_reader_admits_expansion_before_read(
-    tmp_path, tables, envelope, monkeypatch
-):
-    tables["factor_diagnostics"] = pd.concat(
-        [tables["factor_diagnostics"]] * 256, ignore_index=True
-    )
-    tables["factor_diagnostics"]["factor_id"] = "x" * (32 * 1024)
-
-    def write_dictionary_members(staging):
-        for name, frame in tables.items():
-            member = f"{name}.parquet"
-            pq.write_table(
-                pa.Table.from_pandas(
-                    frame,
-                    schema=statistics._ARROW_SCHEMAS[member],
-                    preserve_index=False,
-                ),
-                native_filesystem_path(staging / member),
-                use_dictionary=True,
-                write_statistics=False,
-            )
-
-    root = write_semantic_artifact(
-        tmp_path / "dictionary-statistics", envelope, write_dictionary_members
-    )
-
-    def no_full_read(*args, **kwargs):
-        pytest.fail("plain dictionary expansion started before admission")
-
-    monkeypatch.setattr(pq.ParquetFile, "read", no_full_read)
-    with (
-        runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity, lease=artifact_lease
-        )
-        with pytest.raises(
-            ValueError, match="statistics_table_exceeds_task_memory_budget"
-        ):
-            with artifact.table("factor_diagnostics.parquet"):
-                pytest.fail("oversized full table reached the consumer")
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatch):
-    from quant_research_platform.storage import parquet
-
     primary = KeyboardInterrupt("write_interrupted")
-    original = parquet._parquet_table_write_state
+    original = pq.ParquetWriter.close
 
-    def cleanup_failure():
-        raise RuntimeError("release_failed")
-
-    def native_state(*args, **kwargs):
-        table, state, rows, retained = original(*args, **kwargs)
-        state.callback(cleanup_failure)
-        return table, state, rows, retained
+    def cleanup_failure(self):
+        original(self)
+        raise RuntimeError("writer_close_failed")
 
     def interrupt(*args, **kwargs):
         raise primary
 
-    monkeypatch.setattr(parquet, "_parquet_table_write_state", native_state)
+    monkeypatch.setattr(pq.ParquetWriter, "close", cleanup_failure)
     monkeypatch.setattr(pq.ParquetWriter, "write_table", interrupt)
-    policy = capture_test_policy(available_memory_bytes=16 * 1024**2)
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(KeyboardInterrupt) as caught:
-            statistics.write_statistics_artifact(
-                tmp_path / "statistics", envelope=envelope, tables=tables
-            )
-        assert caught.value is primary
-        assert any("RuntimeError" in note for note in primary.__notes__)
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(KeyboardInterrupt) as caught:
+        statistics.write_statistics_artifact(
+            tmp_path / "statistics", envelope=envelope, tables=tables
+        )
+    assert caught.value is primary
+    assert any("RuntimeError" in note for note in primary.__notes__)
 
 
 @pytest.fixture
@@ -839,43 +682,35 @@ def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
         "UNDEFINED",
         "utc_boundary_valuation_missing",
     ]
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        root = statistics.write_statistics_artifact(
-            tmp_path / "crypto",
-            envelope=envelope,
-            tables=crypto_tables,
-            table_group="crypto_portfolio",
-        )
-        artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity, lease=artifact_lease
-        )
-        with artifact.table("crypto_execution_diagnostics.parquet") as frame:
-            assert frame.loc[0, "status"] == "DEFINED"
-            assert pd.isna(frame.loc[0, "value"])
-            assert frame.loc[0, "text"] == "estimated_queue_ahead"
-        with artifact.table("crypto_portfolio_daily.parquet") as frame:
-            assert frame.loc[0, "status"] == "UNDEFINED"
-            assert pd.isna(frame.loc[0, "net_return"])
-            assert frame.loc[0, "start_nav"] == 100.0
-            assert frame.loc[0, "benchmark_return"] == 0.0
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+    root = statistics.write_statistics_artifact(
+        tmp_path / "crypto",
+        envelope=envelope,
+        tables=crypto_tables,
+        table_group="crypto_portfolio",
+    )
+    artifact = statistics.read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with artifact.table("crypto_execution_diagnostics.parquet") as frame:
+        assert frame.loc[0, "status"] == "DEFINED"
+        assert pd.isna(frame.loc[0, "value"])
+        assert frame.loc[0, "text"] == "estimated_queue_ahead"
+    with artifact.table("crypto_portfolio_daily.parquet") as frame:
+        assert frame.loc[0, "status"] == "UNDEFINED"
+        assert pd.isna(frame.loc[0, "net_return"])
+        assert frame.loc[0, "start_nav"] == 100.0
+        assert frame.loc[0, "benchmark_return"] == 0.0
 
 
-@pytest.mark.parametrize("finish", ["normal", "writer_failure", "capacity"])
+@pytest.mark.parametrize("finish", ["normal", "writer_failure"])
 def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
     tmp_path, monkeypatch, maker_calibration_tables, finish
 ):
-    import gc
-    import weakref
     from contextlib import nullcontext
     from types import SimpleNamespace
 
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.markets.implementations.crypto import portfolio
-    from quant_research_platform.runtime.resources import MemoryLease
     from quant_research_platform.storage.layout import StorageLayout
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
@@ -939,138 +774,92 @@ def test_maker_producer_physical_batches_preserve_tables_and_rebuild(
         validation_chunks=validation_chunks,
     )
     primary = KeyboardInterrupt("synthetic_maker_writer_failure")
-    if finish == "writer_failure":
-        close = MemoryLease.close
+    roots, group_counts = ([], [])
+    for build in (1, 2) if finish == "normal" else (1,):
+        closed, emitted, frames = ([], [], [])
 
-        def fail_buffer_close(lease):
-            close(lease)
-            if lease.owner == "crypto.maker.calibration.buffer":
-                raise OSError("synthetic_buffer_close_failure")
+        def books(*_args, closed=closed, **_kwargs):
+            try:
+                yield from (_state(stamp) for stamp in (2100, 2150, 2650, 2700))
+            finally:
+                closed.append("books")
 
-        monkeypatch.setattr(MemoryLease, "close", fail_buffer_close)
-
-    roots, group_counts = [], []
-    for budget in (512, 4096, 65536) if finish == "normal" else (512,):
-        closed, emitted, frames = [], [], []
-        monkeypatch.setattr(portfolio, "_CALIBRATION_BATCH_BYTES", budget)
-        with (
-            runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy,
-            policy.lease("test.artifact.metadata", 0) as artifact_lease,
-        ):
-
-            def books(*_args, closed=closed, **_kwargs):
-                try:
-                    with (
-                        policy.lease(
-                            "test.sibling", policy.working_set_headroom_bytes - 128
-                        )
-                        if finish == "capacity"
-                        else nullcontext()
-                    ):
-                        yield from (_state(stamp) for stamp in (2100, 2150, 2650, 2700))
-                finally:
-                    closed.append("books")
-
-            def trades(*_args, closed=closed, **_kwargs):
-                try:
-                    yield from (
-                        _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
-                        for stamp in (2180, 2400)
-                    )
-                finally:
-                    closed.append("trades")
-
-            def produce(on_table, emitted=emitted, frames=frames):
-                def append(table_name, output_frame):
-                    emitted.append((table_name, len(output_frame)))
-                    frames.append(weakref.ref(output_frame))
-                    if finish == "writer_failure" and len(emitted) == 2:
-                        raise primary
-                    on_table(table_name, output_frame)
-
-                portfolio.produce_maker_calibration(
-                    asset_id="btc_usdt",
-                    model_ids=MAKER_MODEL_IDS,
-                    on_table=append,
-                    layout=StorageLayout(tmp_path),
-                    protocol_manifest=manifest,
-                    time_window=TimeWindow(
-                        "1970-01-01T00:00:02.100000", "1970-01-01T00:00:03.500000"
-                    ),
-                    upstream_identities={f"{manifest['scenario_id']}_models": "e" * 64},
-                    raw_root=tmp_path / "raw",
-                    resource_policy=policy,
-                    open_run=lambda *_: nullcontext(run),
-                    reconstruct_depth=books,
-                    read_trades=trades,
-                    read_model_artifact=lambda *_args, **_kwargs: models,
-                    symbol="BTCUSDT",
-                    market_type="futures",
+        def trades(*_args, closed=closed, **_kwargs):
+            try:
+                yield from (
+                    _trade(stamp, price="99.5", quantity="3", maker_buyer=True)
+                    for stamp in (2180, 2400)
                 )
+            finally:
+                closed.append("trades")
 
-            logical = tmp_path / f"batch_{budget}"
+        def produce(on_table, emitted=emitted, frames=frames):
 
-            def write(logical=logical):
-                return statistics.write_statistics_artifact(
-                    logical,
-                    envelope=envelope,
-                    tables=produce,
-                    table_group="crypto_maker_calibration",
-                    validate_tables=portfolio.validate_maker_calibration,
-                )
+            def append(table_name, output_frame):
+                emitted.append((table_name, len(output_frame)))
+                if finish == "writer_failure" and len(emitted) == 2:
+                    raise primary
+                on_table(table_name, output_frame)
 
-            if finish != "normal":
-                with pytest.raises(
-                    KeyboardInterrupt if finish == "writer_failure" else MemoryError
-                ) as caught:
-                    write()
-                if finish == "writer_failure":
-                    assert caught.value is primary and len(emitted) == 2
-                    assert any(
-                        "crypto.maker.calibration lease close also failed: OSError"
-                        in note
-                        for note in primary.__notes__
-                    )
-                else:
-                    assert str(caught.value) == "runtime_memory_budget_exceeded"
-                    assert not emitted
-                assert sorted(closed) == sorted(["books", "trades", *MAKER_MODEL_IDS])
-                assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-                assert not tuple(filesystem_glob(logical / "instances", "*"))
-                gc.collect()
-                assert all(frame() is None for frame in frames)
-                return
-
-            root = write()
-            artifact = statistics.read_statistics_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                validate_tables=portfolio.validate_maker_calibration,
-                lease=artifact_lease,
+            portfolio.produce_maker_calibration(
+                asset_id="btc_usdt",
+                model_ids=MAKER_MODEL_IDS,
+                on_table=append,
+                layout=StorageLayout(tmp_path),
+                protocol_manifest=manifest,
+                time_window=TimeWindow(
+                    "1970-01-01T00:00:02.100000", "1970-01-01T00:00:03.500000"
+                ),
+                upstream_identities={f"{manifest['scenario_id']}_models": "e" * 64},
+                raw_root=tmp_path / "raw",
+                open_run=lambda *_: nullcontext(run),
+                reconstruct_depth=books,
+                read_trades=trades,
+                read_model_artifact=lambda *_args, **_kwargs: models,
+                symbol="BTCUSDT",
+                market_type="futures",
             )
-            for name, frame in expected.items():
-                with artifact.table(f"{name}.parquet") as actual:
-                    pd.testing.assert_frame_equal(actual, frame)
-                with pq.ParquetFile(
-                    native_filesystem_path(root / f"{name}.parquet")
-                ) as parquet:
-                    assert parquet.schema_arrow.equals(
-                        statistics._ARROW_SCHEMAS[f"{name}.parquet"]
-                    )
+
+        logical = tmp_path / f"build_{build}"
+
+        def write(logical=logical):
+            return statistics.write_statistics_artifact(
+                logical,
+                envelope=envelope,
+                tables=produce,
+                table_group="crypto_maker_calibration",
+                validate_tables=portfolio.validate_maker_calibration,
+            )
+
+        if finish != "normal":
+            with pytest.raises(KeyboardInterrupt) as caught:
+                write()
+            assert caught.value is primary and len(emitted) == 2
             assert sorted(closed) == sorted(["books", "trades", *MAKER_MODEL_IDS])
-            if budget == 512:
-                assert all(
-                    count == 1
-                    for name, count in emitted
-                    if name == "crypto_maker_events"
-                )
-            roots.append(root)
+            assert not tuple(filesystem_glob(logical / "instances", "*"))
+            return
+        root = write()
+        artifact = statistics.read_statistics_artifact(
+            root,
+            expected_identity=envelope.instance_identity,
+            validate_tables=portfolio.validate_maker_calibration,
+        )
+        for name, frame in expected.items():
+            with artifact.table(f"{name}.parquet") as actual:
+                pd.testing.assert_frame_equal(actual, frame)
             with pq.ParquetFile(
-                native_filesystem_path(root / "crypto_maker_events.parquet")
+                native_filesystem_path(root / f"{name}.parquet")
             ) as parquet:
-                group_counts.append(parquet.num_row_groups)
-            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-    assert group_counts[0] > group_counts[1] > group_counts[2]
+                assert parquet.schema_arrow.equals(
+                    statistics._ARROW_SCHEMAS[f"{name}.parquet"]
+                )
+        assert sorted(closed) == sorted(["books", "trades", *MAKER_MODEL_IDS])
+        roots.append(root)
+        with pq.ParquetFile(
+            native_filesystem_path(root / "crypto_maker_events.parquet")
+        ) as parquet:
+            group_counts.append(parquet.num_row_groups)
+    assert group_counts[0] == group_counts[1]
     assert all(root.name == envelope.instance_identity for root in roots)
     for root in roots[1:]:
         assert compare_semantic_artifacts(roots[0], root).status == "MATCH"
@@ -1098,47 +887,41 @@ def test_incremental_maker_publication_preserves_old_good_and_primary(
         "interrupted": KeyboardInterrupt("synthetic_interruption"),
         "writer_failed": RuntimeError("synthetic_writer_failure"),
     }[failure]
-    with (
-        runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        good = statistics.write_statistics_artifact(
-            tmp_path / "good",
+    good = statistics.write_statistics_artifact(
+        tmp_path / "good",
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    before = read_semantic_artifact_record(good)
+    native = pq.ParquetWriter.write_table
+    written = 0
+
+    def fail_after_progress(writer, *args, **kwargs):
+        nonlocal written
+        written += 1
+        if written == 2:
+            raise primary
+        return native(writer, *args, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetWriter, "write_table", fail_after_progress)
+    with pytest.raises(type(primary)) as caught:
+        statistics.write_statistics_artifact(
+            tmp_path / "candidate",
             envelope=envelope,
             tables=produce,
             table_group="crypto_maker_calibration",
             validate_tables=portfolio.validate_maker_calibration,
         )
-        before = read_semantic_artifact_record(good, lease=artifact_lease)
-        native = pq.ParquetWriter.write_table
-        written = 0
-
-        def fail_after_progress(writer, *args, **kwargs):
-            nonlocal written
-            written += 1
-            if written == 2:
-                raise primary
-            return native(writer, *args, **kwargs)
-
-        monkeypatch.setattr(pq.ParquetWriter, "write_table", fail_after_progress)
-        with pytest.raises(type(primary)) as caught:
-            statistics.write_statistics_artifact(
-                tmp_path / "candidate",
-                envelope=envelope,
-                tables=produce,
-                table_group="crypto_maker_calibration",
-                validate_tables=portfolio.validate_maker_calibration,
-            )
-        assert caught.value is primary and written == 2
-        assert read_semantic_artifact_record(good, lease=artifact_lease) == before
-        assert not tuple(filesystem_glob(tmp_path / "candidate" / "instances", "*"))
-        statistics.read_statistics_artifact(
-            good,
-            expected_identity=envelope.instance_identity,
-            validate_tables=portfolio.validate_maker_calibration,
-            lease=artifact_lease,
-        )
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+    assert caught.value is primary and written == 2
+    assert read_semantic_artifact_record(good) == before
+    assert not tuple(filesystem_glob(tmp_path / "candidate" / "instances", "*"))
+    statistics.read_statistics_artifact(
+        good,
+        expected_identity=envelope.instance_identity,
+        validate_tables=portfolio.validate_maker_calibration,
+    )
 
 
 def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
@@ -1156,14 +939,13 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
         CryptoMakerCandidate,
         protocol,
     )
-    from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.binance_hft import hft_research_plan
     from tests.markets.crypto.test_hft_execution import _state
 
-    count, depth = 1800, 512
-    cap = 64 * 1024**2
-    first, last = 2100, 2100 + (count - 1) * 1000
+    count, depth = (1800, 512)
+    64 * 1024**2
+    first, last = (2100, 2100 + (count - 1) * 1000)
 
     def iso(stamp):
         return pd.Timestamp(stamp, unit="ms").isoformat()
@@ -1184,7 +966,7 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
         for candidate in research_protocol.portfolio_candidates()
         if isinstance(candidate, CryptoMakerCandidate)
         and candidate.asset_id == "btc_usdt"
-        and candidate.model_ids == MAKER_MODEL_IDS
+        and (candidate.model_ids == MAKER_MODEL_IDS)
     )
     manifest = research_protocol.target_manifest(
         candidate.calibration_target_id, "STATISTIC"
@@ -1267,75 +1049,55 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
     emitted = dict.fromkeys(
         ("crypto_maker_samples", "crypto_maker_events", "crypto_maker_calibration"), 0
     )
-    payload = peak_batch = peak_reserved = 0
-    with (
-        runtime_resource_policy_scope(explicit_cap_bytes=cap) as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
 
-        def produce(on_table):
-            def append(name, frame):
-                nonlocal payload, peak_batch, peak_reserved
-                size = pandas_frame_payload_bytes(frame)
-                payload += size
-                peak_batch = max(peak_batch, size)
-                peak_reserved = max(peak_reserved, policy.used_memory_bytes)
-                emitted[name] += len(frame)
-                on_table(name, frame)
+    def produce(on_table):
 
-            portfolio.produce_maker_calibration(
-                asset_id="btc_usdt",
-                model_ids=MAKER_MODEL_IDS,
-                on_table=append,
-                layout=StorageLayout(tmp_path),
-                protocol_manifest=manifest,
-                time_window=TimeWindow(window["start"], window["end"]),
-                upstream_identities={f"{HFT_RESEARCH_DATASET_ID}_models": "e" * 64},
-                raw_root=tmp_path / "raw",
-                resource_policy=policy,
-                open_run=lambda *_: nullcontext(run),
-                reconstruct_depth=lambda *_args, **_kwargs: (
-                    _state(first + index * 1000, bid_levels=bids, ask_levels=asks)
-                    for index in range(count)
-                ),
-                read_trades=lambda *_args, **_kwargs: iter(()),
-                read_model_artifact=lambda *_args, **_kwargs: models,
-                symbol="BTCUSDT",
-                market_type="futures",
-            )
+        def append(name, frame):
+            emitted[name] += len(frame)
+            on_table(name, frame)
 
-        root = statistics.write_statistics_artifact(
-            tmp_path / "bounded",
-            envelope=envelope,
-            tables=produce,
-            table_group="crypto_maker_calibration",
-            validate_tables=portfolio.validate_maker_calibration,
+        portfolio.produce_maker_calibration(
+            asset_id="btc_usdt",
+            model_ids=MAKER_MODEL_IDS,
+            on_table=append,
+            layout=StorageLayout(tmp_path),
+            protocol_manifest=manifest,
+            time_window=TimeWindow(window["start"], window["end"]),
+            upstream_identities={f"{HFT_RESEARCH_DATASET_ID}_models": "e" * 64},
+            raw_root=tmp_path / "raw",
+            open_run=lambda *_: nullcontext(run),
+            reconstruct_depth=lambda *_args, **_kwargs: (
+                _state(first + index * 1000, bid_levels=bids, ask_levels=asks)
+                for index in range(count)
+            ),
+            read_trades=lambda *_args, **_kwargs: iter(()),
+            read_model_artifact=lambda *_args, **_kwargs: models,
+            symbol="BTCUSDT",
+            market_type="futures",
         )
-        artifact = statistics.read_statistics_artifact(
-            root,
-            expected_identity=envelope.instance_identity,
-            validate_tables=portfolio.validate_maker_calibration,
-            lease=artifact_lease,
-        )
-        with artifact.table("crypto_maker_calibration.parquet") as summary:
-            assert summary.sample_count.tolist() == [count, count]
-            assert summary.zero_fill_count.tolist() == [count, count]
-        assert artifact._row_counts["crypto_maker_samples.parquet"] == count * 2
-        assert artifact._row_counts["crypto_maker_events.parquet"] == count * depth * 2
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+
+    root = statistics.write_statistics_artifact(
+        tmp_path / "bounded",
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    artifact = statistics.read_statistics_artifact(
+        root,
+        expected_identity=envelope.instance_identity,
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    with artifact.table("crypto_maker_calibration.parquet") as summary:
+        assert summary.sample_count.tolist() == [count, count]
+        assert summary.zero_fill_count.tolist() == [count, count]
+    assert artifact._row_counts["crypto_maker_samples.parquet"] == count * 2
+    assert artifact._row_counts["crypto_maker_events.parquet"] == count * depth * 2
     assert emitted == {
         "crypto_maker_samples": count * 2,
         "crypto_maker_events": count * depth * 2,
         "crypto_maker_calibration": 2,
     }
-    assert payload > cap * 1.5
-    assert peak_batch < cap // 16
-    assert peak_reserved <= cap
-
-    record_testsuite_property("maker_cap_bytes", cap)
-    record_testsuite_property("maker_output_payload_bytes", payload)
-    record_testsuite_property("maker_max_emitted_batch_bytes", peak_batch)
-    record_testsuite_property("maker_producer_sampled_reserved_bytes", peak_reserved)
     record_testsuite_property("maker_event_rows", emitted["crypto_maker_events"])
 
 
@@ -1352,47 +1114,39 @@ def test_streamed_calibration_rechecks_member_bytes_after_consumption(
         for name, frame in tables.items():
             on_table(name, frame)
 
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        root = statistics.write_statistics_artifact(
-            tmp_path / "calibration",
-            envelope=envelope,
-            tables=produce,
-            table_group="crypto_maker_calibration",
+    root = statistics.write_statistics_artifact(
+        tmp_path / "calibration",
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    original = portfolio._calibration_headers
+    changed = False
+
+    def mutate_after_headers(*args):
+        nonlocal changed
+        yield from original(*args)
+        if not changed:
+            changed = True
+            path = root / "crypto_maker_calibration.parquet"
+            before = filesystem_stat(path)
+            content = bytearray(filesystem_read_bytes(path))
+            content[4] ^= 1
+            filesystem_write_bytes(path, content)
+            os.utime(
+                native_filesystem_path(path),
+                ns=(before.st_atime_ns, before.st_mtime_ns),
+            )
+            assert filesystem_stat(path).st_mtime_ns == before.st_mtime_ns
+
+    monkeypatch.setattr(portfolio, "_calibration_headers", mutate_after_headers)
+    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
+        statistics.read_statistics_artifact(
+            root,
+            expected_identity=envelope.instance_identity,
             validate_tables=portfolio.validate_maker_calibration,
         )
-        original = portfolio._calibration_headers
-        changed = False
-
-        def mutate_after_headers(*args):
-            nonlocal changed
-            yield from original(*args)
-            if not changed:
-                changed = True
-                path = root / "crypto_maker_calibration.parquet"
-                before = filesystem_stat(path)
-                content = bytearray(filesystem_read_bytes(path))
-                content[4] ^= 1
-                filesystem_write_bytes(path, content)
-                os.utime(
-                    native_filesystem_path(path),
-                    ns=(before.st_atime_ns, before.st_mtime_ns),
-                )
-                assert filesystem_stat(path).st_mtime_ns == before.st_mtime_ns
-
-        monkeypatch.setattr(portfolio, "_calibration_headers", mutate_after_headers)
-        with pytest.raises(
-            ValueError, match="semantic_artifact_member_integrity_invalid"
-        ):
-            statistics.read_statistics_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                validate_tables=portfolio.validate_maker_calibration,
-                lease=artifact_lease,
-            )
-        assert changed and policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
 def test_maker_calibration_uses_declared_asset_without_btc_limits(
@@ -1423,23 +1177,18 @@ def test_maker_calibration_uses_declared_asset_without_btc_limits(
         for name, frame in tables.items():
             on_table(name, frame)
 
-    with (
-        runtime_resource_policy_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        root = statistics.write_statistics_artifact(
-            tmp_path / "eth",
-            envelope=envelope,
-            tables=produce,
-            table_group="crypto_maker_calibration",
-            validate_tables=validate_maker_calibration,
-        )
-        statistics.read_statistics_artifact(
-            root,
-            expected_identity=envelope.instance_identity,
-            validate_tables=validate_maker_calibration,
-            lease=artifact_lease,
-        )
+    root = statistics.write_statistics_artifact(
+        tmp_path / "eth",
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=validate_maker_calibration,
+    )
+    statistics.read_statistics_artifact(
+        root,
+        expected_identity=envelope.instance_identity,
+        validate_tables=validate_maker_calibration,
+    )
 
 
 @pytest.mark.parametrize("finish", ["normal", "source_changed", "cancel"])
@@ -1455,9 +1204,7 @@ def test_maker_history_reads_real_artifact_once_and_rechecks_source(
         execution,
         portfolio,
     )
-    from quant_research_platform.storage._scratch_ownership import (
-        handle_preserving_primary,
-    )
+    from quant_research_platform.policy.lifecycle import closing_iterator
     from tests.helpers.binance_hft import _quote
     from tests.markets.crypto.test_hft_execution import _maker_config, _state
 
@@ -1467,94 +1214,86 @@ def test_maker_history_reads_real_artifact_once_and_rechecks_source(
         for name, frame in tables.items():
             on_table(name, frame)
 
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        root = statistics.write_statistics_artifact(
-            tmp_path / "calibration",
-            envelope=envelope,
-            tables=produce,
-            table_group="crypto_maker_calibration",
-            validate_tables=portfolio.validate_maker_calibration,
-        )
-        artifact = statistics.read_statistics_artifact(
-            root,
-            expected_identity=envelope.instance_identity,
-            validate_tables=portfolio.validate_maker_calibration,
-            lease=artifact_lease,
-        )
-        batches = statistics.StatisticsArtifact._batches
-        reads = Counter()
+    root = statistics.write_statistics_artifact(
+        tmp_path / "calibration",
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    artifact = statistics.read_statistics_artifact(
+        root,
+        expected_identity=envelope.instance_identity,
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    batches = statistics.StatisticsArtifact._batches
+    reads = Counter()
 
-        def counted_batches(owner, member, **kwargs):
-            reads[member] += 1
-            yield from batches(owner, member, **kwargs)
+    def counted_batches(owner, member, **kwargs):
+        reads[member] += 1
+        yield from batches(owner, member, **kwargs)
 
-        monkeypatch.setattr(statistics.StatisticsArtifact, "_batches", counted_batches)
-        model = execution.MakerCalibration(
-            partial(portfolio._calibration_samples, artifact, "fold_1"),
-            partial(portfolio._calibration_events, artifact, "fold_1"),
-            price_unit="0.1",
-            resource_policy=policy,
-        )
-        primary = KeyboardInterrupt("consumer_cancel")
-        caught = None
-        try:
-            with handle_preserving_primary(ExitStack()) as resources:
-                resources.callback(artifact._verify)
-                resources.callback(model.close)
-                state = _state(0)
-                answers = []
-                for side in ("buy", "sell", "buy"):
-                    answers.append(
-                        model.select(
-                            state=state,
-                            decision_ns=0,
-                            new_order=execution._maker_new_order(
-                                0,
-                                side,
-                                1.0,
-                                state,
-                                _quote(0, book_segment_id="s1"),
-                                _maker_config().latency_ms,
-                            ),
-                            active_order=None,
-                            commands=(),
-                            lifetime_ns=500000000,
-                            prediction=0.0,
-                            fee_bps=0.0,
-                            funding=[],
-                        )
+    monkeypatch.setattr(statistics.StatisticsArtifact, "_batches", counted_batches)
+    model = execution.MakerCalibration(
+        partial(portfolio._calibration_samples, artifact, "fold_1"),
+        partial(portfolio._calibration_events, artifact, "fold_1"),
+        price_unit="0.1",
+    )
+    primary = KeyboardInterrupt("consumer_cancel")
+    caught = None
+    try:
+        with closing_iterator(ExitStack()) as resources:
+            resources.callback(artifact._verify)
+            state = _state(0)
+            answers = []
+            for side in ("buy", "sell", "buy"):
+                answers.append(
+                    model.select(
+                        state=state,
+                        decision_ns=0,
+                        new_order=execution._maker_new_order(
+                            0,
+                            side,
+                            1.0,
+                            state,
+                            _quote(0, book_segment_id="s1"),
+                            _maker_config().latency_ms,
+                        ),
+                        active_order=None,
+                        commands=(),
+                        lifetime_ns=500000000,
+                        prediction=0.0,
+                        fee_bps=0.0,
+                        funding=[],
                     )
-                assert answers[0] == answers[2]
-                assert reads == {
-                    "crypto_maker_samples.parquet": 1,
-                    "crypto_maker_events.parquet": 1,
-                }
-                if finish != "normal":
-                    path = root / "crypto_maker_events.parquet"
-                    before = filesystem_stat(path)
-                    payload = bytearray(filesystem_read_bytes(path))
-                    payload[4] ^= 1
-                    filesystem_write_bytes(path, payload)
-                    os.utime(
-                        native_filesystem_path(path),
-                        ns=(before.st_atime_ns, before.st_mtime_ns),
-                    )
-                    assert filesystem_stat(path).st_mtime_ns == before.st_mtime_ns
-                if finish == "cancel":
-                    raise primary
-        except (ValueError, KeyboardInterrupt) as error:
-            caught = error
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-        if finish == "normal":
-            assert caught is None
-        elif finish == "source_changed":
-            assert str(caught) == "semantic_artifact_member_integrity_invalid"
-        else:
-            assert caught is primary
-            assert any("ValueError" in note for note in primary.__notes__)
+                )
+            assert answers[0] == answers[2]
+            assert reads == {
+                "crypto_maker_samples.parquet": 1,
+                "crypto_maker_events.parquet": 1,
+            }
+            if finish != "normal":
+                path = root / "crypto_maker_events.parquet"
+                before = filesystem_stat(path)
+                payload = bytearray(filesystem_read_bytes(path))
+                payload[4] ^= 1
+                filesystem_write_bytes(path, payload)
+                os.utime(
+                    native_filesystem_path(path),
+                    ns=(before.st_atime_ns, before.st_mtime_ns),
+                )
+                assert filesystem_stat(path).st_mtime_ns == before.st_mtime_ns
+            if finish == "cancel":
+                raise primary
+    except (ValueError, KeyboardInterrupt) as error:
+        caught = error
+    if finish == "normal":
+        assert caught is None
+    elif finish == "source_changed":
+        assert str(caught) == "semantic_artifact_member_integrity_invalid"
+    else:
+        assert caught is primary
+        assert any("ValueError" in note for note in primary.__notes__)
 
 
 @pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
@@ -1574,21 +1313,17 @@ def test_undefined_model_inference_preserves_descriptive_mean(
         "bootstrap_upper",
     ]
     frame.loc[0, inference_columns] = float("nan")
-    with (
-        runtime_resource_policy_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        root = statistics.write_statistics_artifact(
-            tmp_path / "descriptive", envelope=envelope, tables=tables
-        )
-        artifact = statistics.read_statistics_artifact(
-            root, expected_identity=envelope.instance_identity, lease=artifact_lease
-        )
-        with artifact.table(f"{name}.parquet") as result:
-            assert result["mean"].iloc[0] == 0.2
-            assert result.observation_count.iloc[0] == 32
-            assert result.status.iloc[0] == "UNDEFINED"
-            assert result.loc[:, inference_columns].isna().all().all()
+    root = statistics.write_statistics_artifact(
+        tmp_path / "descriptive", envelope=envelope, tables=tables
+    )
+    artifact = statistics.read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with artifact.table(f"{name}.parquet") as result:
+        assert result["mean"].iloc[0] == 0.2
+        assert result.observation_count.iloc[0] == 32
+        assert result.status.iloc[0] == "UNDEFINED"
+        assert result.loc[:, inference_columns].isna().all().all()
 
 
 @pytest.mark.parametrize("name", ("prediction_diagnostics", "model_comparison"))
@@ -1668,16 +1403,12 @@ def test_defined_group_comparison_requires_descriptive_facts(
             error="statistics_group_comparison_invalid",
         )
     else:
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease("test.group.metadata", 0) as lease,
-        ):
-            root = statistics.write_statistics_artifact(
-                tmp_path / "group", envelope=envelope, tables=tables
-            )
-            artifact = statistics.read_statistics_artifact(
-                root, expected_identity=envelope.instance_identity, lease=lease
-            )
-            with artifact.table("model_group_comparison.parquet") as frame:
-                assert frame.global_mean.iloc[0] == 0.2
-                assert frame.observation_count.iloc[0] == 64
+        root = statistics.write_statistics_artifact(
+            tmp_path / "group", envelope=envelope, tables=tables
+        )
+        artifact = statistics.read_statistics_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        with artifact.table("model_group_comparison.parquet") as frame:
+            assert frame.global_mean.iloc[0] == 0.2
+            assert frame.observation_count.iloc[0] == 64

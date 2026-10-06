@@ -39,8 +39,7 @@ def rebuild_candidate_workspace(
     layout: StorageLayout,
 ) -> Iterator[RebuildCandidateWorkspace]:
     parent = require_unaliased_path(
-        Path(layout.project_root) / ".run",
-        error="invalid_rebuild_scratch_path",
+        Path(layout.project_root) / ".run", error="invalid_rebuild_scratch_path"
     )
     filesystem_mkdir(parent, parents=True, exist_ok=True)
     require_unaliased_path(parent, error="invalid_rebuild_scratch_path")

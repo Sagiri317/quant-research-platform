@@ -53,8 +53,8 @@ def _cash_constrained_inputs(
 ) -> tuple[pd.Series, pd.Series, pd.Series]:
     current = pd.Series(0.0, index=order, dtype="float64")
     target = pd.Series(1.0 / 3.0, index=order, dtype="float64")
-    adv = pd.Series(1_000.0, index=order, dtype="float64")
-    return current, target, adv
+    adv = pd.Series(1000.0, index=order, dtype="float64")
+    return (current, target, adv)
 
 
 def _schedule(
@@ -101,10 +101,7 @@ def _schedule(
             included_in_ledger=True,
         )
     )
-    return FeeSchedule(
-        rules=tuple(rules),
-        content_identity="0" * 64,
-    )
+    return FeeSchedule(rules=tuple(rules), content_identity="0" * 64)
 
 
 def _assumptions() -> ExecutionAssumptions:
@@ -118,13 +115,9 @@ def _assumptions() -> ExecutionAssumptions:
 
 
 @pytest.mark.parametrize(
-    ("field", "value"),
-    (("initial_nav", "100.0"), ("adv_sensitivities", ("1.0",))),
+    ("field", "value"), (("initial_nav", "100.0"), ("adv_sensitivities", ("1.0",)))
 )
-def test_execution_assumptions_reject_text_numbers(
-    field: str,
-    value: object,
-) -> None:
+def test_execution_assumptions_reject_text_numbers(field: str, value: object) -> None:
     parameters: dict[str, object] = {
         "initial_nav": 100.0,
         "slippage_bps": 0.0,
@@ -137,10 +130,8 @@ def test_execution_assumptions_reject_text_numbers(
         ExecutionAssumptions(**parameters)
 
 
-def _a_share_cost(
-    schedule: FeeSchedule,
-    markets: dict[str, str],
-):
+def _a_share_cost(schedule: FeeSchedule, markets: dict[str, str]):
+
     def cost_for_trade(
         execution_date: date,
         asset: str,
@@ -150,13 +141,7 @@ def _a_share_cost(
         assumptions: ExecutionAssumptions,
     ):
         return trade_cost(
-            execution_date,
-            markets[asset],
-            side,
-            notional,
-            adv20,
-            schedule,
-            assumptions,
+            execution_date, markets[asset], side, notional, adv20, schedule, assumptions
         )
 
     return cost_for_trade
@@ -202,10 +187,7 @@ def _real_fee_schedule(tmp_path: Path) -> FeeSchedule:
             for row in source.rows
         ]
     )
-    return fee_schedule_from_frame(
-        frame,
-        content_identity=source.source_identity,
-    )
+    return fee_schedule_from_frame(frame, content_identity=source.source_identity)
 
 
 def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
@@ -241,7 +223,7 @@ def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
             "深市",
             "买入+卖出",
             "成交金额",
-            0.0000255,
+            2.55e-05,
         ),
         (
             "TRANSFER_FEE",
@@ -250,7 +232,7 @@ def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
             "沪深",
             "买入+卖出",
             "成交金额",
-            0.00002,
+            2e-05,
         ),
         (
             "TRANSFER_FEE",
@@ -259,7 +241,7 @@ def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
             "沪深",
             "买入+卖出",
             "成交金额",
-            0.00001,
+            1e-05,
         ),
         (
             "EXCHANGE_HANDLING_FEE",
@@ -268,7 +250,7 @@ def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
             "沪深",
             "买入+卖出",
             "成交金额",
-            0.0000341,
+            3.41e-05,
             "否",
             "BROKER_COMMISSION",
         ),
@@ -298,7 +280,7 @@ def _copy_fee_source(tmp_path: Path) -> tuple[Path, Path]:
         json.dumps(metadata, ensure_ascii=False, separators=(",", ":")),
         encoding="utf-8",
     )
-    return csv_path, sidecar_path
+    return (csv_path, sidecar_path)
 
 
 def _source_row(
@@ -323,8 +305,8 @@ def _source_row(
             "方向": direction,
             "计费基数": basis,
             "十进制费率": str(rate),
-            "费率(‰)": str(rate * 1_000.0),
-            "费率(bps)": str(rate * 10_000.0),
+            "费率(‰)": str(rate * 1000.0),
+            "费率(bps)": str(rate * 10000.0),
             "进入正式账本": included,
             "包含于": included_in,
         }
@@ -342,12 +324,9 @@ def _rewrite_sidecar(sidecar_path: Path, **changes: object) -> None:
     )
 
 
-def test_fee_source_preserves_identity_and_exact_counts(
-    tmp_path: Path,
-) -> None:
+def test_fee_source_preserves_identity_and_exact_counts(tmp_path: Path) -> None:
     csv_path, sidecar_path = _copy_fee_source(tmp_path)
     source = load_a_share_fee_source(reference_root=csv_path.parent.parent)
-
     assert len(source.rows) == 14
     assert len(source.csv_sha256) == 64
     assert source.source_identity != source.csv_sha256
@@ -371,10 +350,7 @@ def test_fee_source_preserves_identity_and_exact_counts(
         ]
     )
     require_fee_coverage(
-        fee_schedule_from_frame(
-            frame,
-            content_identity=source.source_identity,
-        ),
+        fee_schedule_from_frame(frame, content_identity=source.source_identity),
         date(2019, 1, 1),
         date(2025, 12, 31),
         markets=("shanghai", "shenzhen"),
@@ -383,13 +359,11 @@ def test_fee_source_preserves_identity_and_exact_counts(
 
 @pytest.mark.parametrize("field", ("row_count", "file_bytes"))
 def test_fee_source_rejects_sidecar_count_and_byte_mutations(
-    tmp_path: Path,
-    field: str,
+    tmp_path: Path, field: str
 ) -> None:
     _csv_path, sidecar_path = _copy_fee_source(tmp_path)
     metadata = json.loads(filesystem_read_text(sidecar_path, encoding="utf-8"))
     _rewrite_sidecar(sidecar_path, **{field: metadata[field] + 1})
-
     with pytest.raises(ValueError, match="a_share_fee_source_(row_count|metadata)"):
         load_a_share_fee_source(reference_root=_csv_path.parent.parent)
 
@@ -399,7 +373,6 @@ def test_fee_source_rejects_csv_hash_and_schema_mutations(tmp_path: Path) -> Non
     filesystem_write_bytes(csv_path, filesystem_read_bytes(csv_path) + b"\n")
     with pytest.raises(ValueError, match="a_share_fee_source_metadata_invalid"):
         load_a_share_fee_source(reference_root=csv_path.parent.parent)
-
     csv_path, sidecar_path = _copy_fee_source(tmp_path / "schema")
     raw = filesystem_read_text(csv_path, encoding="utf-8-sig")
     filesystem_write_text(
@@ -407,9 +380,7 @@ def test_fee_source_rejects_csv_hash_and_schema_mutations(tmp_path: Path) -> Non
     )
     digest = hashlib.sha256(filesystem_read_bytes(csv_path)).hexdigest()
     _rewrite_sidecar(
-        sidecar_path,
-        file_sha256=digest,
-        file_bytes=filesystem_stat(csv_path).st_size,
+        sidecar_path, file_sha256=digest, file_bytes=filesystem_stat(csv_path).st_size
     )
     with pytest.raises(ValueError, match="a_share_fee_source_schema_invalid"):
         load_a_share_fee_source(reference_root=csv_path.parent.parent)
@@ -420,7 +391,6 @@ def test_fee_source_sidecar_change_changes_combined_identity(tmp_path: Path) -> 
     first = load_a_share_fee_source(reference_root=csv_path.parent.parent)
     _rewrite_sidecar(sidecar_path, notes="sidecar identity mutation")
     second = load_a_share_fee_source(reference_root=csv_path.parent.parent)
-
     assert first.csv_sha256 == second.csv_sha256
     assert first.source_identity != second.source_identity
 
@@ -458,58 +428,46 @@ def test_fee_rules_reject_overlap_gap_and_face_value_without_notional(
         for rule in schedule.rules
     )
     with pytest.raises(ValueError, match="interval_overlap"):
-        FeeSchedule(
-            rules=overlap,
-            content_identity=schedule.content_identity,
-        )
-
+        FeeSchedule(rules=overlap, content_identity=schedule.content_identity)
     gap = tuple(
         replace(stamps[0], end_date=stamps[0].end_date - timedelta(days=1))
         if rule is stamps[0]
         else rule
         for rule in schedule.rules
     )
-    gap_schedule = FeeSchedule(
-        rules=gap,
-        content_identity=schedule.content_identity,
-    )
+    gap_schedule = FeeSchedule(rules=gap, content_identity=schedule.content_identity)
     with pytest.raises(ValueError, match="coverage_missing"):
         require_fee_coverage(
-            gap_schedule,
-            date(2023, 8, 27),
-            date(2023, 8, 28),
-            markets=("shanghai",),
+            gap_schedule, date(2023, 8, 27), date(2023, 8, 28), markets=("shanghai",)
         )
-
     transfer = next(
         rule
         for rule in schedule.rules
         if rule.fee_code == "TRANSFER_FEE"
         and rule.market == "a_share"
-        and rule.effective_date == date(2015, 8, 1)
+        and (rule.effective_date == date(2015, 8, 1))
     )
     basis_mutation = tuple(
         replace(transfer, basis="face_value") if rule is transfer else rule
         for rule in schedule.rules
     )
     basis_schedule = FeeSchedule(
-        rules=basis_mutation,
-        content_identity=schedule.content_identity,
+        rules=basis_mutation, content_identity=schedule.content_identity
     )
     with pytest.raises(ValueError, match="face_value_notional_required"):
         trade_cost(
             date(2019, 1, 1),
             "shanghai",
             "buy",
-            1_000.0,
-            1_000_000.0,
+            1000.0,
+            1000000.0,
             basis_schedule,
             ExecutionAssumptions(
-                initial_nav=1_000_000_000.0,
+                initial_nav=1000000000.0,
                 slippage_bps=5.0,
                 impact_bps=25.0,
                 adv_participation=0.05,
-                adv_sensitivities=(0.01, 0.02, 0.05, 0.10),
+                adv_sensitivities=(0.01, 0.02, 0.05, 0.1),
             ),
         )
     with pytest.raises(ValueError, match="face_value_notional_invalid"):
@@ -517,13 +475,12 @@ def test_fee_rules_reject_overlap_gap_and_face_value_without_notional(
             date(2019, 1, 1),
             "shanghai",
             "buy",
-            1_000.0,
-            1_000_000.0,
+            1000.0,
+            1000000.0,
             basis_schedule,
             _assumptions(),
             face_value_notional=0.0,
         )
-
     ambiguous = tuple(
         (
             *schedule.rules,
@@ -540,29 +497,24 @@ def test_fee_rules_reject_overlap_gap_and_face_value_without_notional(
         )
     )
     with pytest.raises(ValueError, match="interval_overlap"):
-        FeeSchedule(
-            rules=ambiguous,
-            content_identity=schedule.content_identity,
-        )
+        FeeSchedule(rules=ambiguous, content_identity=schedule.content_identity)
 
 
-def test_fee_costs_are_side_aware_and_stamp_transition_is_exact(
-    tmp_path: Path,
-) -> None:
+def test_fee_costs_are_side_aware_and_stamp_transition_is_exact(tmp_path: Path) -> None:
     schedule = _real_fee_schedule(tmp_path)
     assumptions = ExecutionAssumptions(
-        initial_nav=1_000_000_000.0,
+        initial_nav=1000000000.0,
         slippage_bps=0.0,
         impact_bps=0.0,
         adv_participation=0.05,
-        adv_sensitivities=(0.01, 0.02, 0.05, 0.10),
+        adv_sensitivities=(0.01, 0.02, 0.05, 0.1),
     )
     buy = trade_cost(
         date(2023, 8, 28),
         "shanghai",
         "buy",
-        100_000.0,
-        10_000_000.0,
+        100000.0,
+        10000000.0,
         schedule,
         assumptions,
     )
@@ -570,8 +522,8 @@ def test_fee_costs_are_side_aware_and_stamp_transition_is_exact(
         date(2023, 8, 27),
         "shanghai",
         "sell",
-        100_000.0,
-        10_000_000.0,
+        100000.0,
+        10000000.0,
         schedule,
         assumptions,
     )
@@ -579,8 +531,8 @@ def test_fee_costs_are_side_aware_and_stamp_transition_is_exact(
         date(2023, 8, 28),
         "shanghai",
         "sell",
-        100_000.0,
-        10_000_000.0,
+        100000.0,
+        10000000.0,
         schedule,
         assumptions,
     )
@@ -591,8 +543,8 @@ def test_fee_costs_are_side_aware_and_stamp_transition_is_exact(
         date(2022, 4, 28),
         "shanghai",
         "buy",
-        100_000.0,
-        10_000_000.0,
+        100000.0,
+        10000000.0,
         schedule,
         assumptions,
     )
@@ -600,8 +552,8 @@ def test_fee_costs_are_side_aware_and_stamp_transition_is_exact(
         date(2022, 4, 29),
         "shanghai",
         "buy",
-        100_000.0,
-        10_000_000.0,
+        100000.0,
+        10000000.0,
         schedule,
         assumptions,
     )
@@ -646,9 +598,7 @@ def test_zero_cost_sell_buy_transition_is_exact_and_normalized() -> None:
 
 
 @pytest.mark.parametrize("mutation", ("wrong_direction", "overshoot", "phantom_cost"))
-def test_execution_accounting_rejects_canonical_ledger_mutations(
-    mutation: str,
-) -> None:
+def test_execution_accounting_rejects_canonical_ledger_mutations(mutation: str) -> None:
     result = _zero_cost_transition()
     ledger = result.asset_ledger
     if mutation == "wrong_direction":
@@ -660,8 +610,7 @@ def test_execution_accounting_rejects_canonical_ledger_mutations(
     else:
         ledger.loc[ledger["asset_id"].eq("c"), "commission_cost"] = 1.0
     with pytest.raises(
-        ValueError,
-        match="execution_ledger_(direction|phantom_cost)_invalid",
+        ValueError, match="execution_ledger_(direction|phantom_cost)_invalid"
     ):
         replace(result, _asset_ledger=ledger)
 
@@ -682,7 +631,6 @@ def test_zero_adv_is_legal_zero_fill_and_missing_adv_only_blocks_demand() -> Non
     assert zero.asset_ledger["reason"].notna().all()
     assert set(zero.asset_ledger["reason"]) == {"adv_capacity"}
     assert zero.total_cost == 0.0
-
     for missing_adv in (pd.Series(dtype="float64"), pd.Series({"a": float("nan")})):
         no_trade = execute_continuous_target(
             pd.Series({"a": 1.0}),
@@ -773,7 +721,6 @@ def test_blocked_sell_cannot_fund_buy_and_cash_partial_is_pro_rata() -> None:
         ].iloc[0]
         == "market_blocked"
     )
-
     blocked_without_cash = execute_continuous_target(
         pd.Series({"a": 1.0, "b": 0.0}),
         pd.Series({"a": 0.0, "b": 1.0}),
@@ -799,7 +746,6 @@ def test_blocked_sell_cannot_fund_buy_and_cash_partial_is_pro_rata() -> None:
         ].iloc[0]
         == "cash_pro_rata"
     )
-
     partial = execute_continuous_target(
         pd.Series({"a": 0.0, "b": 0.0, "c": 0.0}),
         pd.Series({"a": 1 / 3, "b": 1 / 3, "c": 1 / 3}),
@@ -810,8 +756,7 @@ def test_blocked_sell_cannot_fund_buy_and_cash_partial_is_pro_rata() -> None:
         execution_date=date(2023, 8, 28),
         assumptions=_assumptions(),
         cost_for_trade=_a_share_cost(
-            _schedule(),
-            {"a": "shanghai", "b": "shanghai", "c": "shanghai"},
+            _schedule(), {"a": "shanghai", "b": "shanghai", "c": "shanghai"}
         ),
         cost_source_identity="0" * 64,
     )
@@ -828,15 +773,12 @@ def test_cash_rotation_with_cost_keeps_target_cash_and_reconciles_delta() -> Non
         pd.Series({"a": 0.5}),
         pd.Series({"b": 0.5}),
         nav=100.0,
-        average_daily_volume=pd.Series({"a": 1_000.0, "b": 1_000.0}),
+        average_daily_volume=pd.Series({"a": 1000.0, "b": 1000.0}),
         can_enter=pd.Series({"a": True, "b": True}),
         can_exit=pd.Series({"a": True, "b": True}),
         execution_date=date(2023, 8, 28),
         assumptions=_assumptions(),
-        cost_for_trade=_a_share_cost(
-            _schedule(),
-            {"a": "shanghai", "b": "shanghai"},
-        ),
+        cost_for_trade=_a_share_cost(_schedule(), {"a": "shanghai", "b": "shanghai"}),
         cost_source_identity="0" * 64,
     )
     assert result.pre_trade_cash == pytest.approx(50.0)
@@ -853,7 +795,7 @@ def test_turnover_excludes_cost_and_drift_feeds_next_rebalance() -> None:
         pd.Series({"a": 1.0}),
         pd.Series({"b": 1.0}),
         nav=100.0,
-        average_daily_volume=pd.Series({"a": 1_000.0, "b": 1_000.0}),
+        average_daily_volume=pd.Series({"a": 1000.0, "b": 1000.0}),
         can_enter=pd.Series({"a": True, "b": True}),
         can_exit=pd.Series({"a": True, "b": True}),
         execution_date=date(2023, 8, 28),
@@ -882,9 +824,7 @@ def test_turnover_excludes_cost_and_drift_feeds_next_rebalance() -> None:
     )
     assert first.nav_after == pytest.approx(first.nav_before - first.total_cost)
     drifted, drift_cash, drift_nav = drift_continuous_holdings(
-        pd.Series({"a": 60.0, "b": 30.0}),
-        10.0,
-        pd.Series({"a": 0.10, "b": -0.10}),
+        pd.Series({"a": 60.0, "b": 30.0}), 10.0, pd.Series({"a": 0.1, "b": -0.1})
     )
     assert drifted.to_dict() == {"a": 66.0, "b": 27.0}
     assert drift_cash == 10.0
@@ -893,7 +833,7 @@ def test_turnover_excludes_cost_and_drift_feeds_next_rebalance() -> None:
         drifted / drift_nav,
         pd.Series({"a": 0.5, "b": 0.5}),
         nav=drift_nav,
-        average_daily_volume=pd.Series({"a": 1_000.0, "b": 1_000.0}),
+        average_daily_volume=pd.Series({"a": 1000.0, "b": 1000.0}),
         can_enter=pd.Series({"a": True, "b": True}),
         can_exit=pd.Series({"a": True, "b": True}),
         execution_date=date(2023, 8, 29),
@@ -915,9 +855,7 @@ def test_turnover_excludes_cost_and_drift_feeds_next_rebalance() -> None:
 def test_future_mask_mutation_changes_execution_not_past_target() -> None:
     signal = pd.Series({"a": 1.0, "b": 2.0})
     target = build_simple_target_weights(
-        signal,
-        eligible=pd.Series({"b": True, "a": True}),
-        top_quantile=0.5,
+        signal, eligible=pd.Series({"b": True, "a": True}), top_quantile=0.5
     )
     args = dict(
         nav=100.0,
@@ -946,9 +884,7 @@ def test_future_mask_mutation_changes_execution_not_past_target() -> None:
     pd.testing.assert_series_equal(
         target,
         build_simple_target_weights(
-            signal,
-            eligible=pd.Series({"a": True, "b": True}),
-            top_quantile=0.5,
+            signal, eligible=pd.Series({"a": True, "b": True}), top_quantile=0.5
         ),
     )
     assert (
@@ -965,7 +901,6 @@ def test_cash_constrained_buy_fills_are_asset_order_invariant() -> None:
     second_current, second_target, second_adv = _cash_constrained_inputs(
         ("c", "b", "a")
     )
-
     first = execute_continuous_target(
         first_current,
         first_target,
@@ -976,8 +911,7 @@ def test_cash_constrained_buy_fills_are_asset_order_invariant() -> None:
         execution_date=date(2023, 8, 28),
         assumptions=_assumptions(),
         cost_for_trade=_a_share_cost(
-            _schedule(),
-            {asset: "shanghai" for asset in first_adv.index},
+            _schedule(), {asset: "shanghai" for asset in first_adv.index}
         ),
         cost_source_identity="0" * 64,
     )
@@ -991,12 +925,10 @@ def test_cash_constrained_buy_fills_are_asset_order_invariant() -> None:
         execution_date=date(2023, 8, 28),
         assumptions=_assumptions(),
         cost_for_trade=_a_share_cost(
-            _schedule(),
-            {asset: "shanghai" for asset in second_adv.index},
+            _schedule(), {asset: "shanghai" for asset in second_adv.index}
         ),
         cost_source_identity="0" * 64,
     )
-
     pd.testing.assert_series_equal(
         (
             first.asset_ledger.set_index("asset_id")["post_trade_notional"]
@@ -1014,7 +946,7 @@ def test_buy_costs_are_admitted_before_cash_sizing() -> None:
         pd.Series({"asset": 0.0}),
         pd.Series({"asset": 1.0}),
         nav=1.0,
-        average_daily_volume=pd.Series({"asset": 1_000_000.0}),
+        average_daily_volume=pd.Series({"asset": 1000000.0}),
         can_enter=pd.Series({"asset": True}),
         can_exit=pd.Series({"asset": True}),
         execution_date=date(2023, 8, 28),
@@ -1025,14 +957,12 @@ def test_buy_costs_are_admitted_before_cash_sizing() -> None:
         ),
         cost_source_identity="0" * 64,
     )
-
     assert result.cash_weight >= -1e-12
-
     tiny = execute_continuous_target(
         pd.Series({"asset": 0.0}),
         pd.Series({"asset": 1e-13}),
         nav=1.0,
-        average_daily_volume=pd.Series({"asset": 1_000_000.0}),
+        average_daily_volume=pd.Series({"asset": 1000000.0}),
         can_enter=pd.Series({"asset": True}),
         can_exit=pd.Series({"asset": True}),
         execution_date=date(2023, 8, 28),
@@ -1050,22 +980,13 @@ def test_buy_costs_are_admitted_before_cash_sizing() -> None:
 
 def test_simple_target_includes_all_boundary_ties() -> None:
     signal = pd.Series(
-        {"a": 1.0, "b": 2.0, "c": 2.0, "d": 2.0, "e": 3.0},
-        dtype="float64",
+        {"a": 1.0, "b": 2.0, "c": 2.0, "d": 2.0, "e": 3.0}, dtype="float64"
     )
     target = build_simple_target_weights(
-        signal,
-        eligible=pd.Series(True, index=signal.index),
-        top_quantile=0.4,
+        signal, eligible=pd.Series(True, index=signal.index), top_quantile=0.4
     )
-
     assert target.loc["a"] == 0.0
-    assert target.loc[["b", "c", "d", "e"]].tolist() == [
-        0.25,
-        0.25,
-        0.25,
-        0.25,
-    ]
+    assert target.loc[["b", "c", "d", "e"]].tolist() == [0.25, 0.25, 0.25, 0.25]
 
 
 def test_simple_target_float_cap_and_long_short_weights() -> None:
@@ -1079,7 +1000,6 @@ def test_simple_target_float_cap_and_long_short_weights() -> None:
         float_market_cap=caps,
     )
     assert long_only.tolist() == [0.0, 0.0, 3.0 / 7.0, 4.0 / 7.0]
-
     long_short = build_simple_target_weights(
         signal,
         eligible=pd.Series(True, index=signal.index),
@@ -1096,8 +1016,7 @@ def test_simple_target_float_cap_and_long_short_weights() -> None:
 def test_simple_target_rejects_missing_eligible_signal(bad: float) -> None:
     with pytest.raises(ValueError, match="target_signal_invalid"):
         build_simple_target_weights(
-            pd.Series({"a": bad, "b": 2.0}),
-            eligible=pd.Series({"a": True, "b": True}),
+            pd.Series({"a": bad, "b": 2.0}), eligible=pd.Series({"a": True, "b": True})
         )
 
 
@@ -1105,7 +1024,7 @@ def test_cash_search_stops_at_float_stagnation_and_preserves_old_low_exactly():
     assumptions = _assumptions()
     when = date(2023, 8, 28)
     actual_cost = _a_share_cost(_schedule(), {"a": "shanghai"})
-    low, high = 0.0, 1.0
+    low, high = (0.0, 1.0)
     for _ in range(80):
         middle = (low + high) / 2.0
         amount = 100.0 * middle
@@ -1178,7 +1097,7 @@ def test_trade_cost_preserves_representable_scaled_costs(notional, adv, bps):
     assert result.impact_cost == pytest.approx(expected_impact, rel=1e-14, abs=0)
 
 
-@pytest.mark.parametrize("nav", (1e8, 1e307))
+@pytest.mark.parametrize("nav", (100000000.0, 1e307))
 def test_scaled_execution_costs_reconcile_cash(nav):
     assumptions = replace(
         _assumptions(), initial_nav=nav, slippage_bps=5.0, impact_bps=25.0
@@ -1196,7 +1115,6 @@ def test_scaled_execution_costs_reconcile_cash(nav):
         cost_for_trade=_a_share_cost(schedule, {"a": "shanghai"}),
         cost_source_identity=schedule.content_identity,
     )
-    # Full liquidation at unit participation costs 5 + 25 bps, leaving cash only.
     assert result.total_cost / nav == pytest.approx(0.003, rel=1e-14, abs=0)
     assert result.nav_after / nav == pytest.approx(0.997, rel=1e-14, abs=0)
     assert result.post_trade_cash == result.nav_after
@@ -1214,7 +1132,7 @@ def test_cash_search_vector_costs_build_trade_details_only_once():
     )
     when = date(2023, 8, 28)
     evaluator = prepare_trade_cost(when, "shanghai", "buy", schedule, assumptions)
-    details, vectors = [], []
+    details, vectors = ([], [])
 
     def trade(_date, asset, side, amount, adv, _assumptions):
         assert side == "buy"

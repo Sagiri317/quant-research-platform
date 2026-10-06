@@ -47,14 +47,8 @@ from quant_research_platform.research.protocols.crypto_hft import (
     portfolio_candidates,
     validation_windows,
 )
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    _close_lease_preserving_primary,
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-)
+from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.sources.binance import ids as binance_ids
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 
@@ -84,12 +78,13 @@ def _books_until(run, *, reconstruct_depth, symbol, end_ns):
     source = reconstruct_depth(run, symbol=symbol, end_ns=end_ns)
     with closing_iterator(source):
         for event in source:
-            value = event.value if isinstance(event, OwnedValue) else event
+            value = event
             if value.observed_time_ns > end_ns:
-                if isinstance(event, OwnedValue):
-                    event.release(owner="crypto.execution.book")
                 break
-            yield event
+            try:
+                yield event
+            except GeneratorExit:
+                return
 
 
 def _score_in_label_units(score, calibration):
@@ -107,7 +102,6 @@ def _prediction_rows(
     model_id,
     asset_id,
     protocol_manifest,
-    resource_policy,
     read_prediction_bundle,
     output_window,
 ):
@@ -153,20 +147,15 @@ def _prediction_rows(
                 )
                 with closing_iterator(source):
                     for frame in source:
-                        with resource_policy.lease(
-                            "crypto.execution.prediction.scope",
-                            max(
-                                1, pandas_frame_payload_bytes(frame) + len(frame) * 128
-                            ),
-                        ):
-                            scoped = (
-                                frame.loc[frame.asset_id.isin(assets)]
-                                if assets
-                                else frame
-                            )
-                            scoped = scoped.assign(fold_id=fold_id)
+                        scoped = (
+                            frame.loc[frame.asset_id.isin(assets)] if assets else frame
+                        )
+                        scoped = scoped.assign(fold_id=fold_id)
+                        try:
                             yield scoped
-                            del scoped
+                        except GeneratorExit:
+                            return
+                        del scoped
 
         joined = _iter_prediction_joined_chunks(
             frames(),
@@ -181,7 +170,7 @@ def _prediction_rows(
             for frame in joined:
                 for row in frame.itertuples(index=False):
                     if row.asset_id == asset_id:
-                        yield {
+                        _yield_value = {
                             "timestamp_ms": pd.Timestamp(row.timestamp).value
                             // 1_000_000,
                             "asset_id": asset_id,
@@ -193,6 +182,10 @@ def _prediction_rows(
                                 row.prediction_score, calibration
                             ),
                         }
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
 
 
 def _market_coverage_check(coverage, trade_coverage, bounds):
@@ -246,8 +239,6 @@ class _EpisodeCursor:
         self.exhausted = False
 
     def retain(self, value):
-        if isinstance(self.carried, OwnedValue):
-            self.carried.release(owner="crypto.episode.carry")
         self.carried = None if isinstance(value, BookBoundary) else value
 
     def _next(self):
@@ -261,8 +252,6 @@ class _EpisodeCursor:
             value, self.pending = self.pending, None
             if bootstrap or self.sticky:
                 self.retain(value)
-            elif isinstance(value, OwnedValue):
-                value.release(owner="crypto.episode.discard")
             self._next()
         if self.carried is not None:
             value = self.carried
@@ -277,14 +266,11 @@ class _EpisodeCursor:
             self._next()
 
     def close(self):
-        for value in (self.pending, self.carried):
-            if isinstance(value, OwnedValue):
-                value.release(owner="crypto.episode.cursor")
         self.pending = self.carried = None
 
 
 def _episode_book_time(event):
-    value = event.value if isinstance(event, OwnedValue) else event
+    value = event
     return value.observed_time_ns
 
 
@@ -323,7 +309,11 @@ def _qualified_episodes(coverage, trade_coverage, funding, bounds):
                 cuts = (stamp for stamp in bad_settlements if left <= stamp < right)
                 for cut in cuts:
                     if left < cut:
-                        yield left, cut, "TRUNCATED", ("funding_coverage_end",)
+                        _yield_value = left, cut, "TRUNCATED", ("funding_coverage_end",)
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
                     left = cut + 1
                 if left < right:
                     reasons = []
@@ -335,12 +325,16 @@ def _qualified_episodes(coverage, trade_coverage, funding, bounds):
                         reasons.append("trade_coverage_end")
                     if right == funded[1]:
                         reasons.append("funding_coverage_end")
-                    yield (
+                    _yield_value = (
                         left,
                         right,
                         "PLANNED_END" if right == stop else "TRUNCATED",
                         tuple(sorted(reasons)),
                     )
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
             if book[1] == edge:
                 book = next(book_intervals, None)
             if trade[1] == edge:
@@ -437,7 +431,7 @@ def _execute_portfolio(
     if funding.identity != expected_funding_identity:
         raise ValueError("crypto_execution_funding_identity_mismatch")
     if execution_mode == "independent_segments":
-        with handle_preserving_primary(ExitStack()) as resources:
+        with closing_iterator(ExitStack()) as resources:
             return _execute_episodes(
                 books=books,
                 trades=trades,
@@ -484,7 +478,6 @@ def produce_taker_ledger(
     upstream_identities,
     expected_funding_identity,
     raw_root,
-    resource_policy,
     execution_mode,
     on_ledger=None,
     on_episode=None,
@@ -516,11 +509,9 @@ def produce_taker_ledger(
         "coverage_segments"
     ]
     with (
-        open_run(raw_root, resource_policy) as run,
+        open_run(raw_root) as run,
         read_funding(
-            run.funding_roots(symbol, time_window=output_window),
-            symbol=symbol,
-            resource_policy=resource_policy,
+            run.funding_roots(symbol, time_window=output_window), symbol=symbol
         ) as funding,
     ):
         if run.source_identity != panel["source_artifact_identity"]:
@@ -539,14 +530,16 @@ def produce_taker_ledger(
                 model_id=candidate.model_id,
                 asset_id=candidate.asset_id,
                 protocol_manifest=protocol_manifest,
-                resource_policy=resource_policy,
                 read_prediction_bundle=read_prediction_bundle,
                 output_window=output_window,
             )
             with closing_iterator(rows):
                 for row in rows:
                     if row["prediction_score"] is not None:
-                        yield row
+                        try:
+                            yield row
+                        except GeneratorExit:
+                            return
 
         execute = partial(
             simulate_taker,
@@ -556,7 +549,6 @@ def produce_taker_ledger(
             ],
             config=config,
             observed_coverage=coverage,
-            resource_policy=resource_policy,
             capital=PortfolioCapital(
                 candidate.candidate_id,
                 plan["initial_capital"],
@@ -608,11 +600,15 @@ def _validation_rows(artifact, *, fold_id, model_id, asset_id):
         for frame in rows:
             for row in frame.itertuples(index=False):
                 if row.asset_id == asset_id:
-                    yield row._replace(
+                    _yield_value = row._replace(
                         prediction_score=_score_in_label_units(
                             row.prediction_score, calibration
                         )
                     )
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
 
 
 def _paired_validation(artifact, fold_id, asset_id, model_ids):
@@ -638,7 +634,7 @@ def _paired_validation(artifact, fold_id, asset_id, model_ids):
                 isinstance(getattr(price, column), str) and getattr(price, column)
                 for column in HFT_EXECUTION_CONTEXT_COLUMNS
             ):
-                yield {
+                _yield_value = {
                     "timestamp_ms": pd.Timestamp(price.timestamp).value // 1_000_000,
                     "asset_id": asset_id,
                     "book_segment_id": price.book_segment_id,
@@ -651,14 +647,15 @@ def _paired_validation(artifact, fold_id, asset_id, model_ids):
                         pd.Timestamp(proxy.label_available_at).value,
                     ),
                 }
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
             price, proxy = (next(stream, None) for stream in streams)
         # Validate unused mature rows too; unmatched feature eligibility is not a quote.
         for stream in streams:
             for _row in stream:
                 pass
-
-
-_CALIBRATION_BATCH_BYTES = 8 * 1024**2
 
 
 def produce_maker_calibration(
@@ -669,7 +666,6 @@ def produce_maker_calibration(
     time_window,
     upstream_identities,
     raw_root,
-    resource_policy,
     open_run,
     reconstruct_depth,
     read_trades,
@@ -679,144 +675,141 @@ def produce_maker_calibration(
     model_ids,
     market_type,
 ):
-    with resource_policy.lease(
-        "crypto.maker.calibration.metadata", 0
-    ) as metadata_lease:
-        plan = protocol_manifest["research_plan"]
-        calibration = plan["execution"]["maker"]
-        panel = _panel(layout, upstream_identities)
-        model_target = f"{protocol_manifest['scenario_id']}_models"
-        models = read_model_artifact(
-            layout.target_root(model_target, Path("__missing_models__")),
-            expected_identity=upstream_identities[model_target],
-            trial_layout=layout,
-            lease=metadata_lease,
-        )
-        selected_folds = {
-            fold for fold, _window in validation_windows(plan, time_window)
+    plan = protocol_manifest["research_plan"]
+    calibration = plan["execution"]["maker"]
+    panel = _panel(layout, upstream_identities)
+    model_target = f"{protocol_manifest['scenario_id']}_models"
+    models = read_model_artifact(
+        layout.target_root(model_target, Path("__missing_models__")),
+        expected_identity=upstream_identities[model_target],
+        trial_layout=layout,
+    )
+    selected_folds = {fold for fold, _window in validation_windows(plan, time_window)}
+    sample_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"]
+    event_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_events.parquet"]
+    integers = {
+        "sample_id",
+        "decision_at",
+        "prediction_end",
+        "label_available_at",
+        "initial_book_event_id",
+        "initial_bid_index",
+        "initial_ask_index",
+        "event_start",
+        "event_end",
+        "event_id",
+        "event_at",
+        "level_index",
+        "price_index",
+    }
+    strings = {
+        "fold_id",
+        "side",
+        "terminal_reason",
+        "book_segment_id",
+        "trade_observation_id",
+        "event_kind",
+        "context_id",
+    }
+    columns_by_table = {
+        "crypto_maker_samples": sample_columns,
+        "crypto_maker_events": event_columns,
+    }
+
+    def empty(columns):
+        return {
+            column: []
+            if column in strings
+            else array("q" if column in integers else "d")
+            for column in columns
         }
-        sample_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_samples.parquet"]
-        event_columns = STATISTICS_TABLE_COLUMNS["crypto_maker_events.parquet"]
-        integers = {
-            "sample_id",
-            "decision_at",
-            "prediction_end",
-            "label_available_at",
-            "initial_book_event_id",
-            "initial_bid_index",
-            "initial_ask_index",
-            "event_start",
-            "event_end",
-            "event_id",
-            "event_at",
-            "level_index",
-            "price_index",
-        }
-        strings = {
-            "fold_id",
-            "side",
-            "terminal_reason",
-            "book_segment_id",
-            "trade_observation_id",
-            "event_kind",
-            "context_id",
-        }
-        columns_by_table = {
-            "crypto_maker_samples": sample_columns,
-            "crypto_maker_events": event_columns,
-        }
 
-        def empty(columns):
-            return {
-                column: []
-                if column in strings
-                else array("q" if column in integers else "d")
-                for column in columns
-            }
+    buffers = {name: empty(columns) for name, columns in columns_by_table.items()}
+    buffer_rows = dict.fromkeys(buffers, 0)
+    written = set()
 
-        buffers = {name: empty(columns) for name, columns in columns_by_table.items()}
-        sizes = dict.fromkeys(buffers, 0)
-        written = set()
-        lease = resource_policy.lease("crypto.maker.calibration.buffer", 65536)
-
-        def frame(values, columns):
-            arrays = {}
-            for column in columns:
-                value = values[column]
-                if isinstance(value, array):
-                    value = np.frombuffer(
-                        value, dtype=np.int64 if column in integers else np.float64
-                    )
-                    if column in {
-                        "decision_at",
-                        "prediction_end",
-                        "label_available_at",
-                        "event_at",
-                    }:
-                        value = value.view("datetime64[ns]")
-                arrays[column] = value
-            return pd.DataFrame(arrays, columns=columns, copy=False)
-
-        def flush(name):
-            output = frame(buffers[name], columns_by_table[name])
-            try:
-                on_table(name, output)
-            finally:
-                output = None
-            written.add(name)
-            buffers[name] = empty(columns_by_table[name])
-            sizes[name] = 0
-            lease.shrink_to(65536 + sum(sizes.values()))
-
-        def append(name, rows, count, string_bytes):
-            row_bytes = (
-                512 if name == "crypto_maker_events" else 2048
-            ) + 4 * string_bytes
-            rows = iter(rows)
-            while count:
-                total = sum(sizes.values())
-                target = max(
-                    1,
-                    min(
-                        _CALIBRATION_BATCH_BYTES,
-                        (resource_policy.planning_headroom_bytes + total) // 8,
-                    ),
+    def frame(values, columns):
+        arrays = {}
+        for column in columns:
+            value = values[column]
+            if isinstance(value, array):
+                value = np.frombuffer(
+                    value, dtype=np.int64 if column in integers else np.float64
                 )
-                if total and total + row_bytes > target:
-                    flush(max(sizes, key=sizes.get))
-                    continue
-                take = min(count, max(1, (target - total) // row_bytes))
-                lease.grow(take * row_bytes)
-                sizes[name] += take * row_bytes
-                batch = values = None
-                try:
-                    batch = tuple(islice(rows, take))
-                    for column, values in zip(
-                        columns_by_table[name], zip(*batch, strict=True), strict=True
-                    ):
-                        buffers[name][column].extend(values)
-                finally:
-                    batch = values = None
-                count -= take
+                if column in {
+                    "decision_at",
+                    "prediction_end",
+                    "label_available_at",
+                    "event_at",
+                }:
+                    value = value.view("datetime64[ns]")
+            arrays[column] = value
+        return pd.DataFrame(arrays, columns=columns, copy=False)
 
+    def flush(name):
+        output = frame(buffers[name], columns_by_table[name])
         try:
-            with open_run(raw_root, resource_policy) as run:
-                if run.source_identity != panel["source_artifact_identity"]:
-                    raise ValueError("crypto_execution_recorder_identity_mismatch")
-                price_unit = run.market_metadata(market_type, symbol)["price_unit"]
-                coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
-                    "coverage_segments"
-                ]
-                trade_coverage = run.observation_coverage(
-                    market_type=market_type, data_kind="agg_trades", symbol=symbol
-                )
-                for fold in plan["folds"]:
-                    if fold["fold_id"] not in selected_folds:
-                        continue
-                    counts = {side: [0, 0, 0] for side in ("buy", "sell")}
+            on_table(name, output)
+        finally:
+            output = None
+        written.add(name)
+        buffers[name] = empty(columns_by_table[name])
+        buffer_rows[name] = 0
 
-                    def observe(
-                        *,
+    def append(name, rows, count):
+        rows = iter(rows)
+        while count:
+            if buffer_rows[name] == DEFAULT_BATCH_ROWS:
+                flush(name)
+            take = min(count, DEFAULT_BATCH_ROWS - buffer_rows[name])
+            batch = tuple(islice(rows, take))
+            for column, values in zip(
+                columns_by_table[name], zip(*batch, strict=True), strict=True
+            ):
+                buffers[name][column].extend(values)
+            buffer_rows[name] += take
+            count -= take
+
+    try:
+        with open_run(raw_root) as run:
+            if run.source_identity != panel["source_artifact_identity"]:
+                raise ValueError("crypto_execution_recorder_identity_mismatch")
+            price_unit = run.market_metadata(market_type, symbol)["price_unit"]
+            coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
+                "coverage_segments"
+            ]
+            trade_coverage = run.observation_coverage(
+                market_type=market_type, data_kind="agg_trades", symbol=symbol
+            )
+            for fold in plan["folds"]:
+                if fold["fold_id"] not in selected_folds:
+                    continue
+                counts = {side: [0, 0, 0] for side in ("buy", "sell")}
+
+                def observe(
+                    *,
+                    side,
+                    sample_id,
+                    decision_ns,
+                    prediction_end_ns,
+                    available_ns,
+                    prediction,
+                    observed_return,
+                    filled,
+                    quote_quantity,
+                    terminal_reason,
+                    book_segment_id,
+                    trade_observation_id,
+                    initial_book_event_id,
+                    initial_bid_index,
+                    initial_ask_index,
+                    event_start,
+                    event_end,
+                    fold_id=fold["fold_id"],
+                    counts=counts,
+                ):
+                    values = (
+                        fold_id,
                         side,
                         sample_id,
                         decision_ns,
@@ -824,6 +817,7 @@ def produce_maker_calibration(
                         available_ns,
                         prediction,
                         observed_return,
+                        observed_return - prediction,
                         filled,
                         quote_quantity,
                         terminal_reason,
@@ -834,150 +828,113 @@ def produce_maker_calibration(
                         initial_ask_index,
                         event_start,
                         event_end,
-                        fold_id=fold["fold_id"],
-                        counts=counts,
-                    ):
-                        values = (
-                            fold_id,
-                            side,
-                            sample_id,
-                            decision_ns,
-                            prediction_end_ns,
-                            available_ns,
-                            prediction,
-                            observed_return,
-                            observed_return - prediction,
-                            filled,
-                            quote_quantity,
-                            terminal_reason,
-                            book_segment_id,
-                            trade_observation_id,
-                            initial_book_event_id,
-                            initial_bid_index,
-                            initial_ask_index,
-                            event_start,
-                            event_end,
-                        )
-                        append(
-                            "crypto_maker_samples",
-                            (values,),
-                            1,
-                            sum(
-                                len(value) for value in values if isinstance(value, str)
-                            ),
-                        )
-                        counts[side][0] += 1
-                        counts[side][1] += int(filled == 0)
-                        counts[side][2] += int(
-                            terminal_reason == "post_only_crossing_rejected"
-                        )
+                    )
+                    append("crypto_maker_samples", (values,), 1)
+                    counts[side][0] += 1
+                    counts[side][1] += int(filled == 0)
+                    counts[side][2] += int(
+                        terminal_reason == "post_only_crossing_rejected"
+                    )
 
-                    def observe_event(*, event_id, event, fold_id=fold["fold_id"]):
-                        if isinstance(event, TradeEvent):
-                            if event.visible_quantity is None:
-                                raise PortfolioTargetBlocked(
-                                    "hft_trade_visible_quantity_unknown"
-                                )
-                            kind, context = "trade", event.observation_id
-                            rows = (
-                                (
-                                    "buy" if event.buyer_is_maker else "sell",
-                                    0,
-                                    event.price_index,
-                                    event.visible_quantity,
-                                ),
+                def observe_event(*, event_id, event, fold_id=fold["fold_id"]):
+                    if isinstance(event, TradeEvent):
+                        if event.visible_quantity is None:
+                            raise PortfolioTargetBlocked(
+                                "hft_trade_visible_quantity_unknown"
                             )
-                            count = 1
-                        elif isinstance(event, BookBoundary):
-                            kind, context = "boundary", event.segment_id
-                            rows = (("", 0, 0, 0.0),)
-                            count = 1
-                        else:
-                            kind, context = "book", event.segment_id
-                            rows = (
-                                (side, index, tick, quantity)
-                                for side, levels in (
-                                    ("buy", event.bids),
-                                    ("sell", event.asks),
-                                )
-                                for index, (tick, quantity) in enumerate(levels)
-                            )
-                            count = len(event.bids) + len(event.asks)
-                        append(
-                            "crypto_maker_events",
+                        kind, context = "trade", event.observation_id
+                        rows = (
                             (
-                                (
-                                    fold_id,
-                                    event_id,
-                                    event.observed_time_ns,
-                                    kind,
-                                    context,
-                                    side,
-                                    level,
-                                    tick,
-                                    quantity,
-                                )
-                                for side, level, tick, quantity in rows
+                                "buy" if event.buyer_is_maker else "sell",
+                                0,
+                                event.price_index,
+                                event.visible_quantity,
                             ),
-                            count,
-                            len(fold_id) + len(kind) + len(context) + len("sell"),
                         )
-
-                    cutoff = pd.Timestamp(fold["validation"]["end"]).value
-                    result = replay_maker_calibration(
-                        _books_until(
-                            run,
-                            reconstruct_depth=reconstruct_depth,
-                            symbol=symbol,
-                            end_ns=cutoff,
-                        ),
-                        read_trades(run, symbol=symbol, end_ms=cutoff // 1_000_000),
-                        _paired_validation(
-                            models, fold["fold_id"], asset_id, model_ids
-                        ),
-                        order_quantity=calibration["order_quantity"],
-                        latency_ms=calibration["latency_ms"],
-                        observed_coverage=coverage,
-                        trade_coverage=trade_coverage,
-                        cutoff_ns=cutoff,
-                        resource_policy=resource_policy,
-                        on_sample=observe,
-                        on_event=observe_event,
-                    )
-                    minimum = plan["execution"]["maker"]["min_calibration_samples"]
-                    summaries = []
-                    for side, (count, zero, rejected) in counts.items():
-                        summaries.append(
-                            {
-                                "fold_id": fold["fold_id"],
-                                "side": side,
-                                "price_unit": price_unit,
-                                "sample_count": count,
-                                "zero_fill_count": zero,
-                                "post_only_rejection_count": rejected,
-                                "excluded_decisions": result["excluded_decisions"],
-                                "minimum_samples": minimum,
-                                "status": "DEFINED"
-                                if count >= minimum
-                                else "UNDEFINED",
-                                "reason": ""
-                                if count >= minimum
-                                else "insufficient_calibration_samples",
-                            }
+                        count = 1
+                    elif isinstance(event, BookBoundary):
+                        kind, context = "boundary", event.segment_id
+                        rows = (("", 0, 0, 0.0),)
+                        count = 1
+                    else:
+                        kind, context = "book", event.segment_id
+                        rows = (
+                            (side, index, tick, quantity)
+                            for side, levels in (
+                                ("buy", event.bids),
+                                ("sell", event.asks),
+                            )
+                            for index, (tick, quantity) in enumerate(levels)
                         )
-
-                    on_table(
-                        "crypto_maker_calibration", pd.DataFrame.from_records(summaries)
+                        count = len(event.bids) + len(event.asks)
+                    append(
+                        "crypto_maker_events",
+                        (
+                            (
+                                fold_id,
+                                event_id,
+                                event.observed_time_ns,
+                                kind,
+                                context,
+                                side,
+                                level,
+                                tick,
+                                quantity,
+                            )
+                            for side, level, tick, quantity in rows
+                        ),
+                        count,
                     )
-                    for name in buffers:
-                        if sizes[name]:
-                            flush(name)
-            for name in buffers:
-                if sizes[name] or name not in written:
-                    flush(name)
-        finally:
-            buffers.clear()
-            _close_lease_preserving_primary(lease, owner="crypto.maker.calibration")
+
+                cutoff = pd.Timestamp(fold["validation"]["end"]).value
+                result = replay_maker_calibration(
+                    _books_until(
+                        run,
+                        reconstruct_depth=reconstruct_depth,
+                        symbol=symbol,
+                        end_ns=cutoff,
+                    ),
+                    read_trades(run, symbol=symbol, end_ms=cutoff // 1000000),
+                    _paired_validation(models, fold["fold_id"], asset_id, model_ids),
+                    order_quantity=calibration["order_quantity"],
+                    latency_ms=calibration["latency_ms"],
+                    observed_coverage=coverage,
+                    trade_coverage=trade_coverage,
+                    cutoff_ns=cutoff,
+                    on_sample=observe,
+                    on_event=observe_event,
+                )
+                minimum = plan["execution"]["maker"]["min_calibration_samples"]
+                summaries = []
+                for side, (count, zero, rejected) in counts.items():
+                    summaries.append(
+                        {
+                            "fold_id": fold["fold_id"],
+                            "side": side,
+                            "price_unit": price_unit,
+                            "sample_count": count,
+                            "zero_fill_count": zero,
+                            "post_only_rejection_count": rejected,
+                            "excluded_decisions": result["excluded_decisions"],
+                            "minimum_samples": minimum,
+                            "status": "DEFINED" if count >= minimum else "UNDEFINED",
+                            "reason": ""
+                            if count >= minimum
+                            else "insufficient_calibration_samples",
+                        }
+                    )
+
+                on_table(
+                    "crypto_maker_calibration", pd.DataFrame.from_records(summaries)
+                )
+                for name in buffers:
+                    if buffer_rows[name]:
+                        flush(name)
+        for name in buffers:
+            if buffer_rows[name] or name not in written:
+                flush(name)
+    finally:
+        buffers.clear()
 
 
 def produce_maker_ledger(
@@ -990,7 +947,6 @@ def produce_maker_ledger(
     upstream_identities,
     expected_funding_identity,
     raw_root,
-    resource_policy,
     execution_mode,
     on_ledger=None,
     on_episode=None,
@@ -1014,10 +970,7 @@ def produce_maker_ledger(
     coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
         "coverage_segments"
     ]
-    with handle_preserving_primary(ExitStack()) as resources:
-        metadata_lease = resources.enter_context(
-            resource_policy.lease("crypto.maker.calibration.metadata", 0)
-        )
+    with closing_iterator(ExitStack()) as resources:
         calibrations = None
         if candidate.calibrated:
             target = candidate.calibration_target_id
@@ -1025,7 +978,6 @@ def produce_maker_ledger(
                 layout.target_root(target, Path("__missing_calibration__")),
                 expected_identity=upstream_identities[target],
                 validate_tables=validate_maker_calibration,
-                lease=metadata_lease,
             )
             with artifact.table("crypto_maker_calibration.parquet") as summary:
                 try:
@@ -1054,9 +1006,7 @@ def produce_maker_ledger(
                     partial(_calibration_samples, artifact, fold_id),
                     partial(_calibration_events, artifact, fold_id),
                     price_unit=price_unit,
-                    resource_policy=resource_policy,
                 )
-                resources.callback(calibration.close)
                 calibrations[fold_id] = calibration
 
         def quotes():
@@ -1069,7 +1019,6 @@ def produce_maker_ledger(
                         model_id=model,
                         asset_id=candidate.asset_id,
                         protocol_manifest=protocol_manifest,
-                        resource_policy=resource_policy,
                         read_prediction_bundle=read_prediction_bundle,
                         output_window=output_window,
                     )
@@ -1090,7 +1039,7 @@ def produce_maker_ledger(
                             )
                         ):
                             raise ValueError("maker_prediction_keys_misaligned")
-                        yield {
+                        _yield_value = {
                             **{
                                 key: value
                                 for key, value in price.items()
@@ -1099,6 +1048,10 @@ def produce_maker_ledger(
                             "price_prediction": price["prediction_score"],
                             "proxy_prediction": proxy["prediction_score"],
                         }
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
             else:
                 for fold_id, window in windows:
                     chunks = iter_research_dataset_chunks(
@@ -1120,7 +1073,7 @@ def produce_maker_ledger(
                                     and getattr(row, column)
                                     for column in HFT_EXECUTION_CONTEXT_COLUMNS
                                 ):
-                                    yield {
+                                    _yield_value = {
                                         "timestamp_ms": pd.Timestamp(
                                             row.timestamp
                                         ).value
@@ -1133,13 +1086,15 @@ def produce_maker_ledger(
                                             if column != "segment_id"
                                         },
                                     }
+                                    try:
+                                        yield _yield_value
+                                    except GeneratorExit:
+                                        return
 
         with (
-            open_run(raw_root, resource_policy) as run,
+            open_run(raw_root) as run,
             read_funding(
-                run.funding_roots(symbol, time_window=output_window),
-                symbol=symbol,
-                resource_policy=resource_policy,
+                run.funding_roots(symbol, time_window=output_window), symbol=symbol
             ) as funding,
         ):
             if run.source_identity != panel["source_artifact_identity"]:
@@ -1152,7 +1107,6 @@ def produce_maker_ledger(
                 config=config,
                 observed_coverage=coverage,
                 trade_coverage=trade_coverage,
-                resource_policy=resource_policy,
                 capital=PortfolioCapital(
                     candidate.candidate_id,
                     plan["initial_capital"],
@@ -1190,7 +1144,11 @@ def produce_maker_ledger(
 def _calibration_rows(artifact, member, filters=()):
     with closing_iterator(artifact._batches(member, filters=list(filters))) as batches:
         for frame in batches:
-            yield from frame.itertuples(index=False)
+            for _yield_value in frame.itertuples(index=False):
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
 
 
 def _calibration_samples(artifact, fold_id):
@@ -1205,74 +1163,53 @@ def _calibration_samples(artifact, fold_id):
             sample = row._asdict()
             for column in ("decision_at", "prediction_end", "label_available_at"):
                 sample[column] = getattr(row, column).value
-            yield sample
+            try:
+                yield sample
+            except GeneratorExit:
+                return
 
 
 def _calibration_events(artifact, fold_id):
-    policy = current_runtime_resource_policy()
-    active = previous = lease = event = bids = asks = None
     with closing_iterator(
         _calibration_rows(
-            artifact,
-            "crypto_maker_events.parquet",
-            (("fold_id", "==", fold_id),),
+            artifact, "crypto_maker_events.parquet", (("fold_id", "==", fold_id),)
         )
     ) as rows:
-        try:
-            for event_id, group in groupby(rows, key=lambda row: row.event_id):
-                first = next(group)
-                if first.event_kind == "book":
-                    lease = policy.lease(
-                        "crypto.maker.calibration.book",
-                        65536 + 4 * len(first.context_id),
+        for event_id, group in groupby(rows, key=lambda row: row.event_id):
+            first = next(group)
+            if first.event_kind == "book":
+                bids, asks = [], []
+                for row in chain((first,), group):
+                    (bids if row.side == "buy" else asks).append(
+                        (int(row.price_index), float(row.quantity))
                     )
-                    bids, asks = [], []
-                    for row in chain((first,), group):
-                        lease.grow(256)
-                        (bids if row.side == "buy" else asks).append(
-                            (int(row.price_index), float(row.quantity))
-                        )
-                    event = SimpleNamespace(
-                        kind="book",
-                        event_id=event_id,
-                        event_at=first.event_at.value,
-                        segment_id=first.context_id,
-                        bids=tuple(bids),
-                        asks=tuple(asks),
-                    )
-                    bids = asks = None
-                    previous, active = active, OwnedValue(event, lease)
-                    lease = None
-                    yield event
-                    event = None
-                    if previous is not None:
-                        retired, previous = previous, None
-                        retired.release(owner="crypto.maker.calibration.book")
-                else:
-                    event = SimpleNamespace(
-                        kind=first.event_kind,
-                        event_id=event_id,
-                        event_at=first.event_at.value,
-                        segment_id=first.context_id,
-                        observation_id=first.context_id,
-                        price_index=int(first.price_index),
-                        visible_quantity=float(first.quantity),
-                        buyer_is_maker=first.side == "buy",
-                    )
-                    yield event
-                    event = None
-                    if first.event_kind == "boundary" and active is not None:
-                        retired, active = active, None
-                        retired.release(owner="crypto.maker.calibration.book")
-        finally:
-            event = bids = asks = None
-            for owned in (previous, active):
-                if owned is not None:
-                    owned.release(owner="crypto.maker.calibration.book")
-            if lease is not None:
-                _close_lease_preserving_primary(
-                    lease, owner="crypto.maker.calibration.book"
+                _yield_value = SimpleNamespace(
+                    kind="book",
+                    event_id=event_id,
+                    event_at=first.event_at.value,
+                    segment_id=first.context_id,
+                    bids=tuple(bids),
+                    asks=tuple(asks),
                 )
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
+            else:
+                _yield_value = SimpleNamespace(
+                    kind=first.event_kind,
+                    event_id=event_id,
+                    event_at=first.event_at.value,
+                    segment_id=first.context_id,
+                    observation_id=first.context_id,
+                    price_index=int(first.price_index),
+                    visible_quantity=float(first.quantity),
+                    buyer_is_maker=first.side == "buy",
+                )
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
 
 
 def _calibration_headers(artifact, fold_id, cutoff):
@@ -1352,13 +1289,17 @@ def _calibration_headers(artifact, fold_id, cutoff):
                 not all(counts.values()) or best["buy"] >= best["sell"]
             ):
                 raise ValueError("crypto_calibration_book_invalid")
-            yield SimpleNamespace(
+            _yield_value = SimpleNamespace(
                 event_id=event_id,
                 event_at=stamp,
                 kind=first.event_kind,
                 context=first.context_id,
                 row_count=row_count,
             )
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
 
 
 def validate_maker_calibration(artifact, envelope):
@@ -1383,7 +1324,6 @@ def validate_maker_calibration(artifact, envelope):
     reference = plan["execution"]["maker"]
     _positive(reference["order_quantity"], "hft_maker_order_quantity_invalid")
     _nonnegative_integer(reference["latency_ms"], "hft_maker_latency_invalid")
-    policy = current_runtime_resource_policy()
     with artifact.table("crypto_maker_calibration.parquet") as summary:
         try:
             price_unit = validate_price_unit(summary.price_unit.iloc[0])
@@ -1416,7 +1356,7 @@ def validate_maker_calibration(artifact, envelope):
         cutoff = pd.Timestamp(fold["validation"]["end"]).value
         beginning = pd.Timestamp(fold["validation"]["start"]).value
         counts = {side: [0, 0, 0] for side in ("buy", "sell")}
-        with handle_preserving_primary(ExitStack()) as reads:
+        with closing_iterator(ExitStack()) as reads:
             starts = reads.enter_context(
                 closing_iterator(_calibration_headers(artifact, fold_id, cutoff))
             )
@@ -1439,9 +1379,7 @@ def validate_maker_calibration(artifact, envelope):
                 partial(_calibration_samples, artifact, fold_id),
                 partial(_calibration_events, artifact, fold_id),
                 price_unit=price_unit,
-                resource_policy=policy,
             )
-            reads.callback(model.close)
             start_header = next(starts, None)
             end_header = next(ends, None)
             previous_start = previous_end = latest_state = None
@@ -1530,65 +1468,57 @@ def validate_maker_calibration(artifact, envelope):
                 for row in pair:
                     sample = row._asdict()
                     sample["decision_at"] = decision
-                    with model._book(initial) as state:
-                        if (row.initial_bid_index, row.initial_ask_index) != (
-                            state.bids[0][0],
-                            state.asks[0][0],
-                        ):
-                            raise ValueError("crypto_calibration_origin_invalid")
-                        with policy.lease(
-                            "crypto.maker.calibration.reference",
-                            65536 + 512 * (len(state.bids) + len(state.asks)),
-                        ):
-                            order = _MakerOrder(
-                                0,
-                                row.side,
-                                (state.bids if row.side == "buy" else state.asks)[0][0],
-                                row.quote_quantity,
-                                0.0,
-                                0.0,
-                                row.book_segment_id,
-                                row.trade_observation_id,
-                                price_unit,
-                                decision,
-                                expiry,
-                                decision + reference["latency_ms"] * 1000000,
-                            )
-                            remaining = row.quote_quantity
-                            with closing_iterator(
-                                model._response(
-                                    sample,
-                                    state=state,
-                                    decision_ns=decision,
-                                    new_order=order,
-                                    active_order=None,
-                                    commands=(),
-                                    lifetime_ns=CryptoMakerPlan.quote_horizon_ms
-                                    * 1000000,
-                                    replace_quantity=row.quote_quantity,
-                                    events=model.events(
-                                        int(sample["event_start"]),
-                                        int(sample["event_end"]),
-                                    ),
-                                )
-                            ) as response:
-                                while True:
-                                    try:
-                                        _elapsed, quantity, _price, _new = next(
-                                            response
-                                        )
-                                    except StopIteration as complete:
-                                        reason = complete.value
-                                        break
-                                    remaining -= quantity
-                            if (
-                                row.filled_quantity != row.quote_quantity - remaining
-                                or row.terminal_reason != reason
-                            ):
-                                raise ValueError(
-                                    "crypto_calibration_reference_response_invalid"
-                                )
-                            state = None
+                    state = next(model.events(initial, initial + 1))
+                    if (row.initial_bid_index, row.initial_ask_index) != (
+                        state.bids[0][0],
+                        state.asks[0][0],
+                    ):
+                        raise ValueError("crypto_calibration_origin_invalid")
+                    order = _MakerOrder(
+                        0,
+                        row.side,
+                        (state.bids if row.side == "buy" else state.asks)[0][0],
+                        row.quote_quantity,
+                        0.0,
+                        0.0,
+                        row.book_segment_id,
+                        row.trade_observation_id,
+                        price_unit,
+                        decision,
+                        expiry,
+                        decision + reference["latency_ms"] * 1000000,
+                    )
+                    remaining = row.quote_quantity
+                    with closing_iterator(
+                        model._response(
+                            sample,
+                            state=state,
+                            decision_ns=decision,
+                            new_order=order,
+                            active_order=None,
+                            commands=(),
+                            lifetime_ns=CryptoMakerPlan.quote_horizon_ms * 1000000,
+                            replace_quantity=row.quote_quantity,
+                            events=model.events(
+                                int(sample["event_start"]), int(sample["event_end"])
+                            ),
+                        )
+                    ) as response:
+                        while True:
+                            try:
+                                _elapsed, quantity, _price, _new = next(response)
+                            except StopIteration as complete:
+                                reason = complete.value
+                                break
+                            remaining -= quantity
+                    if (
+                        row.filled_quantity != row.quote_quantity - remaining
+                        or row.terminal_reason != reason
+                    ):
+                        raise ValueError(
+                            "crypto_calibration_reference_response_invalid"
+                        )
+                    state = None
                     counts[row.side][0] += 1
                     counts[row.side][1] += row.filled_quantity == 0
                     counts[row.side][2] += (

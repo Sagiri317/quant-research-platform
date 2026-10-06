@@ -8,9 +8,7 @@ from pathlib import Path
 from quant_research_platform.contracts.business_manifest import (
     validate_business_manifest_envelope,
 )
-from quant_research_platform.storage.datasets.schema import (
-    COMMON_MANIFEST_METADATA_KEY,
-)
+from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_scandir,
@@ -25,17 +23,13 @@ MAX_DISCOVERED_INSTANCES = 1024
 
 
 def discover_dataset_instances(
-    logical_root: Path,
-    *,
-    max_instances: int = MAX_DISCOVERED_INSTANCES,
+    logical_root: Path, *, max_instances: int = MAX_DISCOVERED_INSTANCES
 ) -> tuple[Path, ...]:
     """Return valid immutable instance directories in canonical name order."""
-
     if type(max_instances) is not int or max_instances <= 0:
         raise ValueError("dataset_instance_limit_invalid")
     root = require_unaliased_path(
-        Path(logical_root),
-        error="dataset_instance_root_invalid",
+        Path(logical_root), error="dataset_instance_root_invalid"
     )
     if not filesystem_exists(root):
         return ()
@@ -45,11 +39,9 @@ def discover_dataset_instances(
     if not filesystem_exists(instances_root):
         return ()
     instances_identity = _directory_identity(
-        instances_root,
-        "dataset_instance_root_invalid",
+        instances_root, "dataset_instance_root_invalid"
     )
     names = _instance_names(instances_root, max_instances, instances_identity)
-
     result: list[Path] = []
     for name in names:
         entry = instances_root / name
@@ -59,10 +51,7 @@ def discover_dataset_instances(
             validate_instance_identity(name)
         except ValueError as exc:
             raise ValueError("dataset_instance_child_invalid") from exc
-        entry_identity = _directory_identity(
-            entry,
-            "dataset_instance_child_invalid",
-        )
+        entry_identity = _directory_identity(entry, "dataset_instance_child_invalid")
         try:
             manifest = read_dataset_manifest_evidence(entry)
             envelope = validate_business_manifest_envelope(

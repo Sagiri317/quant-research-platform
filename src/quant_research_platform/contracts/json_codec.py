@@ -5,14 +5,10 @@ from __future__ import annotations
 import hashlib
 import json
 import math
-import re
 import struct
-import sys
-from array import array
-from collections.abc import Callable, Iterable, Mapping
-from contextlib import contextmanager
+from collections.abc import Mapping
 from datetime import date, datetime
-from decimal import MAX_EMAX, MIN_EMIN, Context, Decimal, Rounded
+from decimal import Decimal
 from types import MappingProxyType
 from typing import Any, NoReturn
 
@@ -25,26 +21,6 @@ _MAX_INTEGER_DECIMAL_DIGITS = 4_096
 _MAX_INTEGER_BITS = 13_607
 _MAX_NESTING_DEPTH = 64
 _JSON_INDENT = 2
-_TEXT_CHUNK_CHARACTERS = 16 * 1024
-_JSON_ESCAPE_PATTERN = re.compile(r'["\\\x00-\x1f]')
-_TUPLE_BASE_BYTES = ().__sizeof__()
-_POINTER_BYTES = struct.calcsize("P")
-
-
-def json_record_working_set_bytes(record_bytes: int) -> int:
-    """Return a conservative raw/text/decoded JSON record working set."""
-
-    if type(record_bytes) is not int or record_bytes < 0:
-        raise ValueError("json_record_bytes_invalid")
-    unit = max(
-        sys.getsizeof({}),
-        sys.getsizeof([]),
-        sys.getsizeof(0),
-        sys.getsizeof(""),
-    )
-    raw_and_text = 5 * record_bytes + sys.getsizeof(b"") + sys.getsizeof("")
-    decoded_and_normalized = (record_bytes + 1) * unit
-    return raw_and_text + decoded_and_normalized
 
 
 def parse_qrp_json_object(raw: bytes) -> dict[str, Any]:
@@ -75,7 +51,26 @@ def parse_qrp_json_object(raw: bytes) -> dict[str, Any]:
 def render_qrp_json_object(value: Mapping[str, Any]) -> str:
     """Render one deterministic strict QRP-owned JSON object."""
 
-    payload = _json_native_object(value)
+    return _render_native_json(_json_native_object(value))
+
+
+def bounded_rendered_qrp_json_object_size(
+    value: Mapping[str, Any], *, max_bytes: int
+) -> int:
+    """Return actual UTF-8 JSON size within the persisted format boundary."""
+    return _bounded_json_size(_json_native_object(value), max_bytes=max_bytes)
+
+
+def bounded_qrp_json_object_snapshot(
+    value: Mapping[str, Any], *, max_bytes: int
+) -> dict[str, Any]:
+    """Snapshot native or frozen containers and validate their JSON format size."""
+    payload = _json_native_object(value, allow_frozen=True)
+    _bounded_json_size(payload, max_bytes=max_bytes)
+    return payload
+
+
+def _render_native_json(payload: dict[str, Any]) -> str:
     return json.dumps(
         payload,
         ensure_ascii=False,
@@ -85,313 +80,13 @@ def render_qrp_json_object(value: Mapping[str, Any]) -> str:
     )
 
 
-def bounded_rendered_qrp_json_object_size(
-    value: Mapping[str, Any],
-    *,
-    lazy_arrays: Mapping[tuple[str | int, ...], Iterable[object]],
-    max_bytes: int,
-    lazy_mappings: Mapping[tuple[str | int, ...], Iterable[tuple[str, object]]]
-    | None = None,
-) -> int:
-    """Count exact rendered UTF-8 bytes with declared containers kept lazy."""
-
+def _bounded_json_size(payload: dict[str, Any], *, max_bytes: int) -> int:
     if type(max_bytes) is not int or max_bytes < 0:
         raise ValueError("qrp_json_max_bytes_invalid")
-    preflight_size = _require_bounded_json_preflight(value, max_bytes=max_bytes)
-    if not lazy_arrays and not lazy_mappings:
-        return preflight_size
-    payload = _json_native_object(value)
-    arrays = dict(lazy_arrays)
-    mappings = dict(lazy_mappings or {})
-    if set(arrays).intersection(mappings):
-        raise ValueError("qrp_json_lazy_path_conflict")
-    for path, expected_type, error in (
-        *((path, list, "qrp_json_lazy_array_path_invalid") for path in arrays),
-        *((path, dict, "qrp_json_lazy_mapping_path_invalid") for path in mappings),
-    ):
-        if type(path) is not tuple or not path:
-            raise ValueError(error)
-        current: object = payload
-        for component in path:
-            if type(current) is dict and type(component) is str:
-                if component not in current:
-                    raise ValueError(error)
-                current = current[component]
-            elif type(current) is list and type(component) is int:
-                if component < 0 or component >= len(current):
-                    raise ValueError(error)
-                current = current[component]
-            else:
-                raise ValueError(error)
-        if type(current) is not expected_type:
-            raise ValueError(error)
-
-    lazy_values: list[_LazyJsonArray | _LazyJsonMapping] = []
-    try:
-        for path, source in arrays.items():
-            parent: object = payload
-            for component in path[:-1]:
-                parent = parent[component]  # type: ignore[index]
-            lazy_value = _LazyJsonArray(
-                source,
-                depth=len(path) + 1,
-                max_bytes=max_bytes,
-            )
-            lazy_values.append(lazy_value)
-            parent[path[-1]] = lazy_value  # type: ignore[index]
-        for path, source in mappings.items():
-            parent = payload
-            for component in path[:-1]:
-                parent = parent[component]  # type: ignore[index]
-            lazy_value = _LazyJsonMapping(
-                source,
-                depth=len(path) + 1,
-                max_bytes=max_bytes,
-            )
-            lazy_values.append(lazy_value)
-            parent[path[-1]] = lazy_value  # type: ignore[index]
-    except BaseException:
-        _close_lazy_json_values(lazy_values)
-        raise
-
-    encoder = json.JSONEncoder(
-        ensure_ascii=False,
-        indent=_JSON_INDENT,
-        sort_keys=False,
-        allow_nan=False,
-    )
-    total = 0
-    try:
-        for chunk in encoder.iterencode(payload):
-            total += len(chunk.encode("utf-8"))
-            if total > max_bytes:
-                raise ValueError("qrp_json_render_exceeds_max_bytes")
-        return total
-    finally:
-        _close_lazy_json_values(lazy_values)
-
-
-def bounded_qrp_json_object_snapshot(
-    value: Mapping[str, Any],
-    *,
-    max_bytes: int,
-    _admit: Callable[[int], None] | None = None,
-) -> dict[str, Any]:
-    """Copy one JSON object, including frozen containers, within its size bound."""
-
-    if type(max_bytes) is not int or max_bytes < 0:
-        raise ValueError("qrp_json_max_bytes_invalid")
-    size = _require_bounded_json_preflight(value, max_bytes=max_bytes)
-    if _admit is not None:
-        _admit(json_record_working_set_bytes(size))
-    remaining = max_bytes
-    active: set[int] = set()
-
-    def claim(size: int) -> None:
-        nonlocal remaining
-        remaining -= size
-        if remaining < 0:
-            raise ValueError("qrp_json_render_exceeds_max_bytes")
-
-    def snapshot(item: object, *, depth: int) -> Any:
-        if depth > _MAX_NESTING_DEPTH:
-            raise ValueError("qrp_json_recursion_limit")
-        if item is None or type(item) in {bool, int, float, str}:
-            claim(
-                _require_bounded_json_value_preflight(
-                    item,
-                    max_bytes=max_bytes,
-                    depth=depth,
-                )
-            )
-            return item
-        if type(item) not in {list, tuple, dict, MappingProxyType}:
-            raise ValueError("qrp_json_unsupported_value")
-        identity = id(item)
-        if identity in active:
-            raise ValueError("qrp_json_cycle")
-        active.add(identity)
-        claim(2)
-        sequence = type(item) in {list, tuple}
-        result: list[Any] | dict[str, Any] = [] if sequence else {}
-        try:
-            for index, entry in enumerate(item if sequence else item.items()):
-                if index:
-                    claim(1)
-                claim(1 + _JSON_INDENT * (depth + 1))
-                if sequence:
-                    assert isinstance(result, list)
-                    result.append(snapshot(entry, depth=depth + 1))
-                    continue
-                key, child = entry
-                if type(key) is not str:
-                    raise ValueError("qrp_json_non_string_key")
-                claim(
-                    _require_bounded_json_value_preflight(
-                        key,
-                        max_bytes=max_bytes,
-                        depth=depth + 1,
-                    )
-                    + 2
-                )
-                assert isinstance(result, dict)
-                result[key] = snapshot(child, depth=depth + 1)
-            if result:
-                claim(1 + _JSON_INDENT * depth)
-            return result
-        finally:
-            active.remove(identity)
-
-    payload = snapshot(value, depth=0)
-    assert type(payload) is dict
-    _require_bounded_json_preflight(payload, max_bytes=max_bytes)
-    return payload
-
-
-def _close_lazy_json_values(
-    lazy_values: Iterable[_LazyJsonArray | _LazyJsonMapping],
-) -> None:
-    primary = sys.exception()
-    cleanup_failure: BaseException | None = None
-    for lazy_value in lazy_values:
-        try:
-            lazy_value.close()
-        except BaseException as exc:
-            if primary is None and cleanup_failure is None:
-                cleanup_failure = exc
-            elif primary is not None:
-                primary.add_note(
-                    f"lazy JSON value close also failed: {type(exc).__name__}"
-                )
-            else:
-                cleanup_failure.add_note(
-                    f"lazy JSON value close also failed: {type(exc).__name__}"
-                )
-    if cleanup_failure is not None:
-        raise cleanup_failure
-
-
-class _LazyJsonArray(list[Any]):
-    """One-pass list protocol for the stdlib encoder's existing array codec."""
-
-    def __init__(
-        self,
-        source: Iterable[object],
-        *,
-        depth: int,
-        max_bytes: int,
-    ) -> None:
-        super().__init__()
-        self._source = iter(source)
-        self._depth = depth
-        self._max_bytes = max_bytes
-        self._first: object | None = None
-        self._has_first: bool | None = None
-        self._iterated = False
-
-    def __len__(self) -> int:
-        self._prime()
-        return 1 if self._has_first else 0
-
-    def __iter__(self):  # type: ignore[no-untyped-def]
-        if self._iterated:
-            raise RuntimeError("qrp_json_lazy_array_reused")
-        self._iterated = True
-        self._prime()
-        if not self._has_first:
-            return
-        yield self._native_item(self._first)
-        for item in self._source:
-            yield self._native_item(item)
-
-    def _native_item(self, item: object) -> Any:
-        _require_bounded_json_value_preflight(
-            item,
-            max_bytes=self._max_bytes,
-            depth=self._depth,
-        )
-        return _json_native_value(item, active=set(), depth=self._depth)
-
-    def _prime(self) -> None:
-        if self._has_first is not None:
-            return
-        try:
-            self._first = next(self._source)
-        except StopIteration:
-            self._has_first = False
-        else:
-            self._has_first = True
-
-    def close(self) -> None:
-        close = getattr(self._source, "close", None)
-        if close is not None:
-            close()
-
-
-class _LazyJsonMapping(dict[str, Any]):
-    """One-pass sorted mapping protocol for the stdlib encoder."""
-
-    def __init__(
-        self,
-        source: Iterable[tuple[str, object]],
-        *,
-        depth: int,
-        max_bytes: int,
-    ) -> None:
-        super().__init__()
-        self._source = iter(source)
-        self._depth = depth
-        self._max_bytes = max_bytes
-        self._first: tuple[str, object] | None = None
-        self._has_first: bool | None = None
-        self._iterated = False
-        self._last_key: str | None = None
-
-    def __len__(self) -> int:
-        self._prime()
-        return 1 if self._has_first else 0
-
-    def items(self):  # type: ignore[override]
-        if self._iterated:
-            raise RuntimeError("qrp_json_lazy_mapping_reused")
-        self._iterated = True
-        self._prime()
-        if not self._has_first:
-            return
-        assert self._first is not None
-        yield self._native_item(self._first)
-        for item in self._source:
-            yield self._native_item(item)
-
-    def _native_item(self, item: object) -> tuple[str, Any]:
-        if type(item) is not tuple or len(item) != 2 or type(item[0]) is not str:
-            raise ValueError("qrp_json_lazy_mapping_item_invalid")
-        key, value = item
-        if self._last_key is not None and key <= self._last_key:
-            raise ValueError("qrp_json_lazy_mapping_order_invalid")
-        _utf8_bytes(key)
-        _require_bounded_json_value_preflight(
-            value,
-            max_bytes=self._max_bytes,
-            depth=self._depth,
-        )
-        self._last_key = key
-        return key, _json_native_value(value, active=set(), depth=self._depth)
-
-    def _prime(self) -> None:
-        if self._has_first is not None:
-            return
-        try:
-            self._first = next(self._source)
-        except StopIteration:
-            self._has_first = False
-        else:
-            self._has_first = True
-
-    def close(self) -> None:
-        close = getattr(self._source, "close", None)
-        if close is not None:
-            close()
+    size = len(_render_native_json(payload).encode("utf-8"))
+    if size > max_bytes:
+        raise ValueError("qrp_json_render_exceeds_max_bytes")
+    return size
 
 
 def canonical_json_hash(value: object) -> str:
@@ -401,354 +96,74 @@ def canonical_json_hash(value: object) -> str:
 
 
 def canonical_identity_bytes(value: object) -> bytes:
-    """Return the typed canonical identity encoding for ``value``."""
+    """Encode one typed, collision-framed canonical identity."""
+    active: set[int] = set()
 
-    try:
-        writer = CanonicalIdentityWriter(max_bytes=None)
-        writer.value(value)
-        return writer.finish()
-    except RecursionError as exc:
-        raise ValueError("canonical_json_recursion_limit") from exc
-
-
-class CanonicalIdentityWriter:
-    """Internal bounded writer for conceptual canonical identity values."""
-
-    __slots__ = (
-        "_active",
-        "_scheduling_heuristic_bytes",
-        "_buffer",
-        "_finished",
-        "_max_bytes",
-        "_root_count",
-    )
-
-    def __init__(self, max_bytes: int | None) -> None:
-        if max_bytes is not None and (type(max_bytes) is not int or max_bytes < 0):
-            raise ValueError("canonical_identity_max_bytes_invalid")
-        self._active: set[int] = set()
-        self._scheduling_heuristic_bytes = 0
-        self._buffer = bytearray()
-        self._finished = False
-        self._max_bytes = max_bytes
-        self._root_count = 0
-
-    def value(self, value: object) -> None:
-        self._claim_item()
-        self._write_value(
-            value,
-            depth=0,
-        )
-
-    @contextmanager
-    def canonical_order(
-        self,
-        item_count: int,
-        emit: Callable[[CanonicalIdentityWriter, Any], None],
-        *,
-        collision_error: str | None = None,
-        mapping: dict[object, object] | None = None,
-    ):  # type: ignore[no-untyped-def]
-        """Yield compact indexes ordered by one conceptual emitted identity."""
-
-        if type(item_count) is not int or item_count < 0:
-            raise ValueError("canonical_identity_item_count_invalid")
-        if mapping is not None and len(mapping) != item_count:
-            raise ValueError("canonical_identity_item_count_mismatch")
-        snapshot_pointer_scheduling_heuristic_bytes = (
-            0 if mapping is None else _TUPLE_BASE_BYTES + item_count * _POINTER_BYTES
-        )
-        scheduling_heuristic_bytes = (
-            snapshot_pointer_scheduling_heuristic_bytes
-            + (item_count + 1 + item_count) * 8
-        )
-        self._reserve_scheduling_heuristic(scheduling_heuristic_bytes)
-        keys: tuple[object, ...] | None = None
-        offsets = array("Q")
-        order = array("Q")
-        checkpoint = len(self._buffer)
-        saved_root_count = self._root_count
-        prepared = False
-        try:
-            if mapping is not None:
-                keys = tuple(mapping)
-                if len(keys) != item_count:
-                    raise RuntimeError("canonical_identity_mapping_changed")
-            offsets.append(checkpoint)
-            for index in range(item_count):
-                self._root_count = 0
-                emit(self, index if keys is None else keys[index])
-                if self._root_count != 1:
-                    raise ValueError("canonical_identity_order_key_required")
-                offsets.append(len(self._buffer))
-                order.append(index)
-            _heap_sort_identity_ranges(self._buffer, offsets, order)
-            if collision_error is not None and any(
-                _compare_identity_ranges(
-                    self._buffer,
-                    offsets[order[index]],
-                    offsets[order[index] + 1],
-                    offsets[order[index - 1]],
-                    offsets[order[index - 1] + 1],
-                )
-                == 0
-                for index in range(1, item_count)
-            ):
-                raise ValueError(collision_error)
-            del self._buffer[checkpoint:]
-            self._root_count = saved_root_count
-            prepared = True
-            yield order if keys is None else (keys, order)
-        finally:
-            if not prepared and len(self._buffer) > checkpoint:
-                del self._buffer[checkpoint:]
-            self._root_count = saved_root_count
-            self._release_scheduling_heuristic(scheduling_heuristic_bytes)
-
-    def finish(self) -> bytes:
-        if self._finished:
-            raise RuntimeError("canonical_identity_writer_finished")
-        if self._root_count != 1:
-            raise ValueError("canonical_identity_single_value_required")
-        self._require_capacity(len(self._buffer))
-        payload = bytes(self._buffer)
-        self._buffer.clear()
-        self._finished = True
-        return payload
-
-    def _claim_item(self) -> None:
-        if self._finished:
-            raise RuntimeError("canonical_identity_writer_finished")
-        self._root_count += 1
-        if self._root_count > 1:
-            raise ValueError("canonical_identity_single_value_required")
-
-    def _write_value(self, value: object, *, depth: int) -> None:
+    def encode(item: object, depth: int) -> bytes:
         if depth > _MAX_NESTING_DEPTH:
             raise ValueError("canonical_json_recursion_limit")
-        if value is None:
-            self._write_frame(b"n", b"")
-        elif value is False:
-            self._write_frame(b"f", b"")
-        elif value is True:
-            self._write_frame(b"t", b"")
-        elif type(value) is int:
-            _validate_integer_size(value, error="canonical_json_integer_too_large")
-            self._write_frame(b"i", str(value).encode("ascii"))
-        elif type(value) is float:
-            if not math.isfinite(value):
+        if item is None:
+            return _frame(b"n", b"")
+        if type(item) is bool:
+            return _frame(b"t" if item else b"f", b"")
+        if type(item) is int:
+            _validate_integer_size(item, error="canonical_json_integer_too_large")
+            return _frame(b"i", str(item).encode("ascii"))
+        if type(item) is float:
+            if not math.isfinite(item):
                 raise ValueError("canonical_json_nonfinite_number")
-            normalized = 0.0 if value == 0.0 else value
-            self._write_frame(b"r", struct.pack(">d", normalized))
-        elif type(value) is str:
-            self._write_text_frame(b"s", value)
-        elif type(value) is bytes:
-            self._write_frame(b"b", value)
-        elif value is pd.NaT:
+            return _frame(b"r", struct.pack(">d", 0.0 if item == 0.0 else item))
+        if type(item) is str:
+            return _frame(b"s", _utf8_bytes(item))
+        if type(item) is bytes:
+            return _frame(b"b", item)
+        if item is pd.NaT:
             raise ValueError("canonical_json_invalid_timestamp")
-        elif type(value) is Decimal:
-            self._write_decimal_frame(value)
-        elif type(value) is pd.Timestamp:
-            self._write_frame(b"p", _timestamp_payload(value))
-        elif type(value) is datetime:
-            self._write_frame(b"z", _datetime_payload(value))
-        elif type(value) is date:
-            self._write_frame(b"a", _date_payload(value))
-        elif type(value) is list:
-            self._write_sequence(value, tag=b"l", depth=depth)
-        elif type(value) is tuple:
-            self._write_sequence(value, tag=b"u", depth=depth)
-        elif type(value) is dict:
-            self._write_mapping(value, depth=depth)
-        else:
+        if type(item) is Decimal:
+            if not item.is_finite():
+                raise ValueError("canonical_json_nonfinite_number")
+            parts = item.as_tuple()
+            sign = parts.sign if any(parts.digits) else 0
+            return _frame(
+                b"d",
+                bytes((sign,))
+                + _uint64(len(parts.digits))
+                + bytes(parts.digits)
+                + _frame(b"e", str(parts.exponent).encode("ascii")),
+            )
+        if type(item) is pd.Timestamp:
+            return _frame(b"p", _timestamp_payload(item))
+        if type(item) is datetime:
+            return _frame(b"z", _datetime_payload(item))
+        if type(item) is date:
+            return _frame(b"a", _date_payload(item))
+        if type(item) not in {list, tuple, dict}:
             raise ValueError("canonical_json_unsupported_value")
-
-    def _write_sequence(
-        self, value: list[object] | tuple[object, ...], *, tag: bytes, depth: int
-    ) -> None:
-        identity = self._activate(value)
-        try:
-            length_offset, payload_start = self._start_frame(tag)
-            self._append(_uint64(len(value)))
-            for item in value:
-                self._write_value(item, depth=depth + 1)
-            self._finish_frame(length_offset, payload_start)
-        finally:
-            self._active.remove(identity)
-
-    def _write_mapping(self, value: dict[object, object], *, depth: int) -> None:
-        identity = self._activate(value)
-        try:
-            for key in value:
-                if type(key) is not str:
-                    raise ValueError("canonical_json_non_string_key")
-
-            def emit_key(target: CanonicalIdentityWriter, key: object) -> None:
-                assert type(key) is str
-                target._claim_item()
-                target._append_utf8(key)
-
-            with self.canonical_order(
-                len(value),
-                emit_key,
-                mapping=value,
-            ) as (keys, order):
-                length_offset, payload_start = self._start_frame(b"m")
-                self._append(_uint64(len(keys)))
-                for index in order:
-                    key = keys[index]
-                    assert type(key) is str
-                    self._write_text_frame(b"k", key)
-                    self._write_value(value[key], depth=depth + 1)
-                self._finish_frame(length_offset, payload_start)
-        finally:
-            self._active.remove(identity)
-
-    def _activate(self, value: object) -> int:
-        identity = id(value)
-        if identity in self._active:
+        identity = id(item)
+        if identity in active:
             raise ValueError("canonical_json_cycle")
-        self._active.add(identity)
-        return identity
-
-    def _write_frame(self, tag: bytes, payload: bytes) -> None:
-        length_offset, payload_start = self._start_frame(tag)
-        self._append(payload)
-        self._finish_frame(length_offset, payload_start)
-
-    def _write_text_frame(self, tag: bytes, value: str) -> None:
-        length_offset, payload_start = self._start_frame(tag)
-        self._append_utf8(value)
-        self._finish_frame(length_offset, payload_start)
-
-    def _append_utf8(self, value: str) -> None:
-        offset = 0
-        while offset < len(value):
-            chunk_characters = _TEXT_CHUNK_CHARACTERS
-            if self._max_bytes is not None:
-                remaining = (
-                    self._max_bytes
-                    - len(self._buffer)
-                    - self._scheduling_heuristic_bytes
+        active.add(identity)
+        try:
+            if type(item) is dict:
+                if any(type(key) is not str for key in item):
+                    raise ValueError("canonical_json_non_string_key")
+                keys = sorted(item, key=_utf8_bytes)
+                payload = b"".join(
+                    _frame(b"k", _utf8_bytes(key)) + encode(item[key], depth + 1)
+                    for key in keys
                 )
-                if remaining <= 0:
-                    self._require_capacity(1)
-                chunk_characters = min(
-                    chunk_characters,
-                    max(1, remaining // 4),
-                )
-            chunk = value[offset : offset + chunk_characters]
-            self._append(_utf8_bytes(chunk))
-            offset += len(chunk)
+                tag = b"m"
+            else:
+                payload = b"".join(encode(child, depth + 1) for child in item)
+                tag = b"l" if type(item) is list else b"u"
+            return _frame(tag, _uint64(len(item)) + payload)
+        finally:
+            active.remove(identity)
 
-    def _write_decimal_frame(self, value: Decimal) -> None:
-        if not value.is_finite():
-            raise ValueError("canonical_json_nonfinite_number")
-        if self._max_bytes is not None:
-            adjusted_exponent = value.adjusted()
-            if adjusted_exponent < MIN_EMIN or adjusted_exponent > MAX_EMAX:
-                raise ValueError("canonical_identity_exceeds_max_bytes")
-            admission = Context(
-                prec=_MAX_INTEGER_DECIMAL_DIGITS,
-                Emin=MIN_EMIN,
-                Emax=MAX_EMAX,
-                traps=[Rounded],
-            )
-            try:
-                admission.plus(value)
-            except Rounded as exc:
-                raise ValueError("canonical_identity_exceeds_max_bytes") from exc
-        decimal_tuple = value.as_tuple()
-        is_zero = not any(decimal_tuple.digits)
-        sign = 0 if is_zero else int(decimal_tuple.sign)
-        exponent = str(decimal_tuple.exponent).encode("ascii")
-        payload_bytes = 1 + _LENGTH_BYTES + len(decimal_tuple.digits)
-        payload_bytes += 1 + _LENGTH_BYTES + len(exponent)
-        self._require_capacity(1 + _LENGTH_BYTES + payload_bytes)
-        length_offset, payload_start = self._start_frame(b"d")
-        self._append(bytes((sign,)))
-        self._append(_uint64(len(decimal_tuple.digits)))
-        self._append(bytes(decimal_tuple.digits))
-        self._write_frame(b"e", exponent)
-        self._finish_frame(length_offset, payload_start)
-
-    def _start_frame(self, tag: bytes) -> tuple[int, int]:
-        if len(tag) != 1:
-            raise AssertionError("canonical_json_tag_must_be_one_byte")
-        self._append(tag)
-        length_offset = len(self._buffer)
-        self._append(b"\x00" * _LENGTH_BYTES)
-        return length_offset, len(self._buffer)
-
-    def _finish_frame(self, length_offset: int, payload_start: int) -> None:
-        struct.pack_into(
-            ">Q",
-            self._buffer,
-            length_offset,
-            len(self._buffer) - payload_start,
-        )
-
-    def _append(self, payload: bytes) -> None:
-        self._require_capacity(len(payload))
-        self._buffer.extend(payload)
-
-    def _require_capacity(self, additional_bytes: int) -> None:
-        if self._max_bytes is not None and (
-            len(self._buffer) + self._scheduling_heuristic_bytes + additional_bytes
-            > self._max_bytes
-        ):
-            raise ValueError("canonical_identity_exceeds_max_bytes")
-
-    def _reserve_scheduling_heuristic(self, size: int) -> None:
-        self._require_capacity(size)
-        self._scheduling_heuristic_bytes += size
-
-    def _release_scheduling_heuristic(self, size: int) -> None:
-        self._scheduling_heuristic_bytes -= size
-
-
-def _compare_identity_ranges(
-    buffer: bytearray, left_start: int, left_end: int, right_start: int, right_end: int
-) -> int:
-    left_len = left_end - left_start
-    right_len = right_end - right_start
-    for offset in range(min(left_len, right_len)):
-        left_byte = buffer[left_start + offset]
-        right_byte = buffer[right_start + offset]
-        if left_byte != right_byte:
-            return -1 if left_byte < right_byte else 1
-    return (left_len > right_len) - (left_len < right_len)
-
-
-def _heap_sort_identity_ranges(
-    buffer: bytearray, offsets: array[int], order: array[int]
-) -> None:
-    def greater(left: int, right: int) -> bool:
-        return (
-            _compare_identity_ranges(
-                buffer,
-                offsets[left],
-                offsets[left + 1],
-                offsets[right],
-                offsets[right + 1],
-            )
-            > 0
-        )
-
-    def sift(root: int, stop: int) -> None:
-        while (child := root * 2 + 1) < stop:
-            if child + 1 < stop and greater(order[child + 1], order[child]):
-                child += 1
-            if not greater(order[child], order[root]):
-                return
-            order[root], order[child] = order[child], order[root]
-            root = child
-
-    for root in range(len(order) // 2 - 1, -1, -1):
-        sift(root, len(order))
-    for stop in range(len(order) - 1, 0, -1):
-        order[0], order[stop] = order[stop], order[0]
-        sift(0, stop)
+    try:
+        return encode(value, 0)
+    except RecursionError as exc:
+        raise ValueError("canonical_json_recursion_limit") from exc
 
 
 def _strict_object_from_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -770,121 +185,14 @@ def _parse_json_integer(value: str) -> int:
     return int(value)
 
 
-def _require_bounded_json_preflight(
-    value: Mapping[str, Any],
-    *,
-    max_bytes: int,
-) -> int:
-    """Reject an over-limit payload before copying its native containers."""
-
-    if type(value) not in {dict, MappingProxyType}:
+def _json_native_object(
+    value: Mapping[str, Any], *, allow_frozen: bool = False
+) -> dict[str, Any]:
+    if type(value) is not dict and not (
+        allow_frozen and type(value) is MappingProxyType
+    ):
         raise ValueError("qrp_json_top_level_object_required")
-    return _require_bounded_json_value_preflight(
-        value,
-        max_bytes=max_bytes,
-        depth=0,
-    )
-
-
-def _require_bounded_json_value_preflight(
-    value: object,
-    *,
-    max_bytes: int,
-    depth: int,
-) -> int:
-    """Reject one over-limit value before copying its native containers."""
-
-    remaining = max_bytes
-    active: set[int] = set()
-
-    def claim(size: int) -> None:
-        nonlocal remaining
-        remaining -= size
-        if remaining < 0:
-            raise ValueError("qrp_json_render_exceeds_max_bytes")
-
-    def claim_text(text: str) -> None:
-        claim(2)
-        for offset in range(0, len(text), _TEXT_CHUNK_CHARACTERS):
-            chunk = text[offset : offset + _TEXT_CHUNK_CHARACTERS]
-            if _JSON_ESCAPE_PATTERN.search(chunk) is None:
-                claim(len(_utf8_bytes(chunk)))
-                continue
-            segment_start = 0
-            for index, character in enumerate(chunk):
-                codepoint = ord(character)
-                if character not in {'"', "\\"} and codepoint >= 0x20:
-                    continue
-                if segment_start != index:
-                    claim(len(_utf8_bytes(chunk[segment_start:index])))
-                claim(
-                    2 if character in {'"', "\\", "\b", "\f", "\n", "\r", "\t"} else 6
-                )
-                segment_start = index + 1
-            if segment_start != len(chunk):
-                claim(len(_utf8_bytes(chunk[segment_start:])))
-
-    def claim_container_whitespace(*, item_count: int, depth: int) -> None:
-        claim(2)
-        if item_count == 0:
-            return
-        claim(item_count - 1)
-        claim(item_count + 1)
-        claim(_JSON_INDENT * (item_count * (depth + 1) + depth))
-
-    def visit(item: object, *, depth: int) -> None:
-        if depth > _MAX_NESTING_DEPTH:
-            raise ValueError("qrp_json_recursion_limit")
-        if item is None:
-            claim(4)
-        elif type(item) is bool:
-            claim(4 if item else 5)
-        elif type(item) is int:
-            _validate_integer_size(item, error="qrp_json_integer_too_large")
-            claim(len(str(item)))
-        elif type(item) is float:
-            if not math.isfinite(item):
-                raise ValueError("qrp_json_nonfinite_number")
-            claim(len(repr(item)))
-        elif type(item) is str:
-            claim_text(item)
-        elif type(item) in {list, tuple}:
-            identity = id(item)
-            if identity in active:
-                raise ValueError("qrp_json_cycle")
-            active.add(identity)
-            try:
-                claim_container_whitespace(item_count=len(item), depth=depth)
-                for child in item:
-                    visit(child, depth=depth + 1)
-            finally:
-                active.remove(identity)
-        elif type(item) in {dict, MappingProxyType}:
-            identity = id(item)
-            if identity in active:
-                raise ValueError("qrp_json_cycle")
-            active.add(identity)
-            try:
-                claim_container_whitespace(item_count=len(item), depth=depth)
-                for key, child in item.items():
-                    if type(key) is not str:
-                        raise ValueError("qrp_json_non_string_key")
-                    claim_text(key)
-                    claim(2)
-                    visit(child, depth=depth + 1)
-            finally:
-                active.remove(identity)
-        else:
-            raise ValueError("qrp_json_unsupported_value")
-
-    visit(value, depth=depth)
-    return max_bytes - remaining
-
-
-def _json_native_object(value: Mapping[str, Any]) -> dict[str, Any]:
-    if type(value) is not dict:
-        raise ValueError("qrp_json_top_level_object_required")
-    return _json_native_mapping(value, active=set(), depth=0)
+    return _json_native_mapping(value, active=set(), depth=0, allow_frozen=allow_frozen)
 
 
 def _json_native_mapping(
@@ -892,6 +200,7 @@ def _json_native_mapping(
     *,
     active: set[int],
     depth: int,
+    allow_frozen: bool = False,
 ) -> dict[str, Any]:
     if depth > _MAX_NESTING_DEPTH:
         raise ValueError("qrp_json_recursion_limit")
@@ -910,13 +219,16 @@ def _json_native_mapping(
                 item,
                 active=active,
                 depth=depth + 1,
+                allow_frozen=allow_frozen,
             )
         return result
     finally:
         active.remove(identity)
 
 
-def _json_native_value(value: object, *, active: set[int], depth: int) -> Any:
+def _json_native_value(
+    value: object, *, active: set[int], depth: int, allow_frozen: bool = False
+) -> Any:
     if depth > _MAX_NESTING_DEPTH:
         raise ValueError("qrp_json_recursion_limit")
     kind = type(value)
@@ -933,20 +245,24 @@ def _json_native_value(value: object, *, active: set[int], depth: int) -> Any:
         if not math.isfinite(value):
             raise ValueError("qrp_json_nonfinite_number")
         return value
-    if kind is list:
+    if kind is list or (allow_frozen and kind is tuple):
         identity = id(value)
         if identity in active:
             raise ValueError("qrp_json_cycle")
         active.add(identity)
         try:
             return [
-                _json_native_value(item, active=active, depth=depth + 1)
+                _json_native_value(
+                    item, active=active, depth=depth + 1, allow_frozen=allow_frozen
+                )
                 for item in value
             ]
         finally:
             active.remove(identity)
-    if kind is dict:
-        return _json_native_mapping(value, active=active, depth=depth)
+    if kind is dict or (allow_frozen and kind is MappingProxyType):
+        return _json_native_mapping(
+            value, active=active, depth=depth, allow_frozen=allow_frozen
+        )
     raise ValueError("qrp_json_unsupported_value")
 
 

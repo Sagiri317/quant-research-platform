@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 import stat
-import sys
-from array import array
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
 from itertools import chain, groupby, islice
@@ -34,15 +32,6 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    OwnedValue,
-    RuntimeResourcePolicy,
-    _close_lease_preserving_primary,
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.sources.csmar.field_mappings import (
     map_columns,
     normalize_provider_stock_code_series,
@@ -53,11 +42,10 @@ from quant_research_platform.sources.csmar.raw_exports import (
     _iter_dataset_file_identities,
     _verify_csmar_member_set,
     dataset_files_with_identity_by_id,
-    iter_private_export_chunks_with_policy,
+    iter_private_export_chunks,
 )
 from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.datasets.writing import write_dataset
-from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -69,14 +57,6 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_bounded_qrp_json
-
-
-class _InterimCapacityExceeded(DatasetReadCapacityExceeded):
-    def __init__(self, required_bytes: int, budget_bytes: int) -> None:
-        super().__init__("csmar_interim_working_set_exceeds_task_memory_budget")
-        self.required_bytes = required_bytes
-        self.budget_bytes = budget_bytes
-
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
@@ -599,48 +579,26 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
         Path(raw_root),
         error="csmar_raw_export_identity_changed",
     )
-    policy = current_runtime_resource_policy()
-    if policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
     if not filesystem_exists(root):
         return None
     index = ExactPrimaryKeyIndex(
         primary_key=("dataset_path",),
     )
-    with (
-        policy.lease(
-            "source.csmar.raw.identity.index",
-            index.retained_memory_bytes,
-        ),
-        index,
-    ):
-        records_iterator = dataset_files_with_identity_by_id(
-            root,
-            resource_policy=policy,
-            identity_index=index,
-            requested_datasets=(data_id,),
-        )
-        with closing_iterator(records_iterator):
-            for record in records_iterator:
-                del record
-        _verify_csmar_member_set(
-            root,
-            index,
-            requested_datasets=(data_id,),
-        )
-        if not index.identity_payload_count(namespace="csmar-dataset-paths"):
-            return None
-        identity = content_hash_for_files(
-            _iter_dataset_file_identities(root, index, data_id=data_id),
-            error="csmar_raw_export_identity_changed",
-            resource_policy=policy,
-        )
-        _verify_csmar_member_set(
-            root,
-            index,
-            requested_datasets=(data_id,),
-        )
-        return identity
+    records_iterator = dataset_files_with_identity_by_id(
+        root, identity_index=index, requested_datasets=(data_id,)
+    )
+    with closing_iterator(records_iterator):
+        for record in records_iterator:
+            del record
+    _verify_csmar_member_set(root, index, requested_datasets=(data_id,))
+    if not index.identity_payload_count(namespace="csmar-dataset-paths"):
+        return None
+    identity = content_hash_for_files(
+        _iter_dataset_file_identities(root, index, data_id=data_id),
+        error="csmar_raw_export_identity_changed",
+    )
+    _verify_csmar_member_set(root, index, requested_datasets=(data_id,))
+    return identity
 
 
 def normalize_raw_frame(
@@ -1238,33 +1196,28 @@ def _iter_interim_frames(
                 first_input = None
             if first_input is not None:
                 prepared_inputs = _iter_source_inputs(first_input, inputs)
-                policy = current_runtime_resource_policy()
-                if policy is None:
-                    raise RuntimeError("runtime_resource_policy_not_active")
                 spec = interim_catalog().get(data_id)
                 index = ExactPrimaryKeyIndex(
                     primary_key=spec.primary_key,
                 )
-                with (
-                    policy.lease(
-                        "source.csmar.interim.index", index.retained_memory_bytes
-                    ),
-                    index,
-                ):
-                    frames = _iter_pruned_interim_frames(
-                        data_id=data_id,
-                        input_files=prepared_inputs,
-                        start_date=start_date,
-                        end_date=end_date,
-                        overrides=validated_overrides,
-                        chunksize=chunksize,
-                        pruning_reports=operation_reports,
-                        source_row_counts=source_row_counts,
-                        duplicate_index=index,
-                        producer_diagnostics=producer_diagnostics,
-                    )
-                    with closing_iterator(frames):
-                        yield from frames
+                frames = _iter_pruned_interim_frames(
+                    data_id=data_id,
+                    input_files=prepared_inputs,
+                    start_date=start_date,
+                    end_date=end_date,
+                    overrides=validated_overrides,
+                    chunksize=chunksize,
+                    pruning_reports=operation_reports,
+                    source_row_counts=source_row_counts,
+                    duplicate_index=index,
+                    producer_diagnostics=producer_diagnostics,
+                )
+                with closing_iterator(frames):
+                    for _yield_value in frames:
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
             if verify_members is not None:
                 verify_members()
         if pruning_reports is not None:
@@ -1282,37 +1235,9 @@ def materialize_interim_data(
     start_date: str | None = "2014-01-01",
     end_date: str | None = "2025-12-31",
     override_path: Path | None = None,
-    chunksize: int = 500_000,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    chunksize: int = 500000,
     instance_metadata: Mapping[str, object] | None = None,
 ) -> InterimImportResult:
-    with runtime_resource_policy_scope(resource_policy):
-        return _materialize_interim_data(
-            layout=layout,
-            raw_root=raw_root,
-            data_ids=data_ids,
-            start_date=start_date,
-            end_date=end_date,
-            override_path=override_path,
-            chunksize=chunksize,
-            instance_metadata=instance_metadata,
-        )
-
-
-def _materialize_interim_data(
-    *,
-    layout: StorageLayout,
-    raw_root: Path | None,
-    data_ids: tuple[str, ...],
-    start_date: str | None,
-    end_date: str | None,
-    override_path: Path | None,
-    chunksize: int,
-    instance_metadata: Mapping[str, object] | None,
-) -> InterimImportResult:
-    resource_policy = current_runtime_resource_policy()
-    if resource_policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
     if type(chunksize) is not int or chunksize <= 0:
         raise ValueError("invalid_csmar_chunksize")
     catalog = interim_catalog()
@@ -1333,110 +1258,90 @@ def _materialize_interim_data(
     identity_index = ExactPrimaryKeyIndex(
         primary_key=("dataset_path",),
     )
-    with (
-        resource_policy.lease(
-            "source.csmar.raw.identity.index",
-            identity_index.retained_memory_bytes,
-        ),
-        identity_index,
-    ):
-        indexed_files = dataset_files_with_identity_by_id(
-            source_raw_root,
-            resource_policy=resource_policy,
-            identity_index=identity_index,
-            requested_datasets=data_ids,
+    indexed_files = dataset_files_with_identity_by_id(
+        source_raw_root, identity_index=identity_index, requested_datasets=data_ids
+    )
+
+    def verify_members() -> None:
+        _verify_csmar_member_set(
+            source_raw_root, identity_index, requested_datasets=data_ids
         )
 
-        def verify_members() -> None:
-            _verify_csmar_member_set(
-                source_raw_root,
-                identity_index,
-                requested_datasets=data_ids,
+    with closing_iterator(indexed_files):
+        for data_id, group in groupby(indexed_files, key=lambda item: item[0]):
+            identity = content_hash_for_files(
+                group, error="csmar_raw_export_identity_changed"
             )
-
-        with closing_iterator(indexed_files):
-            for data_id, group in groupby(indexed_files, key=lambda item: item[0]):
-                identity = content_hash_for_files(
-                    group,
-                    error="csmar_raw_export_identity_changed",
-                    resource_policy=resource_policy,
+            if (
+                instance_metadata is not None
+                and COMMON_MANIFEST_METADATA_KEY in instance_metadata
+            ):
+                envelope = validate_business_manifest_envelope(
+                    instance_metadata[COMMON_MANIFEST_METADATA_KEY]
                 )
+                if envelope["semantic_metadata"]["raw_content_identity"] != identity:
+                    raise ValueError("csmar_raw_export_identity_changed")
+
+            def verify_source(_receipt, dataset=data_id, expected=identity):
+                verify_members()
                 if (
-                    instance_metadata is not None
-                    and COMMON_MANIFEST_METADATA_KEY in instance_metadata
+                    content_hash_for_files(
+                        _iter_dataset_file_identities(
+                            source_raw_root, identity_index, data_id=dataset
+                        ),
+                        error="csmar_raw_export_identity_changed",
+                    )
+                    != expected
                 ):
-                    envelope = validate_business_manifest_envelope(
-                        instance_metadata[COMMON_MANIFEST_METADATA_KEY]
-                    )
-                    if (
-                        envelope["semantic_metadata"]["raw_content_identity"]
-                        != identity
-                    ):
-                        raise ValueError("csmar_raw_export_identity_changed")
+                    raise ValueError("csmar_raw_export_identity_changed")
+                verify_members()
 
-                def verify_source(_receipt, dataset=data_id, expected=identity):
-                    verify_members()
-                    if (
-                        content_hash_for_files(
-                            _iter_dataset_file_identities(
-                                source_raw_root, identity_index, data_id=dataset
-                            ),
-                            error="csmar_raw_export_identity_changed",
-                            resource_policy=resource_policy,
-                        )
-                        != expected
-                    ):
-                        raise ValueError("csmar_raw_export_identity_changed")
-                    verify_members()
-
-                input_records = _iter_dataset_file_identities(
-                    source_raw_root, identity_index, data_id=data_id
+            input_records = _iter_dataset_file_identities(
+                source_raw_root, identity_index, data_id=data_id
+            )
+            input_files = ((item[1], item[2]) for item in input_records)
+            pending.discard(data_id)
+            spec = catalog.get(data_id)
+            artifact_root = require_artifact_root(
+                layout.target_root(
+                    spec.data_id, layout.interim_data_root(spec.source_id, spec.data_id)
                 )
-                input_files = ((item[1], item[2]) for item in input_records)
-                pending.discard(data_id)
-                spec = catalog.get(data_id)
-                artifact_root = require_artifact_root(
-                    layout.target_root(
-                        spec.data_id,
-                        layout.interim_data_root(spec.source_id, spec.data_id),
+            )
+            metadata = dict(instance_metadata or {})
+            diagnostics = dict(metadata.get("producer_diagnostics", {}))
+            diagnostics["exact_duplicate_count"] = 0
+            metadata["producer_diagnostics"] = diagnostics
+            source_row_counts = None
+            if data_id == "analyst_forecast":
+                source_row_counts = {}
+                diagnostics["source_row_counts"] = source_row_counts
+            frames = _iter_interim_frames(
+                data_id=data_id,
+                input_files=input_files,
+                start_date=start_date,
+                end_date=end_date,
+                overrides=overrides,
+                chunksize=chunksize,
+                pruning_reports=pruning_reports,
+                verify_members=verify_members,
+                source_row_counts=source_row_counts,
+                producer_diagnostics=diagnostics,
+            )
+            with closing_iterator(input_records), closing_iterator(frames):
+                try:
+                    write_dataset(
+                        artifact_root,
+                        frames,
+                        spec=spec,
+                        instance_metadata=metadata,
+                        staged_validator=verify_source,
                     )
-                )
-                metadata = dict(instance_metadata or {})
-                diagnostics = dict(metadata.get("producer_diagnostics", {}))
-                diagnostics["exact_duplicate_count"] = 0
-                metadata["producer_diagnostics"] = diagnostics
-                source_row_counts = None
-                if data_id == "analyst_forecast":
-                    source_row_counts = {}
-                    diagnostics["source_row_counts"] = source_row_counts
-                frames = _iter_interim_frames(
-                    data_id=data_id,
-                    input_files=input_files,
-                    start_date=start_date,
-                    end_date=end_date,
-                    overrides=overrides,
-                    chunksize=chunksize,
-                    pruning_reports=pruning_reports,
-                    verify_members=verify_members,
-                    source_row_counts=source_row_counts,
-                    producer_diagnostics=diagnostics,
-                )
-                with closing_iterator(input_records), closing_iterator(frames):
-                    try:
-                        write_dataset(
-                            artifact_root,
-                            frames,
-                            spec=spec,
-                            resource_policy=resource_policy,
-                            instance_metadata=metadata,
-                            staged_validator=verify_source,
-                        )
-                    except ValueError as exc:
-                        if str(exc) != "empty_dataset_schema_missing":
-                            raise
-                        skipped.add(data_id)
-                        continue
-                written[data_id] = artifact_root
+                except ValueError as exc:
+                    if str(exc) != "empty_dataset_schema_missing":
+                        raise
+                    skipped.add(data_id)
+                    continue
+            written[data_id] = artifact_root
     skipped.update(pending)
 
     return InterimImportResult(
@@ -1459,271 +1364,78 @@ def _iter_pruned_interim_frames(
     producer_diagnostics: dict[str, object] | None,
     source_row_counts: dict[str, int] | None = None,
 ) -> Iterator[object]:
-    policy = current_runtime_resource_policy()
-    if policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
     local_reports: list[dict[str, object]] = []
     primary_key = interim_catalog().get(data_id).primary_key
     exact_duplicate_count = 0
-    lease: MemoryLease | None = None
     for input in input_files:
-        if isinstance(input, tuple):
-            input_file, expected_identity = input
-        else:
-            input_file = input
-            expected_identity = None
-        chunks = iter(
-            iter_private_export_chunks_with_policy(
-                input_file,
-                dataset=data_id,
-                chunksize=chunksize,
-                resource_policy=policy,
-                expected_identity=expected_identity,
-            )
+        input_file, expected_identity = (
+            input if isinstance(input, tuple) else (input, None)
+        )
+        chunks = iter_private_export_chunks(
+            input_file,
+            dataset=data_id,
+            chunksize=chunksize,
+            expected_identity=expected_identity,
         )
         with closing_iterator(chunks):
-            try:
-                upstream_bound = next(chunks)
-            except StopIteration:
-                continue
-            pending_frame: pd.DataFrame | None = None
-            pending_lease: MemoryLease | None = None
-            pending_bound: int | None = None
-            pending_span: int | None = None
-            try:
-                while upstream_bound is not None or pending_frame is not None:
-                    source_owned = pending_frame is None
-                    if source_owned:
-                        if lease is None:
-                            lease = yield upstream_bound
-                        elif upstream_bound > lease.reserved_bytes:
-                            policy.require_working_set(
-                                upstream_bound - lease.reserved_bytes,
-                                error="csmar_interim_working_set_exceeds_task_memory_budget",
-                            )
-                            lease.grow(upstream_bound - lease.reserved_bytes)
-                        try:
-                            owned = chunks.send(lease)
-                        except StopIteration:
-                            break
-                        if not isinstance(owned, OwnedValue):
-                            raise TypeError("invalid_csmar_owned_frame")
-                        if owned.lease is not lease:
-                            raise RuntimeError("runtime_memory_lease_transfer_mismatch")
-                        chunk = owned.value
-                    else:
-                        pending_handoff = yield (pending_bound, pending_lease)
-                        if pending_handoff is not pending_lease:
-                            raise RuntimeError("runtime_memory_lease_transfer_mismatch")
-                        lease = pending_handoff
-                        owned = None
-                        chunk = pending_frame
-                    if type(chunk) is not pd.DataFrame:
-                        raise TypeError("invalid_dataset_chunk")
-                    chunk_bytes = pandas_frame_payload_bytes(chunk)
-                    start = 0
-                    span = pending_span or len(chunk)
-                    downsized = False
-                    emitted = False
-                    while start < len(chunk):
-                        stop = min(len(chunk), start + span)
-                        candidate = (
-                            chunk
-                            if start == 0 and stop == len(chunk)
-                            else chunk.iloc[start:stop]
-                        )
-                        try:
-                            pruned, report = _transform_interim_chunk(
-                                candidate,
-                                data_id=data_id,
-                                start_date=start_date,
-                                end_date=end_date,
-                                overrides=overrides,
-                                retained_previous_bytes=(
-                                    0 if candidate is chunk else chunk_bytes
-                                ),
-                            )
-                        except _InterimCapacityExceeded as exc:
-                            del candidate
-                            if downsized or stop - start == 1:
-                                raise
-                            available_bytes = exc.budget_bytes - chunk_bytes
-                            if available_bytes <= 0:
-                                raise
-                            span = max(
-                                1,
-                                min(
-                                    stop - start - 1,
-                                    (stop - start)
-                                    * available_bytes
-                                    // max(1, exc.required_bytes),
-                                ),
-                            )
-                            downsized = True
-                            continue
-                        skip_duplicate = False
-                        if not pruned.empty:
-                            frame_bytes = pandas_frame_payload_bytes(pruned)
-                            dedupe_bound = (
-                                chunk_bytes + _deduplication_working_set_bytes(pruned)
-                            )
-                            reservation_before = lease.reserved_bytes
-                            if dedupe_bound > lease.reserved_bytes:
-                                policy.require_working_set(
-                                    dedupe_bound - lease.reserved_bytes,
-                                    error="csmar_interim_working_set_exceeds_task_memory_budget",
-                                )
-                                lease.grow(dedupe_bound - lease.reserved_bytes)
-                            table = pa.Table.from_pandas(pruned, preserve_index=False)
-                            retry_scratch = False
-                            try:
-                                if table.nbytes > 2 * frame_bytes + 64 * 1024:
-                                    raise ValueError("csmar_interim_bound_invalid")
-                                positions, duplicate_count = (
-                                    duplicate_index.classify_comparison_table(
-                                        table,
-                                        namespace=data_id,
-                                        value_columns=tuple(
-                                            sorted(
-                                                column
-                                                for column in pruned
-                                                if column not in primary_key
-                                            )
-                                        ),
-                                        payload_target_bytes=max(
-                                            1,
-                                            lease.reserved_bytes
-                                            - chunk_bytes
-                                            - frame_bytes,
-                                        ),
+            for chunk in chunks:
+                pruned, report = _transform_interim_chunk(
+                    chunk,
+                    data_id=data_id,
+                    start_date=start_date,
+                    end_date=end_date,
+                    overrides=overrides,
+                )
+                skip_duplicate = False
+                if not pruned.empty:
+                    table = pa.Table.from_pandas(pruned, preserve_index=False)
+                    try:
+                        positions, duplicate_count = (
+                            duplicate_index.classify_comparison_table(
+                                table,
+                                namespace=data_id,
+                                value_columns=tuple(
+                                    sorted(
+                                        column
+                                        for column in pruned
+                                        if column not in primary_key
                                     )
-                                )
-                            except ValueError as error:
-                                if (
-                                    str(error)
-                                    == "storage_scratch_exceeds_memory_capacity"
-                                    and stop - start > 1
-                                ):
-                                    retry_scratch = True
-                                elif (
-                                    str(error)
-                                    == "conflicting_exact_primary_key_payload"
-                                ):
-                                    raise ValueError(
-                                        "conflicting_csmar_primary_key_duplicates: "
-                                        f"{data_id}"
-                                    ) from error
-                                else:
-                                    raise
-                            finally:
-                                del table
-                            if retry_scratch:
-                                del pruned, report, candidate
-                                lease.shrink_to(reservation_before)
-                                span = max(1, (stop - start) // 2)
-                                continue
-                            exact_duplicate_count += duplicate_count
-                            if producer_diagnostics is not None:
-                                producer_diagnostics["exact_duplicate_count"] = (
-                                    exact_duplicate_count
-                                )
-                            if not positions:
-                                skip_duplicate = True
-                            elif len(positions) != len(pruned):
-                                selected = pruned.iloc[positions.view].reset_index(
-                                    drop=True
-                                )
-                                required = (
-                                    chunk_bytes
-                                    + frame_bytes
-                                    + pandas_frame_payload_bytes(selected)
-                                    + positions.retained_memory_bytes
-                                    + 64 * 1024
-                                )
-                                if required > lease.reserved_bytes:
-                                    raise ValueError("csmar_interim_bound_invalid")
-                                pruned = selected
-                                del selected
-                            del positions
-                        if data_id == "analyst_forecast":
-                            counts = report.pop("source_row_counts")
-                        if source_row_counts is not None:
-                            for key, count in counts.items():
-                                source_row_counts[key] = (
-                                    source_row_counts.get(key, 0) + count
-                                )
-                        if report:
-                            _merge_pruning_report(local_reports, report)
-                        if skip_duplicate:
-                            del pruned, report, candidate
-                            start = stop
-                            continue
-                        if pruned.empty and data_id != "analyst_forecast":
-                            del pruned, report, candidate
-                            start = stop
-                            continue
-                        pending_frame = None
-                        if pending_lease is not None and pending_lease is not lease:
-                            pending_lease.close()
-                        pending_lease = None
-                        pending_bound = None
-                        pending_span = None
-                        if stop < len(chunk):
-                            remainder_bytes = pandas_frame_payload_bytes(
-                                chunk.iloc[stop:]
+                                ),
                             )
-                            pending_lease = policy.lease(
-                                "source.csmar.interim.pending", remainder_bytes
+                        )
+                    except ValueError as error:
+                        if str(error) == "conflicting_exact_primary_key_payload":
+                            raise ValueError(
+                                f"conflicting_csmar_primary_key_duplicates: {data_id}"
+                            ) from error
+                        raise
+                    finally:
+                        del table
+                    exact_duplicate_count += duplicate_count
+                    if producer_diagnostics is not None:
+                        producer_diagnostics["exact_duplicate_count"] = (
+                            exact_duplicate_count
+                        )
+                    if not positions:
+                        skip_duplicate = True
+                    elif len(positions) != len(pruned):
+                        pruned = pruned.iloc[positions].reset_index(drop=True)
+                    del positions
+                if data_id == "analyst_forecast":
+                    counts = report.pop("source_row_counts")
+                    if source_row_counts is not None:
+                        for key, count in counts.items():
+                            source_row_counts[key] = (
+                                source_row_counts.get(key, 0) + count
                             )
-                            pending_frame = chunk.iloc[stop:].copy()
-                            pending_bound = lease.reserved_bytes
-                            pending_span = span
-                        if source_owned:
-                            try:
-                                upstream_bound = chunks.send(None)
-                            except StopIteration:
-                                upstream_bound = None
-                            if upstream_bound is not None and (
-                                type(upstream_bound) is not int or upstream_bound <= 0
-                            ):
-                                raise ValueError("invalid_csmar_raw_bound")
-                        del report, candidate
-                        del owned, chunk
-                        lease.shrink_to(pandas_frame_payload_bytes(pruned) + 64 * 1024)
-                        owned_output = OwnedValue(pruned, lease)
-                        del pruned
-                        yield owned_output
-                        del owned_output
-                        lease = None
-                        emitted = True
-                        break
-                    if not emitted:
-                        del owned, chunk
-                        pending_frame = None
-                        if pending_lease is not None and pending_lease is not lease:
-                            pending_lease.close()
-                        pending_lease = None
-                        pending_bound = None
-                        pending_span = None
-                        if source_owned:
-                            try:
-                                upstream_bound = chunks.send(None)
-                            except StopIteration:
-                                upstream_bound = None
-                            if upstream_bound is not None and (
-                                type(upstream_bound) is not int or upstream_bound <= 0
-                            ):
-                                raise ValueError("invalid_csmar_raw_bound")
-            finally:
-                pending_frame = None
-                if pending_lease is not None:
-                    _close_lease_preserving_primary(
-                        pending_lease,
-                        owner="source.csmar.interim.pending",
-                    )
-                    pending_lease = None
-                pending_bound = None
-                pending_span = None
+                if report:
+                    _merge_pruning_report(local_reports, report)
+                if skip_duplicate or pruned.empty and data_id != "analyst_forecast":
+                    continue
+                try:
+                    yield pruned
+                except GeneratorExit:
+                    return
     if pruning_reports is not None:
         _append_duplicate_summary(pruning_reports, data_id, exact_duplicate_count)
         for report in local_reports:
@@ -1737,39 +1449,14 @@ def _transform_interim_chunk(
     start_date: str | None,
     end_date: str | None,
     overrides: Mapping[str, Mapping[str, object]],
-    retained_previous_bytes: int,
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    policy = current_runtime_resource_policy()
-    if policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
-    chunk_bytes = pandas_frame_payload_bytes(chunk)
-    normalization_preallocation_bytes = _normalization_preallocation_bytes(
-        chunk, data_id=data_id
-    )
-    _require_interim_transform_headroom(
-        retained_previous_bytes + chunk_bytes + normalization_preallocation_bytes,
-    )
     normalized = normalize_raw_frame(chunk, data_id)
     source_row_counts = normalized.attrs.pop("source_row_counts", None)
-    normalized_bytes = pandas_frame_payload_bytes(normalized)
-    filter_preallocation_bytes = _filter_preallocation_bytes(
-        normalized,
-        data_id=data_id,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    _require_interim_transform_headroom(
-        retained_previous_bytes + normalized_bytes + filter_preallocation_bytes,
-    )
     filtered = _filter_normalized_frame(
         normalized,
         data_id=data_id,
         start_date=start_date,
         end_date=end_date,
-    )
-    filtered_bytes = pandas_frame_payload_bytes(filtered)
-    _require_interim_transform_headroom(
-        retained_previous_bytes + normalized_bytes + filtered_bytes,
     )
     del normalized
     if source_row_counts is not None:
@@ -1783,72 +1470,15 @@ def _transform_interim_chunk(
             if source_row_counts is not None
             else {}
         )
-    _require_interim_transform_headroom(
-        retained_previous_bytes + filtered_bytes + filtered_bytes,
-    )
     pruned, report = _apply_output_column_rules_validated(
         filtered,
         data_id,
         overrides=overrides,
     )
-    _require_interim_transform_headroom(
-        retained_previous_bytes
-        + filtered_bytes
-        + _deduplication_working_set_bytes(pruned),
-    )
     del filtered
     if source_row_counts is not None:
         report["source_row_counts"] = source_row_counts
     return pruned, report
-
-
-def _deduplication_working_set_bytes(frame: pd.DataFrame) -> int:
-    return (
-        3 * pandas_frame_payload_bytes(frame)
-        + len(frame) * array("Q").itemsize
-        + 64 * 1024
-    )
-
-
-def _require_interim_transform_headroom(required_bytes: int) -> None:
-    policy = current_runtime_resource_policy()
-    explicit = None if policy is None else policy.explicit_memory_cap_bytes
-    if explicit is not None and policy is not None:
-        if policy.used_memory_bytes + required_bytes > explicit:
-            raise _InterimCapacityExceeded(required_bytes, explicit)
-
-
-def _normalization_preallocation_bytes(frame: pd.DataFrame, *, data_id: str) -> int:
-    """Bound the actual variable-width and ordering allocations of normalization."""
-
-    if frame.empty:
-        return 0
-    pointer_bytes = array("Q").itemsize
-    variable_width_bytes = pandas_frame_payload_bytes(frame)
-    primary_key_columns = len(interim_catalog().get(data_id).primary_key)
-    ordering_bytes = len(frame) * (primary_key_columns + 2) * pointer_bytes
-    if data_id == "index_membership":
-        # Hash strings coexist with the construction list and assigned object array.
-        variable_width_bytes += len(frame) * (
-            sys.getsizeof("0" * 64) + 2 * pointer_bytes
-        )
-    return variable_width_bytes + ordering_bytes
-
-
-def _filter_preallocation_bytes(
-    frame: pd.DataFrame,
-    *,
-    data_id: str,
-    start_date: str | None,
-    end_date: str | None,
-) -> int:
-    if not (
-        (data_id in TIME_RANGE_FILTER_DATA_IDS and (start_date or end_date))
-        or (data_id in START_END_FILTER_DATA_IDS and (start_date or end_date))
-        or (data_id in END_ONLY_FILTER_DATA_IDS and end_date)
-    ):
-        return 0
-    return len(frame) * (array("Q").itemsize + 1) + pandas_frame_payload_bytes(frame)
 
 
 def _merge_pruning_report(

@@ -709,7 +709,6 @@ def calibrate_expected_alpha(
     order = np.argsort(cluster_codes, kind="stable")
     boundaries = np.flatnonzero(np.diff(cluster_codes[order])) + 1
     groups = np.split(order, boundaries)
-    del cluster_codes, boundaries
 
     def cluster_averages():
         for positions in groups:

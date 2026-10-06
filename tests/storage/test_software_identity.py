@@ -10,7 +10,7 @@ from quant_research_platform.storage.software_identity import (
 )
 
 
-def _identity(root: Path, versions: dict[str, str] | None = None):  # noqa: ANN202
+def _identity(root: Path, versions: dict[str, str] | None = None):
     return production_software_identity(
         package_root=root,
         dependency_versions=versions
@@ -27,14 +27,12 @@ def test_package_identity_is_order_independent_and_ignores_bytecode(
     (package_root / "a.py").write_bytes(b"a")
     ignored = package_root / "__pycache__" / "ignored.pyc"
     ignored.write_bytes(b"first")
-
     first = _identity(package_root)
     assert set(first.payload) == {"package_content_hash", "dependency_versions"}
     assert len(first.payload["package_content_hash"]) == 64
     assert set(first.payload["dependency_versions"]) == set(
         NUMERICAL_MODEL_DISTRIBUTIONS
     )
-
     ignored.write_bytes(b"second")
     second = _identity(
         package_root,
@@ -56,23 +54,14 @@ def test_package_and_dependency_changes_invalidate_only_production_identity(
     outside_docs = tmp_path / "docs"
     outside_docs.mkdir()
     versions = {distribution: "1.0" for distribution in NUMERICAL_MODEL_DISTRIBUTIONS}
-
     first = _identity(package_root, versions)
     (outside_docs / "README.md").write_text("documentation", encoding="utf-8")
     assert _identity(package_root, versions).identity_hash == first.identity_hash
-
     (package_root / "module.py").write_bytes(b"after")
     changed_package = _identity(package_root, versions)
     assert changed_package.identity_hash != first.identity_hash
-
     (package_root / "module.py").write_bytes(b"before")
-    changed_dependency = _identity(
-        package_root,
-        {
-            **versions,
-            "numpy": "2.0",
-        },
-    )
+    changed_dependency = _identity(package_root, {**versions, "numpy": "2.0"})
     assert changed_dependency.identity_hash != first.identity_hash
 
 
@@ -118,9 +107,12 @@ def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
 
     def identities():
         software = _identity(package)
-        return software.identity_hash, tuple(
-            research._target_software_identity(binding, software)
-            for binding in bindings
+        return (
+            software.identity_hash,
+            tuple(
+                research._target_software_identity(binding, software)
+                for binding in bindings
+            ),
         )
 
     original_package, original = identities()
@@ -131,7 +123,6 @@ def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
     changed_package, operational = identities()
     assert changed_package != original_package
     assert operational == original
-
     fitting = package / "research" / "models" / "fitting.py"
     fitting.write_bytes(fitting.read_bytes() + b"\n# Numerical model change.\n")
     _, changed_models = identities()
@@ -147,7 +138,6 @@ def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
             assert after == before
         elif binding.kind is ProducerKind.MODEL:
             assert after != before
-
     helper = package / (
         "markets/implementations/crypto/hft.py"
         if market == "crypto"
@@ -156,11 +146,13 @@ def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
     helper.write_bytes(helper.read_bytes() + b"\n# Label helper change.\n")
     _, changed_helpers = identities()
     assert any(
-        after != before
-        for binding, before, after in zip(
-            bindings, changed_models, changed_helpers, strict=True
+        (
+            after != before
+            for binding, before, after in zip(
+                bindings, changed_models, changed_helpers, strict=True
+            )
+            if binding.kind is ProducerKind.PROCESSED
         )
-        if binding.kind is ProducerKind.PROCESSED
     )
     initializer = (
         package / "markets" / "implementations" / market / "processed" / "__init__.py"
@@ -170,15 +162,14 @@ def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
     )
     _, changed_initializers = identities()
     assert all(
-        after != before
-        for binding, before, after in zip(
-            bindings, changed_helpers, changed_initializers, strict=True
+        (
+            after != before
+            for binding, before, after in zip(
+                bindings, changed_helpers, changed_initializers, strict=True
+            )
+            if binding.kind is ProducerKind.PROCESSED
         )
-        if binding.kind is ProducerKind.PROCESSED
     )
-
-    # A real injected callback is part of the scope even when the producer
-    # imports neither its implementation nor its module.
     callback = package / "sources" / "binance" / "replay.py"
     if market == "crypto":
         callback.write_bytes(
@@ -186,11 +177,13 @@ def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
         )
         _, changed_callbacks = identities()
         assert any(
-            after != before
-            for binding, before, after in zip(
-                bindings, changed_initializers, changed_callbacks, strict=True
+            (
+                after != before
+                for binding, before, after in zip(
+                    bindings, changed_initializers, changed_callbacks, strict=True
+                )
+                if binding.kind is ProducerKind.PROCESSED
             )
-            if binding.kind is ProducerKind.PROCESSED
         )
 
 
@@ -201,7 +194,6 @@ def test_identity_rejects_incomplete_or_extra_dependency_versions(
     package_root.mkdir()
     (package_root / "module.py").write_bytes(b"module")
     complete = {distribution: "1.0" for distribution in NUMERICAL_MODEL_DISTRIBUTIONS}
-
     with pytest.raises(ValueError, match="software_dependency_versions_invalid"):
         production_software_identity(
             package_root=package_root,
@@ -211,8 +203,7 @@ def test_identity_rejects_incomplete_or_extra_dependency_versions(
         )
     with pytest.raises(ValueError, match="software_dependency_versions_invalid"):
         production_software_identity(
-            package_root=package_root,
-            dependency_versions={**complete, "other": "1.0"},
+            package_root=package_root, dependency_versions={**complete, "other": "1.0"}
         )
 
 
@@ -223,17 +214,12 @@ def test_identity_rejects_empty_package_and_inconsistent_typed_identity(
     empty.mkdir()
     complete = {distribution: "1.0" for distribution in NUMERICAL_MODEL_DISTRIBUTIONS}
     with pytest.raises(ValueError, match="production_package_empty"):
-        production_software_identity(
-            package_root=empty,
-            dependency_versions=complete,
-        )
-
+        production_software_identity(package_root=empty, dependency_versions=complete)
     package_root = tmp_path / "package"
     package_root.mkdir()
     (package_root / "module.py").write_bytes(b"module")
     identity = production_software_identity(
-        package_root=package_root,
-        dependency_versions=complete,
+        package_root=package_root, dependency_versions=complete
     )
     detached = identity.payload
     detached["dependency_versions"]["numpy"] = "2.0"
@@ -244,9 +230,7 @@ def test_identity_rejects_empty_package_and_inconsistent_typed_identity(
 
 @pytest.mark.parametrize("fixed_directory_identity", (False, True))
 def test_identity_rejects_file_or_root_mutation_during_read(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fixed_directory_identity: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixed_directory_identity: bool
 ) -> None:
     package_root = tmp_path / "package"
     package_root.mkdir()
@@ -262,7 +246,7 @@ def test_identity_rejects_file_or_root_mutation_during_read(
             software_identity, "_directory_identity", lambda _path: stable
         )
 
-    def changing_open(path: Path, *args: object, **kwargs: object):  # noqa: ANN202
+    def changing_open(path: Path, *args: object, **kwargs: object):
         if path == module_path:
             with real_open(module_path, "wb") as handle:
                 handle.write(b"changed")
@@ -271,13 +255,11 @@ def test_identity_rejects_file_or_root_mutation_during_read(
     monkeypatch.setattr(software_identity, "open_filesystem_file", changing_open)
     with pytest.raises(ValueError, match="production_package_identity_changed"):
         production_software_identity(
-            package_root=package_root,
-            dependency_versions=complete,
+            package_root=package_root, dependency_versions=complete
         )
-
     monkeypatch.setattr(software_identity, "open_filesystem_file", real_open)
 
-    def changing_root_open(path: Path, *args: object, **kwargs: object):  # noqa: ANN202
+    def changing_root_open(path: Path, *args: object, **kwargs: object):
         if path == module_path:
             with real_open(package_root / "new.py", "wb") as handle:
                 handle.write(b"new")
@@ -286,8 +268,7 @@ def test_identity_rejects_file_or_root_mutation_during_read(
     monkeypatch.setattr(software_identity, "open_filesystem_file", changing_root_open)
     with pytest.raises(ValueError, match="production_package_identity_changed"):
         production_software_identity(
-            package_root=package_root,
-            dependency_versions=complete,
+            package_root=package_root, dependency_versions=complete
         )
 
 
@@ -425,7 +406,6 @@ def test_software_identity_close_preserves_active_primary(
     secondary = OSError("synthetic_close")
     closed = []
     native_scan = owner.filesystem_scandir
-
     native_open = owner.open_filesystem_file
 
     class Handle:
@@ -461,7 +441,7 @@ def test_software_identity_close_preserves_active_primary(
     assert caught.value is (primary or secondary)
     assert closed == [True]
     if primary is not None:
-        assert "scratch handle close also failed: OSError" in primary.__notes__
+        assert "iterator close also failed: OSError" in primary.__notes__
 
 
 def test_package_hash_rejects_open_fd_from_swapped_ancestor(tmp_path, monkeypatch):
@@ -503,7 +483,7 @@ def test_package_inventory_rejects_child_junction_on_windows(tmp_path):
 
     if os.name != "nt":
         pytest.skip("requires a real Windows junction")
-    package, external = tmp_path / "package", tmp_path / "external"
+    package, external = (tmp_path / "package", tmp_path / "external")
     package.mkdir()
     external.mkdir()
     (external / "module.py").write_bytes(b"synthetic")

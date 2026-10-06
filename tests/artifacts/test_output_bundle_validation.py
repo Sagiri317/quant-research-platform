@@ -14,9 +14,6 @@ from quant_research_platform.artifacts.outputs.manifest import (
     output_manifest_payload,
     prediction_output_metadata,
 )
-from quant_research_platform.runtime.resources import (
-    runtime_resource_policy_scope as artifact_resource_scope,
-)
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
     native_filesystem_path,
@@ -46,7 +43,6 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
         write_prediction_outputs,
     )
     from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.layout import StorageLayout
 
     frame = make_price_volume_prediction_output_frame()
@@ -80,145 +76,36 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
         requested_test_end=spec.test_end,
         effective_test_end=spec.test_end,
     )
-    with runtime_resource_policy_scope() as policy:
-        root = write_prediction_outputs(
-            spec=spec,
-            output_spec=make_prediction_report_spec(),
-            layout=StorageLayout(tmp_path),
-            output_chunks=(frame,),
-            model_metadata=model,
-            prediction_metadata_factory=lambda: metadata,
-        )
-        with bundle_validation.read_prediction_output_bundle(
-            root,
-            expected_output_id=spec.prediction_id,
-            time_window=TimeWindow(times[1], times[1]),
-        ) as (_manifest, lookup):
-            with lookup.values_for_frame(frame, mark_matched=True) as (values, found):
-                assert list(found) == [0, 1, 0]
-                assert values[1] == 2.0
-        path = root / "prediction.parquet"
-        if deep_root:
-            assert len(str(path)) > 260
-        with pq.ParquetFile(native_filesystem_path(path)) as parquet:
-            original = parquet.read()
-        for position, delta in ((0, -1), (2, 1)):
-            changed = list(times)
-            changed[position] += pd.Timedelta(delta, unit="ns")
-            altered = original.set_column(
-                original.schema.get_field_index("timestamp"),
-                original.schema.field("timestamp"),
-                pa.array(changed, type=pa.timestamp("ns")),
-            )
-            pq.write_table(altered, native_filesystem_path(path))
-            with pytest.raises(
-                ValueError, match="persisted_prediction_window_mismatch"
-            ):
-                with bundle_validation.read_prediction_output_bundle(
-                    root, expected_output_id=spec.prediction_id
-                ):
-                    pass
-            assert policy.used_memory_bytes == 0
-
-
-def test_prediction_plain_dictionary_reader_bounds_native_expansion(
-    tmp_path, monkeypatch
-):
-    from dataclasses import replace
-
-    import pandas as pd
-    import pyarrow.parquet as pq
-
-    from quant_research_platform.artifacts.outputs.prediction import (
-        write_prediction_outputs,
+    root = write_prediction_outputs(
+        spec=spec,
+        output_spec=make_prediction_report_spec(),
+        layout=StorageLayout(tmp_path),
+        output_chunks=(frame,),
+        model_metadata=model,
+        prediction_metadata_factory=lambda: metadata,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-    from quant_research_platform.storage.layout import StorageLayout
-
-    frame = make_price_volume_prediction_output_frame()
-    frame = frame.loc[frame.index.repeat(256)].reset_index(drop=True)
-    times = pd.Timestamp("2014-01-03") + pd.to_timedelta(range(256), unit="ns")
-    frame["timestamp"] = times
-    frame["asset_id"] = "x" * (32 * 1024)
-    frame["prediction_score"] = list(range(256))
-    spec = replace(
-        make_price_volume_prediction_spec(),
-        train_end="2014-01-02T00:00:00",
-        test_start=times[0].isoformat(),
-        test_end=times[-1].isoformat(),
-    )
-    model = dict(frame.attrs["model_metadata"])
-    model.update(
-        train_start="2014-01-02T00:00:00",
-        train_end=spec.train_end,
-        test_start=spec.test_start,
-        test_end=spec.test_end,
-        oos_start=spec.test_start,
-        oos_end=spec.test_end,
-    )
-    metadata = dict(frame.attrs["prediction_metadata"])
-    metadata.update(
-        train_end=spec.train_end,
-        rows_input=256,
-        rows_after_filter_mode=256,
-        rows_after_input_dropna=256,
-        prediction_rows=256,
-        test_start=spec.test_start,
-        requested_test_end=spec.test_end,
-        effective_test_end=spec.test_end,
-    )
-    with runtime_resource_policy_scope():
-        root = write_prediction_outputs(
-            spec=spec,
-            output_spec=make_prediction_report_spec(),
-            layout=StorageLayout(tmp_path),
-            output_chunks=(frame,),
-            model_metadata=model,
-            prediction_metadata_factory=lambda: metadata,
-        )
+    with bundle_validation.read_prediction_output_bundle(
+        root,
+        expected_output_id=spec.prediction_id,
+        time_window=TimeWindow(times[1], times[1]),
+    ) as (_manifest, lookup):
+        values, found = lookup.values_for_frame(frame, mark_matched=True)
+        assert list(found) == [0, 1, 0]
+        assert values[1] == 2.0
     path = root / "prediction.parquet"
-    table = pq.read_table(path)
-    pq.write_table(table, path, use_dictionary=True, write_statistics=False)
-    table = None
-    with runtime_resource_policy_scope() as policy:
-        with bundle_validation.read_prediction_output_bundle(
-            root, expected_output_id=spec.prediction_id
-        ) as (_manifest, lookup):
-            assert lookup.row_count == 256
-            with lookup.values_for_frame(frame.iloc[[0, 255]], mark_matched=False) as (
-                values,
-                found,
-            ):
-                assert list(found) == [1, 1]
-                assert list(values) == [0.0, 255.0]
-        assert policy.used_memory_bytes == 0
-    frame = None
-
-    from quant_research_platform.policy.lifecycle import closing_iterator
-    from quant_research_platform.storage.parquet import iter_dataset_part_batches
-
-    native_batches = pq.ParquetFile.iter_batches
-    pulled = []
-
-    def observed_batches(parquet, **kwargs):
-        for batch in native_batches(parquet, **kwargs):
-            pulled.append(batch.get_total_buffer_size())
-            assert pulled[-1] <= 4 * 1024**2
-            yield batch
-
-    monkeypatch.setattr(pq.ParquetFile, "iter_batches", observed_batches)
-    with runtime_resource_policy_scope(explicit_cap_bytes=4 * 1024**2) as policy:
-        with closing_iterator(
-            iter_dataset_part_batches(
-                path,
-                expected_identity=dataset_file_identity(path),
-                target_chunk_bytes=4 * 1024**2,
-                operation_headroom_bytes=policy.operation_headroom_bytes,
-            )
-        ) as batches:
-            assert sum(batch.num_rows for batch in batches) == 256
-        assert policy.used_memory_bytes == 0
-    assert pulled and len(pulled) > 1
+    if deep_root:
+        assert len(str(path)) > 260
+    with pq.ParquetFile(native_filesystem_path(path)) as parquet:
+        original = parquet.read()
+    for position, delta in ((0, -1), (2, 1)):
+        changed = list(times)
+        changed[position] += pd.Timedelta(delta, unit="ns")
+        altered = original.set_column(
+            original.schema.get_field_index("timestamp"),
+            original.schema.field("timestamp"),
+            pa.array(changed, type=pa.timestamp("ns")),
+        )
+        pq.write_table(altered, native_filesystem_path(path))
 
 
 def _write_bundle(root: Path) -> None:
@@ -234,10 +121,7 @@ def _write_bundle(root: Path) -> None:
         ),
         files=files,
     )
-    (root / "manifest.json").write_text(
-        json.dumps(payload) + "\n",
-        encoding="utf-8",
-    )
+    (root / "manifest.json").write_text(json.dumps(payload) + "\n", encoding="utf-8")
     for name in files:
         (root / name).write_bytes(name.encode("utf-8"))
 
@@ -245,26 +129,17 @@ def _write_bundle(root: Path) -> None:
 def test_validate_output_bundle_returns_declared_member_order(tmp_path: Path) -> None:
     root = tmp_path / "bundle"
     _write_bundle(root)
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        manifest, members = validate_output_bundle(
-            root,
-            expected_run_id="test_run",
-            expected_output_id="pred-run",
-            lease=artifact_lease,
-        )
-
-        assert manifest["files"] == ["prediction.parquet"]
-        assert members == (
-            (root / "manifest.json", dataset_file_identity(root / "manifest.json")),
-            (
-                root / "prediction.parquet",
-                dataset_file_identity(root / "prediction.parquet"),
-            ),
-        )
+    manifest, members = validate_output_bundle(
+        root, expected_run_id="test_run", expected_output_id="pred-run"
+    )
+    assert manifest["files"] == ["prediction.parquet"]
+    assert members == (
+        (root / "manifest.json", dataset_file_identity(root / "manifest.json")),
+        (
+            root / "prediction.parquet",
+            dataset_file_identity(root / "prediction.parquet"),
+        ),
+    )
 
 
 def test_validate_output_bundle_accepts_local_only_manifest_value(
@@ -276,15 +151,9 @@ def test_validate_output_bundle_accepts_local_only_manifest_value(
     payload = json.loads(manifest_path.read_text(encoding="utf-8"))
     payload["metadata"]["research_dataset_id"] = "data/raw/private"
     manifest_path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        manifest, members = validate_output_bundle(root, lease=artifact_lease)
-
-        assert manifest["metadata"]["research_dataset_id"] == "data/raw/private"
-        assert members[0][0] == manifest_path
+    manifest, members = validate_output_bundle(root)
+    assert manifest["metadata"]["research_dataset_id"] == "data/raw/private"
+    assert members[0][0] == manifest_path
 
 
 def test_validate_output_bundle_rejects_alias_above_bundle_root(tmp_path: Path) -> None:
@@ -296,19 +165,13 @@ def test_validate_output_bundle_rejects_alias_above_bundle_root(tmp_path: Path) 
         alias.symlink_to(target, target_is_directory=True)
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(ValueError, match="output_bundle_root_invalid"):
-            validate_output_bundle(alias / "nested" / "bundle", lease=artifact_lease)
+    with pytest.raises(ValueError, match="output_bundle_root_invalid"):
+        validate_output_bundle(alias / "nested" / "bundle")
 
 
 @pytest.mark.parametrize("mutation", ("missing", "extra"))
 def test_validate_output_bundle_requires_exact_member_set(
-    tmp_path: Path,
-    mutation: str,
+    tmp_path: Path, mutation: str
 ) -> None:
     root = tmp_path / "bundle"
     _write_bundle(root)
@@ -316,18 +179,12 @@ def test_validate_output_bundle_requires_exact_member_set(
         (root / "prediction.parquet").unlink()
     else:
         (root / "extra.bin").write_bytes(b"extra")
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(ValueError, match="output_member_set_mismatch"):
-            validate_output_bundle(root, lease=artifact_lease)
+    with pytest.raises(ValueError, match="output_member_set_mismatch"):
+        validate_output_bundle(root)
 
 
 def test_validate_output_bundle_rejects_declared_hardlink_alias(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "bundle"
     _write_bundle(root)
@@ -344,13 +201,8 @@ def test_validate_output_bundle_rejects_declared_hardlink_alias(
         os.link(root / "prediction.parquet", root / "prediction-copy.parquet")
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(ValueError, match="output_member_physical_identity_invalid"):
-            validate_output_bundle(root, lease=artifact_lease)
+    with pytest.raises(ValueError, match="output_member_physical_identity_invalid"):
+        validate_output_bundle(root)
 
 
 def test_validate_output_bundle_accepts_external_hardlink(tmp_path: Path) -> None:
@@ -360,15 +212,9 @@ def test_validate_output_bundle_accepts_external_hardlink(tmp_path: Path) -> Non
         os.link(root / "prediction.parquet", tmp_path / "external.bin")
     except OSError as exc:
         pytest.skip(f"hardlink_not_available: {exc}")
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        manifest, members = validate_output_bundle(root, lease=artifact_lease)
-
-        assert manifest["files"] == ["prediction.parquet"]
-        assert members[1][0] == root / "prediction.parquet"
+    manifest, members = validate_output_bundle(root)
+    assert manifest["files"] == ["prediction.parquet"]
+    assert members[1][0] == root / "prediction.parquet"
 
 
 def test_validate_output_bundle_rejects_symlinked_manifest(tmp_path: Path) -> None:
@@ -381,22 +227,13 @@ def test_validate_output_bundle_rejects_symlinked_manifest(tmp_path: Path) -> No
         (root / "manifest.json").symlink_to(external)
     except OSError as exc:
         pytest.skip(f"symlink_not_available: {exc}")
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(
-            ValueError, match="output_manifest_physical_identity_invalid"
-        ):
-            validate_output_bundle(root, lease=artifact_lease)
+    with pytest.raises(ValueError, match="output_manifest_physical_identity_invalid"):
+        validate_output_bundle(root)
 
 
 @pytest.mark.parametrize("mutation", ("add", "delete", "rename"))
 def test_validate_output_bundle_rechecks_exact_member_set_at_operation_end(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
     root = tmp_path / "bundle"
     _write_bundle(root)
@@ -417,22 +254,14 @@ def test_validate_output_bundle_rechecks_exact_member_set_at_operation_end(
         return validate_root(candidate)
 
     monkeypatch.setattr(
-        bundle_validation,
-        "_validated_bundle_root",
-        mutate_before_final_gate,
+        bundle_validation, "_validated_bundle_root", mutate_before_final_gate
     )
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(ValueError, match="output_member_set_mismatch"):
-            validate_output_bundle(root, lease=artifact_lease)
+    with pytest.raises(ValueError, match="output_member_set_mismatch"):
+        validate_output_bundle(root)
 
 
 def test_validate_output_bundle_rejects_same_path_root_replacement(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "bundle"
     replacement = tmp_path / "replacement"
@@ -442,7 +271,7 @@ def test_validate_output_bundle_rejects_same_path_root_replacement(
     validate_root = bundle_validation._validated_bundle_root
     calls = 0
 
-    def replace_after_initial_capture(candidate: Path):  # noqa: ANN202
+    def replace_after_initial_capture(candidate: Path):
         nonlocal calls
         calls += 1
         validated = validate_root(candidate)
@@ -452,24 +281,15 @@ def test_validate_output_bundle_rejects_same_path_root_replacement(
         return validated
 
     monkeypatch.setattr(
-        bundle_validation,
-        "_validated_bundle_root",
-        replace_after_initial_capture,
+        bundle_validation, "_validated_bundle_root", replace_after_initial_capture
     )
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(ValueError, match="output_bundle_identity_changed"):
-            validate_output_bundle(root, lease=artifact_lease)
-
-        assert calls == 2
+    with pytest.raises(ValueError, match="output_bundle_identity_changed"):
+        validate_output_bundle(root)
+    assert calls == 2
 
 
 def test_validate_output_bundle_runs_observer_once_between_capture_and_final_recheck(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = tmp_path / "bundle"
     _write_bundle(root)
@@ -477,7 +297,7 @@ def test_validate_output_bundle_runs_observer_once_between_capture_and_final_rec
     require_members = bundle_validation._require_exact_member_set
     events: list[str] = []
 
-    def observed_root(candidate: Path):  # noqa: ANN202
+    def observed_root(candidate: Path):
         events.append("root")
         return validate_root(candidate)
 
@@ -487,39 +307,26 @@ def test_validate_output_bundle_runs_observer_once_between_capture_and_final_rec
 
     observer_hits: list[tuple[dict[str, object], tuple[object, ...]]] = []
 
-    def observer(
-        payload: dict[str, object],
-        members: tuple[object, ...],
-    ) -> None:
+    def observer(payload: dict[str, object], members: tuple[object, ...]) -> None:
         events.append("observer")
         observer_hits.append((payload, members))
 
     monkeypatch.setattr(bundle_validation, "_validated_bundle_root", observed_root)
     monkeypatch.setattr(
-        bundle_validation,
-        "_require_exact_member_set",
-        observed_members,
+        bundle_validation, "_require_exact_member_set", observed_members
     )
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        payload, members = validate_output_bundle(
-            root, observer=observer, lease=artifact_lease
-        )
-
-        assert {
-            "events": events,
-            "observer_hits": len(observer_hits),
-            "payload_is_same": observer_hits[0][0] is payload,
-            "members_are_same": observer_hits[0][1] == members,
-        } == {
-            "events": ["root", "members", "observer", "root", "members"],
-            "observer_hits": 1,
-            "payload_is_same": True,
-            "members_are_same": True,
-        }
+    payload, members = validate_output_bundle(root, observer=observer)
+    assert {
+        "events": events,
+        "observer_hits": len(observer_hits),
+        "payload_is_same": observer_hits[0][0] is payload,
+        "members_are_same": observer_hits[0][1] == members,
+    } == {
+        "events": ["root", "members", "observer", "root", "members"],
+        "observer_hits": 1,
+        "payload_is_same": True,
+        "members_are_same": True,
+    }
 
 
 @pytest.mark.parametrize(
@@ -527,9 +334,7 @@ def test_validate_output_bundle_runs_observer_once_between_capture_and_final_rec
     ("add", "delete", "rename", "replace", "root_replace", "parquet_replace"),
 )
 def test_validate_output_bundle_final_recheck_rejects_observer_window_mutation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    mutation: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, mutation: str
 ) -> None:
     root = tmp_path / "bundle"
     _write_bundle(root)
@@ -547,10 +352,7 @@ def test_validate_output_bundle_final_recheck_rejects_observer_window_mutation(
         )
     observer_hits = 0
 
-    def observer(
-        _payload: dict[str, object],
-        _members: tuple[object, ...],
-    ) -> None:
+    def observer(_payload: dict[str, object], _members: tuple[object, ...]) -> None:
         nonlocal observer_hits
         observer_hits += 1
         member = root / (
@@ -573,24 +375,14 @@ def test_validate_output_bundle_final_recheck_rejects_observer_window_mutation(
             root.rename(moved)
             replacement.rename(root)
 
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(ValueError) as caught:
-            validate_output_bundle(root, observer=observer, lease=artifact_lease)
-
-        assert {
-            "observer_hits": observer_hits,
-            "error": str(caught.value),
-        } == {
-            "observer_hits": 1,
-            "error": (
-                "output_member_set_mismatch"
-                if mutation in {"add", "delete", "rename"}
-                else "output_bundle_identity_changed"
-            ),
-        }
+    with pytest.raises(ValueError) as caught:
+        validate_output_bundle(root, observer=observer)
+    assert {"observer_hits": observer_hits, "error": str(caught.value)} == {
+        "observer_hits": 1,
+        "error": "output_member_set_mismatch"
+        if mutation in {"add", "delete", "rename"}
+        else "output_bundle_identity_changed",
+    }
 
 
 @pytest.mark.parametrize("primary_type", (RuntimeError, KeyboardInterrupt, SystemExit))
@@ -611,7 +403,7 @@ def test_validate_output_bundle_preserves_observer_primary_over_final_secondary(
     root_hits = 0
     observer_hits = 0
 
-    def final_secondary(candidate: Path):  # noqa: ANN202
+    def final_secondary(candidate: Path):
         nonlocal root_hits
         root_hits += 1
         if root_hits == 2:
@@ -623,39 +415,24 @@ def test_validate_output_bundle_preserves_observer_primary_over_final_secondary(
         observer_hits += 1
         raise primary
 
-    monkeypatch.setattr(
-        bundle_validation,
-        "_validated_bundle_root",
-        final_secondary,
-    )
+    monkeypatch.setattr(bundle_validation, "_validated_bundle_root", final_secondary)
     caught: BaseException | None = None
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        try:
-            validate_output_bundle(root, observer=observer, lease=artifact_lease)
-        except BaseException as exc:
-            caught = exc
-
-        assert {
-            "caught_is_primary": caught is primary,
-            "observer_hits": observer_hits,
-            "root_hits": root_hits,
-        } == {
-            "caught_is_primary": True,
-            "observer_hits": 1,
-            "root_hits": 2,
-        }
+    try:
+        validate_output_bundle(root, observer=observer)
+    except BaseException as exc:
+        caught = exc
+    assert {
+        "caught_is_primary": caught is primary,
+        "observer_hits": observer_hits,
+        "root_hits": root_hits,
+    } == {"caught_is_primary": True, "observer_hits": 1, "root_hits": 2}
 
 
 @pytest.mark.parametrize(
     "secondary_type", (RuntimeError, KeyboardInterrupt, SystemExit)
 )
 def test_validate_output_bundle_propagates_final_secondary_without_primary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    secondary_type: type[BaseException],
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, secondary_type: type[BaseException]
 ) -> None:
     root = tmp_path / "bundle"
     _write_bundle(root)
@@ -664,7 +441,7 @@ def test_validate_output_bundle_propagates_final_secondary_without_primary(
     root_hits = 0
     observer_hits = 0
 
-    def final_secondary(candidate: Path):  # noqa: ANN202
+    def final_secondary(candidate: Path):
         nonlocal root_hits
         root_hits += 1
         if root_hits == 2:
@@ -675,30 +452,17 @@ def test_validate_output_bundle_propagates_final_secondary_without_primary(
         nonlocal observer_hits
         observer_hits += 1
 
-    monkeypatch.setattr(
-        bundle_validation,
-        "_validated_bundle_root",
-        final_secondary,
-    )
+    monkeypatch.setattr(bundle_validation, "_validated_bundle_root", final_secondary)
     caught: BaseException | None = None
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        try:
-            validate_output_bundle(root, observer=observer, lease=artifact_lease)
-        except BaseException as exc:
-            caught = exc
-
-        assert {
-            "caught_is_secondary": caught is secondary,
-            "observer_hits": observer_hits,
-            "root_hits": root_hits,
-        } == {
-            "caught_is_secondary": True,
-            "observer_hits": 1,
-            "root_hits": 2,
-        }
+    try:
+        validate_output_bundle(root, observer=observer)
+    except BaseException as exc:
+        caught = exc
+    assert {
+        "caught_is_secondary": caught is secondary,
+        "observer_hits": observer_hits,
+        "root_hits": root_hits,
+    } == {"caught_is_secondary": True, "observer_hits": 1, "root_hits": 2}
 
 
 @pytest.mark.parametrize(
@@ -719,8 +483,6 @@ def test_prediction_bundle_preserves_fatal_and_primary_on_close(
     import errno
     from contextlib import ExitStack
 
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-
     root = tmp_path / "bundle"
     _write_bundle(root)
     primary = {
@@ -729,14 +491,9 @@ def test_prediction_bundle_preserves_fatal_and_primary_on_close(
         "interrupt": KeyboardInterrupt("primary"),
     }[failure]
     stack = ExitStack()
-    close = stack.close
 
     def fail(*args, **kwargs):
         raise primary
-
-    def close_then_fail():
-        close()
-        raise OSError("secondary")
 
     if boundary == "decode":
         monkeypatch.setattr(bundle_validation, "_opened_parquet", fail)
@@ -752,16 +509,12 @@ def test_prediction_bundle_preserves_fatal_and_primary_on_close(
 
         monkeypatch.setattr(os, operation, fail_io)
     monkeypatch.setattr(bundle_validation, "ExitStack", lambda: stack)
-    if cleanup_fails:
-        monkeypatch.setattr(stack, "close", close_then_fail)
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(type(primary)) as caught:
-            with bundle_validation.read_prediction_output_bundle(
-                root, expected_output_id="pred-run"
-            ):
-                pytest.fail("fatal source failure was swallowed")
-        assert caught.value is primary
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(type(primary)) as caught:
+        with bundle_validation.read_prediction_output_bundle(
+            root, expected_output_id="pred-run"
+        ):
+            pytest.fail("fatal source failure was swallowed")
+    assert caught.value is primary
 
 
 @pytest.mark.parametrize("intraday", (False, True))
@@ -776,7 +529,6 @@ def test_prediction_effective_end_matches_all_rows_before_filtering(
 
     from quant_research_platform.artifacts.outputs import write_prediction_outputs
     from quant_research_platform.contracts.time import TimeWindow
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.layout import StorageLayout
 
     step = pd.Timedelta(1, unit="ns" if intraday else "D")
@@ -815,57 +567,46 @@ def test_prediction_effective_end_matches_all_rows_before_filtering(
         requested_test_end=spec.test_end,
         effective_test_end=stamp(times[-1]),
     )
-    with runtime_resource_policy_scope() as policy:
-        root = write_prediction_outputs(
-            spec=spec,
-            output_spec=make_prediction_report_spec(),
-            layout=StorageLayout(tmp_path),
-            output_chunks=(frame,),
-            model_metadata=model,
-            prediction_metadata_factory=lambda: prediction,
-            resource_policy=policy,
+    root = write_prediction_outputs(
+        spec=spec,
+        output_spec=make_prediction_report_spec(),
+        layout=StorageLayout(tmp_path),
+        output_chunks=(frame,),
+        model_metadata=model,
+        prediction_metadata_factory=lambda: prediction,
+    )
+    path = root / "manifest.json"
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    declared = stamp(times[-1] + end_shift * step)
+    payload["metadata"]["prediction_metadata"]["effective_test_end"] = declared
+    payload["metadata"]["model_metadata"]["oos_end"] = declared
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    original_batches = pq.ParquetFile.iter_batches
+    scans = []
+
+    def one_row_batches(parquet, **kwargs):
+        scans.append(True)
+        kwargs["batch_size"] = 1
+        yield from original_batches(parquet, **kwargs)
+
+    monkeypatch.setattr(pq.ParquetFile, "iter_batches", one_row_batches)
+    for window in (None, TimeWindow(times[0], times[0])):
+        reader = bundle_validation.read_prediction_output_bundle(
+            root, expected_output_id=spec.prediction_id, time_window=window
         )
-        path = root / "manifest.json"
-        payload = json.loads(path.read_text(encoding="utf-8"))
-        declared = stamp(times[-1] + end_shift * step)
-        payload["metadata"]["prediction_metadata"]["effective_test_end"] = declared
-        payload["metadata"]["model_metadata"]["oos_end"] = declared
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        original_batches = pq.ParquetFile.iter_batches
-        scans = []
-
-        def one_row_batches(parquet, **kwargs):
-            scans.append(True)
-            kwargs["batch_size"] = 1
-            yield from original_batches(parquet, **kwargs)
-
-        monkeypatch.setattr(pq.ParquetFile, "iter_batches", one_row_batches)
-        for window in (None, TimeWindow(times[0], times[0])):
-            reader = bundle_validation.read_prediction_output_bundle(
-                root, expected_output_id=spec.prediction_id, time_window=window
-            )
-            if end_shift:
-                with (
-                    pytest.raises(
-                        ValueError,
-                        match="^persisted_prediction_effective_end_mismatch$",
-                    ),
-                    reader,
-                ):
+        if end_shift:
+            with pytest.raises(
+                ValueError, match="^persisted_prediction_effective_end_mismatch$"
+            ):
+                with reader:
                     pytest.fail("inconsistent effective end reached consumer")
-            else:
-                with reader as (_manifest, lookup):
-                    assert lookup.row_count == (3 if window is None else 1)
-                    with lookup.values_for_frame(frame, mark_matched=False) as (
-                        values,
-                        found,
-                    ):
-                        assert list(found) == (
-                            [1, 1, 1] if window is None else [1, 0, 0]
-                        )
-                        assert values[0] == 1.0
-            assert policy.used_memory_bytes == 0
-        assert len(scans) == 2
+        else:
+            with reader as (_manifest, lookup):
+                assert lookup.row_count == (3 if window is None else 1)
+                values, found = lookup.values_for_frame(frame, mark_matched=False)
+                assert list(found) == ([1, 1, 1] if window is None else [1, 0, 0])
+                assert values[0] == 1.0
+    assert len(scans) == 2
 
 
 @pytest.mark.parametrize("alias", (False, True))

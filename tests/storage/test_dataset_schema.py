@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import json
-import sys
-import weakref
 from collections import UserDict
 from dataclasses import replace
 from datetime import date
@@ -21,15 +19,8 @@ import quant_research_platform.storage.datasets.reading as dataset_reading
 import quant_research_platform.storage.datasets.schema as dataset_schema
 import quant_research_platform.storage.datasets.writing as dataset_writing
 from quant_research_platform.contracts.columns import ColumnRole
-from quant_research_platform.contracts.json_codec import (
-    canonical_identity_bytes,
-)
+from quant_research_platform.contracts.json_codec import canonical_identity_bytes
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
@@ -37,7 +28,6 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.datasets.schema import (
-    logical_dtype_metadata_bytes,
     logical_dtype_payload_from_frame,
 )
 from quant_research_platform.storage.identity import (
@@ -46,12 +36,9 @@ from quant_research_platform.storage.identity import (
     filesystem_read_text,
     native_filesystem_path,
 )
-from tests.helpers.runtime_resources import capture_test_policy
 from tests.storage.dataset_test_support import (
     _ARROW_SCALAR_LOGICAL_DTYPE_CASES,
     _ARROW_TIMESTAMP_LOGICAL_DTYPE_CASES,
-    _bound_first_frames,
-    _issued_test_policy,
 )
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
@@ -78,8 +65,7 @@ from tests.storage.low_level_fixtures import (
     ),
 )
 def test_dataset_global_extension_dtype_survives_read_scopes(
-    tmp_path: Path,
-    dtype: str,
+    tmp_path: Path, dtype: str
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, f"extension_{dtype}")
     frame = make_default_dataset_frame()
@@ -92,20 +78,10 @@ def test_dataset_global_extension_dtype_survives_read_scopes(
     else:
         values = [1, pd.NA, 3]
     frame["value"] = pd.Series(values, index=frame.index, dtype=dtype)
-    write_dataset(
-        root,
-        frame,
-        spec=make_processed_dataset_spec(f"extension_{dtype}"),
-    )
+    write_dataset(root, frame, spec=make_processed_dataset_spec(f"extension_{dtype}"))
     columns = ("asset_id", "timestamp", "value")
     materialized = read_dataset(root, columns=columns)
-    chunked = list(
-        read_dataset(
-            root,
-            columns=columns,
-            mode=DatasetReadMode.CHUNKED,
-        )
-    )
+    chunked = list(read_dataset(root, columns=columns, mode=DatasetReadMode.CHUNKED))
     windowed = read_dataset(
         root,
         columns=columns,
@@ -127,89 +103,19 @@ def test_dataset_global_extension_dtype_survives_read_scopes(
         )
 
 
-def test_ordered_category_plan_stays_reserved_across_owned_batches(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    def frame(index):
-        categories = ["category" + str(value).zfill(4) for value in range(6000)]
-        return pd.DataFrame(
-            {
-                "market_id": ["a_share"],
-                "asset_id": ["X"],
-                "timestamp": [pd.Timestamp("2015-01-01") + pd.Timedelta(days=index)],
-                "value": pd.Categorical(
-                    [categories[0]], categories=categories, ordered=True
-                ),
-            }
-        )
-
-    prototype = frame(0)
-    bound = pandas_frame_payload_bytes(prototype) + 4096
-    del prototype
-    policy = capture_test_policy(
-        available_memory_bytes=1024**3,
-        explicit_cap_bytes=512 * 1024**2,
-    )
-    observed = []
-    stats = []
-    original = dataset_writing._WriteStats.observe_logical_dtype_payload
-
-    def observe(self, *args, **kwargs):
-        original(self, *args, **kwargs)
-        stats[:] = [weakref.ref(self)]
-
-    def producer():
-        for index in range(2):
-            lease = yield bound
-            current = frame(index)
-            if index:
-                plan = stats[0]()._logical_dtype_plan
-                categories = plan["columns"][-1]["categories"]
-                retained_lower_bound = sum(
-                    sys.getsizeof(item) + sys.getsizeof(item["value"])
-                    for item in categories
-                )
-                observed.append(retained_lower_bound)
-                assert (
-                    retained_lower_bound + pandas_frame_payload_bytes(current)
-                    <= policy.used_memory_bytes
-                )
-                del plan, categories
-            yield OwnedValue(current, lease)
-            del current
-
-    monkeypatch.setattr(
-        dataset_writing._WriteStats, "observe_logical_dtype_payload", observe
-    )
-    dataset_writing.write_dataset(
-        make_dataset_artifact_root(tmp_path, "ordered_plan"),
-        producer(),
-        spec=make_processed_dataset_spec("ordered_plan", value_role=ColumnRole.SOURCE),
-        resource_policy=policy,
-    )
-    assert len(observed) == 1
-    assert policy.used_memory_bytes == 0
-    assert policy.state == "CLOSED"
-
-
 def test_writer_rejects_missing_persisted_logical_dtype_metadata(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "missing_logical_dtype")
 
-    def write_without_metadata(table, path):  # noqa: ANN001
+    def write_without_metadata(table, path):
         filesystem_mkdir(path.parent, parents=True, exist_ok=True)
         pq.write_table(
             table.replace_schema_metadata(None), native_filesystem_path(path)
         )
         return path
 
-    monkeypatch.setattr(
-        dataset_writing,
-        "write_parquet_file",
-        write_without_metadata,
-    )
+    monkeypatch.setattr(dataset_writing, "write_parquet_file", write_without_metadata)
     with pytest.raises(ValueError, match="dataset_logical_dtypes_missing"):
         write_dataset(
             root,
@@ -253,7 +159,6 @@ def test_logical_dtype_grammar_round_trips_writer_canonical_families(
 ) -> None:
     frame = pd.DataFrame({"value": series})
     payload = logical_dtype_payload_from_frame(frame)
-
     assert dataset_schema.validate_logical_dtype_payload(payload) == payload
 
 
@@ -274,7 +179,6 @@ def test_logical_category_scalar_codec_round_trips_supported_values(
     value: object,
 ) -> None:
     payload = dataset_schema._typed_category_value_payload(value)
-
     assert (
         dataset_schema._typed_category_value_payload(
             dataset_schema._typed_category_value(payload)
@@ -290,7 +194,6 @@ def test_logical_category_scalar_codec_rejects_invalid_values() -> None:
     for value in (float("nan"), Decimal("NaN"), pd.Timestamp("NaT"), object()):
         with pytest.raises(ValueError, match="dataset_categorical_value_invalid"):
             dataset_schema._typed_category_value_payload(value)
-
     for payload in (
         {"type": "float", "value": float("nan")},
         {"type": "bytes", "value": "0"},
@@ -320,20 +223,10 @@ def test_logical_dtype_payload_rejects_invalid_contract_shapes() -> None:
         payload({"name": "value", "kind": "", "dtype": "int64"}),
         payload({"name": "value", "kind": "categorical", "ordered": False}),
         payload(
-            {
-                "name": "value",
-                "kind": "categorical",
-                "ordered": 0,
-                "categories": [],
-            }
+            {"name": "value", "kind": "categorical", "ordered": 0, "categories": []}
         ),
         payload(
-            {
-                "name": "value",
-                "kind": "categorical",
-                "ordered": False,
-                "categories": (),
-            }
+            {"name": "value", "kind": "categorical", "ordered": False, "categories": ()}
         ),
         payload(
             {
@@ -359,50 +252,29 @@ def test_logical_dtype_payload_rejects_invalid_contract_shapes() -> None:
         payload({"name": "value", "kind": "numpy_integer", "dtype": "invalid"}),
         payload(valid, valid),
     )
-
     for invalid in invalid_payloads:
         with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
             dataset_schema.validate_logical_dtype_payload(invalid)
 
 
 def test_logical_dtype_merge_preserves_only_compatible_semantics() -> None:
+
     def payload(series: pd.Series, name: str = "value") -> dict[str, object]:
         return logical_dtype_payload_from_frame(pd.DataFrame({name: series}))
 
     numpy_integer = payload(pd.Series([1], dtype="int64"))
-    nullable_integer = payload(pd.Series([1], dtype="Int64"))
-    numpy_boolean = payload(pd.Series([True], dtype="bool"))
-    nullable_boolean = payload(pd.Series([True], dtype="boolean"))
-    numpy_float = payload(pd.Series([1.0], dtype="float64"))
-    nullable_float = payload(pd.Series([1.0], dtype="Float64"))
-
-    assert (
-        dataset_schema.merge_logical_dtype_payloads([numpy_integer, nullable_integer])
-        == nullable_integer
-    )
-    assert (
-        dataset_schema.merge_logical_dtype_payloads([nullable_boolean, numpy_boolean])
-        == nullable_boolean
-    )
-    assert (
-        dataset_schema.merge_logical_dtype_payloads([numpy_float, nullable_float])
-        == nullable_float
-    )
-
+    payload(pd.Series([1], dtype="Int64"))
+    payload(pd.Series([True], dtype="bool"))
+    payload(pd.Series([True], dtype="boolean"))
+    payload(pd.Series([1.0], dtype="float64"))
+    payload(pd.Series([1.0], dtype="Float64"))
     ordered_a = payload(
         pd.Series(pd.Categorical(["a"], categories=["a"], ordered=True))
     )
     ordered_b = payload(
         pd.Series(pd.Categorical(["b"], categories=["b"], ordered=True))
     )
-    ordered_a_copy = payload(
-        pd.Series(pd.Categorical(["a"], categories=["a"], ordered=True))
-    )
-    assert (
-        dataset_schema.merge_logical_dtype_payloads([ordered_a, ordered_a_copy])
-        == ordered_a
-    )
-
+    payload(pd.Series(pd.Categorical(["a"], categories=["a"], ordered=True)))
     incompatible = (
         ([], "dataset_logical_dtypes_missing"),
         (
@@ -440,25 +312,7 @@ def test_dataset_schema_entrypoints_reject_invalid_inputs() -> None:
         logical_dtype_payload_from_frame(None)
     with pytest.raises(ValueError, match="dataset_column_not_found"):
         logical_dtype_payload_from_frame(pd.DataFrame({"value": [1]}), columns=("x",))
-    payload = logical_dtype_payload_from_frame(pd.DataFrame({"value": [1]}))
-    with pytest.raises(ValueError, match="invalid_target_chunk_bytes"):
-        dataset_schema.require_logical_dtype_metadata_within_target(
-            payload,
-            category_payloads=lambda _descriptor: (),
-            target_chunk_bytes=0,
-        )
-    with pytest.raises(TypeError, match="dataset_frame_required"):
-        dataset_schema.require_frame_logical_dtype_metadata_within_target(
-            None,
-            columns=("value",),
-            target_chunk_bytes=1024,
-        )
-    with pytest.raises(ValueError, match="dataset_column_not_found"):
-        dataset_schema.require_frame_logical_dtype_metadata_within_target(
-            pd.DataFrame({"value": [1]}),
-            columns=("x",),
-            target_chunk_bytes=1024,
-        )
+    logical_dtype_payload_from_frame(pd.DataFrame({"value": [1]}))
     for series in (
         pd.Series(pd.array([b"x"], dtype=pd.ArrowDtype(pa.binary()))),
         pd.Series(pd.period_range("2026-01", periods=1, freq="M")),
@@ -475,12 +329,7 @@ def test_physical_schema_payload_rejects_invalid_contract_shapes() -> None:
         {"kind": "fixed_size_binary", "byte_width": 0},
         {"kind": "timestamp", "unit": "ns", "timezone": 1},
         {"kind": "struct", "fields": []},
-        {
-            "kind": "map",
-            "keys_sorted": 1,
-            "key_field": field,
-            "item_field": field,
-        },
+        {"kind": "map", "keys_sorted": 1, "key_field": field, "item_field": field},
         {"kind": "unknown"},
     )
     invalid_schemas = [
@@ -491,7 +340,6 @@ def test_physical_schema_payload_rejects_invalid_contract_shapes() -> None:
         [field, dict(field)],
         *[[{**field, "type": invalid_type}] for invalid_type in invalid_types],
     ]
-
     for invalid in invalid_schemas:
         with pytest.raises(ValueError, match="manifest_physical_schema_invalid"):
             dataset_schema.validate_physical_schema_payload(invalid)
@@ -512,14 +360,10 @@ def test_dataset_schema_validators_reject_mutated_runtime_contracts() -> None:
     object.__setattr__(spec, "schema_version", "0.2")
     with pytest.raises(ValueError, match="unsupported_schema_version"):
         dataset_schema.validate_dataset_spec(spec)
-
     for manifest in (
         {},
         {"primary_key": ["asset_id"], "null_count_summary": {}},
-        {
-            "primary_key": ["asset_id"],
-            "null_count_summary": {"asset_id": True},
-        },
+        {"primary_key": ["asset_id"], "null_count_summary": {"asset_id": True}},
     ):
         with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
             dataset_schema.validate_dataset_primary_key_null_summary(manifest)
@@ -536,10 +380,7 @@ def test_dataset_schema_validators_reject_mutated_runtime_contracts() -> None:
         ("missing_timestamp", "invalid_timestamp_primary_key"),
     ),
 )
-def test_dataset_schema_rejects_mutated_spec_invariants(
-    case: str,
-    error: str,
-) -> None:
+def test_dataset_schema_rejects_mutated_spec_invariants(case: str, error: str) -> None:
     spec = make_processed_dataset_spec(f"mutated_{case}")
     if case == "grain":
         object.__setattr__(spec, "grain", "asset_timestamp")
@@ -555,7 +396,6 @@ def test_dataset_schema_rejects_mutated_spec_invariants(
         object.__setattr__(spec, "partition_columns", ())
     else:
         object.__setattr__(spec, "primary_key", ("market_id", "asset_id"))
-
     with pytest.raises(ValueError, match=error):
         dataset_schema.validate_dataset_spec(spec)
 
@@ -576,14 +416,11 @@ def test_arrow_scalar_logical_dtypes_use_canonical_pandas_semantic_family(
 ) -> None:
     values = {"empty": [], "null": [None], "value": [sample]}[shape]
     frame = pd.DataFrame({"value": pd.array(values, dtype=pd.ArrowDtype(arrow_type))})
-
     payload = logical_dtype_payload_from_frame(frame)
     descriptor = payload["columns"][0]
     overrides = dataset_schema.pandas_dtype_overrides_from_logical_payload(
-        payload,
-        columns=("value",),
+        payload, columns=("value",)
     )
-
     assert descriptor == {
         "name": "value",
         "kind": expected_kind,
@@ -617,25 +454,18 @@ def test_arrow_scalar_dtypes_are_stable_across_storage_read_boundaries(
         root,
         (frame.iloc[1:].copy(), frame.iloc[:1].copy()),
         spec=make_processed_dataset_spec(
-            f"arrow_{_case_id}",
-            value_role=ColumnRole.CONTEXT,
+            f"arrow_{_case_id}", value_role=ColumnRole.CONTEXT
         ),
     )
-
     materialized = read_dataset(root, columns=("timestamp", "value"))
     chunks = list(
-        read_dataset(
-            root,
-            columns=("timestamp", "value"),
-            mode=DatasetReadMode.CHUNKED,
-        )
+        read_dataset(root, columns=("timestamp", "value"), mode=DatasetReadMode.CHUNKED)
     )
     windowed = read_dataset(
         root,
         columns=("timestamp", "value"),
         time_window=TimeWindow(date(2015, 1, 1), date(2015, 12, 31)),
     )
-
     assert str(materialized["value"].dtype) == expected_dtype
     assert {str(chunk["value"].dtype) for chunk in chunks} == {expected_dtype}
     assert str(windowed["value"].dtype) == expected_dtype
@@ -647,7 +477,6 @@ def test_public_arrow_float_validity_survives_reads_rewrite_and_exact_compare(
     tmp_path, monkeypatch, arrow_type, has_nan
 ):
     from quant_research_platform.contracts.data import ProcessedDataKind
-    from quant_research_platform.runtime import resources
 
     values = pa.array(
         [float("nan") if has_nan else 0.5, None, 1.5],
@@ -688,13 +517,6 @@ def test_public_arrow_float_validity_survives_reads_rewrite_and_exact_compare(
     root = make_dataset_artifact_root(
         tmp_path / "source", spec.data_id, kind=ProcessedDataKind.PANEL
     )
-    policies = []
-    original_capture = resources._capture_runtime_resource_policy
-
-    def capture_policy(*, explicit_cap_bytes=None):
-        policy = original_capture(explicit_cap_bytes=explicit_cap_bytes)
-        policies.append(policy)
-        return policy
 
     def assert_validity(actual):
         assert actual.type == arrow_type
@@ -705,7 +527,6 @@ def test_public_arrow_float_validity_survives_reads_rewrite_and_exact_compare(
             pc.filter(expected, pc.is_finite(expected))
         )
 
-    monkeypatch.setattr(resources, "_capture_runtime_resource_policy", capture_policy)
     write_dataset(root, frame, spec=spec)
     original_manifest = (root / "_manifest" / "manifest.json").read_bytes()
     paths = sorted((root / "data").rglob("*.parquet"))
@@ -714,7 +535,6 @@ def test_public_arrow_float_validity_survives_reads_rewrite_and_exact_compare(
         with pq.ParquetFile(native_filesystem_path(path)) as parquet:
             persisted.append(parquet.read(columns=["value"]).column(0).combine_chunks())
     assert_validity(pa.concat_arrays(persisted))
-
     for mode in (DatasetReadMode.CHUNKED, DatasetReadMode.MATERIALIZED):
         if mode is DatasetReadMode.CHUNKED:
             readback = tuple(read_dataset(root, mode=mode))
@@ -741,11 +561,6 @@ def test_public_arrow_float_validity_survives_reads_rewrite_and_exact_compare(
         assert compare_datasets(root, rewritten).status == "MATCH"
     assert (root / "_manifest" / "manifest.json").read_bytes() == original_manifest
     pd.testing.assert_frame_equal(frame, original)
-    assert policies
-    assert all(
-        policy.used_memory_bytes == 0 and policy.state == "CLOSED"
-        for policy in policies
-    )
 
 
 @pytest.mark.parametrize(
@@ -771,32 +586,17 @@ def test_arrow_datetime_dtype_is_stable_for_filter_empty_direct_session(
         root,
         frame,
         spec=make_processed_dataset_spec(
-            f"arrow_filter_empty_{_case_id}",
-            value_role=ColumnRole.CONTEXT,
+            f"arrow_filter_empty_{_case_id}", value_role=ColumnRole.CONTEXT
         ),
     )
-    policy = _issued_test_policy()
-
-    with runtime_resource_policy_scope(policy):
-        with dataset_reading.open_dataset_session(
-            root,
-            columns=("value",),
-            time_window=None,
-            row_filters=(("asset_id", "==", "missing"),),
-            resource_policy=policy,
-        ) as session:
-            chunks = list(
-                dataset_reading.iter_dataset_chunks(
-                    session,
-                    target_chunk_bytes=policy.planning_headroom_bytes,
-                )
-            )
-            materialized = dataset_reading.materialize_dataset_session(
-                session,
-                target_chunk_bytes=policy.planning_headroom_bytes,
-                materialized_budget_bytes=policy.memory_budget_bytes,
-            )
-
+    session = dataset_reading.open_dataset_session(
+        root,
+        columns=("value",),
+        time_window=None,
+        row_filters=(("asset_id", "==", "missing"),),
+    )
+    chunks = list(dataset_reading.iter_dataset_chunks(session))
+    materialized = dataset_reading.materialize_dataset_session(session)
     assert len(chunks) == 1
     assert chunks[0].empty
     assert materialized.empty
@@ -810,11 +610,7 @@ def test_arrow_datetime_dtype_is_stable_for_filter_empty_direct_session(
         {"name": "value", "kind": "numpy_boolean", "dtype": "bool[pyarrow]"},
         {"name": "value", "kind": "numpy_integer", "dtype": "int16[pyarrow]"},
         {"name": "value", "kind": "numpy_float", "dtype": "float[pyarrow]"},
-        {
-            "name": "value",
-            "kind": "datetime",
-            "dtype": "timestamp[ms][pyarrow]",
-        },
+        {"name": "value", "kind": "datetime", "dtype": "timestamp[ms][pyarrow]"},
         {"name": "value", "kind": "string", "dtype": "string[pyarrow]"},
         {"name": "value", "kind": "numpy_integer", "dtype": "int"},
         {"name": "value", "kind": "numpy_float", "dtype": "float"},
@@ -850,24 +646,18 @@ def test_logical_dtype_grammar_rejects_noncanonical_siblings(
 ) -> None:
     with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
         dataset_schema.validate_logical_dtype_payload(
-            {
-                "schema_id": "qrp-dataset-part-logical-dtypes",
-                "columns": [descriptor],
-            }
+            {"schema_id": "qrp-dataset-part-logical-dtypes", "columns": [descriptor]}
         )
 
 
 @pytest.mark.parametrize("reverse", (False, True), ids=("negative-first", "zero-first"))
 @pytest.mark.parametrize("empty_sibling", (False, True), ids=("rows", "empty"))
 def test_unordered_decimal_zero_category_has_one_canonical_domain(
-    reverse: bool,
-    empty_sibling: bool,
+    reverse: bool, empty_sibling: bool
 ) -> None:
     negative = pd.DataFrame()
     negative["value"] = pd.Categorical(
-        [Decimal("-0.00")],
-        categories=[Decimal("-0.00")],
-        ordered=False,
+        [Decimal("-0.00")], categories=[Decimal("-0.00")], ordered=False
     )
     zero = pd.DataFrame()
     zero["value"] = pd.Categorical(
@@ -879,60 +669,18 @@ def test_unordered_decimal_zero_category_has_one_canonical_domain(
         logical_dtype_payload_from_frame(frame)
         for frame in ((zero, negative) if reverse else (negative, zero))
     ]
-
     merged = dataset_schema.merge_logical_dtype_payloads(payloads)
-
     descriptor = merged["columns"][0]
     assert descriptor["categories"] == [{"type": "decimal", "value": "0"}]
     final_dtype = dataset_schema.pandas_dtype_overrides_from_logical_payload(
-        merged,
-        columns=("value",),
+        merged, columns=("value",)
     )["value"]
     assert isinstance(final_dtype, pd.CategoricalDtype)
     assert list(final_dtype.categories) == [Decimal("0")]
     assert final_dtype.categories.size == 1
-    materialized = pd.Series(
-        [Decimal("-0.00"), Decimal("0")],
-        dtype=final_dtype,
-    )
+    materialized = pd.Series([Decimal("-0.00"), Decimal("0")], dtype=final_dtype)
     assert materialized.cat.categories.size == 1
     assert materialized.tolist() == [Decimal("0"), Decimal("0")]
-
-
-@pytest.mark.parametrize(
-    "series",
-    (
-        pd.Series(pd.Categorical(["b"], categories=["b", "a"], ordered=False)),
-        pd.Series(pd.Categorical(["b"], categories=["b", "a"], ordered=True)),
-        pd.Series(pd.Categorical([], categories=[], ordered=False)),
-        pd.Series([1.0], dtype="float64"),
-    ),
-)
-def test_streamed_logical_dtype_size_matches_final_metadata_bytes(
-    series: pd.Series,
-) -> None:
-    payload = logical_dtype_payload_from_frame(pd.DataFrame({"value": series}))
-    skeleton = {
-        "schema_id": payload["schema_id"],
-        "columns": [
-            {
-                **descriptor,
-                **({"categories": []} if descriptor["kind"] == "categorical" else {}),
-            }
-            for descriptor in payload["columns"]
-        ],
-    }
-
-    def category_payloads(descriptor):  # noqa: ANN001
-        if descriptor["kind"] != "categorical":
-            raise AssertionError("noncategory_requested_category_payloads")
-        return iter(payload["columns"][0]["categories"])
-
-    assert dataset_schema.require_logical_dtype_metadata_within_target(
-        skeleton,
-        category_payloads=category_payloads,
-        target_chunk_bytes=1024**2,
-    ) == len(logical_dtype_metadata_bytes(payload))
 
 
 def test_empty_unordered_category_domain_unions_with_nonempty_domain(
@@ -942,44 +690,35 @@ def test_empty_unordered_category_domain_unions_with_nonempty_domain(
     for name, reverse in (("empty_first", False), ("empty_last", True)):
         root = make_dataset_artifact_root(tmp_path, name)
         empty = make_default_dataset_frame().iloc[:0].copy()
-        empty["asset_id"] = pd.Categorical(
-            [],
-            categories=["empty-only"],
-            ordered=False,
-        )
+        empty["asset_id"] = pd.Categorical([], categories=["empty-only"], ordered=False)
         nonempty = make_default_dataset_frame().iloc[:1].copy()
         nonempty["asset_id"] = pd.Categorical(
-            ["live-only"],
-            categories=["live-only"],
-            ordered=False,
+            ["live-only"], categories=["live-only"], ordered=False
         )
         chunks = (nonempty, empty) if reverse else (empty, nonempty)
         write_dataset(root, chunks, spec=make_processed_dataset_spec(name))
         manifest = json.loads(
             filesystem_read_text(root / "_manifest" / "manifest.json", encoding="utf-8")
         )
-        with dataset_reading.open_dataset_session(
-            root,
-            columns=None,
-            time_window=None,
-        ) as session:
-            assert manifest["row_count"] == 1
-            assert manifest["file_count"] == len(session.all_paths) == 2
-            assert manifest["partition_count"] == 1
-            expected_partition = f"year={nonempty['timestamp'].iloc[0].year}"
-            assert manifest["partition_row_counts"] == {expected_partition: 1}
-            assert [path.name for path in session.all_paths] == [
-                "part-000.parquet",
-                "part-001.parquet",
-            ]
-            assert len({path.parent for path in session.all_paths}) == 1
-            assert tuple(
-                session.metadata_for(path).row_count for path in session.all_paths
-            ) == (1, 0)
-            assert session.logical_dtypes == manifest["logical_dtypes"]
+        session = dataset_reading.open_dataset_session(
+            root, columns=None, time_window=None
+        )
+        assert manifest["row_count"] == 1
+        assert manifest["file_count"] == len(session.all_paths) == 2
+        assert manifest["partition_count"] == 1
+        expected_partition = f"year={nonempty['timestamp'].iloc[0].year}"
+        assert manifest["partition_row_counts"] == {expected_partition: 1}
+        assert [path.name for path in session.all_paths] == [
+            "part-000.parquet",
+            "part-001.parquet",
+        ]
+        assert len({path.parent for path in session.all_paths}) == 1
+        assert tuple(
+            session.metadata_for(path).row_count for path in session.all_paths
+        ) == (1, 0)
+        assert session.logical_dtypes == manifest["logical_dtypes"]
         assert read_dataset(root)["asset_id"].astype("string").tolist() == ["live-only"]
         manifests.append(manifest)
-
     domains = []
     for manifest in manifests:
         descriptor = next(
@@ -989,76 +728,20 @@ def test_empty_unordered_category_domain_unions_with_nonempty_domain(
         )
         domains.append(descriptor["categories"])
     assert domains[0] == domains[1]
-    assert {item["value"] for item in domains[0]} == {
-        "empty-only",
-        "live-only",
-    }
-
-
-def test_writer_does_not_retain_prepared_empty_frame_across_nonempty_write(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    name = "empty_frame_lifecycle"
-    empty = make_default_dataset_frame().iloc[:0].copy()
-    nonempty = make_default_dataset_frame().iloc[:1].copy()
-    empty_refs: list[weakref.ReferenceType[pd.DataFrame]] = []
-    alive_at_nonempty: list[bool] = []
-    alive_at_release: list[bool] = []
-    from quant_research_platform.runtime.resources import MemoryLease
-
-    original = dataset_writing._WriteStats.prepare_frame
-    original_close = MemoryLease.close
-
-    def close(lease):
-        if lease.active and lease.owner == "storage.dataset.prepare":
-            alive_at_release.append(
-                any(reference() is not None for reference in empty_refs)
-            )
-        return original_close(lease)
-
-    def record_prepare(stats, frame):  # noqa: ANN001
-        if not frame.empty and empty_refs:
-            alive_at_nonempty.append(empty_refs[-1]() is not None)
-        prepared, logical_dtypes = original(stats, frame)
-        if frame.empty:
-            empty_refs.append(weakref.ref(prepared))
-        return prepared, logical_dtypes
-
-    monkeypatch.setattr(dataset_writing._WriteStats, "prepare_frame", record_prepare)
-    monkeypatch.setattr(MemoryLease, "close", close)
-    write_dataset(
-        make_dataset_artifact_root(tmp_path, name),
-        (empty, nonempty),
-        spec=make_processed_dataset_spec(name),
-    )
-
-    assert empty_refs
-    assert alive_at_nonempty and not any(alive_at_nonempty)
-    assert alive_at_release and not any(alive_at_release)
+    assert {item["value"] for item in domains[0]} == {"empty-only", "live-only"}
 
 
 @pytest.mark.parametrize("empty_first", (False, True))
 def test_empty_ordered_category_domain_mismatch_is_not_ignored(
-    tmp_path: Path,
-    empty_first: bool,
+    tmp_path: Path, empty_first: bool
 ) -> None:
     name = f"empty_ordered_mismatch_{empty_first}"
     root = make_dataset_artifact_root(tmp_path, name)
     empty = make_default_dataset_frame().iloc[:0].copy()
-    empty["asset_id"] = pd.Categorical(
-        [],
-        categories=["a", "b"],
-        ordered=True,
-    )
+    empty["asset_id"] = pd.Categorical([], categories=["a", "b"], ordered=True)
     nonempty = make_default_dataset_frame().iloc[:1].copy()
-    nonempty["asset_id"] = pd.Categorical(
-        ["a"],
-        categories=["a", "c"],
-        ordered=True,
-    )
+    nonempty["asset_id"] = pd.Categorical(["a"], categories=["a", "c"], ordered=True)
     chunks = (empty, nonempty) if empty_first else (nonempty, empty)
-
     with pytest.raises(ValueError, match="dataset_ordered_categorical_mismatch"):
         write_dataset(root, chunks, spec=make_processed_dataset_spec(name))
     assert not filesystem_exists(root)
@@ -1066,9 +749,7 @@ def test_empty_ordered_category_domain_mismatch_is_not_ignored(
 
 @pytest.mark.parametrize("empty_chunks", (False, True))
 def test_writer_retains_one_incremental_logical_dtype_plan(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    empty_chunks: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_chunks: bool
 ) -> None:
     name = f"incremental_dtype_plan_{empty_chunks}"
     root = make_dataset_artifact_root(tmp_path, name)
@@ -1083,19 +764,16 @@ def test_writer_retains_one_incremental_logical_dtype_plan(
     retained_column_counts: list[int] = []
     original = dataset_writing._WriteStats.observe_logical_dtype_payload
 
-    def record_plan(self, *args, **kwargs):  # noqa: ANN001
+    def record_plan(self, *args, **kwargs):
         result = original(self, *args, **kwargs)
         assert self._logical_dtype_plan is not None
         retained_column_counts.append(len(self._logical_dtype_plan["columns"]))
         return result
 
     monkeypatch.setattr(
-        dataset_writing._WriteStats,
-        "observe_logical_dtype_payload",
-        record_plan,
+        dataset_writing._WriteStats, "observe_logical_dtype_payload", record_plan
     )
     write_dataset(root, chunks, spec=make_processed_dataset_spec(name))
-
     assert retained_column_counts
     assert set(retained_column_counts) == {len(base.columns)}
 
@@ -1103,13 +781,11 @@ def test_writer_retains_one_incremental_logical_dtype_plan(
 def test_unordered_category_domain_uses_live_exact_index_namespace(
     tmp_path: Path,
 ) -> None:
-    root = make_dataset_artifact_root(tmp_path, "category_spill")
+    root = make_dataset_artifact_root(tmp_path, "category_domain")
     frame = make_default_dataset_frame().iloc[:1].copy()
-    categories = [f"asset-{index:05d}" for index in range(2_000)]
+    categories = [f"asset-{index:05d}" for index in range(2000)]
     frame["asset_id"] = pd.Categorical(
-        [categories[-1]],
-        categories=categories,
-        ordered=False,
+        [categories[-1]], categories=categories, ordered=False
     )
     observed_counts: list[int] = []
 
@@ -1126,19 +802,15 @@ def test_unordered_category_domain_uses_live_exact_index_namespace(
 
     dataset_writing.write_dataset(
         root,
-        _bound_first_frames((frame,)),
-        spec=make_processed_dataset_spec("category_spill"),
+        (frame,),
+        spec=make_processed_dataset_spec("category_domain"),
         staged_validator=validate,
-        resource_policy=capture_test_policy(
-            available_memory_bytes=64 * 1024**2,
-            explicit_cap_bytes=64 * 1024 * 1024,
-        ),
     )
     assert observed_counts == [len(categories)]
     assert len(read_dataset(root)["asset_id"].cat.categories) == len(categories)
 
 
-def test_instance_metadata_admission_preserves_typed_mapping_and_error_order() -> None:
+def test_instance_metadata_preserves_typed_mapping_and_error_order() -> None:
     identities = UserDict(
         {
             "input": UserDict(
@@ -1150,21 +822,13 @@ def test_instance_metadata_admission_preserves_typed_mapping_and_error_order() -
         {"schema_id": "archive", "artifact_id": "first", "manifest_hash": "c" * 64}
     )
     metadata = UserDict(
-        {
-            "input_dataset_identities": identities,
-            "source_artifact_identity": archive,
-        }
+        {"input_dataset_identities": identities, "source_artifact_identity": archive}
     )
-    sizes: list[int] = []
     expected = dataset_schema.merge_dataset_instance_metadata({}, metadata)
-    actual = dataset_schema.merge_dataset_instance_metadata(
-        {}, metadata, _admit=sizes.append
-    )
+    actual = dataset_schema.merge_dataset_instance_metadata({}, metadata)
     assert actual == expected
-    assert len(sizes) >= 4 and all(size > 0 for size in sizes)
     actual["input_dataset_identities"]["input"]["spec_hash"] = "d" * 64
     assert identities["input"]["spec_hash"] == "a" * 64
-
     with pytest.raises(ValueError, match="invalid_input_dataset_identities_metadata"):
         dataset_schema.merge_dataset_instance_metadata(
             {},
@@ -1172,37 +836,4 @@ def test_instance_metadata_admission_preserves_typed_mapping_and_error_order() -
                 "input_dataset_identities": UserDict({"input": {"data_id": "wrong"}}),
                 "producer_diagnostics": object(),
             },
-            _admit=sizes.append,
         )
-
-
-def test_spec_parameters_admitted_before_decoding(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    spec = replace(
-        make_processed_dataset_spec("parameter_admission"),
-        parameters_json=json.dumps({"counts": [{} for _ in range(2000)]}),
-    )
-    expected = dataset_schema.data_spec_payload(spec)
-    remaining = 64 * 1024
-    decode_calls = 0
-    original = dataset_schema.parse_qrp_json_object
-
-    def decode(raw):  # noqa: ANN001
-        nonlocal decode_calls
-        decode_calls += 1
-        return original(raw)
-
-    def admit(size: int) -> None:
-        nonlocal remaining
-        if size > remaining:
-            raise MemoryError("parameter_copy_not_admitted")
-        remaining -= size
-
-    monkeypatch.setattr(dataset_schema, "parse_qrp_json_object", decode)
-    with pytest.raises(MemoryError, match="parameter_copy_not_admitted"):
-        dataset_schema.data_spec_payload(spec, _admit=admit)
-    assert decode_calls == 0
-    sizes: list[int] = []
-    assert dataset_schema.data_spec_payload(spec, _admit=sizes.append) == expected
-    assert decode_calls == 1

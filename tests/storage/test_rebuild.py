@@ -30,7 +30,7 @@ def test_rebuild_uses_canonical_unc_paths_without_network_access(monkeypatch) ->
         rebuild, "remove_owned_scratch", lambda path: cleaned.append(str(path))
     )
     with rebuild.rebuild_candidate_workspace(
-        StorageLayout(Path(r"\\server\share\project"))
+        StorageLayout(Path("\\\\server\\share\\project"))
     ) as candidate:
         assert str(candidate.project_root).startswith(
             "\\\\server\\share\\project\\.run\\.r-"
@@ -53,7 +53,6 @@ def test_rebuild_candidate_success_cleans_owner_scratch(
         assert root.name.startswith(".r-")
         assert root.parent.name == ".run"
         filesystem_write_text(root / "evidence", "candidate", encoding="utf-8")
-
     assert not filesystem_exists(root)
 
 
@@ -63,14 +62,13 @@ def test_rebuild_candidate_explicit_preserve_keeps_evidence(tmp_path: Path) -> N
     ) as candidate:
         root = candidate.project_root
         candidate.preserve()
-
     assert root.is_dir()
 
 
 def test_rebuild_candidate_exception_preserves_primary_and_evidence(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
     class PrimaryError(Exception):
         pass
 
@@ -89,16 +87,15 @@ def test_rebuild_candidate_exception_preserves_primary_and_evidence(
             root = candidate.project_root
             (root / "evidence").write_text("candidate", encoding="utf-8")
             raise primary
-
     assert caught.value is primary
     assert cleanup_calls == []
     assert root.is_dir()
 
 
 def test_rebuild_candidate_cleanup_failure_is_reported(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+
     def fail_cleanup(_path: Path) -> None:
         raise OSError("cleanup failure")
 
@@ -108,5 +105,4 @@ def test_rebuild_candidate_cleanup_failure_is_reported(
             StorageLayout(project_root=tmp_path)
         ) as candidate:
             root = candidate.project_root
-
     assert root.is_dir()

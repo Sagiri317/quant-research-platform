@@ -38,7 +38,6 @@ def test_atomic_directory_writer_failure_removes_only_operation_temp(
 
     with pytest.raises(RuntimeError, match="writer_failed"):
         atomic_write_directory(final_root, fail)
-
     assert not final_root.exists()
     assert (unrelated / "keep.txt").read_text(encoding="utf-8") == "keep"
     assert set(final_root.parent.iterdir()) == {unrelated}
@@ -46,8 +45,7 @@ def test_atomic_directory_writer_failure_removes_only_operation_temp(
 
 @pytest.mark.parametrize("exception", [KeyboardInterrupt, SystemExit])
 def test_atomic_directory_preserves_control_flow_primary_and_cleans_temp(
-    tmp_path: Path,
-    exception: type[BaseException],
+    tmp_path: Path, exception: type[BaseException]
 ) -> None:
     final_root = tmp_path / "bundle"
 
@@ -57,16 +55,12 @@ def test_atomic_directory_preserves_control_flow_primary_and_cleans_temp(
 
     with pytest.raises(exception, match="cancelled"):
         atomic_write_directory(final_root, cancel)
-
     assert not final_root.exists()
     assert not list(tmp_path.glob(".a-[0-9a-f]*"))
 
 
-def test_atomic_write_text_creates_nested_parent_and_publishes(
-    tmp_path: Path,
-) -> None:
+def test_atomic_write_text_creates_nested_parent_and_publishes(tmp_path: Path) -> None:
     final_path = tmp_path / "root" / "year=2014" / "part.txt"
-
     assert atomic_write_text(final_path, "ok\n") == final_path
     assert final_path.read_text(encoding="utf-8") == "ok\n"
     assert not list(final_path.parent.glob(".f-*"))
@@ -77,10 +71,8 @@ def test_atomic_json_writer_rejects_existing_target_without_overwrite(
 ) -> None:
     json_path = tmp_path / "manifest.json"
     json_path.write_text("existing", encoding="utf-8")
-
     with pytest.raises(OutputAlreadyExistsError):
         atomic_write_json(json_path, {"ok": True})
-
     assert json_path.read_text(encoding="utf-8") == "existing"
 
 
@@ -90,18 +82,14 @@ def test_atomic_directory_rejects_existing_target_without_overwrite(
     final_root = tmp_path / "bundle"
     final_root.mkdir()
     (final_root / "winner").write_text("winner", encoding="utf-8")
-
     with pytest.raises(OutputAlreadyExistsError):
         atomic_write_directory(final_root, lambda _stage: None)
-
     assert (final_root / "winner").read_text(encoding="utf-8") == "winner"
 
 
 @pytest.mark.parametrize("long_path", (False, True))
 def test_publish_no_replace_preserves_concurrent_winner(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    long_path: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, long_path: bool
 ) -> None:
     if long_path:
         tmp_path = _long_parent(tmp_path)
@@ -119,7 +107,6 @@ def test_publish_no_replace_preserves_concurrent_winner(
     monkeypatch.setattr(atomic, "move_path_no_replace", race)
     with pytest.raises(OutputAlreadyExistsError):
         publish_no_replace(source, target)
-
     assert (
         Path(native_filesystem_path(source)).read_text(encoding="utf-8") == "candidate"
     )
@@ -127,20 +114,15 @@ def test_publish_no_replace_preserves_concurrent_winner(
 
 
 def test_atomic_write_text_rename_failure_cleans_operation_temp(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     final_path = tmp_path / "output.txt"
     primary = PermissionError(5, "rename_primary")
     monkeypatch.setattr(
-        atomic,
-        "move_path_no_replace",
-        lambda *_args: (_ for _ in ()).throw(primary),
+        atomic, "move_path_no_replace", lambda *_args: (_ for _ in ()).throw(primary)
     )
-
     with pytest.raises(PermissionError, match="rename_primary") as caught:
         atomic_write_text(final_path, "owned")
-
     assert caught.value is primary
     assert not final_path.exists()
     assert not list(tmp_path.glob(".f-*"))

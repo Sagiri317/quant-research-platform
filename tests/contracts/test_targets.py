@@ -179,7 +179,6 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
         read_research_run_record,
         write_research_run_record,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     protocol = {
         "scenario_id": "scenario",
@@ -254,11 +253,9 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
     with pytest.raises(TypeError):
         record.operation_evidence["environment"]["reason"] = "changed"
     assert replace(record).payload() == original
-    with runtime_resource_policy_scope() as policy:
-        path = write_research_run_record(tmp_path / f"{record.run_id}.json", record)
-        assert path.stat().st_size > 1024 * 1024
-        assert read_research_run_record(path).payload() == original
-        assert policy.used_memory_bytes == 0
+    path = write_research_run_record(tmp_path / f"{record.run_id}.json", record)
+    assert path.stat().st_size > 1024 * 1024
+    assert read_research_run_record(path).payload() == original
 
 
 @pytest.mark.parametrize(
@@ -280,7 +277,6 @@ def test_run_record_reader_rejects_wrong_json_container(tmp_path, field):
         read_research_run_record,
         write_research_run_record,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     protocol = {"scenario_id": "scenario", "access_window": "development"}
     record = ResearchRunRecord(
@@ -308,16 +304,15 @@ def test_run_record_reader_rejects_wrong_json_container(tmp_path, field):
         operation_evidence=unmeasured_operation_evidence("fixture_record"),
     )
     path = tmp_path / "shape-run.json"
-    with runtime_resource_policy_scope():
-        write_research_run_record(path, record)
-        assert read_research_run_record(path).payload() == record.payload()
-        payload = record.payload()
-        value = payload[field]
-        payload[field] = (
-            list(value.items())
-            if isinstance(value, dict)
-            else {str(item): "discarded" for item in value}
-        )
-        path.write_text(json.dumps(payload), encoding="utf-8")
-        with pytest.raises(ValueError, match="research_run_record_invalid"):
-            read_research_run_record(path)
+    write_research_run_record(path, record)
+    assert read_research_run_record(path).payload() == record.payload()
+    payload = record.payload()
+    value = payload[field]
+    payload[field] = (
+        list(value.items())
+        if isinstance(value, dict)
+        else {str(item): "discarded" for item in value}
+    )
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    with pytest.raises(ValueError, match="research_run_record_invalid"):
+        read_research_run_record(path)

@@ -36,12 +36,11 @@ from tests.helpers.binance_hft import (
     _panel_rows,
     _quote,
     _row_timestamp_ms,
-    with_test_resource_policy,
 )
 from tests.helpers.research_configuration import research_configuration
 
-simulate_taker = with_test_resource_policy(_simulate_taker)
-simulate_maker = with_test_resource_policy(_simulate_maker)
+simulate_taker = _simulate_taker
+simulate_maker = _simulate_maker
 
 
 def _state(
@@ -66,7 +65,7 @@ def _state(
         source_sequence=sequence,
         event_time_ms=event_time_ms,
         transaction_time_ms=transaction_time_ms,
-        observed_time_ns=observed_time_ms * 1_000_000,
+        observed_time_ns=observed_time_ms * 1000000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=monotonic,
         update_id=sequence,
@@ -89,7 +88,7 @@ def _boundary(
         source_sequence=observed_time_ms + 1,
         event_time_ms=observed_time_ms,
         transaction_time_ms=observed_time_ms,
-        observed_time_ns=observed_time_ms * 1_000_000,
+        observed_time_ns=observed_time_ms * 1000000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=observed_time_ms + 1,
         segment_id=segment_id,
@@ -117,7 +116,7 @@ def _trade(
         source_sequence=sequence,
         event_time_ms=observed_time_ms,
         transaction_time_ms=observed_time_ms,
-        observed_time_ns=observed_time_ms * 1_000_000,
+        observed_time_ns=observed_time_ms * 1000000,
         receive_time="2026-08-27T00:00:00.000000Z",
         receive_monotonic_ns=monotonic,
         observation_id=observation_id,
@@ -162,7 +161,7 @@ def _state_at_ns(
     ask_qty: float = 1.0,
     segment_id: str = "book-1",
 ) -> BookState:
-    observed_time_ms = observed_time_ns // 1_000_000
+    observed_time_ms = observed_time_ns // 1000000
     return BookState(
         source_sequence=source_sequence,
         event_time_ms=observed_time_ms,
@@ -182,7 +181,6 @@ def _state_at_ns(
 
 def test_unobserved_state_is_hidden_from_panel_and_taker() -> None:
     state = _state(100, event_time_ms=0, transaction_time_ms=0)
-
     rows = list(
         _panel_rows(
             [state],
@@ -194,7 +192,6 @@ def test_unobserved_state_is_hidden_from_panel_and_taker() -> None:
         )
     )
     assert rows == []
-
     fills: list[dict[str, object]] = []
     diagnostics = simulate_taker(
         [state],
@@ -215,10 +212,9 @@ def test_unobserved_state_is_hidden_from_panel_and_taker() -> None:
 
 def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
     initial = _state_at_ns(0, source_sequence=1)
-    just_after_boundary = _state_at_ns(100_000_001, source_sequence=2)
-    coverage = {"book-1": (0, 200_000_000)}
-    trade_coverage = {"trade-connection-1": (0, 200_000_000)}
-
+    just_after_boundary = _state_at_ns(100000001, source_sequence=2)
+    coverage = {"book-1": (0, 200000000)}
+    trade_coverage = {"trade-connection-1": (0, 200000000)}
     rows = list(
         _panel_rows(
             [initial, just_after_boundary],
@@ -230,7 +226,6 @@ def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
         )
     )
     assert rows[0]["book_source_sequence"] == initial.source_sequence
-
     fills: list[dict[str, object]] = []
     diagnostics = simulate_taker(
         [just_after_boundary],
@@ -247,7 +242,6 @@ def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
     )
     assert diagnostics["filled_orders"] == 0
     assert fills == []
-
     maker = simulate_maker(
         [just_after_boundary],
         [],
@@ -263,26 +257,19 @@ def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
 
 
 def test_panel_coverage_uses_exact_half_open_nanoseconds() -> None:
-    state = _state_at_ns(100_000_000, source_sequence=1)
+    state = _state_at_ns(100000000, source_sequence=1)
     common = {
         "book_events": [state],
         "trades": [],
         "start_ms": 200,
         "end_ms": 200,
-        "trade_coverage": {"trade-connection-1": (0, 300_000_000)},
+        "trade_coverage": {"trade-connection-1": (0, 300000000)},
     }
-
     covered = list(
-        _panel_rows(
-            **common,
-            book_coverage={"book-1": (100_000_000, 300_000_000)},
-        )
+        _panel_rows(**common, book_coverage={"book-1": (100000000, 300000000)})
     )
     not_fully_covered = list(
-        _panel_rows(
-            **common,
-            book_coverage={"book-1": (100_000_001, 300_000_000)},
-        )
+        _panel_rows(**common, book_coverage={"book-1": (100000001, 300000000)})
     )
     assert len(covered) == 1
     assert not_fully_covered == []
@@ -301,7 +288,6 @@ def test_trade_gap_is_missing_not_zero_volume() -> None:
         )
     )
     assert missing == []
-
     complete = list(
         _panel_rows(
             books,
@@ -352,35 +338,18 @@ def test_trade_reconnect_does_not_make_first_partial_interval_valid() -> None:
 
 
 def test_maker_uses_local_observation_order_for_same_time_events() -> None:
-    book_first_fills, trade_first_fills = [], []
+    book_first_fills, trade_first_fills = ([], [])
     initial = _state(0, source_sequence=1, receive_monotonic_ns=1)
     changed = _state(
-        100,
-        bid_index=994,
-        ask_index=1008,
-        source_sequence=3,
-        receive_monotonic_ns=20,
+        100, bid_index=994, ask_index=1008, source_sequence=3, receive_monotonic_ns=20
     )
     book_first_trade = _trade(
-        100,
-        quantity=3.0,
-        source_sequence=2,
-        receive_monotonic_ns=30,
+        100, quantity=3.0, source_sequence=2, receive_monotonic_ns=30
     )
     trade_first_book = _state(
-        100,
-        bid_index=994,
-        ask_index=1008,
-        source_sequence=2,
-        receive_monotonic_ns=30,
+        100, bid_index=994, ask_index=1008, source_sequence=2, receive_monotonic_ns=30
     )
-    trade_first = _trade(
-        100,
-        quantity=3.0,
-        source_sequence=3,
-        receive_monotonic_ns=20,
-    )
-
+    trade_first = _trade(100, quantity=3.0, source_sequence=3, receive_monotonic_ns=20)
     book_first = simulate_maker(
         [initial, changed],
         [book_first_trade],
@@ -405,7 +374,6 @@ def test_maker_uses_local_observation_order_for_same_time_events() -> None:
         funding_events=(),
         on_fill=trade_first_fills.append,
     )
-
     assert book_first["filled_orders"] == 1
     assert trade_first_result["filled_orders"] == 1
     assert book_first_fills[0]["spread_capture_per_unit"] == pytest.approx(0.6)
@@ -429,7 +397,6 @@ def test_total_trade_flow_uses_q_but_maker_queue_uses_visible_quantity() -> None
         )
     )
     assert rows[0]["trade_volume_100ms"] == 2.0
-
     result = simulate_maker(
         [_state(0)],
         [trade],
@@ -484,8 +451,8 @@ def test_trade_through_consumes_full_remaining_order_not_visible_quantity() -> N
         [_trade(50, quantity=1.0, visible_quantity=0.1, price_index=994)],
         [_quote(0)],
         config=_maker_config(),
-        observed_coverage={"book-1": (0, 200_000_000)},
-        trade_coverage={"trade-connection-1": (0, 200_000_000)},
+        observed_coverage={"book-1": (0, 200000000)},
+        trade_coverage={"trade-connection-1": (0, 200000000)},
         on_fill=fills.append,
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
@@ -501,8 +468,8 @@ def test_maker_max_abs_position_updates_on_terminal_fill() -> None:
         [_trade(50, quantity=1.0, visible_quantity=1.0, price_index=994)],
         [_quote(0)],
         config=_maker_config(),
-        observed_coverage={"book-1": (0, 200_000_000)},
-        trade_coverage={"trade-connection-1": (0, 200_000_000)},
+        observed_coverage={"book-1": (0, 200000000)},
+        trade_coverage={"trade-connection-1": (0, 200000000)},
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -520,8 +487,8 @@ def test_maker_order_expires_at_first_missing_trade_coverage_boundary() -> None:
         ],
         [_quote(0)],
         config=_maker_config(),
-        observed_coverage={"book-1": (0, 200_000_000)},
-        trade_coverage={"trade-connection-1": (0, 75_000_000)},
+        observed_coverage={"book-1": (0, 200000000)},
+        trade_coverage={"trade-connection-1": (0, 75000000)},
         on_fill=fills.append,
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
@@ -545,7 +512,6 @@ def test_maker_terminal_order_uses_coverage_validity_end() -> None:
         asset_id="btc_usdt",
         funding_events=(),
     )
-
     assert result["average_order_lifetime_ms"] == 75.0
 
 
@@ -589,13 +555,11 @@ def test_book_state_lease_and_taker_timing_and_terminal_mark() -> None:
         asset_id="btc_usdt",
         funding_events=(),
     )
-
     assert fills[0]["decision_time_ms"] == 0
     assert fills[0]["effective_time_ms"] == 10
     assert fills[0]["state_observed_time_ms"] == 5
     assert fills[0]["timestamp_ms"] == 10
     assert equities[0]["timestamp_ms"] == 0
-
     terminal = simulate_taker(
         [_state(0), _state(100, bid_index=1005, ask_index=1015)],
         [{"timestamp_ms": 0, "prediction": 0.1}],
@@ -613,10 +577,7 @@ def test_book_state_lease_and_taker_timing_and_terminal_mark() -> None:
 
 def test_same_price_book_decrease_without_trade_does_not_deplete_queue() -> None:
     result = simulate_maker(
-        [
-            _state(0, bid_qty=1.0),
-            _state(50, bid_qty=0.5),
-        ],
+        [_state(0, bid_qty=1.0), _state(50, bid_qty=0.5)],
         [_trade(100, quantity=1.0, visible_quantity=1.0)],
         [_quote(0)],
         config=_maker_config(),
@@ -653,18 +614,11 @@ def test_hft_grid_is_the_only_model_and_label_step_owner() -> None:
     models = build_hft_model_catalog(configuration=config).list()
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
     rows = [
-        {
-            "timestamp_ms": index * HFT_GRID_MS,
-            "segment_id": "book-1",
-            "mid": 100.0,
-        }
+        {"timestamp_ms": index * HFT_GRID_MS, "segment_id": "book-1", "mid": 100.0}
         for index in range(2)
     ]
     labels = pd.concat(
-        iter_label_frames(
-            (pd.DataFrame(rows),),
-            horizons_ms=(HFT_GRID_MS,),
-        ),
+        iter_label_frames((pd.DataFrame(rows),), horizons_ms=(HFT_GRID_MS,)),
         ignore_index=True,
     ).to_dict("records")
     assert labels[0][f"future_mid_return_{HFT_GRID_MS}ms"] == 0.0
@@ -721,10 +675,10 @@ def test_maker_observed_trade_gap_discards_active_and_pending_before_new_quote(
         else [],
         [_quote(0), _quote(80, trade_observation_id="trade-connection-2")],
         config=replace(_maker_config(), latency_ms=latency),
-        observed_coverage={"book-1": (0, 200_000_000)},
+        observed_coverage={"book-1": (0, 200000000)},
         trade_coverage={
-            "trade-connection-1": (0, 75_000_000),
-            "trade-connection-2": (75_000_000, 200_000_000),
+            "trade-connection-1": (0, 75000000),
+            "trade-connection-2": (75000000, 200000000),
         },
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
@@ -749,88 +703,81 @@ def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
     from quant_research_platform.contracts.business_manifest import (
         build_business_manifest_envelope,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     capital = PortfolioCapital("quiet_tail", 1000.0, "USDT", "linear_perpetual")
     comparisons = []
-    with runtime_resource_policy_scope() as policy:
-        for has_later_book in (False, True):
-            books = [_state(0)]
-            if has_later_book:
-                books.append(_state(175))
-            fills = []
-            results = []
-            envelope = build_business_manifest_envelope(
-                logical_artifact_id="quiet_tail",
-                schema_identity="a" * 64,
-                protocol_or_spec_identity="b" * 64,
-                software_identity="c" * 64,
-                research_window={
-                    "start": "1970-01-01T00:00:00",
-                    "end": "1970-01-01T00:00:00.180",
-                    "access": "holdout",
-                },
-                upstream_identities={},
-                semantic_metadata={"portfolio_capital": asdict(capital)},
-            )
+    for has_later_book in (False, True):
+        books = [_state(0)]
+        if has_later_book:
+            books.append(_state(175))
+        fills = []
+        results = []
+        envelope = build_business_manifest_envelope(
+            logical_artifact_id="quiet_tail",
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity="c" * 64,
+            research_window={
+                "start": "1970-01-01T00:00:00",
+                "end": "1970-01-01T00:00:00.180",
+                "access": "holdout",
+            },
+            upstream_identities={},
+            semantic_metadata={"portfolio_capital": asdict(capital)},
+        )
 
-            def produce(emit, books=books, fills=fills, results=results):
-                common = dict(
-                    observed_coverage={"book-1": _coverage(0, stop_ms)},
-                    resource_policy=policy,
-                    capital=capital,
-                    asset_id="btc_usdt",
-                    funding_events=(),
-                    funding_forecasts=KNOWN_NO_FUNDING,
-                    decision_windows_ns=((0, 180_000_000),),
-                    observation_window_ns=(0, stop_ms * 1_000_000),
-                    on_fill=lambda fill: fills.append(dict(fill)),
-                    on_ledger=emit,
-                )
-                if kind == "taker":
-                    result = _simulate_taker(
-                        books,
-                        [{"timestamp_ms": 0, "prediction": 0.1}],
-                        prediction_column="prediction",
-                        prediction_horizon_ms=500,
-                        config=_taker_config(),
-                        **common,
-                    )
-                else:
-                    result = _simulate_maker(
-                        books,
-                        [_trade(10, quantity=3)],
-                        [_quote(0)],
-                        config=replace(_maker_config(), markout_horizon_ms=90),
-                        trade_coverage={"trade-connection-1": _coverage(0, stop_ms)},
-                        **common,
-                    )
-                results.append(result)
-
-            root = write_portfolio_ledger_artifact(
-                tmp_path / str(has_later_book),
-                envelope=envelope,
-                produce=produce,
+        def produce(emit, books=books, fills=fills, results=results):
+            common = dict(
+                observed_coverage={"book-1": _coverage(0, stop_ms)},
+                capital=capital,
+                asset_id="btc_usdt",
+                funding_events=(),
+                funding_forecasts=KNOWN_NO_FUNDING,
+                decision_windows_ns=((0, 180000000),),
+                observation_window_ns=(0, stop_ms * 1000000),
+                on_fill=lambda fill: fills.append(dict(fill)),
+                on_ledger=emit,
             )
-            with policy.lease("tests.quiet_tail.artifact", 0) as lease:
-                artifact = read_portfolio_ledger_artifact(
-                    root, expected_identity=envelope.instance_identity, lease=lease
+            if kind == "taker":
+                result = _simulate_taker(
+                    books,
+                    [{"timestamp_ms": 0, "prediction": 0.1}],
+                    prediction_column="prediction",
+                    prediction_horizon_ms=500,
+                    config=_taker_config(),
+                    **common,
                 )
-                trades, cashflows, markouts = [], [], []
-                for batch in artifact.iter_chunks():
-                    trades.extend(batch.trades)
-                    cashflows.extend(batch.cashflows)
-                    markouts.extend(
-                        row.number
-                        for row in batch.diagnostics
-                        if row.name == "markout_per_unit"
-                    )
-                assert len(trades) == 1 and len(markouts) == 1
-                assert (markouts[0] is not None) is expected
-                assert fills[0]["markout_per_unit"] == markouts[0]
-                comparisons.append((trades, cashflows, results[0]["net_pnl"], markouts))
-        assert comparisons[0] == comparisons[1]
-        assert policy.used_memory_bytes == 0
+            else:
+                result = _simulate_maker(
+                    books,
+                    [_trade(10, quantity=3)],
+                    [_quote(0)],
+                    config=replace(_maker_config(), markout_horizon_ms=90),
+                    trade_coverage={"trade-connection-1": _coverage(0, stop_ms)},
+                    **common,
+                )
+            results.append(result)
+
+        root = write_portfolio_ledger_artifact(
+            tmp_path / str(has_later_book), envelope=envelope, produce=produce
+        )
+        artifact = read_portfolio_ledger_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        trades, cashflows, markouts = ([], [], [])
+        for batch in artifact.iter_chunks():
+            trades.extend(batch.trades)
+            cashflows.extend(batch.cashflows)
+            markouts.extend(
+                row.number
+                for row in batch.diagnostics
+                if row.name == "markout_per_unit"
+            )
+        assert len(trades) == 1 and len(markouts) == 1
+        assert (markouts[0] is not None) is expected
+        assert fills[0]["markout_per_unit"] == markouts[0]
+        comparisons.append((trades, cashflows, results[0]["net_pnl"], markouts))
+    assert comparisons[0] == comparisons[1]
 
 
 @pytest.mark.parametrize(
@@ -849,7 +796,6 @@ def test_maker_visible_quantity_controls_persisted_fill_and_nav(
     from quant_research_platform.contracts.business_manifest import (
         build_business_manifest_envelope,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     capital = PortfolioCapital("visible_quantity", 1000.0, "USDT", "linear_perpetual")
     envelope = build_business_manifest_envelope(
@@ -865,42 +811,38 @@ def test_maker_visible_quantity_controls_persisted_fill_and_nav(
         upstream_identities={},
         semantic_metadata={"portfolio_capital": asdict(capital)},
     )
-    with runtime_resource_policy_scope() as policy:
-        result = []
+    result = []
 
-        def produce(emit):
-            result.append(
-                _simulate_maker(
-                    [_state(0), _state(200)],
-                    [_trade(50, quantity=quantity, visible_quantity=visible)],
-                    [_quote(0)],
-                    config=_maker_config(),
-                    observed_coverage={"book-1": _coverage(0, 300)},
-                    trade_coverage={"trade-connection-1": _coverage(0, 300)},
-                    resource_policy=policy,
-                    capital=capital,
-                    asset_id="btc_usdt",
-                    funding_events=(),
-                    on_ledger=emit,
-                )
+    def produce(emit):
+        result.append(
+            _simulate_maker(
+                [_state(0), _state(200)],
+                [_trade(50, quantity=quantity, visible_quantity=visible)],
+                [_quote(0)],
+                config=_maker_config(),
+                observed_coverage={"book-1": _coverage(0, 300)},
+                trade_coverage={"trade-connection-1": _coverage(0, 300)},
+                capital=capital,
+                asset_id="btc_usdt",
+                funding_events=(),
+                on_ledger=emit,
             )
-
-        root = write_portfolio_ledger_artifact(
-            tmp_path / "ledger", envelope=envelope, produce=produce
         )
-        with policy.lease("tests.visible_quantity.artifact", 0) as lease:
-            artifact = read_portfolio_ledger_artifact(
-                root, expected_identity=envelope.instance_identity, lease=lease
-            )
-            trades = []
-            persisted_nav = None
-            for batch in artifact.iter_chunks():
-                trades.extend(batch.trades)
-                endings = [row for row in batch.valuations if row.phase == "end"]
-                if endings:
-                    persisted_nav = sum(row.value for row in endings)
-            assert sum(trade.quantity for trade in trades) == expected_fill
-            assert result[0]["net_pnl"] == pytest.approx(0.5 * expected_fill)
-            assert result[0]["nav"] == pytest.approx(1000.0 + 0.5 * expected_fill)
-            assert persisted_nav == pytest.approx(1000.0 + 0.5 * expected_fill)
-        assert policy.used_memory_bytes == 0
+
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger", envelope=envelope, produce=produce
+    )
+    artifact = read_portfolio_ledger_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    trades = []
+    persisted_nav = None
+    for batch in artifact.iter_chunks():
+        trades.extend(batch.trades)
+        endings = [row for row in batch.valuations if row.phase == "end"]
+        if endings:
+            persisted_nav = sum(row.value for row in endings)
+    assert sum(trade.quantity for trade in trades) == expected_fill
+    assert result[0]["net_pnl"] == pytest.approx(0.5 * expected_fill)
+    assert result[0]["nav"] == pytest.approx(1000.0 + 0.5 * expected_fill)
+    assert persisted_nav == pytest.approx(1000.0 + 0.5 * expected_fill)

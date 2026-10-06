@@ -2,10 +2,7 @@
 
 from __future__ import annotations
 
-import gc
 import json
-import tracemalloc
-import weakref
 from decimal import Decimal, localcontext
 
 import numpy as np
@@ -43,11 +40,6 @@ from quant_research_platform.research.portfolios.construction import (
     build_simple_target_weights,
 )
 from quant_research_platform.research.statistics import cross_sectional_rank_ic
-from quant_research_platform.runtime.dataframes import iter_complete_time_sized_frames
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.runtime.resources import (
-    runtime_resource_policy_scope as artifact_resource_scope,
-)
 from quant_research_platform.storage import semantic_artifacts
 from quant_research_platform.storage.datasets.schema import (
     _typed_category_value_payload,
@@ -59,9 +51,7 @@ from quant_research_platform.storage.identity import (
     filesystem_walk,
     filesystem_write_bytes,
     native_filesystem_path,
-    open_filesystem_file,
 )
-from tests.helpers.runtime_resources import disabled_gc
 from tests.storage.test_semantic_artifacts import _envelope
 
 
@@ -205,36 +195,6 @@ def test_evaluation_counts_keep_exact_int64_identity(dtype):
         strict_non_negative_count_series(pd.Series([2**63], dtype="uint64"))
 
 
-@pytest.mark.parametrize("count", [1000, 10000])
-@disabled_gc()
-def test_complete_frame_releases_consumed_concat_before_next_output(count):
-    def inputs():
-        for dates in ([1] * count, [1] * count + [2], [3, 4]):
-            yield pd.DataFrame(
-                {
-                    "timestamp": pd.to_datetime(dates, unit="D"),
-                    "value": range(len(dates)),
-                }
-            )
-
-    with runtime_resource_policy_scope() as policy:
-        stream = iter_complete_time_sized_frames(
-            inputs(), timestamp_column="timestamp", resource_policy=policy
-        )
-        try:
-            first = next(stream)
-            assert len(first) == 2 * count
-            reference = weakref.ref(first)
-            del first
-            second = next(stream)
-            assert len(second) == 1
-            assert reference() is None
-            del second
-        finally:
-            stream.close()
-        assert policy.used_memory_bytes == 0
-
-
 def test_decimal_metadata_rejects_exponents_without_expansion():
     payload = {
         "schema_id": "qrp-dataset-part-logical-dtypes",
@@ -248,13 +208,8 @@ def test_decimal_metadata_rejects_exponents_without_expansion():
         ],
     }
     raw = json.dumps(payload).encode()
-    tracemalloc.start()
-    try:
-        with pytest.raises(ValueError):
-            parse_logical_dtype_metadata(raw)
-        assert tracemalloc.get_traced_memory()[1] < 100000
-    finally:
-        tracemalloc.stop()
+    with pytest.raises(ValueError):
+        parse_logical_dtype_metadata(raw)
     with pytest.raises(ValueError):
         _typed_category_value_payload(Decimal("1e2000000"))
     assert _typed_category_value_payload(Decimal("1.2300")) == {
@@ -286,48 +241,8 @@ def test_semantic_read_rechecks_earlier_members_and_manifest(
         return result
 
     monkeypatch.setattr(semantic_artifacts, "_member_record", record)
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(
-            ValueError, match="semantic_artifact_member_identity_changed"
-        ):
-            semantic_artifacts.read_semantic_artifact_record(root, lease=artifact_lease)
-
-
-def test_semantic_hash_workspace_uses_active_budget(tmp_path, monkeypatch):
-    def writer(path):
-        with open_filesystem_file(path / "payload.bin", "wb") as handle:
-            for _ in range(64):
-                handle.write(b"x" * 65536)
-
-    root = semantic_artifacts.write_semantic_artifact(tmp_path, _envelope(), writer)
-    original = semantic_artifacts._hash_file_content
-    observed = []
-    from quant_research_platform.contracts.json_codec import (
-        json_record_working_set_bytes,
-    )
-
-    metadata_bytes = 2 * json_record_working_set_bytes(
-        (root / "manifest.json").stat().st_size
-    )
-    capacity = metadata_bytes + 65536
-    with (
-        runtime_resource_policy_scope(explicit_cap_bytes=capacity) as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-
-        def hashing(path, identity, error, *, chunk_size):
-            observed.append(chunk_size)
-            assert 0 < chunk_size <= 65536
-            assert chunk_size + metadata_bytes <= policy.used_memory_bytes <= capacity
-            return original(path, identity, error, chunk_size=chunk_size)
-
-        monkeypatch.setattr(semantic_artifacts, "_hash_file_content", hashing)
-        semantic_artifacts.read_semantic_artifact_record(root, lease=artifact_lease)
-        assert observed
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+    with pytest.raises(ValueError, match="semantic_artifact_member_identity_changed"):
+        semantic_artifacts.read_semantic_artifact_record(root)
 
 
 def test_real_observations_preserve_nonfinite_domain_handling():
@@ -342,135 +257,9 @@ def test_real_observations_preserve_nonfinite_domain_handling():
 
 
 @pytest.mark.parametrize(
-    "axis,market",
-    [("cross_sectional", "a_share"), ("single_asset_time_series", "crypto")],
-)
-def test_evaluation_releases_previous_filtered_input(monkeypatch, axis, market):
-    from contextlib import contextmanager
-
-    import quant_research_platform.research.filtering as filtering
-    from quant_research_platform.contracts.evaluations import EvaluationSpec
-    from quant_research_platform.contracts.ids import MarketId
-    from quant_research_platform.contracts.signals import SignalSpec
-    from quant_research_platform.research.evaluations.engine import (
-        build_evaluation_result_from_frames,
-    )
-
-    original = filtering._filter_mode_scope
-    references = []
-
-    @contextmanager
-    def inspect(*args, **kwargs):
-        if references:
-            assert references[-1]() is None
-        with original(*args, **kwargs) as pair:
-            references.append(weakref.ref(pair[0]))
-            yield pair
-
-    monkeypatch.setattr(filtering, "_filter_mode_scope", inspect)
-
-    def frames():
-        for number in range(4):
-            dates = pd.date_range("2023-01-01", periods=5) + pd.Timedelta(
-                days=5 * number
-            )
-            yield pd.DataFrame(
-                {
-                    "timestamp": dates if market == "crypto" else dates.repeat(3),
-                    "asset_id": ["a"] * 5
-                    if market == "crypto"
-                    else ["a", "b", "c"] * 5,
-                    "feature": list(range(5))
-                    if market == "crypto"
-                    else [0.0, 1.0, 2.0] * 5,
-                    "label": list(range(5))
-                    if market == "crypto"
-                    else [0.0, 1.0, 2.0] * 5,
-                    "eligible": True,
-                }
-            )
-
-    spec = EvaluationSpec(
-        evaluation_id="lifetime",
-        market_id=MarketId(market),
-        research_dataset_id="dataset",
-        signals=(
-            SignalSpec(
-                signal_id="signal", source_column="feature", source_kind="feature"
-            ),
-        ),
-        label_columns=("label",),
-        evaluation_axis=axis,
-        n_groups=2,
-    )
-    with runtime_resource_policy_scope() as policy:
-        with build_evaluation_result_from_frames(
-            frames(),
-            spec=spec,
-            signal_columns=("signal",),
-            label_columns=("label",),
-            n_groups=2,
-            asset_column="asset_id",
-            source_columns_by_kind={"feature": ("feature",)},
-            resource_policy=policy,
-        ) as result:
-            for item in result.output_chunks:
-                item.release(owner="test.evaluation")
-        assert len(references) > 1
-        assert policy.used_memory_bytes == 0
-
-
-def test_prediction_releases_previous_model_array():
-    from quant_research_platform.contracts.predictions import PredictionSpec
-    from quant_research_platform.research.predictions.outputs import (
-        _iter_prediction_output_frames,
-        _PredictionBuildState,
-    )
-
-    references = []
-
-    def predict(frame):
-        if references:
-            assert references[-1]() is None
-        value = np.arange(len(frame), dtype=float)
-        references.append(weakref.ref(value))
-        return value
-
-    def frames():
-        for number in range(3):
-            yield pd.DataFrame(
-                {
-                    "timestamp": pd.date_range("2023-01-01", periods=5)
-                    + pd.Timedelta(days=5 * number),
-                    "asset_id": "a",
-                    "feature": np.arange(5, dtype=float),
-                    "eligible": True,
-                }
-            )
-
-    spec = PredictionSpec("prediction", "model", "dataset", "2022-12-31", "2023-01-01")
-    with runtime_resource_policy_scope() as policy:
-        stream = _iter_prediction_output_frames(
-            frames(),
-            spec=spec,
-            input_columns=("feature",),
-            predictor=predict,
-            build_state=_PredictionBuildState(),
-            validity_columns=("feature",),
-        )
-        try:
-            for item in stream:
-                item.release(owner="test.prediction")
-        finally:
-            stream.close()
-        assert len(references) == 3
-        assert policy.used_memory_bytes == 0
-
-
-@pytest.mark.parametrize(
     "error_type", (OSError, PermissionError, FileNotFoundError, NotADirectoryError)
 )
-def test_semantic_hash_io_failure_preserves_error_and_releases_budget(
+def test_semantic_hash_io_failure_preserves_error_and_published_files(
     tmp_path, monkeypatch, error_type
 ):
     root = semantic_artifacts.write_semantic_artifact(
@@ -485,27 +274,15 @@ def test_semantic_hash_io_failure_preserves_error_and_releases_budget(
         raise primary
 
     monkeypatch.setattr(semantic_artifacts, "_hash_file_content", failed_hash)
-    from quant_research_platform.contracts.json_codec import (
-        json_record_working_set_bytes,
-    )
 
-    metadata_bytes = 2 * json_record_working_set_bytes(
-        (root / "manifest.json").stat().st_size
-    )
-    capacity = metadata_bytes + 65536
-    with (
-        runtime_resource_policy_scope(explicit_cap_bytes=capacity) as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        missing = error_type in (FileNotFoundError, NotADirectoryError)
-        with pytest.raises(ValueError if missing else error_type) as caught:
-            semantic_artifacts.read_semantic_artifact_record(root, lease=artifact_lease)
-        if missing:
-            assert str(caught.value) == "semantic_artifact_member_invalid"
-            assert caught.value.__cause__ is primary
-        else:
-            assert caught.value is primary
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+    missing = error_type in (FileNotFoundError, NotADirectoryError)
+    with pytest.raises(ValueError if missing else error_type) as caught:
+        semantic_artifacts.read_semantic_artifact_record(root)
+    if missing:
+        assert str(caught.value) == "semantic_artifact_member_invalid"
+        assert caught.value.__cause__ is primary
+    else:
+        assert caught.value is primary
     assert before == _file_bytes(root)
 
 
@@ -564,43 +341,18 @@ def test_group_spread_aggregates_before_float_conversion(
         n_groups=2,
     )
     state = _EvaluationStreamingState(spec=spec, n_groups=2)
-    try:
-        for top, bottom in zip(tops, bottoms, strict=True):
-            _add_group_spread_observation(
-                state._spread, "signal", "label", top, bottom, float(top > bottom), None
-            )
-        if expected_spread is None:
-            with pytest.raises(ValueError, match="^invalid_evaluation_numeric_values$"):
-                state.group_spread_summary()
-        else:
-            summary = state.group_spread_summary().iloc[0]
-            assert summary.top_group_mean_label_value == expected_top
-            assert summary.bottom_group_mean_label_value == expected_bottom
-            assert summary.top_bottom_label_value_spread_mean == expected_spread
-    finally:
-        state.close()
-
-
-@pytest.mark.parametrize("timezone", [None, "UTC"])
-@pytest.mark.parametrize("count", [100_000, 500_000])
-def test_timestamp_validation_fits_time_operation_reservation(timezone, count):
-    from quant_research_platform.contracts.validation import strict_timestamp_series
-    from quant_research_platform.runtime.dataframes import _time_chunk_operation_bytes
-
-    frame = pd.DataFrame(
-        {"timestamp": pd.date_range("2020", periods=count, freq="s", tz=timezone)}
-    )
-    bound = _time_chunk_operation_bytes(frame, timestamp_column="timestamp")
-    gc.collect()
-    tracemalloc.start()
-    try:
-        result = strict_timestamp_series(frame.timestamp, error="timestamp_invalid")
-        peak = tracemalloc.get_traced_memory()[1]
-    finally:
-        tracemalloc.stop()
-    assert len(result) == len(frame)
-    assert result.dtype == np.dtype("datetime64[ns]")
-    assert peak <= bound + 65536
+    for top, bottom in zip(tops, bottoms, strict=True):
+        _add_group_spread_observation(
+            state._spread, "signal", "label", top, bottom, float(top > bottom), None
+        )
+    if expected_spread is None:
+        with pytest.raises(ValueError, match="^invalid_evaluation_numeric_values$"):
+            state.group_spread_summary()
+    else:
+        summary = state.group_spread_summary().iloc[0]
+        assert summary.top_group_mean_label_value == expected_top
+        assert summary.bottom_group_mean_label_value == expected_bottom
+        assert summary.top_bottom_label_value_spread_mean == expected_spread
 
 
 @pytest.mark.parametrize(
@@ -657,22 +409,18 @@ def test_evaluation_mixed_timestamp_strings_follow_chronological_order():
         n_groups=2,
     )
     observed = []
-    with runtime_resource_policy_scope() as policy:
-        with build_evaluation_result_from_frames(
-            [frame],
-            spec=spec,
-            signal_columns=("signal",),
-            label_columns=("label",),
-            n_groups=2,
-            asset_column="asset_id",
-            resource_policy=policy,
-            source_columns_by_kind={"feature": ("feature",)},
-        ) as result:
-            for output in result.output_chunks:
-                metrics, _groups, _metadata = output.value
-                observed.extend(metrics.timestamp.drop_duplicates().tolist())
-                output.release(owner="test.evaluation")
-        assert policy.used_memory_bytes == 0
+    with build_evaluation_result_from_frames(
+        [frame],
+        spec=spec,
+        signal_columns=("signal",),
+        label_columns=("label",),
+        n_groups=2,
+        asset_column="asset_id",
+        source_columns_by_kind={"feature": ("feature",)},
+    ) as result:
+        for output in result.output_chunks:
+            metrics, _groups, _metadata = output
+            observed.extend(metrics.timestamp.drop_duplicates().tolist())
     assert list(pd.to_datetime(observed, format="mixed")) == list(
         pd.to_datetime(["2024-01-01", "2024-02-01", "2024-10-01"])
     )
@@ -804,68 +552,62 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
             "eligible": True,
         }
     )
-    with (
-        runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024 * 1024) as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        if kind == "trial":
-            actual = evaluate_model_trial_metrics_from_chunks(
-                (frame.iloc[:1], frame.iloc[1:]),
-                model_id="rounding",
-                label_column="label",
-                prediction_column="x",
-            )
-            assert actual["validation_ic"] == expected
-            assert abs(actual["validation_ic"]) <= 1.0
-        else:
-            spec = EvaluationSpec(
-                evaluation_id="rounding",
-                market_id=MarketId(
-                    "crypto" if kind == "single_asset_time_series" else "a_share"
-                ),
-                research_dataset_id="synthetic",
-                signals=(
-                    SignalSpec(signal_id="x", source_column="x", source_kind="factor"),
-                ),
-                label_columns=("label",),
-                evaluation_axis=kind,
-                n_groups=2,
-            )
-            with build_evaluation_result_from_frames(
-                (frame.iloc[:1], frame.iloc[1:]),
+    if kind == "trial":
+        actual = evaluate_model_trial_metrics_from_chunks(
+            (frame.iloc[:1], frame.iloc[1:]),
+            model_id="rounding",
+            label_column="label",
+            prediction_column="x",
+        )
+        assert actual["validation_ic"] == expected
+        assert abs(actual["validation_ic"]) <= 1.0
+    else:
+        spec = EvaluationSpec(
+            evaluation_id="rounding",
+            market_id=MarketId(
+                "crypto" if kind == "single_asset_time_series" else "a_share"
+            ),
+            research_dataset_id="synthetic",
+            signals=(
+                SignalSpec(signal_id="x", source_column="x", source_kind="factor"),
+            ),
+            label_columns=("label",),
+            evaluation_axis=kind,
+            n_groups=2,
+        )
+        with build_evaluation_result_from_frames(
+            (frame.iloc[:1], frame.iloc[1:]),
+            spec=spec,
+            signal_columns=("x",),
+            label_columns=("label",),
+            n_groups=2,
+            asset_column="asset_id",
+        ) as result:
+            bundle = write_evaluation_outputs_from_chunks(
+                result.output_chunks,
+                summary_factory=result.summaries,
                 spec=spec,
-                signal_columns=("x",),
-                label_columns=("label",),
+                output_spec=OutputSpec(
+                    output_id="rounding",
+                    output_definition_id="evaluation_outputs",
+                    run_id="test_run",
+                    market_id=spec.market_id,
+                    run_type="evaluation",
+                    scope=OutputScope.LOCAL_ONLY,
+                ),
+                layout=StorageLayout(tmp_path),
                 n_groups=2,
-                asset_column="asset_id",
-                resource_policy=policy,
-            ) as result:
-                bundle = write_evaluation_outputs_from_chunks(
-                    result.output_chunks,
-                    summary_factory=result.summaries,
-                    spec=spec,
-                    output_spec=OutputSpec(
-                        output_id="rounding",
-                        output_definition_id="evaluation_outputs",
-                        run_id="test_run",
-                        market_id=spec.market_id,
-                        run_type="evaluation",
-                        scope=OutputScope.LOCAL_ONLY,
-                    ),
-                    layout=StorageLayout(tmp_path),
-                    n_groups=2,
-                )
-            validate_output_bundle(bundle, lease=artifact_lease)
-            assert pd.read_parquet(
-                native_filesystem_path(bundle / "metrics.parquet")
-            ).ic.tolist() == [expected]
-            assert pd.read_parquet(
-                native_filesystem_path(bundle / "ic_summary.parquet")
-            ).mean_ic.tolist() == [expected]
-            assert filesystem_read_text(
-                bundle / "summary.md", encoding="utf-8"
-            ).startswith("# Evaluation Summary")
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+            )
+        validate_output_bundle(bundle)
+        assert pd.read_parquet(
+            native_filesystem_path(bundle / "metrics.parquet")
+        ).ic.tolist() == [expected]
+        assert pd.read_parquet(
+            native_filesystem_path(bundle / "ic_summary.parquet")
+        ).mean_ic.tolist() == [expected]
+        assert filesystem_read_text(bundle / "summary.md", encoding="utf-8").startswith(
+            "# Evaluation Summary"
+        )
 
 
 def test_scaler_transform_preserves_representable_extreme_difference():
@@ -930,219 +672,3 @@ def test_risk_style_population_scale_is_unit_invariant(scale):
     result = preprocess_risk_styles(frame, style_columns=("style",))
     # Equal weights: mean 3a/2, population standard deviation a/2.
     np.testing.assert_allclose(result["style"], [-1.0, 1.0], rtol=1e-14)
-
-
-@pytest.mark.parametrize("kind", ("taker", "maker"))
-@pytest.mark.parametrize("depth", (2, 4096))
-@pytest.mark.parametrize(
-    "failure", ("none", "consumer", "consumer_and_cleanup", "mid", "funding")
-)
-def test_execution_previous_book_stays_owned_through_markout(
-    monkeypatch, kind, depth, failure
-):
-    import quant_research_platform.markets.implementations.crypto.execution as execution
-    from quant_research_platform.runtime.resources import MemoryLease, OwnedValue
-    from tests.helpers.binance_hft import KNOWN_NO_FUNDING
-    from tests.helpers.runtime_resources import capture_test_policy
-    from tests.markets.crypto.test_hft_execution import (
-        _maker_config,
-        _state,
-        _taker_config,
-    )
-
-    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    leases, seen, closed = {}, [], []
-    primary = KeyboardInterrupt("markout_consumer_failure")
-    original_resolve = execution._resolve_observed_markouts
-    original_close = MemoryLease.close
-    original_mid = execution._mid
-    original_funding = execution.PortfolioEconomics.funding
-
-    def books():
-        try:
-            for stamp in (0, 100, 200):
-                lease = policy.lease("fixture.book", 4096 + 512 * depth)
-                leases[stamp * 1_000_000] = lease
-                yield OwnedValue(
-                    _state(
-                        stamp,
-                        bid_levels=tuple((10000 - i, 1.0) for i in range(depth)),
-                        ask_levels=tuple((10001 + i, 1.0) for i in range(depth)),
-                    ),
-                    lease,
-                )
-        finally:
-            closed.append(True)
-
-    def resolve(pending, state, coverage, *, previous_state):
-        if previous_state is not None:
-            previous = leases[previous_state.observed_time_ns]
-            current = leases[state.observed_time_ns]
-            assert previous.active and current.active
-            assert (
-                policy.used_memory_bytes
-                >= previous.reserved_bytes + current.reserved_bytes
-            )
-            assert len(previous_state.bids) == len(previous_state.asks) == depth
-            seen.append(True)
-            if failure not in {"none", "mid", "funding"}:
-                raise primary
-        return original_resolve(pending, state, coverage, previous_state=previous_state)
-
-    def mid(state):
-        if failure == "mid" and state.observed_time_ns == 100_000_000:
-            raise primary
-        return original_mid(state)
-
-    def funding(economics, event):
-        if failure == "funding":
-            raise primary
-        return original_funding(economics, event)
-
-    def close(lease):
-        original_close(lease)
-        if failure == "consumer_and_cleanup" and lease is leases.get(0):
-            raise OSError("previous_book_close_failure")
-
-    monkeypatch.setattr(execution, "_resolve_observed_markouts", resolve)
-    monkeypatch.setattr(MemoryLease, "close", close)
-    monkeypatch.setattr(execution, "_mid", mid)
-    monkeypatch.setattr(execution.PortfolioEconomics, "funding", funding)
-    with runtime_resource_policy_scope(policy):
-        options = dict(
-            observed_coverage={"s1": (0, 300_000_000)},
-            resource_policy=policy,
-            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
-            asset_id="btc_usdt",
-            funding_events=(execution.FundingEvent(100_000_000, 0.01, 100.0),),
-            funding_forecasts=KNOWN_NO_FUNDING,
-        )
-
-        def run():
-            if kind == "taker":
-                return execution.simulate_taker(
-                    books(),
-                    (),
-                    prediction_column="prediction",
-                    prediction_horizon_ms=500,
-                    config=_taker_config(),
-                    **options,
-                )
-            return execution.simulate_maker(
-                books(),
-                (),
-                (),
-                config=_maker_config(),
-                trade_coverage={"trade-connection-1": (0, 300_000_000)},
-                **options,
-            )
-
-        if failure == "none":
-            assert run()["net_pnl"] == 0.0
-            assert len(seen) == 2
-        else:
-            with pytest.raises(KeyboardInterrupt) as caught:
-                try:
-                    run()
-                finally:
-                    leaked = [lease for lease in leases.values() if lease.active]
-                    for lease in leaked:
-                        lease.close()
-            assert not leaked
-            assert caught.value is primary
-            assert len(seen) == (
-                0
-                if failure == "funding" or (kind == "taker" and failure == "mid")
-                else 1
-            )
-            if failure == "consumer_and_cleanup":
-                assert any("OSError" in note for note in primary.__notes__)
-        assert closed == [True]
-        assert all(not lease.active for lease in leases.values())
-        assert policy.used_memory_bytes == 0
-
-
-@pytest.mark.parametrize("kind", ("taker", "maker", "calibration"))
-@pytest.mark.parametrize("failure", ("type", "order"))
-def test_execution_rejected_book_releases_transferred_ownership(kind, failure):
-    import quant_research_platform.markets.implementations.crypto.execution as execution
-    from quant_research_platform.runtime.resources import OwnedValue
-    from tests.helpers.binance_hft import KNOWN_NO_FUNDING
-    from tests.helpers.runtime_resources import capture_test_policy
-    from tests.markets.crypto.test_hft_execution import (
-        _maker_config,
-        _state,
-        _taker_config,
-    )
-
-    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    leases, closed = [], []
-
-    def books():
-        try:
-            for value in (
-                (_state(100), _state(0)) if failure == "order" else (object(),)
-            ):
-                lease = policy.lease("fixture.book", 4096)
-                leases.append(lease)
-                yield OwnedValue(value, lease)
-        finally:
-            closed.append(True)
-
-    with runtime_resource_policy_scope(policy):
-        options = dict(
-            observed_coverage={"s1": (0, 300_000_000)},
-            resource_policy=policy,
-            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
-            asset_id="btc_usdt",
-            funding_events=(),
-            funding_forecasts=KNOWN_NO_FUNDING,
-        )
-        error = TypeError if failure == "type" else ValueError
-        message = (
-            "hft_execution_book_event_invalid"
-            if failure == "type"
-            else "hft_execution_time_non_monotonic"
-        )
-        try:
-            with pytest.raises(error, match=message):
-                if kind == "taker":
-                    execution.simulate_taker(
-                        books(),
-                        (),
-                        prediction_column="prediction",
-                        prediction_horizon_ms=500,
-                        config=_taker_config(),
-                        **options,
-                    )
-                elif kind == "calibration":
-                    calibration = _maker_config()
-                    execution.replay_maker_calibration(
-                        books(),
-                        (),
-                        (),
-                        order_quantity=calibration.order_quantity,
-                        latency_ms=calibration.latency_ms,
-                        observed_coverage=options["observed_coverage"],
-                        trade_coverage={"trade-connection-1": (0, 300_000_000)},
-                        cutoff_ns=300_000_000,
-                        resource_policy=policy,
-                        on_sample=lambda **sample: None,
-                        on_event=lambda **event: None,
-                    )
-                else:
-                    execution.simulate_maker(
-                        books(),
-                        (),
-                        (),
-                        config=_maker_config(),
-                        trade_coverage={"trade-connection-1": (0, 300_000_000)},
-                        **options,
-                    )
-            assert closed == [True]
-            assert policy.used_memory_bytes == 0
-            assert all(not lease.active for lease in leases)
-        finally:
-            # Keep a failing regression from poisoning the rest of the test process.
-            for lease in leases:
-                lease.close()

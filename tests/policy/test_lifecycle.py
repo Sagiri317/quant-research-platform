@@ -58,3 +58,29 @@ def test_closing_iterator_records_secondary_without_replacing_primary(
 
     assert iterator.close_calls == 1
     assert raised.value.__notes__ == ["iterator close also failed: OSError"]
+
+
+def test_generator_close_surfaces_nested_resource_failure() -> None:
+    class Resource:
+        def close(self) -> None:
+            raise OSError("close_failure")
+
+    def inner():
+        with closing_iterator(Resource()):
+            try:
+                yield 1
+            except GeneratorExit:
+                return
+
+    def outer():
+        with closing_iterator(inner()) as source:
+            for value in source:
+                try:
+                    yield value
+                except GeneratorExit:
+                    return
+
+    stream = outer()
+    assert next(stream) == 1
+    with pytest.raises(OSError, match="close_failure"):
+        stream.close()

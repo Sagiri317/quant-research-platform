@@ -1,32 +1,23 @@
 from __future__ import annotations
 
 import json
-import sys
 from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
 import pytest
 
-import quant_research_platform.storage.datasets.inspection as dataset_inspection
 import quant_research_platform.storage.datasets.reading as dataset_reading
 import quant_research_platform.storage.datasets.writing as dataset_writing
 import quant_research_platform.storage.parquet as dataset_physical
-from quant_research_platform.runtime.resources import (
-    pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.storage.datasets import (
-    compare_datasets,
     fingerprint_dataset,
     inspect_dataset,
     read_dataset,
     write_dataset,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_exists,
     filesystem_glob,
-    filesystem_is_file,
     filesystem_read_bytes,
     filesystem_read_text,
     filesystem_replace,
@@ -35,40 +26,12 @@ from quant_research_platform.storage.identity import (
     filesystem_write_text,
     native_filesystem_path,
 )
-from tests.helpers.runtime_resources import capture_test_policy
-from tests.storage.dataset_test_support import (
-    _bound_first_frames,
-    _persisted_table,
-)
+from tests.storage.dataset_test_support import _persisted_table
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
     make_processed_dataset_spec,
 )
-
-
-def test_storage_datasets_public_operations_reject_resource_policy_control() -> None:
-    spec = make_processed_dataset_spec("no_resource_policy_control")
-    calls = (
-        lambda: write_dataset(
-            Path("ignored"),
-            pd.DataFrame(),
-            spec=spec,
-            resource_policy=None,
-        ),
-        lambda: read_dataset(Path("ignored"), resource_policy=None),
-        lambda: inspect_dataset(Path("ignored"), resource_policy=None),
-        lambda: fingerprint_dataset(Path("ignored"), resource_policy=None),
-        lambda: compare_datasets(
-            Path("left"),
-            Path("right"),
-            resource_policy=None,
-        ),
-    )
-
-    for call in calls:
-        with pytest.raises(TypeError):
-            call()
 
 
 def test_dataset_session_returns_fresh_contract_views_and_keeps_frozen_truth(
@@ -80,24 +43,18 @@ def test_dataset_session_returns_fresh_contract_views_and_keeps_frozen_truth(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("immutable_session"),
     )
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    ) as session:
-        expected_primary_key = tuple(session.spec["primary_key"])
-        expected_schema = session.schema
-        expected_logical = session.logical_dtypes
-
-        session.spec["primary_key"].clear()
-        session.manifest["physical_schema"].clear()
-        session.schema.clear()
-        session.logical_dtypes["columns"].clear()
-
-        assert tuple(session.spec["primary_key"]) == expected_primary_key
-        assert session.schema == expected_schema
-        assert session.logical_dtypes == expected_logical
-        session.verify()
+    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
+    expected_primary_key = tuple(session.spec["primary_key"])
+    expected_schema = session.schema
+    expected_logical = session.logical_dtypes
+    session.spec["primary_key"].clear()
+    session.manifest["physical_schema"].clear()
+    session.schema.clear()
+    session.logical_dtypes["columns"].clear()
+    assert tuple(session.spec["primary_key"]) == expected_primary_key
+    assert session.schema == expected_schema
+    assert session.logical_dtypes == expected_logical
+    session.verify()
 
 
 def test_dataset_session_rejects_raw_contract_and_inventory_drift(
@@ -105,45 +62,29 @@ def test_dataset_session_rejects_raw_contract_and_inventory_drift(
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "session_drift")
     frame = make_default_dataset_frame()
-    write_dataset(
-        root,
-        frame,
-        spec=make_processed_dataset_spec("session_drift"),
+    write_dataset(root, frame, spec=make_processed_dataset_spec("session_drift"))
+    raw_session = dataset_reading.open_dataset_session(
+        root, columns=None, time_window=None
     )
-
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    ) as raw_session:
-        spec_path = root / "spec.json"
-        filesystem_write_bytes(spec_path, raw_session.spec_bytes + b" ")
-        with pytest.raises(ValueError, match="dataset_spec_identity_changed"):
-            raw_session.verify()
-        filesystem_write_bytes(spec_path, raw_session.spec_bytes)
-
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    ) as inventory_session:
-        added = root / "data" / "year=2016" / "part-000.parquet"
-        dataset_writing.write_parquet_file(
-            _persisted_table(frame),
-            added,
-        )
-        with pytest.raises(ValueError, match="dataset_inventory_changed"):
-            inventory_session.verify()
-        filesystem_unlink(added)
-
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    ) as removal_session:
-        filesystem_unlink(removal_session.all_paths[0])
-        with pytest.raises(ValueError, match="dataset_inventory_changed"):
-            removal_session.verify()
+    spec_path = root / "spec.json"
+    filesystem_write_bytes(spec_path, raw_session.spec_bytes + b" ")
+    with pytest.raises(ValueError, match="dataset_spec_identity_changed"):
+        raw_session.verify()
+    filesystem_write_bytes(spec_path, raw_session.spec_bytes)
+    inventory_session = dataset_reading.open_dataset_session(
+        root, columns=None, time_window=None
+    )
+    added = root / "data" / "year=2016" / "part-000.parquet"
+    dataset_writing.write_parquet_file(_persisted_table(frame), added)
+    with pytest.raises(ValueError, match="dataset_inventory_changed"):
+        inventory_session.verify()
+    filesystem_unlink(added)
+    removal_session = dataset_reading.open_dataset_session(
+        root, columns=None, time_window=None
+    )
+    filesystem_unlink(removal_session.all_paths[0])
+    with pytest.raises(ValueError, match="dataset_inventory_changed"):
+        removal_session.verify()
 
 
 @pytest.mark.parametrize(
@@ -154,9 +95,7 @@ def test_dataset_session_rejects_raw_contract_and_inventory_drift(
     ),
 )
 def test_dataset_session_rejects_same_bytes_metadata_replacement(
-    tmp_path: Path,
-    relative_path: Path,
-    error: str,
+    tmp_path: Path, relative_path: Path, error: str
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, f"session_{relative_path.name}_drift")
     write_dataset(
@@ -164,54 +103,41 @@ def test_dataset_session_rejects_same_bytes_metadata_replacement(
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec(f"session_{relative_path.name}_drift"),
     )
-
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    ) as session:
-        path = root / relative_path
-        replacement = path.with_name(f"{path.name}.replacement")
-        filesystem_write_bytes(replacement, filesystem_read_bytes(path))
-        filesystem_replace(replacement, path)
-
-        with pytest.raises(ValueError, match=error):
-            session.verify()
+    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
+    path = root / relative_path
+    replacement = path.with_name(f"{path.name}.replacement")
+    filesystem_write_bytes(replacement, filesystem_read_bytes(path))
+    filesystem_replace(replacement, path)
+    with pytest.raises(ValueError, match=error):
+        session.verify()
 
 
-def test_physical_decoder_rechecks_the_same_handle_after_decode(
-    tmp_path: Path,
-) -> None:
+def test_physical_decoder_rechecks_the_same_handle_after_decode(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "handle_drift")
     write_dataset(
         root,
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("handle_drift"),
     )
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    ) as session:
-        path = session.all_paths[0]
+    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
+    path = session.all_paths[0]
 
-        def mutate_after_open(_metadata) -> None:  # noqa: ANN001
-            Path(native_filesystem_path(path)).touch()
+    def mutate_after_open(_metadata) -> None:
+        Path(native_filesystem_path(path)).touch()
 
-        with pytest.raises(ValueError, match="dataset_file_identity_changed"):
-            list(
-                dataset_physical.iter_dataset_part_batches(
-                    path,
-                    expected_identity=session.metadata_for(path).identity,
-                    target_chunk_bytes=1024**2,
-                    metadata_observer=mutate_after_open,
-                )
+    with pytest.raises(ValueError, match="dataset_file_identity_changed"):
+        list(
+            dataset_physical.iter_dataset_part_batches(
+                path,
+                expected_identity=session.metadata_for(path).identity,
+                metadata_observer=mutate_after_open,
+                batch_rows=2048,
             )
+        )
 
 
 def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "writer_receipt")
     frame = make_default_dataset_frame()
@@ -219,37 +145,30 @@ def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
     decoder = dataset_writing.iter_declared_parquet_member_batches
     receipt_checks: list[bool] = []
 
-    def record_decode(path, **kwargs):  # noqa: ANN001
+    def record_decode(path, **kwargs):
         observed_paths.append(Path(path))
         yield from decoder(path, **kwargs)
 
     def validate_receipt(receipt: dataset_writing.DatasetWriteReceipt) -> None:
         receipt.session.verify()
-        receipt.session.close()
         receipt.session.verify()
         receipt_checks.append(
-            filesystem_is_file(receipt.exact_primary_key_index.database_path)
+            receipt.exact_primary_key_index.identity_payload_count(namespace="dataset")
+            == len(frame)
         )
         assert receipt.exact_primary_key_index.add_table(
             pa.Table.from_pandas(frame, preserve_index=False)
         ) == len(frame)
 
     monkeypatch.setattr(
-        dataset_writing,
-        "iter_declared_parquet_member_batches",
-        record_decode,
+        dataset_writing, "iter_declared_parquet_member_batches", record_decode
     )
     dataset_writing.write_dataset(
         root,
-        _bound_first_frames((frame.iloc[:1].copy(), frame.iloc[1:].copy())),
+        (frame.iloc[:1].copy(), frame.iloc[1:].copy()),
         spec=make_processed_dataset_spec("writer_receipt"),
         staged_validator=validate_receipt,
-        resource_policy=capture_test_policy(
-            available_memory_bytes=64 * 1024**2,
-            explicit_cap_bytes=32 * 1024 * 1024,
-        ),
     )
-
     assert receipt_checks == [True]
     assert len(observed_paths) == len(set(observed_paths))
     manifest = json.loads(
@@ -258,132 +177,8 @@ def test_writer_observes_each_closed_part_once_and_passes_live_receipt(
     assert len(observed_paths) == manifest["file_count"]
 
 
-def test_open_dataset_session_owns_and_closes_inventory(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "session_inventory_owner")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("session_inventory_owner"),
-    )
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-    ) as session:
-        scratch = session.inventory.scratch_path
-        assert filesystem_exists(scratch)
-
-    assert not filesystem_exists(scratch)
-
-
-def test_open_dataset_session_admits_metadata_before_decode(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "session_nested_retained")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("session_nested_retained"),
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
-    )
-    metadata_reads = 0
-
-    def reject_metadata_read(*_args: object, **_kwargs: object) -> None:
-        nonlocal metadata_reads
-        metadata_reads += 1
-        raise AssertionError("metadata decode ran before session admission")
-
-    monkeypatch.setattr(
-        dataset_reading,
-        "read_bounded_qrp_json",
-        reject_metadata_read,
-    )
-
-    with runtime_resource_policy_scope(policy):
-        blocking_lease = policy.lease(
-            "test.dataset.session.capacity",
-            policy.planning_headroom_bytes,
-        )
-        try:
-            with pytest.raises(
-                MemoryError,
-                match="runtime_memory_budget_exceeded",
-            ):
-                with dataset_reading.open_dataset_session(
-                    root,
-                    columns=None,
-                    time_window=None,
-                    resource_policy=policy,
-                ):
-                    pass
-        finally:
-            blocking_lease.close()
-    assert metadata_reads == 0
-
-
-def test_session_from_inventory_admits_lease_before_metadata_decode(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "writer_session_overlap")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("writer_session_overlap"),
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
-    )
-
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-        resource_policy=policy,
-    ) as source:
-        metadata_reads = 0
-
-        def reject_metadata_read(*_args: object, **_kwargs: object) -> None:
-            nonlocal metadata_reads
-            metadata_reads += 1
-            raise AssertionError("metadata decode ran before session admission")
-
-        with monkeypatch.context() as admission_patch:
-            admission_patch.setattr(
-                dataset_reading,
-                "read_bounded_qrp_json",
-                reject_metadata_read,
-            )
-            blocking_lease = policy.lease(
-                "test.dataset.session.capacity",
-                policy.planning_headroom_bytes,
-            )
-            try:
-                with pytest.raises(
-                    MemoryError,
-                    match="runtime_memory_budget_exceeded",
-                ):
-                    dataset_reading.dataset_session_from_inventory(
-                        root,
-                        inventory=source.inventory,
-                        columns=None,
-                        time_window=None,
-                        resource_policy=policy,
-                    )
-            finally:
-                blocking_lease.close()
-
-        assert metadata_reads == 0
-
-
 def test_open_dataset_session_preserves_missing_manifest_preflight(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "missing_manifest_preflight")
     write_dataset(
@@ -394,45 +189,28 @@ def test_open_dataset_session_preserves_missing_manifest_preflight(
     filesystem_unlink(root / "_manifest" / "manifest.json")
     metadata_reads = 0
 
-    def reject_metadata_read(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+    def reject_metadata_read(*_args, **_kwargs):
         nonlocal metadata_reads
         metadata_reads += 1
         raise AssertionError("metadata read ran for missing manifest")
 
-    monkeypatch.setattr(
-        dataset_reading,
-        "read_bounded_qrp_json",
-        reject_metadata_read,
-    )
-
+    monkeypatch.setattr(dataset_reading, "read_bounded_qrp_json", reject_metadata_read)
     with pytest.raises(ValueError, match="dataset_manifest_missing"):
-        with dataset_reading.open_dataset_session(
-            root,
-            columns=None,
-            time_window=None,
-        ):
-            pass
-
+        dataset_reading.open_dataset_session(root, columns=None, time_window=None)
+        pass
     assert metadata_reads == 0
 
 
 @pytest.mark.parametrize("entrypoint", ("owned", "borrowed"))
 @pytest.mark.parametrize("failure", ("missing", "not_directory", "io", "permission"))
 def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    entrypoint: str,
-    failure: str,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, entrypoint: str, failure: str
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, f"metadata_stat_{entrypoint}")
     write_dataset(
         root,
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec(f"metadata_stat_{entrypoint}"),
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024**2,
-        explicit_cap_bytes=4 * 1024 * 1024,
     )
     metadata_reads = 0
     primary = {
@@ -442,164 +220,76 @@ def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
         "permission": PermissionError("metadata_permission"),
     }[failure]
 
-    def fail_owner_preflight_identity(_path: Path):  # noqa: ANN202
+    def fail_owner_preflight_identity(_path: Path):
         raise primary
 
-    def reject_metadata_read(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
+    def reject_metadata_read(*_args, **_kwargs):
         nonlocal metadata_reads
         metadata_reads += 1
         raise AssertionError("metadata read ran after stat failure")
 
-    with dataset_reading.open_dataset_session(
-        root,
-        columns=None,
-        time_window=None,
-        resource_policy=policy,
-    ) as source:
-        with monkeypatch.context() as admission_patch:
-            admission_patch.setattr(
-                dataset_reading,
-                "dataset_file_identity",
-                fail_owner_preflight_identity,
-            )
-            admission_patch.setattr(
-                dataset_reading,
-                "read_bounded_qrp_json",
-                reject_metadata_read,
-            )
-            fatal = failure in {"io", "permission"}
-            with pytest.raises(
-                type(primary) if fatal else ValueError,
-                match=None if fatal else "dataset_metadata_file_invalid",
-            ) as caught:
-                if entrypoint == "owned":
-                    with dataset_reading.open_dataset_session(
-                        root,
-                        columns=None,
-                        time_window=None,
-                        resource_policy=policy,
-                    ):
-                        pass
-                else:
-                    dataset_reading.dataset_session_from_inventory(
-                        root,
-                        inventory=source.inventory,
-                        columns=None,
-                        time_window=None,
-                        resource_policy=policy,
-                    )
-
+    source = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
+    with monkeypatch.context() as identity_patch:
+        identity_patch.setattr(
+            dataset_reading, "dataset_file_identity", fail_owner_preflight_identity
+        )
+        identity_patch.setattr(
+            dataset_reading, "read_bounded_qrp_json", reject_metadata_read
+        )
+        fatal = failure in {"io", "permission"}
+        with pytest.raises(
+            type(primary) if fatal else ValueError,
+            match=None if fatal else "dataset_metadata_file_invalid",
+        ) as caught:
+            if entrypoint == "owned":
+                dataset_reading.open_dataset_session(
+                    root, columns=None, time_window=None
+                )
+                pass
+            else:
+                dataset_reading.dataset_session_from_inventory(
+                    root, inventory=source.inventory, columns=None, time_window=None
+                )
     assert metadata_reads == 0
     if fatal:
         assert caught.value is primary
-    assert policy.used_memory_bytes == 0
 
 
-def test_writer_bounds_raw_pandas_arrow_and_persisted_conversion(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "bounded_writer")
-    row_count = 100
-    frame = pd.DataFrame(
-        {
-            "market_id": ["a_share"] * row_count,
-            "asset_id": [f"asset-{index:03d}" for index in range(row_count)],
-            "timestamp": pd.date_range("2026-01-01", periods=row_count),
-            "value": ["x" * 20_000 for _ in range(row_count)],
-        }
-    )
-    input_bytes = pandas_frame_payload_bytes(frame)
-    working_set_cap = (
-        dataset_writing._DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES
-        + dataset_physical._PARQUET_NATIVE_FIXED_WORKSPACE_BYTES
-        + 2 * input_bytes
-    )
-    written_table_bytes: list[int] = []
-    converted_frame_bytes: list[int] = []
-    original_write = dataset_writing.write_parquet_file
-    original_decode = dataset_writing.iter_declared_parquet_member_batches
-
-    def record_write(table: pa.Table, path: Path) -> Path:
-        written_table_bytes.append(table.nbytes)
-        return original_write(table, path)
-
-    def record_decode(*args, **kwargs):
-        for current in original_decode(*args, **kwargs):
-            converted_frame_bytes.append(pandas_frame_payload_bytes(current))
-            yield current
-
-    monkeypatch.setattr(dataset_writing, "write_parquet_file", record_write)
-    monkeypatch.setattr(
-        dataset_writing,
-        "iter_declared_parquet_member_batches",
-        record_decode,
-    )
-    result = dataset_writing.write_dataset(
-        root,
-        _bound_first_frames(
-            (frame,), bound=pandas_frame_payload_bytes(frame) + 128 * 1024
-        ),
-        spec=make_processed_dataset_spec("bounded_writer"),
-        resource_policy=capture_test_policy(
-            available_memory_bytes=16 * 1024**2,
-            explicit_cap_bytes=working_set_cap,
-        ),
-    )
-
-    assert result.root == root
-    assert result.data_root == root / "data"
-    assert result.row_count == row_count
-    assert len(written_table_bytes) > 1
-    assert len(converted_frame_bytes) > 1
-    assert max(written_table_bytes) < input_bytes
-    assert max(converted_frame_bytes) < input_bytes
-
-
-def test_private_writer_returns_final_inspection_and_public_writer_returns_none(
+def test_dataset_writer_returns_final_inspection(
     tmp_path: Path,
 ) -> None:
     private_root = make_dataset_artifact_root(tmp_path, "private_return")
     public_root = make_dataset_artifact_root(tmp_path, "public_return")
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024**2,
-        explicit_cap_bytes=32 * 1024 * 1024,
-    )
     private_result = dataset_writing.write_dataset(
         private_root,
-        _bound_first_frames((make_default_dataset_frame(),)),
+        (make_default_dataset_frame(),),
         spec=make_processed_dataset_spec("private_return"),
-        resource_policy=policy,
     )
-
     assert private_result.root == private_root
     assert private_result.data_root == private_root / "data"
     assert private_result.manifest["row_count"] == private_result.row_count
-    assert (
-        write_dataset(
-            public_root,
-            make_default_dataset_frame(),
-            spec=make_processed_dataset_spec("public_return"),
-        )
-        is None
+    public_result = write_dataset(
+        public_root,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("public_return"),
     )
+    assert public_result.root == public_root
+    assert public_result.row_count == private_result.row_count
 
 
 def test_writer_manifest_uses_persisted_bytes_not_prewrite_summary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "persisted_truth")
     original = dataset_writing.write_parquet_file
 
-    def write_infinite(table, path):  # noqa: ANN001
+    def write_infinite(table, path):
         position = table.schema.get_field_index("value")
         persisted = table.set_column(
             position,
             table.schema.field(position),
             pa.array(
-                [float("inf")] * table.num_rows,
-                type=table.schema.field(position).type,
+                [float("inf")] * table.num_rows, type=table.schema.field(position).type
             ),
         )
         return original(persisted, path)
@@ -619,10 +309,7 @@ def test_exact_primary_key_index_supports_nested_arrow_key_identity(
     table = pa.table(
         {
             "key": pa.array(
-                [
-                    {"items": [1, 2], "label": "a"},
-                    {"items": [2, 1], "label": "a"},
-                ],
+                [{"items": [1, 2], "label": "a"}, {"items": [2, 1], "label": "a"}],
                 type=pa.struct(
                     [
                         pa.field("items", pa.list_(pa.int64())),
@@ -632,11 +319,9 @@ def test_exact_primary_key_index_supports_nested_arrow_key_identity(
             )
         }
     )
-    with dataset_writing.ExactPrimaryKeyIndex(
-        primary_key=("key",),
-    ) as index:
-        assert index.add_table(table) == 0
-        assert index.add_table(table) == 2
+    index = dataset_writing.ExactPrimaryKeyIndex(primary_key=("key",))
+    assert index.add_table(table) == 0
+    assert index.add_table(table) == 2
 
 
 def test_dataset_global_nullable_integer_plan_is_chunk_order_independent(
@@ -711,8 +396,7 @@ def test_all_empty_logical_dtype_plan_is_chunk_order_independent(
 
 @pytest.mark.parametrize("reverse", (False, True))
 def test_writer_rejects_incompatible_physical_width_in_both_chunk_orders(
-    tmp_path: Path,
-    reverse: bool,
+    tmp_path: Path, reverse: bool
 ) -> None:
     base = make_default_dataset_frame()
     narrow = base.iloc[:1].copy()
@@ -723,21 +407,16 @@ def test_writer_rejects_incompatible_physical_width_in_both_chunk_orders(
     root = make_dataset_artifact_root(tmp_path, f"physical_width_{reverse}")
     with pytest.raises(ValueError, match="dataset_schema_mismatch"):
         write_dataset(
-            root,
-            chunks,
-            spec=make_processed_dataset_spec(f"physical_width_{reverse}"),
+            root, chunks, spec=make_processed_dataset_spec(f"physical_width_{reverse}")
         )
 
 
 def test_writer_rejects_malformed_persisted_logical_dtype_metadata(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "malformed_logical_dtype")
     monkeypatch.setattr(
-        dataset_writing,
-        "logical_dtype_metadata_bytes",
-        lambda _payload: b"{}",
+        dataset_writing, "logical_dtype_metadata_bytes", lambda _payload: b"{}"
     )
     with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
         write_dataset(
@@ -748,38 +427,30 @@ def test_writer_rejects_malformed_persisted_logical_dtype_metadata(
 
 
 def test_writer_rejects_persisted_category_outside_declared_domain(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "forged_category_domain")
     frame = make_default_dataset_frame()
     frame["asset_id"] = pd.Categorical(frame["asset_id"])
     original = dataset_writing.write_parquet_file
 
-    def write_extra_domain(current, path):  # noqa: ANN001
+    def write_extra_domain(current, path):
         persisted = current.to_pandas(use_threads=False)
         persisted["asset_id"] = persisted["asset_id"].cat.add_categories(
             ["FORGED_UNUSED_CATEGORY"]
         )
         persisted.loc[persisted.index[0], "asset_id"] = "FORGED_UNUSED_CATEGORY"
         forged = pa.Table.from_pandas(persisted, preserve_index=False)
-        return original(
-            forged.replace_schema_metadata(current.schema.metadata),
-            path,
-        )
+        return original(forged.replace_schema_metadata(current.schema.metadata), path)
 
     monkeypatch.setattr(dataset_writing, "write_parquet_file", write_extra_domain)
     with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):
         write_dataset(
-            root,
-            frame,
-            spec=make_processed_dataset_spec("forged_category_domain"),
+            root, frame, spec=make_processed_dataset_spec("forged_category_domain")
         )
 
 
-def test_full_inspection_rejects_forged_persisted_date_summary(
-    tmp_path: Path,
-) -> None:
+def test_full_inspection_rejects_forged_persisted_date_summary(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "forged_dates")
     write_dataset(
         root,
@@ -795,8 +466,7 @@ def test_full_inspection_rejects_forged_persisted_date_summary(
 
 
 def test_writer_receipt_reuses_observed_metadata_without_reopening_parts(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "receipt_no_reopen")
 
@@ -839,414 +509,3 @@ def test_persisted_identity_rejects_same_statistics_member_replacement(
     with pytest.raises(ValueError, match="dataset_content_identity_changed"):
         operation(root)
     assert filesystem_read_bytes(manifest_path) == manifest
-
-
-@pytest.mark.parametrize(
-    ("available", "cap", "error_type", "error_code"),
-    (
-        (512 * 1024**2, 4 * 1024**2, MemoryError, "runtime_memory_budget_exceeded"),
-        (
-            2 * 1024**2,
-            None,
-            ValueError,
-            "dataset_working_set_exceeds_task_memory_budget",
-        ),
-        (
-            2 * 1024**2,
-            64 * 1024**2,
-            MemoryError,
-            "runtime_memory_budget_exceeded",
-        ),
-    ),
-)
-def test_dataset_session_admits_legal_decoded_metadata_before_read(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    available: int,
-    cap: int | None,
-    error_type: type[Exception],
-    error_code: str,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "decoded_metadata_admission")
-    write_dataset(
-        root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("decoded_metadata_admission"),
-        instance_metadata={
-            "producer_diagnostics": {
-                "counts": [{"count": 100000 + index} for index in range(20000)]
-            }
-        },
-    )
-    spec_path = root / "spec.json"
-    manifest_path = root / "_manifest" / "manifest.json"
-    before = (filesystem_read_bytes(spec_path), filesystem_read_bytes(manifest_path))
-    assert len(before[0]) + len(before[1]) < 1024**2
-    metadata_reads = 0
-
-    def reject_metadata_read(*_args: object, **_kwargs: object) -> None:
-        nonlocal metadata_reads
-        metadata_reads += 1
-        raise AssertionError("decoded metadata allocated before admission")
-
-    low_policy = capture_test_policy(
-        available_memory_bytes=available,
-        explicit_cap_bytes=cap,
-    )
-    with monkeypatch.context() as admission_patch:
-        admission_patch.setattr(
-            dataset_reading, "read_bounded_qrp_json", reject_metadata_read
-        )
-        with pytest.raises(error_type, match=error_code):
-            with dataset_reading.open_dataset_session(
-                root, columns=None, time_window=None, resource_policy=low_policy
-            ):
-                pass
-    assert metadata_reads == 0
-    assert low_policy.used_memory_bytes == 0
-
-    policy = capture_test_policy(
-        available_memory_bytes=512 * 1024**2,
-        explicit_cap_bytes=None if cap is None else 256 * 1024**2,
-    )
-    with dataset_reading.open_dataset_session(
-        root, columns=None, time_window=None, resource_policy=policy
-    ) as source:
-        blocking_lease = policy.lease(
-            "test.dataset.receipt.capacity",
-            policy.working_set_headroom_bytes - 4 * 1024**2,
-        )
-        try:
-            with monkeypatch.context() as admission_patch:
-                admission_patch.setattr(
-                    dataset_reading, "read_bounded_qrp_json", reject_metadata_read
-                )
-                with pytest.raises(
-                    ValueError if cap is None else MemoryError,
-                    match=(
-                        "dataset_working_set_exceeds_task_memory_budget"
-                        if cap is None
-                        else "runtime_memory_budget_exceeded"
-                    ),
-                ):
-                    dataset_reading.dataset_session_from_inventory(
-                        root,
-                        inventory=source.inventory,
-                        columns=None,
-                        time_window=None,
-                        resource_policy=policy,
-                    )
-        finally:
-            blocking_lease.close()
-        source.verify()
-    assert metadata_reads == 0
-    assert policy.used_memory_bytes == 0
-    assert (filesystem_read_bytes(spec_path), filesystem_read_bytes(manifest_path)) == (
-        before
-    )
-
-
-def test_writer_and_inspection_own_decoded_metadata_until_result_release(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "decoded_metadata_results")
-    counts = [{"count": 100000 + index} for index in range(20000)]
-    minimum_dict_bytes = sum(sys.getsizeof(item) for item in counts)
-    policy = capture_test_policy(
-        available_memory_bytes=512 * 1024**2,
-        explicit_cap_bytes=256 * 1024**2,
-    )
-    inspection_factory = dataset_writing.inspection_from_persisted_session
-    writer_result_checked = False
-
-    def observe_writer_result(context, *, published_root):  # noqa: ANN001
-        nonlocal writer_result_checked
-        result = inspection_factory(context, published_root=published_root)
-        result_lease = next(
-            lease
-            for lease in policy._leases
-            if lease.owner == "storage.dataset.write.result"
-        )
-        assert result.manifest["producer_diagnostics"]["counts"] == counts
-        assert result_lease.reserved_bytes >= minimum_dict_bytes
-        writer_result_checked = True
-        return result
-
-    with runtime_resource_policy_scope(policy):
-        with monkeypatch.context() as observation_patch:
-            observation_patch.setattr(
-                dataset_writing,
-                "inspection_from_persisted_session",
-                observe_writer_result,
-            )
-            dataset_writing.write_dataset(
-                root,
-                make_default_dataset_frame(),
-                spec=make_processed_dataset_spec("decoded_metadata_results"),
-                instance_metadata={"producer_diagnostics": {"counts": counts}},
-                resource_policy=policy,
-                borrowed_input=True,
-            )
-        assert writer_result_checked
-        assert policy.used_memory_bytes == 0
-        with dataset_reading.open_dataset_session(
-            root, columns=None, time_window=None, resource_policy=policy
-        ) as session:
-            session_retained = policy.used_memory_bytes
-            owned = dataset_inspection._inspect_dataset_session_owned(
-                session, resource_policy=policy
-            )
-            try:
-                assert owned.value.row_count == 3
-                assert owned.value.manifest["producer_diagnostics"]["counts"] == counts
-                assert owned.lease.reserved_bytes >= minimum_dict_bytes
-                assert policy.used_memory_bytes == (
-                    session_retained + owned.lease.reserved_bytes
-                )
-                owned.value.manifest["producer_diagnostics"]["counts"].clear()
-                assert session.manifest["producer_diagnostics"]["counts"] == counts
-            finally:
-                owned.release(owner="test.dataset.inspection.result")
-            assert policy.used_memory_bytes == session_retained
-            session.verify()
-        assert policy.used_memory_bytes == 0
-
-
-@pytest.mark.parametrize(
-    ("available", "cap", "error_type", "error_code"),
-    (
-        (512 * 1024**2, 8 * 1024**2, MemoryError, "runtime_memory_budget_exceeded"),
-        (
-            8 * 1024**2,
-            None,
-            ValueError,
-            "dataset_working_set_exceeds_task_memory_budget",
-        ),
-        (
-            8 * 1024**2,
-            64 * 1024**2,
-            ValueError,
-            "dataset_working_set_exceeds_task_memory_budget",
-        ),
-    ),
-)
-def test_writer_rejects_unadmitted_metadata_before_snapshot_and_publication(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    available: int,
-    cap: int | None,
-    error_type: type[Exception],
-    error_code: str,
-) -> None:
-    old_root = make_dataset_artifact_root(tmp_path / "old", "writer_metadata")
-    write_dataset(
-        old_root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("writer_metadata"),
-    )
-    old_bytes = {
-        path.relative_to(old_root): filesystem_read_bytes(path)
-        for path in filesystem_glob(old_root, "**/*")
-        if filesystem_is_file(path)
-    }
-    candidate = make_dataset_artifact_root(tmp_path / "candidate", "writer_metadata")
-    counts = [{"count": 100000 + index} for index in range(20000)]
-    diagnostics = {"counts": counts}
-    snapshot_returns = 0
-    merge_calls = 0
-    original = dataset_writing.merge_dataset_instance_metadata
-
-    def observe_merge(payload, instance_metadata, **kwargs):  # noqa: ANN001
-        nonlocal snapshot_returns, merge_calls
-        merge_calls += 1
-        result = original(payload, instance_metadata, **kwargs)
-        snapshot_returns += 1
-        return result
-
-    policy = capture_test_policy(
-        available_memory_bytes=available,
-        explicit_cap_bytes=cap,
-    )
-    monkeypatch.setattr(
-        dataset_writing, "merge_dataset_instance_metadata", observe_merge
-    )
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(error_type, match=error_code):
-            dataset_writing.write_dataset(
-                candidate,
-                make_default_dataset_frame(),
-                spec=make_processed_dataset_spec("writer_metadata"),
-                instance_metadata={"producer_diagnostics": diagnostics},
-                resource_policy=policy,
-                borrowed_input=True,
-            )
-        assert policy.used_memory_bytes == 0
-    assert merge_calls == 1 and snapshot_returns == 0
-    assert not filesystem_exists(candidate)
-    assert counts == [{"count": 100000 + index} for index in range(20000)]
-    assert {
-        path.relative_to(old_root): filesystem_read_bytes(path)
-        for path in filesystem_glob(old_root, "**/*")
-        if filesystem_is_file(path)
-    } == old_bytes
-
-
-@pytest.mark.parametrize("cap", (None, 128 * 1024**2))
-def test_writer_metadata_failure_releases_views_while_exception_is_retained(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    cap: int | None,
-) -> None:
-    old_root = make_dataset_artifact_root(tmp_path / "old", "writer_metadata_failure")
-    write_dataset(
-        old_root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("writer_metadata_failure"),
-    )
-    old_bytes = {
-        path.relative_to(old_root): filesystem_read_bytes(path)
-        for path in filesystem_glob(old_root, "**/*")
-        if filesystem_is_file(path)
-    }
-    root = make_dataset_artifact_root(tmp_path / "candidate", "writer_metadata_failure")
-    metadata = {
-        "producer_diagnostics": {"counts": [{"count": index} for index in range(2000)]}
-    }
-    failure = RuntimeError("manifest_boundary_primary")
-    original = dataset_writing.write_internal_artifact_manifest
-    captured_manifest_id: int | None = None
-    observed_reserve = 0
-    policy = capture_test_policy(
-        available_memory_bytes=512 * 1024**2,
-        explicit_cap_bytes=cap,
-    )
-
-    def fail_manifest(path, payload, **kwargs):  # noqa: ANN001
-        nonlocal captured_manifest_id, observed_reserve
-        if path.name == "manifest.json":
-            captured_manifest_id = id(payload)
-            observed_reserve = policy.used_memory_bytes
-            raise failure
-        return original(path, payload, **kwargs)
-
-    monkeypatch.setattr(
-        dataset_writing, "write_internal_artifact_manifest", fail_manifest
-    )
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(RuntimeError, match="manifest_boundary_primary") as caught:
-            dataset_writing.write_dataset(
-                root,
-                make_default_dataset_frame(),
-                spec=make_processed_dataset_spec("writer_metadata_failure"),
-                instance_metadata=metadata,
-                resource_policy=policy,
-                borrowed_input=True,
-            )
-        assert caught.value is failure
-        assert observed_reserve > 2 * 1024**2
-        current = failure.__traceback__
-        while current is not None:
-            locals_ = current.tb_frame.f_locals
-            if current.tb_frame.f_code.co_name == "_writer":
-                assert all(
-                    locals_.get(name) is None
-                    for name in ("accumulator", "spec_payload", "payload", "manifest")
-                )
-            if current.tb_frame.f_code.co_name == "fail_manifest":
-                assert not locals_
-            assert all(id(value) != captured_manifest_id for value in locals_.values())
-            current = current.tb_next
-        assert policy.used_memory_bytes == 0
-        with policy.lease("test.after.metadata.failure", 64 * 1024**2):
-            assert policy.used_memory_bytes == 64 * 1024**2
-    assert not filesystem_exists(root)
-    assert len(metadata["producer_diagnostics"]["counts"]) == 2000
-    assert {
-        path.relative_to(old_root): filesystem_read_bytes(path)
-        for path in filesystem_glob(old_root, "**/*")
-        if filesystem_is_file(path)
-    } == old_bytes
-
-
-@pytest.mark.parametrize("entry", ("inspection", "writer_receipt"))
-def test_dataset_result_copy_admits_default_available_capacity(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    entry: str,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path / "old", "result_copy_admission")
-    spec = make_processed_dataset_spec("result_copy_admission")
-    frame = make_default_dataset_frame()
-    write_dataset(root, frame, spec=spec)
-    before = {
-        path.relative_to(root): filesystem_read_bytes(path)
-        for path in filesystem_glob(root, "**/*")
-        if filesystem_is_file(path)
-    }
-    policy = capture_test_policy(available_memory_bytes=256 * 1024**2)
-    result_calls = 0
-    pressure = None
-
-    def reject_result(*_args, **_kwargs):  # noqa: ANN002, ANN003, ANN202
-        nonlocal result_calls
-        result_calls += 1
-        raise AssertionError("result allocated before admission")
-
-    def retain_other_work(_receipt=None):  # noqa: ANN001, ANN202
-        nonlocal pressure
-        pressure = policy.lease(
-            "test.dataset.result.other_work", policy.working_set_headroom_bytes - 1
-        )
-
-    candidate = make_dataset_artifact_root(
-        tmp_path / "candidate", "result_copy_admission"
-    )
-    with runtime_resource_policy_scope(policy):
-        if entry == "inspection":
-            with dataset_reading.open_dataset_session(
-                root, columns=None, time_window=None, resource_policy=policy
-            ) as session:
-                retain_other_work()
-                monkeypatch.setattr(
-                    dataset_inspection, "_inspection_runtime_metadata", reject_result
-                )
-                try:
-                    with pytest.raises(
-                        ValueError,
-                        match="dataset_working_set_exceeds_task_memory_budget",
-                    ):
-                        dataset_inspection._inspect_dataset_session_owned(
-                            session, resource_policy=policy
-                        )
-                finally:
-                    pressure.close()
-                session.verify()
-        else:
-            monkeypatch.setattr(
-                dataset_writing, "inspection_from_persisted_session", reject_result
-            )
-            try:
-                with pytest.raises(
-                    ValueError,
-                    match="dataset_working_set_exceeds_task_memory_budget",
-                ):
-                    dataset_writing.write_dataset(
-                        candidate,
-                        frame,
-                        spec=spec,
-                        staged_validator=retain_other_work,
-                        resource_policy=policy,
-                        borrowed_input=True,
-                    )
-            finally:
-                if pressure is not None:
-                    pressure.close()
-        assert policy.used_memory_bytes == 0
-    assert result_calls == 0
-    assert not filesystem_exists(candidate)
-    assert {
-        path.relative_to(root): filesystem_read_bytes(path)
-        for path in filesystem_glob(root, "**/*")
-        if filesystem_is_file(path)
-    } == before

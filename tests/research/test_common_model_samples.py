@@ -67,8 +67,6 @@ def test_single_selected_model_has_no_invented_comparison():
 
 
 def test_crypto_comparison_intersects_exact_keys_without_mutating_full_outputs():
-    from contextlib import contextmanager
-
     from quant_research_platform.research.predictions.alignment import (
         _iter_common_prediction_chunks,
     )
@@ -86,11 +84,10 @@ def test_crypto_comparison_intersects_exact_keys_without_mutating_full_outputs()
         def __init__(self, values):
             self.values = dict(values)
 
-        @contextmanager
         def values_for_frame(self, frame, *, mark_matched):
             assert mark_matched is False
             keys = list(zip(frame.asset_id, frame.timestamp, strict=True))
-            yield (
+            return (
                 np.array([self.values.get(key, np.nan) for key in keys]),
                 np.array([key in self.values for key in keys]),
             )
@@ -98,7 +95,7 @@ def test_crypto_comparison_intersects_exact_keys_without_mutating_full_outputs()
     keys = list(zip(frame.asset_id, frame.timestamp, strict=True))
     left = Lookup(dict(zip(keys, [1.0, 2.0, np.nan, 4.0], strict=True)))
     right = Lookup({keys[1]: 2.5, keys[2]: 3.5, keys[3]: 4.5})
-    before_left, before_right = dict(left.values), dict(right.values)
+    before_left, before_right = (dict(left.values), dict(right.values))
     lookups = {"reference": left, "candidate": right}
 
     def result(chunks):

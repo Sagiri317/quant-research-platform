@@ -33,95 +33,6 @@ FORBIDDEN_PUBLIC_MARKERS = (
 )
 
 
-@pytest.mark.parametrize("boundary", ["soft", "captured", "explicit"])
-def test_curve_output_growth_is_admitted_before_retention(
-    tmp_path, monkeypatch, boundary
-):
-    from types import SimpleNamespace
-
-    from quant_research_platform.contracts.targets import ProducerKind, TargetStatus
-    from quant_research_platform.interfaces import queries
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.runtime_resources import capture_test_policy
-
-    policy = capture_test_policy(
-        available_memory_bytes=(256 if boundary == "captured" else 400) * 1024,
-        explicit_cap_bytes=256 * 1024 if boundary == "explicit" else None,
-    )
-    target = SimpleNamespace(
-        target_id="ledger",
-        producer_kind=ProducerKind.PORTFOLIO,
-        status=TargetStatus.BUILT,
-        instance_identity="b" * 64,
-    )
-    record = SimpleNamespace(target_results=(target,), payload=lambda: {})
-    pulled, closed, observed_bytes = [], [], []
-
-    def chunks():
-        try:
-            for sequence in range(100):
-                pulled.append(sequence)
-                observed_bytes.append(policy.used_memory_bytes)
-                yield SimpleNamespace(
-                    sequence=sequence,
-                    valuations=tuple(
-                        SimpleNamespace(
-                            phase=phase,
-                            timestamp_ns=sequence * 10 + offset,
-                            value=100.0,
-                        )
-                        for offset, phase in enumerate(("before", "after", "end"))
-                    ),
-                    diagnostics=(),
-                )
-        finally:
-            closed.append(True)
-
-    artifact = SimpleNamespace(
-        iter_chunks=chunks,
-        capital=SimpleNamespace(
-            candidate_id="synthetic",
-            valuation_currency="USD",
-            initial_capital=100.0,
-        ),
-    )
-    monkeypatch.setattr(
-        queries.report_artifact,
-        "read_research_run_record",
-        lambda *args, **kwargs: record,
-    )
-    monkeypatch.setattr(
-        queries.report_artifact,
-        "read_validated_reference",
-        lambda *args, **kwargs: (tmp_path, {}),
-    )
-    monkeypatch.setattr(
-        queries, "read_portfolio_ledger_artifact", lambda *args, **kwargs: artifact
-    )
-    with runtime_resource_policy_scope(policy):
-        kwargs = dict(
-            profile=SimpleNamespace(profile_id="synthetic", market_id="a_share"),
-            layout=StorageLayout(tmp_path),
-            run_id="run_" + "a" * 32,
-            target_id="ledger",
-        )
-        if boundary == "soft":
-            result = queries.portfolio_curve(**kwargs)
-            assert (
-                result["source_point_count"] == result["displayed_point_count"] == 300
-            )
-            assert max(observed_bytes) > policy.memory_budget_bytes
-        else:
-            with pytest.raises(
-                ValueError, match="portfolio_curve_exceeds_task_memory_budget"
-            ):
-                queries.portfolio_curve(**kwargs)
-            assert 0 < len(pulled) < 100
-        assert closed == [True]
-        assert policy.used_memory_bytes == 0
-
-
 def test_api_routes_are_current_and_exact() -> None:
     api = create_app()
     routes = {
@@ -436,7 +347,7 @@ async def test_catalog_queries_support_both_existing_profiles(
 
 @pytest.mark.anyio
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
-async def test_overlapping_published_queries_reject_busy_and_recover(
+async def test_overlapping_published_queries_complete_independently(
     anyio_backend, tmp_path, monkeypatch
 ):
     from quant_research_platform.artifacts import research as artifact
@@ -449,7 +360,6 @@ async def test_overlapping_published_queries_reject_busy_and_recover(
         TargetStatus,
         unmeasured_operation_evidence,
     )
-    from quant_research_platform.runtime import resources
     from quant_research_platform.storage.layout import StorageLayout
 
     layout = StorageLayout(project_root=tmp_path)
@@ -480,19 +390,15 @@ async def test_overlapping_published_queries_reject_busy_and_recover(
     )
     artifact.write_research_run_record(layout.research_run_path(record.run_id), record)
     entered, release = threading.Event(), threading.Event()
-    roots, worker_threads = [], []
+    worker_threads = []
     original_read = artifact.read_research_run_record
 
     def paused_read(*args, **kwargs):
-        root = resources.current_runtime_resource_policy()
-        assert root is not None
-        roots.append(root)
         worker_threads.append(threading.get_ident())
-        with root.lease("test.query_read", 1):
-            if len(roots) == 1:
-                entered.set()
-                assert release.wait(timeout=5)
-            return original_read(*args, **kwargs)
+        if len(worker_threads) == 1:
+            entered.set()
+            assert release.wait(timeout=5)
+        return original_read(*args, **kwargs)
 
     monkeypatch.setattr(artifact, "read_research_run_record", paused_read)
     async with AsyncClient(
@@ -505,12 +411,8 @@ async def test_overlapping_published_queries_reject_busy_and_recover(
         first_request = asyncio.create_task(client.get(url))
         try:
             assert await asyncio.to_thread(entered.wait, 5)
-            rejected = await client.get(url)
-            assert rejected.status_code == 503
-            assert (
-                rejected.json()["error"]["error_code"] == "runtime_data_scale_lock_busy"
-            )
-            assert len(roots) == 1 and roots[0].used_memory_bytes == 1
+            concurrent = await asyncio.wait_for(client.get(url), timeout=5)
+            assert concurrent.status_code == 200
         finally:
             release.set()
             first = await asyncio.wait_for(first_request, timeout=5)
@@ -527,11 +429,8 @@ async def test_overlapping_published_queries_reject_busy_and_recover(
                 "reason": "missing_prediction",
             }
         )
-        assert len(roots) == 2 and roots[0] is not roots[1]
-        assert all(
-            root.state == "CLOSED" and root.used_memory_bytes == 0 for root in roots
-        )
-        assert not resources._PROCESS_POISONED
+        assert len(worker_threads) == 3
+        assert concurrent.json() == first.json()
 
         def fail_read(*_args, **_kwargs):
             raise RuntimeError("private_runtime_failure")

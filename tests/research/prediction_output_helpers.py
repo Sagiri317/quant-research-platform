@@ -18,11 +18,6 @@ from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.research.predictions.outputs import (
     build_prediction_result_from_frames,
 )
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    current_runtime_resource_policy,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.storage.layout import StorageLayout
 
 
@@ -34,26 +29,23 @@ def write_prediction_output_and_read(
     *,
     prediction_model: object,
     model_metadata: dict[str, object],
-    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> tuple[pd.DataFrame, Path, dict[str, object]]:
     layout = StorageLayout(project_root=project_root)
-    with runtime_resource_policy_scope(resource_policy) as policy:
-        result = build_prediction_result_from_frames(
-            frames,
-            spec,
-            input_columns,
-            prediction_model=prediction_model,
-            model_metadata=model_metadata,
-            resource_policy=policy,
-        )
-        output_bundle = write_prediction_result(layout, result)
+    result = build_prediction_result_from_frames(
+        frames,
+        spec,
+        input_columns,
+        prediction_model=prediction_model,
+        model_metadata=model_metadata,
+    )
+    output_bundle = write_prediction_result(layout, result)
     manifest = json.loads((output_bundle / "manifest.json").read_text(encoding="utf-8"))
     prediction = pd.read_parquet(output_bundle / "prediction.parquet")
     prediction.attrs["model_metadata"] = manifest["metadata"]["model_metadata"]
     prediction.attrs["prediction_metadata"] = manifest["metadata"][
         "prediction_metadata"
     ]
-    return prediction, output_bundle, manifest
+    return (prediction, output_bundle, manifest)
 
 
 def write_prediction_result(layout: StorageLayout, result) -> Path:
@@ -73,13 +65,11 @@ def write_prediction_result(layout: StorageLayout, result) -> Path:
             output_chunks=result.output_chunks,
             model_metadata=result.model_metadata,
             prediction_metadata_factory=result.prediction_metadata_factory,
-            resource_policy=current_runtime_resource_policy(),
         )
 
 
 def synthetic_prediction_model_metadata(
-    spec: PredictionSpec,
-    input_columns: tuple[str, ...],
+    spec: PredictionSpec, input_columns: tuple[str, ...]
 ) -> dict[str, object]:
     return {
         "model_algorithm": "linear_regression",

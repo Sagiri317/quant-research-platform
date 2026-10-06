@@ -3,26 +3,22 @@
 from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import replace
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
 
 from quant_research_platform.contracts.json_codec import (
-    bounded_rendered_qrp_json_object_size,
     canonical_json_hash,
     render_qrp_json_object,
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    runtime_resource_policy_scope,
-)
+from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.atomic import atomic_write_chunks
 from quant_research_platform.storage.datasets.inspection import (
-    _inspect_dataset_session_owned,
+    inspect_dataset_session,
 )
 from quant_research_platform.storage.datasets.paths import _matches_artifact_path
 from quant_research_platform.storage.datasets.reading import (
@@ -65,54 +61,37 @@ _LOWER_HEX = frozenset("0123456789abcdef")
 
 @contextmanager
 def iter_schema_inventory_items(
-    project_root: Path,
-    *,
-    important_null_count_columns: Collection[str] | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
+    project_root: Path, *, important_null_count_columns: Collection[str] | None = None
 ) -> Iterator[Iterator[dict[str, Any]]]:
     """Yield one validated inventory item at a time."""
 
-    with runtime_resource_policy_scope(resource_policy) as policy:
-        root = Path(project_root)
-        declared_important_columns = (
-            () if important_null_count_columns is None else important_null_count_columns
-        )
-        if any(
-            type(column) is not str or not column
-            for column in declared_important_columns
-        ):
-            raise ValueError("schema_inventory_important_columns_invalid")
-        important_columns = frozenset(declared_important_columns)
-        data_root = root / "data"
-        for candidate in (
-            root,
-            data_root,
-            *(data_root / layer for layer in sorted(_RUN_RESULT_DATASET_LAYERS)),
-        ):
-            require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
+    root = Path(project_root)
+    declared_important_columns = (
+        () if important_null_count_columns is None else important_null_count_columns
+    )
+    if any(
+        type(column) is not str or not column for column in declared_important_columns
+    ):
+        raise ValueError("schema_inventory_important_columns_invalid")
+    important_columns = frozenset(declared_important_columns)
+    data_root = root / "data"
+    for candidate in (
+        root,
+        data_root,
+        *(data_root / layer for layer in sorted(_RUN_RESULT_DATASET_LAYERS)),
+    ):
+        require_unaliased_path(candidate, error="schema_inventory_dataset_invalid")
 
-        def generate() -> Iterator[dict[str, Any]]:
-            for artifact_root in _iter_dataset_artifact_roots(root):
-                with ExitStack() as item_state:
-                    try:
-                        try:
-                            item, _item_bytes = _inventory_item(
-                                root,
-                                artifact_root,
-                                important_null_count_columns=important_columns,
-                                resource_policy=policy,
-                                retained_items=item_state,
-                            )
-                        except MemoryError:
-                            raise ValueError(
-                                "schema_inventory_payload_exceeds_task_memory_budget"
-                            ) from None
-                        yield item
-                    finally:
-                        item = None
+    def generate() -> Iterator[dict[str, Any]]:
+        for artifact_root in _iter_dataset_artifact_roots(root):
+            yield _inventory_item(
+                root,
+                artifact_root,
+                important_null_count_columns=important_columns,
+            )
 
-        with closing_iterator(generate()) as items:
-            yield items
+    with closing_iterator(generate()) as items:
+        yield items
 
 
 def write_schema_inventory(
@@ -120,7 +99,6 @@ def write_schema_inventory(
     output: Path,
     *,
     important_null_count_columns: Collection[str] | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
 ) -> Path:
     """Stream a deterministic schema inventory through atomic publication."""
 
@@ -129,25 +107,24 @@ def write_schema_inventory(
         found = False
         yield '{\n  "datasets": ['
         with iter_schema_inventory_items(
-            project_root,
-            important_null_count_columns=important_null_count_columns,
-            resource_policy=resource_policy,
+            project_root, important_null_count_columns=important_null_count_columns
         ) as items:
             for item in items:
+                _validate_schema_inventory_item(item)
+                logical_root = item["logical_relative_root"]
+                if previous_root is not None and logical_root <= previous_root:
+                    raise ValueError("schema_inventory_dataset_order_invalid")
+                previous_root = logical_root
+                rendered = render_qrp_json_object(item)
+                prefix = "\n" if not found else ",\n"
+                found = True
+                chunk = prefix + "\n".join(
+                    "  " + line for line in rendered.splitlines()
+                )
                 try:
-                    _validate_schema_inventory_item(item)
-                    logical_root = item["logical_relative_root"]
-                    if previous_root is not None and logical_root <= previous_root:
-                        raise ValueError("schema_inventory_dataset_order_invalid")
-                    previous_root = logical_root
-                    rendered = render_qrp_json_object(item)
-                    prefix = "\n" if not found else ",\n"
-                    found = True
-                    yield prefix + "\n".join(
-                        "  " + line for line in rendered.splitlines()
-                    )
-                finally:
-                    item = rendered = None
+                    yield chunk
+                except GeneratorExit:
+                    return
         if not found:
             raise ValueError("schema_inventory_no_datasets_found")
         yield '\n  ],\n  "schema_id": "qrp-schema-inventory"\n}\n'
@@ -361,24 +338,16 @@ def _inventory_item(
     artifact_root: Path,
     *,
     important_null_count_columns: frozenset[str],
-    resource_policy: RuntimeResourcePolicy,
-    retained_items: ExitStack,
-) -> tuple[dict[str, Any], int]:
-    with open_dataset_session(
+) -> dict[str, Any]:
+    session = open_dataset_session(
+        artifact_root, columns=None, time_window=None, require_consumable=False
+    )
+    return _inventory_item_from_session(
+        project_root,
         artifact_root,
-        columns=None,
-        time_window=None,
-        require_consumable=False,
-        resource_policy=resource_policy,
-    ) as session:
-        return _inventory_item_from_session(
-            project_root,
-            artifact_root,
-            session=session,
-            important_null_count_columns=important_null_count_columns,
-            resource_policy=resource_policy,
-            retained_items=retained_items,
-        )
+        session=session,
+        important_null_count_columns=important_null_count_columns,
+    )
 
 
 def _inventory_item_from_session(
@@ -387,114 +356,50 @@ def _inventory_item_from_session(
     *,
     session: DatasetSession,
     important_null_count_columns: frozenset[str],
-    resource_policy: RuntimeResourcePolicy,
-    retained_items: ExitStack,
-) -> tuple[dict[str, Any], int]:
-    owned = _inspect_dataset_session_owned(
-        session,
-        resource_policy=resource_policy,
-    )
-    inspection = owned.value
+) -> dict[str, Any]:
+    inspection = inspect_dataset_session(session)
     logical_root = artifact_root.relative_to(project_root).as_posix()
     spec_payload = inspection.spec
     columns = inspection.columns
     primary_key = tuple(spec_payload["primary_key"])
     partition_columns = tuple(spec_payload["partition_columns"])
-    build_bound = _inventory_item_upper_bound_bytes(
-        logical_root=logical_root,
-        columns=columns,
-        primary_key=primary_key,
-        partition_columns=partition_columns,
-        important_columns=important_null_count_columns.intersection(columns),
-        date_min=inspection.date_min,
-        date_max=inspection.date_max,
+    stats = _aggregate_dataset_stats(
+        session,
+        columns,
+        primary_key,
+        important_null_count_columns=important_null_count_columns,
+        exact_duplicate_count=int(inspection.manifest["duplicate_primary_key_count"]),
     )
-    try:
-        retained_items.enter_context(
-            resource_policy.lease("schema.inventory.items", build_bound)
-        )
-        stats = _aggregate_dataset_stats(
-            session,
-            columns,
-            primary_key,
-            important_null_count_columns=important_null_count_columns,
-            resource_policy=resource_policy,
-            exact_duplicate_count=int(
-                inspection.manifest["duplicate_primary_key_count"]
-            ),
-        )
-        session.verify()
-        layer, _, kind, artifact_id = _logical_identifiers(logical_root)
-        item = {
-            "artifact_id": artifact_id,
-            "layer": layer,
-            "kind": kind,
-            "logical_relative_root": logical_root,
-            "columns": list(columns),
-            "dtypes": stats["dtypes"],
-            "primary_key": list(primary_key),
-            "partition_columns": list(partition_columns),
-            "file_count": inspection.file_count,
-            "row_count": inspection.row_count,
-            "row_count_by_year": stats["row_count_by_year"],
-            "min_timestamp": inspection.date_min,
-            "max_timestamp": inspection.date_max,
-            "duplicate_primary_key_count": stats["duplicate_primary_key_count"],
-            "null_key_counts": stats["null_key_counts"],
-            "selected_important_column_null_counts": stats[
-                "selected_important_column_null_counts"
-            ],
-            "schema_hash": _schema_hash(
-                columns=columns,
-                dtypes=stats["dtypes"],
-                primary_key=primary_key,
-                partition_columns=partition_columns,
-            ),
-            "warnings": [],
-        }
-        try:
-            bounded_rendered_qrp_json_object_size(
-                item,
-                lazy_arrays={},
-                max_bytes=build_bound,
-            )
-        except (MemoryError, ValueError):
-            raise ValueError(
-                "schema_inventory_payload_exceeds_task_memory_budget"
-            ) from None
-        return item, build_bound
-    except MemoryError:
-        raise ValueError(
-            "schema_inventory_payload_exceeds_task_memory_budget"
-        ) from None
-    finally:
-        inspection = None
-        owned.release(owner="workflow.schema_inventory.inspection.result")
-
-
-def _inventory_item_upper_bound_bytes(
-    *,
-    logical_root: str,
-    columns: tuple[str, ...],
-    primary_key: tuple[str, ...],
-    partition_columns: tuple[str, ...],
-    important_columns: frozenset[str],
-    date_min: str | None,
-    date_max: str | None,
-) -> int:
-    year_count = 0
-    if date_min is not None and date_max is not None:
-        year_count = (
-            date.fromisoformat(date_max).year - date.fromisoformat(date_min).year + 1
-        )
-    text_bytes = len(logical_root.encode("utf-8")) + sum(
-        len(value.encode("utf-8"))
-        for value in (*columns, *primary_key, *partition_columns, *important_columns)
-    )
-    item_entries = (
-        2 * len(columns) + 2 * len(primary_key) + len(important_columns) + year_count
-    )
-    return 16 * 1024 + 4 * text_bytes + 512 * item_entries
+    session.verify()
+    layer, _, kind, artifact_id = _logical_identifiers(logical_root)
+    item = {
+        "artifact_id": artifact_id,
+        "layer": layer,
+        "kind": kind,
+        "logical_relative_root": logical_root,
+        "columns": list(columns),
+        "dtypes": stats["dtypes"],
+        "primary_key": list(primary_key),
+        "partition_columns": list(partition_columns),
+        "file_count": inspection.file_count,
+        "row_count": inspection.row_count,
+        "row_count_by_year": stats["row_count_by_year"],
+        "min_timestamp": inspection.date_min,
+        "max_timestamp": inspection.date_max,
+        "duplicate_primary_key_count": stats["duplicate_primary_key_count"],
+        "null_key_counts": stats["null_key_counts"],
+        "selected_important_column_null_counts": stats[
+            "selected_important_column_null_counts"
+        ],
+        "schema_hash": _schema_hash(
+            columns=columns,
+            dtypes=stats["dtypes"],
+            primary_key=primary_key,
+            partition_columns=partition_columns,
+        ),
+        "warnings": [],
+    }
+    return item
 
 
 def _aggregate_dataset_stats(
@@ -504,7 +409,6 @@ def _aggregate_dataset_stats(
     *,
     important_null_count_columns: frozenset[str],
     exact_duplicate_count: int,
-    resource_policy: RuntimeResourcePolicy,
 ) -> dict[str, Any]:
     dtypes = {
         descriptor["name"]: (
@@ -531,10 +435,8 @@ def _aggregate_dataset_stats(
             session,
             logical_columns=statistic_columns,
             physical_columns=statistic_columns,
-            owns_inventory=False,
-            owns_lease=False,
         ),
-        target_chunk_bytes=max(1, resource_policy.planning_headroom_bytes),
+        batch_rows=DEFAULT_BATCH_ROWS,
     )
     with closing_iterator(chunks):
         for frame in chunks:

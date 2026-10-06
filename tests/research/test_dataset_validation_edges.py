@@ -14,7 +14,6 @@ from tests.helpers.research_specs import make_dummy_research_dataset_spec
 def test_research_dataset_validation_rejects_frame_key_errors() -> None:
     spec = make_dummy_research_dataset_spec()
     frame = _research_frame()
-
     with pytest.raises(ValueError, match="missing_research_required_fields"):
         validate_research_dataset(frame.drop(columns=["factor_1"]), spec)
     with pytest.raises(ValueError, match="null_research_dataset_key_columns"):
@@ -30,10 +29,8 @@ def test_research_dataset_validation_rejects_duplicate_dataframe_columns(
     spec = make_dummy_research_dataset_spec()
     frame = _research_frame()
     duplicate = pd.concat([frame, frame[[duplicate_column]]], axis="columns")
-
     with pytest.raises(
-        ValueError,
-        match=f"^duplicate_research_dataset_columns: {duplicate_column}$",
+        ValueError, match=f"^duplicate_research_dataset_columns: {duplicate_column}$"
     ):
         validate_research_dataset(duplicate, spec)
 
@@ -41,21 +38,13 @@ def test_research_dataset_validation_rejects_duplicate_dataframe_columns(
 def test_evaluation_and_prediction_inputs_require_declared_columns() -> None:
     spec = make_dummy_research_dataset_spec()
     frame = _research_frame()
-
     validate_evaluation_input(
-        frame,
-        spec,
-        signal_columns=("factor_1",),
-        label_columns=("label_1",),
+        frame, spec, signal_columns=("factor_1",), label_columns=("label_1",)
     )
     validate_research_input(frame, spec, input_columns=("factor_1",))
-
     with pytest.raises(ValueError, match="invalid_evaluation_signal_columns"):
         validate_evaluation_input(
-            frame,
-            spec,
-            signal_columns=("factor_2",),
-            label_columns=("label_1",),
+            frame, spec, signal_columns=("factor_2",), label_columns=("label_1",)
         )
     with pytest.raises(ValueError, match="invalid_evaluation_label_columns"):
         validate_evaluation_input(

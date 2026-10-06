@@ -11,20 +11,12 @@ from types import MappingProxyType
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.contracts.business_manifest import (
-    BusinessManifestEnvelope,
-)
+from quant_research_platform.contracts.business_manifest import BusinessManifestEnvelope
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_integer_series,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
-)
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
 )
@@ -35,9 +27,6 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
-    _parquet_frame_bound,
-    _parquet_frame_reservation,
-    parquet_decoded_working_set_bounds,
     parquet_table_writer,
 )
 from quant_research_platform.storage.semantic_artifacts import (
@@ -608,28 +597,20 @@ class StatisticsArtifact:
     def _batches(self, member, *, filters=None):
         if member not in self._members:
             raise ValueError("statistics_table_member_invalid")
-        with runtime_resource_policy_scope(current_runtime_resource_policy()) as policy:
-            target = max(1, min(1024**2, policy.planning_headroom_bytes // 8))
-            with closing_iterator(
-                iter_declared_parquet_member_batches(
-                    self.root / member,
-                    expected_identity=self._identities[member],
-                    target_chunk_bytes=target,
-                    operation_headroom_bytes=policy.operation_headroom_bytes,
-                    parquet_filters=filters,
-                )
-            ) as frames:
-                for frame in frames:
-                    with policy.lease(
-                        "artifacts.statistics.validation",
-                        max(65536, 2 * pandas_frame_payload_bytes(frame)),
-                    ):
-                        result = None
-                        try:
-                            result = _validated_frame(frame, member=member)
-                            yield result
-                        finally:
-                            result = None
+        max(1, min(1024**2, 67108864 // 8))
+        with closing_iterator(
+            iter_declared_parquet_member_batches(
+                self.root / member,
+                expected_identity=self._identities[member],
+                parquet_filters=filters,
+            )
+        ) as frames:
+            for frame in frames:
+                result = _validated_frame(frame, member=member)
+                try:
+                    yield result
+                except GeneratorExit:
+                    return
 
     @contextmanager
     def table(self, member: str):
@@ -638,48 +619,19 @@ class StatisticsArtifact:
         path = self.root / member
         identity = self._identities[member]
         verify_semantic_artifact_member(
-            self.root,
-            relative_path=member,
-            expected=dict(self._members[member]),
+            self.root, relative_path=member, expected=dict(self._members[member])
         )
-        with runtime_resource_policy_scope(current_runtime_resource_policy()) as policy:
-            with _opened_parquet(path, expected_identity=identity) as (
-                parquet,
-                _identity,
-                _handle,
-            ):
-                if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
-                    raise ValueError("statistics_table_schema_invalid")
-                row_bytes, fixed_bytes = parquet_decoded_working_set_bounds(
-                    parquet, _TABLE_COLUMNS[member], handle=_handle
-                )
-                working_bytes = max(
-                    1, 4 * fixed_bytes + 8 * row_bytes * parquet.metadata.num_rows
-                )
-                policy.require_working_set(
-                    working_bytes, error="statistics_table_exceeds_task_memory_budget"
-                )
-                with policy.lease(
-                    "artifacts.statistics.table",
-                    working_bytes,
-                ) as working:
-                    table = frame = result = None
-                    try:
-                        table = parquet.read()
-                        actual_bound = max(
-                            working_bytes, 8 * table.get_total_buffer_size()
-                        )
-                        additional = actual_bound - working.reserved_bytes
-                        policy.require_working_set(
-                            additional,
-                            error="statistics_table_exceeds_task_memory_budget",
-                        )
-                        working.grow(additional)
-                        frame = table.to_pandas()
-                        result = _validated_frame(frame, member=member)
-                        yield result
-                    finally:
-                        table = frame = result = None
+        with _opened_parquet(path, expected_identity=identity) as (
+            parquet,
+            _identity,
+            _handle,
+        ):
+            if parquet.schema_arrow != _ARROW_SCHEMAS[member]:
+                raise ValueError("statistics_table_schema_invalid")
+            table = parquet.read()
+            frame = table.to_pandas()
+            result = _validated_frame(frame, member=member)
+            yield result
 
 
 def write_statistics_artifact(
@@ -693,20 +645,24 @@ def write_statistics_artifact(
     if table_group not in STATISTICS_TABLE_GROUPS:
         raise ValueError("statistics_tables_invalid")
     calibration = table_group == "crypto_maker_calibration"
-    if calibration and not callable(validate_tables):
+    if calibration and (not callable(validate_tables)):
         raise ValueError("statistics_business_validator_required")
     expected = {
         member.removesuffix(".parquet")
         for member in STATISTICS_TABLE_GROUPS[table_group]
     }
-    if (calibration and not callable(tables)) or (
-        not calibration and (not isinstance(tables, Mapping) or set(tables) != expected)
+    if (
+        calibration
+        and (not callable(tables))
+        or (
+            not calibration
+            and (not isinstance(tables, Mapping) or set(tables) != expected)
+        )
     ):
         raise ValueError("statistics_tables_invalid")
 
     def write_batches(staging, produce):
-        policy = current_runtime_resource_policy()
-        with handle_preserving_primary(ExitStack()) as output:
+        with closing_iterator(ExitStack()) as output:
             writers = {}
 
             def append(table_name, frame):
@@ -715,9 +671,7 @@ def write_statistics_artifact(
                 member = f"{table_name}.parquet"
                 if member not in writers:
                     handle = output.enter_context(
-                        handle_preserving_primary(
-                            open_filesystem_file(staging / member, "xb")
-                        )
+                        closing_iterator(open_filesystem_file(staging / member, "xb"))
                     )
                     writers[member] = output.enter_context(
                         parquet_table_writer(
@@ -737,35 +691,12 @@ def write_statistics_artifact(
                             ),
                         )
                     )
-                validated = table = None
-                with handle_preserving_primary(ExitStack()) as working:
-                    try:
-                        if policy is not None:
-                            payload_bytes = pandas_frame_payload_bytes(frame)
-                            validation_bytes = max(65536, 2 * payload_bytes)
-                            policy.require_working_set(
-                                validation_bytes
-                                + _parquet_frame_bound(frame, key_columns=())
-                                - payload_bytes,
-                                error="statistics_validation_exceeds_task_memory_budget",
-                            )
-                            working.enter_context(
-                                policy.lease(
-                                    "artifacts.statistics.validation", validation_bytes
-                                )
-                            )
-                        working.enter_context(
-                            _parquet_frame_reservation(frame, borrowed_input=True)
-                        )
-                        validated = _validated_frame(frame, member=member)
-                        table = pa.Table.from_pandas(
-                            validated,
-                            schema=_ARROW_SCHEMAS[member],
-                            preserve_index=False,
-                        )
-                        writers[member](table)
-                    finally:
-                        validated = table = None
+
+                validated = _validated_frame(frame, member=member)
+                table = pa.Table.from_pandas(
+                    validated, schema=_ARROW_SCHEMAS[member], preserve_index=False
+                )
+                writers[member](table)
 
             produce(on_table=append)
             return {member.removesuffix(".parquet") for member in writers}
@@ -802,7 +733,7 @@ def _statistics_artifact(root, identity, members, member_identities=None):
         set(by_path) == set(group) for group in STATISTICS_TABLE_GROUPS.values()
     ) or len(by_path) != len(members):
         raise ValueError("statistics_artifact_members_invalid")
-    identities, row_counts = {}, {}
+    identities, row_counts = ({}, {})
     for member in by_path:
         path = root / member
         physical = (
@@ -832,7 +763,6 @@ def _statistics_artifact(root, identity, members, member_identities=None):
 def read_statistics_artifact(
     instance_root: Path,
     *,
-    lease,
     expected_identity: str,
     validate_tables=None,
     expected_member_identities=None,
@@ -843,18 +773,16 @@ def read_statistics_artifact(
         expected_identity=expected_identity,
         member_identities=identities,
         expected_member_identities=expected_member_identities,
-        lease=lease,
     )
-    with runtime_resource_policy_scope(current_runtime_resource_policy()):
-        artifact = _statistics_artifact(
-            Path(instance_root), expected_identity, members, identities
-        )
-        if set(artifact._members) == set(
-            STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]
-        ):
-            if not callable(validate_tables):
-                raise ValueError("statistics_business_validator_required")
-            validate_tables(artifact, envelope)
+    artifact = _statistics_artifact(
+        Path(instance_root), expected_identity, members, identities
+    )
+    if set(artifact._members) == set(
+        STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]
+    ):
+        if not callable(validate_tables):
+            raise ValueError("statistics_business_validator_required")
+        validate_tables(artifact, envelope)
     return artifact
 
 
@@ -890,7 +818,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         for column in _TABLE_COLUMNS[member]
         if column not in _STRING_COLUMNS[member]
         and column not in _COUNT_COLUMNS[member]
-        and column not in _TIMESTAMP_COLUMNS.get(member, ())
+        and (column not in _TIMESTAMP_COLUMNS.get(member, ()))
     )
     for column in numeric_columns:
         result[column] = strict_finite_numeric_series(
@@ -947,7 +875,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             if result["mean"].notna().ne(result.observation_count.gt(0)).any():
                 raise ValueError("statistics_table_descriptive_mean_count_invalid")
         for column in ("p_value", "fdr_adjusted_p_value", "white_p_value"):
-            if column in result and not result[column].dropna().between(0, 1).all():
+            if column in result and (not result[column].dropna().between(0, 1).all()):
                 raise ValueError("statistics_table_probability_invalid")
         if "standard_error" in result and result.standard_error.lt(0).any():
             raise ValueError("statistics_table_standard_error_invalid")
@@ -964,13 +892,18 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
                 or result.defined_hypothesis_count.gt(
                     result.planned_hypothesis_count
                 ).any()
-                or not result.missing_hypothesis_count.eq(
-                    result.planned_hypothesis_count - result.defined_hypothesis_count
-                ).all()
+                or (
+                    not result.missing_hypothesis_count.eq(
+                        result.planned_hypothesis_count
+                        - result.defined_hypothesis_count
+                    ).all()
+                )
                 or result.loc[applicable, "fdr_alpha"].isna().any()
-                or not result.loc[applicable, "fdr_alpha"]
-                .between(0, 1, inclusive="neither")
-                .all()
+                or (
+                    not result.loc[applicable, "fdr_alpha"]
+                    .between(0, 1, inclusive="neither")
+                    .all()
+                )
                 or result.loc[applicable & defined, "fdr_adjusted_p_value"].isna().any()
                 or result.loc[~applicable | ~defined, "fdr_adjusted_p_value"]
                 .notna()
@@ -995,8 +928,8 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             if (
                 not (indicator | probability).all()
                 or not result.alpha.between(0, 1, inclusive="neither").all()
-                or not result.loc[defined & indicator, "value"].isin((0, 1)).all()
-                or not result.loc[defined & probability, "value"].between(0, 1).all()
+                or (not result.loc[defined & indicator, "value"].isin((0, 1)).all())
+                or (not result.loc[defined & probability, "value"].between(0, 1).all())
             ):
                 raise ValueError("statistics_table_reality_check_invalid")
     if member in {
@@ -1039,9 +972,9 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         if (
             result.duplicated([key]).any()
             or not result.status.isin(("DEFINED", "UNDEFINED")).all()
-            or not result.bootstrap_status.isin(("DEFINED", "UNDEFINED")).all()
-            or not result.access_window.isin(("development", "holdout")).all()
-            or result.access_window.nunique() > 1
+            or (not result.bootstrap_status.isin(("DEFINED", "UNDEFINED")).all())
+            or (not result.access_window.isin(("development", "holdout")).all())
+            or (result.access_window.nunique() > 1)
             or (defined & result.access_window.ne("holdout")).any()
             or (bootstrap_defined & ~defined).any()
             or result.loc[defined, list(measurements)].isna().any().any()
@@ -1060,15 +993,15 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             .str.strip()
             .eq("")
             .any()
-            or not result.fdr_method.eq("BY").all()
-            or not result.fdr_alpha.between(0, 1, inclusive="neither").all()
-            or not result.confidence.between(0, 1, inclusive="neither").all()
-            or not result.fdr_family_size.eq(len(result)).all()
+            or (not result.fdr_method.eq("BY").all())
+            or (not result.fdr_alpha.between(0, 1, inclusive="neither").all())
+            or (not result.confidence.between(0, 1, inclusive="neither").all())
+            or (not result.fdr_family_size.eq(len(result)).all())
             or result.standard_error.lt(0).any()
             or result.ci_lower.gt(result.ci_upper).any()
             or result.bootstrap_lower.gt(result.bootstrap_upper).any()
-            or not result.p_value.dropna().between(0, 1).all()
-            or not result.fdr_adjusted_p_value.dropna().between(0, 1).all()
+            or (not result.p_value.dropna().between(0, 1).all())
+            or (not result.fdr_adjusted_p_value.dropna().between(0, 1).all())
         ):
             raise ValueError("statistics_group_comparison_invalid")
         if (
@@ -1097,7 +1030,7 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         if (
             not result.asset_coverage_id.str.fullmatch("[0-9a-f]{64}").all()
             or not result["loss"].dropna().between(-1, 1).all()
-            or not result["common_date"].isin((0, 1)).all()
+            or (not result["common_date"].isin((0, 1)).all())
             or (result["common_observation_count"] > result["observation_count"]).any()
             or result.groupby("timestamp")["common_observation_count"]
             .nunique()
@@ -1119,8 +1052,8 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         has_value = result[value_column].notna()
         if member == "crypto_execution_diagnostics.parquet":
             has_text = result.text.str.strip().ne("")
-            invalid_value = (defined & ~(has_value ^ has_text)) | (
-                ~defined & (has_value | has_text)
+            invalid_value = defined & ~(has_value ^ has_text) | ~defined & (
+                has_value | has_text
             )
         else:
             invalid_value = defined.ne(has_value)
@@ -1158,8 +1091,8 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             continuous = result.execution_mode.eq("continuous")
             valid_episode = result.episode_id.str.fullmatch("[0-9a-f]{64}")
             if (
-                (~aggregate & continuous & ~result.episode_id.eq("continuous"))
-                | (~aggregate & ~continuous & ~valid_episode)
+                ~aggregate & continuous & ~result.episode_id.eq("continuous")
+                | ~aggregate & ~continuous & ~valid_episode
             ).any():
                 raise ValueError("statistics_episode_id_invalid")
             if aggregate.any() and (
@@ -1230,13 +1163,14 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
                 or result.loc[~defined, "reason"].eq("").any()
             ):
                 raise ValueError("statistics_table_status_value_invalid")
-        if "end_at" in result and not result.entry_at.lt(result.end_at).all():
+        if "end_at" in result and (not result.entry_at.lt(result.end_at).all()):
             raise ValueError("statistics_holding_interval_invalid")
-        if "decision_at" in result and not result.decision_at.lt(result.entry_at).all():
+        if "decision_at" in result and (
+            not result.decision_at.lt(result.entry_at).all()
+        ):
             raise ValueError("statistics_holding_interval_invalid")
-        if (
-            member == "portfolio_attribution.parquet"
-            and not result.component_type.isin(("additive", "detail")).all()
+        if member == "portfolio_attribution.parquet" and (
+            not result.component_type.isin(("additive", "detail")).all()
         ):
             raise ValueError("statistics_attribution_component_invalid")
     result.index = pd.RangeIndex(len(result))

@@ -25,21 +25,14 @@ from websockets.exceptions import WebSocketException
 from websockets.sync.client import connect as _connect_websocket
 
 from quant_research_platform.contracts.json_codec import (
-    bounded_rendered_qrp_json_object_size,
-    json_record_working_set_bytes,
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.order_book import BookBoundary
 from quant_research_platform.contracts.validation import (
-    clear_exception_frames,
     strict_finite_float,
 )
 from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    RuntimeResourcePolicy,
-    _close_lease_preserving_primary,
     require_free_disk_headroom,
-    runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
@@ -84,14 +77,6 @@ MAX_REST_RESPONSE_BYTES = 4 * 1024 * 1024
 REST_REQUEST_TIMEOUT_SECONDS = 15.0
 SNAPSHOT_LIMITS = {SPOT_MARKET_TYPE: 5000, FUTURES_MARKET_TYPE: 1000}
 _RECORDER_DISK_CHECK_BYTES = 1024 * 1024
-_REST_WORKING_SET_BYTES = (
-    json_record_working_set_bytes(MAX_REST_RESPONSE_BYTES) + 64 * 1024
-)
-_WS_STREAM_WORKING_SET_BYTES = (
-    MAX_WS_QUEUE * MAX_WS_MESSAGE_BYTES * 4
-    + json_record_working_set_bytes(MAX_WS_MESSAGE_BYTES)
-    + 64 * 1024
-)
 
 
 @dataclass(frozen=True)
@@ -467,16 +452,13 @@ class _RunWriter:
             if failure is not None:
                 raise failure
 
-    def connection_interval_manifest(
-        self,
-        resource_policy: RuntimeResourcePolicy,
-    ) -> dict[str, Any]:
+    def connection_interval_manifest(self) -> dict[str, Any]:
         with self._lock:
             if not self._closed:
                 raise RuntimeError("binance_recorder_writer_not_closed")
             assert self._interval_path is not None
             path = self._interval_path
-            digest = _sha256_path(path, resource_policy)
+            digest = _sha256_path(path)
             return {
                 "path": path.relative_to(self.root).as_posix(),
                 "record_count": self._interval_record_count,
@@ -484,10 +466,7 @@ class _RunWriter:
                 "sha256": digest,
             }
 
-    def file_manifests(
-        self,
-        resource_policy: RuntimeResourcePolicy,
-    ) -> list[dict[str, Any]]:
+    def file_manifests(self) -> list[dict[str, Any]]:
         with self._lock:
             if not self._closed or self._handles:
                 raise RuntimeError("binance_recorder_writer_not_closed")
@@ -495,7 +474,7 @@ class _RunWriter:
                 {
                     **self._files[path],
                     "compressed_bytes": filesystem_stat(path).st_size,
-                    "sha256": _sha256_path(path, resource_policy),
+                    "sha256": _sha256_path(path),
                 }
                 for path in sorted(self._files)
             ]
@@ -509,20 +488,18 @@ class _RunWriter:
             return dict(sorted(self._event_counts.items()))
 
 
-def _sha256_path(path: Path, resource_policy: RuntimeResourcePolicy) -> str:
-    with resource_policy.lease("binance.recorder.file_hash", 128 * 1024):
-        digest = hashlib.sha256()
-        buffer = bytearray(64 * 1024)
-        with open_filesystem_file(path, "rb") as handle:
-            while count := handle.readinto(buffer):
-                digest.update(memoryview(buffer)[:count])
-        return digest.hexdigest()
+def _sha256_path(path: Path) -> str:
+    digest = hashlib.sha256()
+    buffer = bytearray(64 * 1024)
+    with open_filesystem_file(path, "rb") as handle:
+        while count := handle.readinto(buffer):
+            digest.update(memoryview(buffer)[:count])
+    return digest.hexdigest()
 
 
 @contextmanager
 def _writer_lifecycle(
     writer: _RunWriter,
-    policy: RuntimeResourcePolicy,
     files: list[dict[str, Any]],
     capture_stats: _CaptureStats | None = None,
 ) -> Iterator[None]:
@@ -534,10 +511,10 @@ def _writer_lifecycle(
         try:
             if not writer._aborted:  # noqa: SLF001
                 writer.close()
-                files.extend(writer.file_manifests(policy))
+                files.extend(writer.file_manifests())
                 if capture_stats is not None:
                     capture_stats.set_connection_interval_manifest(
-                        writer.connection_interval_manifest(policy)
+                        writer.connection_interval_manifest()
                     )
         except BaseException as cleanup_error:
             if primary is not None:
@@ -547,33 +524,14 @@ def _writer_lifecycle(
                 )
             else:
                 failure = cleanup_error
-        finally:
-            if capture_stats is not None:
-                try:
-                    capture_stats.close()
-                except BaseException as cleanup_error:
-                    if primary is not None:
-                        primary.add_note(
-                            "Binance capture stats cleanup also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
-                    elif failure is None:
-                        failure = cleanup_error
-                    else:
-                        failure.add_note(
-                            "Binance capture stats cleanup also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
         if failure is not None:
             raise failure
 
 
 @dataclass
 class _CaptureStats:
-    resource_policy: RuntimeResourcePolicy | None = None
     writer: _RunWriter | None = None
     _lock: threading.Lock = field(default_factory=threading.Lock, init=False)
-    _interval_lease: MemoryLease | None = field(default=None, init=False, repr=False)
     connection_opens: Counter[str] = field(default_factory=Counter)
     reconnects: Counter[str] = field(default_factory=Counter)
     connection_intervals: dict[str, dict[str, Any]] = field(default_factory=dict)
@@ -587,22 +545,6 @@ class _CaptureStats:
     stale_depth_events: int = 0
     invalid_messages: int = 0
 
-    def __post_init__(self) -> None:
-        if self.resource_policy is not None:
-            self._interval_lease = self.resource_policy.lease(
-                "binance.recorder.connection_intervals",
-                0,
-            )
-
-    def bind(self, resource_policy: RuntimeResourcePolicy) -> None:
-        if self.resource_policy is not None or self._interval_lease is not None:
-            raise RuntimeError("binance_recorder_capture_stats_already_bound")
-        self.resource_policy = resource_policy
-        self._interval_lease = resource_policy.lease(
-            "binance.recorder.connection_intervals",
-            0,
-        )
-
     def opened(
         self,
         stream: RecorderStream,
@@ -614,8 +556,6 @@ class _CaptureStats:
         opened_monotonic_ns: int,
     ) -> None:
         with self._lock:
-            if self._interval_lease is not None:
-                self._interval_lease.grow(1024)
             key = f"{stream.market_type}:{stream.stream}"
             self.connection_opens[key] += 1
             if reconnect:
@@ -653,8 +593,6 @@ class _CaptureStats:
             if self.writer is not None:
                 self.writer.write_connection_interval(interval)
             del self.connection_intervals[connection_id]
-            if self._interval_lease is not None:
-                self._interval_lease.shrink_to(len(self.connection_intervals) * 1024)
 
     def connection_error(self) -> None:
         with self._lock:
@@ -671,12 +609,6 @@ class _CaptureStats:
     def invalid(self) -> None:
         with self._lock:
             self.invalid_messages += 1
-
-    def close(self) -> None:
-        with self._lock:
-            if self._interval_lease is not None:
-                self._interval_lease.close()
-                self._interval_lease = None
 
     def set_connection_interval_manifest(self, value: dict[str, Any]) -> None:
         with self._lock:
@@ -726,7 +658,6 @@ class _StreamReader(threading.Thread):
         stats: _CaptureStats,
         stop: threading.Event,
         config: RecorderConfig,
-        resource_policy: RuntimeResourcePolicy,
         tick_size: str,
     ) -> None:
         super().__init__(
@@ -738,7 +669,6 @@ class _StreamReader(threading.Thread):
         self.stats = stats
         self.stop = stop
         self.config = config
-        self.resource_policy = resource_policy
         self.tick_size = tick_size
         self.ready = threading.Event()
         self.failure: str | None = None
@@ -806,9 +736,6 @@ class _StreamReader(threading.Thread):
             )
             opened = True
             if self.stream.data_kind == "depth":
-                coverage = depth_resources.enter_context(
-                    self.resource_policy.lease("binance.recorder.depth_coverage", 0)
-                )
                 depth_book = DepthReconstructor(
                     self.stream.market_type,
                     price_unit=self.tick_size,
@@ -816,15 +743,12 @@ class _StreamReader(threading.Thread):
                     required_levels=RECONSTRUCTION_REQUIRED_LEVELS,
                     max_book_levels=RECONSTRUCTION_MAX_BOOK_LEVELS,
                     connection_close_ns=None,
-                    resource_policy=self.resource_policy,
                     stats=ReconstructionStats(),
-                    coverage_lease=coverage,
                 )
                 depth_resources.callback(depth_book.close)
                 assert segment_id is not None
                 _record_depth_snapshot(
                     self.writer,
-                    self.resource_policy,
                     self.stream,
                     connection_id=connection_id,
                     segment_id=segment_id,
@@ -1019,11 +943,7 @@ def _selected_symbol(payload: object, symbol_id: str) -> dict[str, Any]:
 
 
 def _record_market_metadata(
-    writer: _RunWriter,
-    policy: RuntimeResourcePolicy,
-    *,
-    market_types: tuple[str, ...],
-    symbols: tuple[str, ...],
+    writer: _RunWriter, *, market_types: tuple[str, ...], symbols: tuple[str, ...]
 ) -> dict[str, dict[str, dict[str, Any]]]:
     requests = {
         SPOT_MARKET_TYPE: (SPOT_REST_BASE_URL, "/api/v3/exchangeInfo"),
@@ -1043,52 +963,46 @@ def _record_market_metadata(
                 if market_type == SPOT_MARKET_TYPE
                 else None
             )
-            with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
+            payload = symbol = filters = tick_size = received = monotonic_ns = None
+            try:
+                payload, received, monotonic_ns = _http_get_json(
+                    base_url,
+                    endpoint,
+                    params=params,
+                )
+                for symbol_id in requested_symbols:
+                    symbol = _selected_symbol(payload, symbol_id)
+                    filters = symbol.get("filters")
+                    if not isinstance(filters, list):
+                        raise ValueError("binance_recorder_symbol_metadata_invalid")
+                    tick_size = next(
+                        (
+                            item.get("tickSize")
+                            for item in filters
+                            if isinstance(item, dict)
+                            and item.get("filterType") == "PRICE_FILTER"
+                        ),
+                        None,
+                    )
+                    strict_positive_float(
+                        tick_size,
+                        error="binance_recorder_tick_size_invalid",
+                    )
+                    result[symbol_id][market_type] = {
+                        "tick_size": tick_size,
+                        "snapshot_limit": SNAPSHOT_LIMITS[market_type],
+                    }
+                    writer.write(
+                        symbol=symbol_id,
+                        market_type=market_type,
+                        data_kind="metadata",
+                        stream=f"REST:{endpoint}",
+                        payload=symbol,
+                        receive_time=received,
+                        receive_monotonic_ns=monotonic_ns,
+                    )
+            finally:
                 payload = symbol = filters = tick_size = received = monotonic_ns = None
-                try:
-                    payload, received, monotonic_ns = _http_get_json(
-                        base_url,
-                        endpoint,
-                        params=params,
-                    )
-                    for symbol_id in requested_symbols:
-                        symbol = _selected_symbol(payload, symbol_id)
-                        filters = symbol.get("filters")
-                        if not isinstance(filters, list):
-                            raise ValueError("binance_recorder_symbol_metadata_invalid")
-                        tick_size = next(
-                            (
-                                item.get("tickSize")
-                                for item in filters
-                                if isinstance(item, dict)
-                                and item.get("filterType") == "PRICE_FILTER"
-                            ),
-                            None,
-                        )
-                        strict_positive_float(
-                            tick_size,
-                            error="binance_recorder_tick_size_invalid",
-                        )
-                        result[symbol_id][market_type] = {
-                            "tick_size": tick_size,
-                            "snapshot_limit": SNAPSHOT_LIMITS[market_type],
-                        }
-                        writer.write(
-                            symbol=symbol_id,
-                            market_type=market_type,
-                            data_kind="metadata",
-                            stream=f"REST:{endpoint}",
-                            payload=symbol,
-                            receive_time=received,
-                            receive_monotonic_ns=monotonic_ns,
-                        )
-                except BaseException as error:
-                    clear_exception_frames(error)
-                    raise
-                finally:
-                    payload = symbol = filters = tick_size = received = monotonic_ns = (
-                        None
-                    )
     return result
 
 
@@ -1116,7 +1030,6 @@ def _validate_snapshot(payload: object, *, market_type: str) -> dict[str, Any]:
 
 def _record_depth_snapshot(
     writer: _RunWriter,
-    policy: RuntimeResourcePolicy,
     stream: RecorderStream,
     *,
     connection_id: str,
@@ -1129,62 +1042,57 @@ def _record_depth_snapshot(
         if market_type == SPOT_MARKET_TYPE
         else (FUTURES_REST_BASE_URL, "/fapi/v1/depth")
     )
-    with policy.lease("binance.recorder.rest", _REST_WORKING_SET_BYTES):
-        payload = snapshot = received = monotonic_ns = None
+    payload = snapshot = received = monotonic_ns = None
+    try:
         try:
-            try:
-                payload, received, monotonic_ns = _http_get_json(
-                    base_url,
-                    endpoint,
-                    params={
-                        "symbol": stream.symbol,
-                        "limit": str(SNAPSHOT_LIMITS[market_type]),
-                    },
-                )
-            except (TimeoutError, OSError) as error:
-                raise _ConnectionProblem() from error
-            snapshot = _validate_snapshot(payload, market_type=market_type)
-            capture_seq = writer.write(
-                symbol=stream.symbol,
-                market_type=market_type,
-                data_kind="depth_snapshot",
-                stream=f"REST:{endpoint}",
-                payload=snapshot,
-                receive_time=received,
-                receive_monotonic_ns=monotonic_ns,
-                connection_id=connection_id,
-                segment_id=segment_id,
+            payload, received, monotonic_ns = _http_get_json(
+                base_url,
+                endpoint,
+                params={
+                    "symbol": stream.symbol,
+                    "limit": str(SNAPSHOT_LIMITS[market_type]),
+                },
             )
-            reconstructor.bootstrap(
-                normalize_recorder_record(
-                    {
-                        "capture_seq": capture_seq,
-                        "tick_size": reconstructor.price_unit,
-                        "market_type": market_type,
-                        "payload": snapshot,
-                        "receive_time": received,
-                        "receive_monotonic_ns": monotonic_ns,
-                        "connection_id": connection_id,
-                        "segment_id": segment_id,
-                    }
-                )
+        except (TimeoutError, OSError) as error:
+            raise _ConnectionProblem() from error
+        snapshot = _validate_snapshot(payload, market_type=market_type)
+        capture_seq = writer.write(
+            symbol=stream.symbol,
+            market_type=market_type,
+            data_kind="depth_snapshot",
+            stream=f"REST:{endpoint}",
+            payload=snapshot,
+            receive_time=received,
+            receive_monotonic_ns=monotonic_ns,
+            connection_id=connection_id,
+            segment_id=segment_id,
+        )
+        reconstructor.bootstrap(
+            normalize_recorder_record(
+                {
+                    "capture_seq": capture_seq,
+                    "tick_size": reconstructor.price_unit,
+                    "market_type": market_type,
+                    "payload": snapshot,
+                    "receive_time": received,
+                    "receive_monotonic_ns": monotonic_ns,
+                    "connection_id": connection_id,
+                    "segment_id": segment_id,
+                }
             )
-        except BaseException as error:
-            clear_exception_frames(error)
-            raise
-        finally:
-            payload = snapshot = received = monotonic_ns = None
+        )
+    finally:
+        payload = snapshot = received = monotonic_ns = None
 
 
 def record(config: RecorderConfig) -> dict[str, Any]:
     """Record one bounded public-data run and publish its exact manifest."""
 
     config.validate()
-    with runtime_resource_policy_scope():
-        return atomic_write_directory(
-            Path(config.output_root),
-            lambda root: _record_staged(config, root),
-        )
+    return atomic_write_directory(
+        Path(config.output_root),
+        lambda root: _record_staged(config, root),
+    )
 
 
 def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
@@ -1198,118 +1106,88 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     started_clock = time.monotonic()
     cpu_start = time.process_time()
     process = psutil.Process(os.getpid())
-    peak_rss = process.memory_info().rss
     market_metadata: dict[str, dict[str, dict[str, Any]]] = {}
     duration_reached = False
     cleanup_errors: list[str] = []
     files: list[dict[str, Any]] = []
-    with runtime_resource_policy_scope() as policy:
-        with _writer_lifecycle(
-            writer,
-            policy,
-            files,
-            capture_stats=stats,
-        ):
-            stats.bind(policy)
-            market_metadata = _record_market_metadata(
-                writer,
-                policy,
-                market_types=market_types,
-                symbols=config.symbols,
-            )
-            websocket_reserve = len(streams) * _WS_STREAM_WORKING_SET_BYTES
-            websocket_lease = policy.lease(
-                "binance.recorder.websocket_buffers",
-                websocket_reserve,
-            )
-            try:
-                try:
-                    readers = [
-                        _StreamReader(
-                            stream=stream,
-                            writer=writer,
-                            stats=stats,
-                            stop=stop,
-                            config=config,
-                            resource_policy=policy,
-                            tick_size=market_metadata[stream.symbol][
-                                stream.market_type
-                            ]["tick_size"],
-                        )
-                        for stream in streams
-                    ]
-                    for reader in readers:
-                        reader.start()
-                    deadline = time.monotonic() + config.connect_timeout_seconds
-                    for reader in readers:
-                        remaining = max(0.0, deadline - time.monotonic())
-                        if not reader.ready.wait(remaining):
-                            raise TimeoutError(
-                                "binance_recorder_stream_connect_timeout"
-                            )
-                    started_at = _utc_now()
-                    started_clock = time.monotonic()
-                    cpu_start = time.process_time()
-                    while True:
-                        elapsed = time.monotonic() - started_clock
-                        remaining = config.duration_seconds - elapsed
-                        if remaining <= 0:
-                            duration_reached = True
-                            break
-                        stop.wait(min(0.25, remaining))
-                        peak_rss = max(peak_rss, process.memory_info().rss)
-                        for reader in readers:
-                            if reader.failure is not None:
-                                raise RuntimeError("binance_recorder_reader_failure")
-                            if not reader.is_alive():
-                                raise RuntimeError(
-                                    "binance_recorder_reader_thread_died"
-                                )
-                finally:
-                    active_primary = sys.exception()
-                    stop.set()
-                    join_failed = False
-                    for reader in readers:
-                        try:
-                            reader.join(timeout=20)
-                            if reader.is_alive():
-                                join_failed = True
-                                cleanup_errors.append(f"{reader.name}:join_timeout")
-                        except BaseException as cleanup_error:
-                            join_failed = True
-                            if active_primary is not None:
-                                active_primary.add_note(
-                                    "Binance reader join also failed: "
-                                    f"{type(cleanup_error).__name__}"
-                                )
-                            else:
-                                cleanup_errors.append(type(cleanup_error).__name__)
-                    if join_failed:
-                        try:
-                            writer.abort()
-                        except BaseException as cleanup_error:
-                            if active_primary is None:
-                                raise
-                            active_primary.add_note(
-                                "Binance run writer abort also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-                        if active_primary is None:
-                            raise _ReaderQuiescenceFailure(
-                                "binance_recorder_reader_quiescence_timeout"
-                            )
-                    if active_primary is None and any(
-                        reader.failure is not None for reader in readers
-                    ):
+    with _writer_lifecycle(writer, files, capture_stats=stats):
+        market_metadata = _record_market_metadata(
+            writer, market_types=market_types, symbols=config.symbols
+        )
+        try:
+            readers = [
+                _StreamReader(
+                    stream=stream,
+                    writer=writer,
+                    stats=stats,
+                    stop=stop,
+                    config=config,
+                    tick_size=market_metadata[stream.symbol][stream.market_type][
+                        "tick_size"
+                    ],
+                )
+                for stream in streams
+            ]
+            for reader in readers:
+                reader.start()
+            deadline = time.monotonic() + config.connect_timeout_seconds
+            for reader in readers:
+                remaining = max(0.0, deadline - time.monotonic())
+                if not reader.ready.wait(remaining):
+                    raise TimeoutError("binance_recorder_stream_connect_timeout")
+            started_at = _utc_now()
+            started_clock = time.monotonic()
+            cpu_start = time.process_time()
+            while True:
+                elapsed = time.monotonic() - started_clock
+                remaining = config.duration_seconds - elapsed
+                if remaining <= 0:
+                    duration_reached = True
+                    break
+                stop.wait(min(0.25, remaining))
+                for reader in readers:
+                    if reader.failure is not None:
                         raise RuntimeError("binance_recorder_reader_failure")
-            finally:
-                # Live readers still own these buffers. Retaining their lease
-                # poisons the existing root and keeps its machine lock held.
-                if not any(reader.is_alive() for reader in readers):
-                    _close_lease_preserving_primary(
-                        websocket_lease, owner="binance.recorder.websocket_buffers"
+                    if not reader.is_alive():
+                        raise RuntimeError("binance_recorder_reader_thread_died")
+        finally:
+            active_primary = sys.exception()
+            stop.set()
+            join_failed = False
+            for reader in readers:
+                try:
+                    reader.join(timeout=20)
+                    if reader.is_alive():
+                        join_failed = True
+                        cleanup_errors.append(f"{reader.name}:join_timeout")
+                except BaseException as cleanup_error:
+                    join_failed = True
+                    if active_primary is not None:
+                        active_primary.add_note(
+                            "Binance reader join also failed: "
+                            f"{type(cleanup_error).__name__}"
+                        )
+                    else:
+                        cleanup_errors.append(type(cleanup_error).__name__)
+            if join_failed:
+                try:
+                    writer.abort()
+                except BaseException as cleanup_error:
+                    if active_primary is None:
+                        raise
+                    active_primary.add_note(
+                        "Binance run writer abort also failed: "
+                        f"{type(cleanup_error).__name__}"
                     )
-        captured = stats.payload()
+                if active_primary is None:
+                    raise _ReaderQuiescenceFailure(
+                        "binance_recorder_reader_quiescence_timeout"
+                    )
+            if active_primary is None and any(
+                reader.failure is not None for reader in readers
+            ):
+                raise RuntimeError("binance_recorder_reader_failure")
+    captured = stats.payload()
 
     ended_at = _utc_now()
     duration_seconds = max(0.001, time.monotonic() - started_clock)
@@ -1355,20 +1233,13 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
             "event_counts": writer.event_counts(),
             "missing_required_streams": missing_required_streams,
             **captured,
-            "peak_rss_bytes": peak_rss,
             "process_cpu_seconds": max(0.0, time.process_time() - cpu_start),
             "threads": len(readers),
             "descendants": len(process.children(recursive=True)),
             "cleanup_errors": cleanup_errors,
         },
     }
-    encoded_size = bounded_rendered_qrp_json_object_size(
-        manifest, lazy_arrays={}, max_bytes=policy.operation_headroom_bytes
-    )
-    with policy.lease(
-        "binance.recorder.manifest", json_record_working_set_bytes(encoded_size)
-    ):
-        atomic_write_json(root / "run.json", manifest)
+    atomic_write_json(root / "run.json", manifest)
     return manifest
 
 

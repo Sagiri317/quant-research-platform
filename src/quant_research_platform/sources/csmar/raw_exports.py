@@ -2,33 +2,18 @@
 
 from __future__ import annotations
 
-import codecs
-import io
-import mmap
 import os
 import re
 import stat
-import struct
 import sys
-import tempfile
 from collections.abc import Callable, Iterable, Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from itertools import groupby, islice
 from pathlib import Path
 
 import pandas as pd
 
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    OwnedValue,
-    RuntimeResourcePolicy,
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
-)
-from quant_research_platform.storage._scratch_ownership import reserved_temporary_file
-from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -42,7 +27,6 @@ from .field_mappings import RAW_TABLE_CONTRACTS, missing_raw_column_names
 from .raw_schemas import (
     LOGICAL_RECORD_LIMIT_ERROR,
     MAX_LOGICAL_RECORD_BYTES,
-    BoundedCsvRecord,
     _infer_dataset_from_header,
     infer_dataset_from_native_export,
     inspect_raw_export_file,
@@ -51,7 +35,6 @@ from .raw_schemas import (
     parse_raw_filename,
     raw_export_file_identity,
     read_export_header,
-    require_raw_resource_policy,
 )
 
 SUPPORTED_RAW_EXPORT_SUFFIXES = {".csv"}
@@ -124,7 +107,7 @@ STRING_CODE_DTYPES = {
     "Fenddt": str,
     "InstitutionID": str,
 }
-INDEX_INFO_CODE_RE = re.compile(r"^[0-9A-Za-z_.-]{1,32}$")
+INDEX_INFO_CODE_RE = re.compile("^[0-9A-Za-z_.-]{1,32}$")
 INDEX_INFO_SOURCE_CODE_ENUMS = (
     frozenset({"1", "2", "3", "4"}),
     frozenset({"1", "2", "3", "4"}),
@@ -141,187 +124,30 @@ INDEX_INFO_SOURCE_CODE_COLUMNS = (
 )
 
 
-def _utf8_size(value: str) -> int:
-    size = 0
-    index = 0
-    for character in value:
-        codepoint = ord(character)
-        if 0xD800 <= codepoint <= 0xDFFF:
-            raise UnicodeEncodeError(
-                "utf-8",
-                value,
-                index,
-                index + 1,
-                "surrogates not allowed",
-            )
-        size += 1 + (codepoint > 0x7F) + (codepoint > 0x7FF) + (codepoint > 0xFFFF)
-        index += 1
-    return size
+def _append_continuation_fields(
+    continuations: list[str],
+    fields: Iterable[str],
+    *,
+    field_count: int,
+    suffix_count: int = 0,
+    include_empty: bool = True,
+) -> list[str]:
+    values = list(fields)
+    prefix_count = field_count - suffix_count
+    if prefix_count < 0:
+        raise ValueError("malformed_csmar_csv_row")
+    prefix = ",".join(values[:prefix_count])
+    if prefix or include_empty:
+        continuations.append(prefix)
+    return values[prefix_count:]
 
 
-class _IndexInfoContinuationSpool:
-    """Bounded private scratch for malformed physical-row continuations."""
-
-    def __init__(
-        self,
-        *,
-        resource_policy: RuntimeResourcePolicy,
-    ) -> None:
-        require_unaliased_path(
-            Path(tempfile.gettempdir()), error="csmar_raw_scratch_parent_invalid"
-        )
-        self._scratch_context = reserved_temporary_file(resource_policy=resource_policy)
-        self._handle, self._scratch = self._scratch_context.__enter__()
-        self._count = 0
-
-    def __enter__(self) -> _IndexInfoContinuationSpool:
-        return self
-
-    def __exit__(self, _exc_type, exc_value, _traceback) -> bool:  # noqa: ANN001
-        return self._scratch_context.__exit__(_exc_type, exc_value, _traceback)
-
-    def clear(self) -> None:
-        self._handle.seek(0)
-        self._handle.truncate(0)
-        self._scratch.resize(0)
-        self._count = 0
-
-    def _write(self, payload: bytes) -> None:
-        end = self._handle.tell() + len(payload)
-        allocated = (end + mmap.PAGESIZE - 1) // mmap.PAGESIZE * mmap.PAGESIZE
-        if allocated > self._scratch.reserved_bytes:
-            self._scratch.resize(allocated)
-        self._handle.write(payload)
-
-    def append_fields(
-        self,
-        fields: Iterable[str],
-        *,
-        field_count: int,
-        suffix_count: int = 0,
-        include_empty: bool = True,
-        payload_lease: MemoryLease,
-    ) -> list[str]:
-        """Stream one continuation prefix and retain only its bounded suffix."""
-
-        prefix_count = field_count - suffix_count
-        if prefix_count < 0:
-            raise ValueError("malformed_csmar_csv_row")
-        _require_raw_conversion_headroom(
-            logical_bytes=4,
-            payload_lease=payload_lease,
-        )
-        self._handle.seek(0, 2)
-        frame_start = self._handle.tell()
-        self._write(b"\0\0\0\0")
-        payload_bytes = 0
-        suffix: list[str] = []
-        for position, value in enumerate(fields):
-            if position >= prefix_count:
-                suffix.append(value)
-                continue
-            if position:
-                self._write(b",")
-                payload_bytes += 1
-            payload_bytes += self._write_text(
-                value,
-                payload_lease=payload_lease,
-            )
-        if payload_bytes == 0 and not include_empty:
-            self._handle.seek(frame_start)
-            self._handle.truncate()
-            self._scratch.resize(
-                (frame_start + mmap.PAGESIZE - 1) // mmap.PAGESIZE * mmap.PAGESIZE
-            )
-            return suffix
-        frame_end = self._handle.tell()
-        self._handle.seek(frame_start)
-        self._write(struct.pack(">I", payload_bytes))
-        self._handle.seek(frame_end)
-        self._count += 1
-        return suffix
-
-    def _write_text(
-        self,
-        value: str,
-        *,
-        payload_lease: MemoryLease,
-    ) -> int:
-        payload_bytes = 0
-        codepoint_span = max(1, io.DEFAULT_BUFFER_SIZE // 4)
-        for start in range(0, len(value), codepoint_span):
-            stop = min(len(value), start + codepoint_span)
-            transient_bytes = (stop - start) * 8
-            _require_raw_conversion_headroom(
-                logical_bytes=transient_bytes,
-                payload_lease=payload_lease,
-            )
-            text_slice = value[start:stop]
-            payload = text_slice.encode("utf-8")
-            self._write(payload)
-            payload_bytes += len(payload)
-            del text_slice, payload
-        return payload_bytes
-
-    def __bool__(self) -> bool:
-        return self._count > 0
-
-    def joined(
-        self,
-        current: str,
-        *,
-        resource_policy: RuntimeResourcePolicy,
-        payload_lease: MemoryLease,
-    ) -> str:
-        result_bytes = self._joined_payload_bytes(current)
-        _grow_source_lease(
-            additional_bytes=8 * result_bytes,
-            resource_policy=resource_policy,
-            payload_lease=payload_lease,
-        )
-        output = io.StringIO()
-        wrote = bool(current)
-        if current:
-            output.write(current)
-        self._handle.seek(0)
-        for _ in range(self._count):
-            encoded_length = self._handle.read(4)
-            if len(encoded_length) != 4:
-                raise ValueError("malformed_csmar_csv_row")
-            length = struct.unpack(">I", encoded_length)[0]
-            if not wrote and length == 0:
-                continue
-            if wrote:
-                output.write("\n")
-            decoder = codecs.getincrementaldecoder("utf-8")("strict")
-            remaining = length
-            while remaining:
-                payload = self._handle.read(min(io.DEFAULT_BUFFER_SIZE, remaining))
-                if not payload:
-                    raise ValueError("malformed_csmar_csv_row")
-                remaining -= len(payload)
-                output.write(decoder.decode(payload, final=remaining == 0))
-            wrote = True
-        return output.getvalue()
-
-    def _joined_payload_bytes(self, current: str) -> int:
-        current_bytes = _utf8_size(current)
-        result_bytes = current_bytes
-        wrote = bool(current)
-        self._handle.seek(0)
-        for _ in range(self._count):
-            encoded_length = self._handle.read(4)
-            if len(encoded_length) != 4:
-                raise ValueError("malformed_csmar_csv_row")
-            length = struct.unpack(">I", encoded_length)[0]
-            if not wrote and length == 0:
-                continue
-            if wrote:
-                result_bytes += 1
-            result_bytes += length
-            wrote = True
-            self._handle.seek(length, 1)
-        return result_bytes
+def _join_continuations(current: str, continuations: list[str]) -> str:
+    parts = [current] if current else []
+    for value in continuations:
+        if parts or value:
+            parts.append(value)
+    return "\n".join(parts)
 
 
 @contextmanager
@@ -355,13 +181,7 @@ def _raw_export_path_session(
         raise error
 
     def iter_paths() -> Iterator[Path]:
-        walker = iter(
-            filesystem_walk(
-                root,
-                follow_symlinks=False,
-                on_error=fail_walk,
-            )
-        )
+        walker = iter(filesystem_walk(root, follow_symlinks=False, on_error=fail_walk))
         while True:
             try:
                 parent, dirnames, filenames = next(walker)
@@ -370,8 +190,7 @@ def _raw_export_path_session(
             require_unaliased_path(parent, error="csmar_raw_export_identity_changed")
             for name in dirnames:
                 require_unaliased_path(
-                    parent / name,
-                    error="csmar_raw_export_identity_changed",
+                    parent / name, error="csmar_raw_export_identity_changed"
                 )
             dirnames[:] = sorted(
                 name for name in dirnames if name.casefold() != "raw_only"
@@ -391,7 +210,7 @@ def _raw_export_path_session(
 
     try:
         require_unaliased_path(root, error="csmar_raw_export_identity_changed")
-        yield iter_paths(), verify_root
+        yield (iter_paths(), verify_root)
     finally:
         primary = sys.exception()
         if primary is None:
@@ -407,48 +226,16 @@ def _raw_export_path_session(
 
 
 def iter_index_info_rows(
-    export_path: Path,
-    *,
-    resource_policy: RuntimeResourcePolicy | None = None,
-    expected_identity: DatasetFileIdentity | None = None,
-) -> Iterable[tuple[list[str], list[str], int]]:
-    bound_policy = resource_policy
-
-    def activate() -> Iterator[tuple[list[str], list[str], int]]:
-        policy = bound_policy or current_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy) as policy:
-            yield from _iter_index_info_rows_under_policy(
-                export_path,
-                resource_policy=policy,
-                expected_identity=expected_identity,
-            )
-
-    return activate()
-
-
-def _iter_index_info_rows_under_policy(
-    export_path: Path,
-    *,
-    resource_policy: RuntimeResourcePolicy,
-    expected_identity: DatasetFileIdentity | None,
+    export_path: Path, *, expected_identity: DatasetFileIdentity | None
 ) -> Iterator[tuple[list[str], list[str], int]]:
-    policy = resource_policy
     record_limit_bytes = MAX_LOGICAL_RECORD_BYTES
     rows = iter(
         _iter_csv_records(
-            export_path,
-            resource_policy=policy,
-            require_exact_width=False,
-            expected_identity=expected_identity,
+            export_path, require_exact_width=False, expected_identity=expected_identity
         )
     )
-    with (
-        closing_iterator(rows),
-        policy.lease("source.csmar.index_info.rows", 0) as payload_lease,
-        _IndexInfoContinuationSpool(
-            resource_policy=policy,
-        ) as continuations,
-    ):
+    continuations: list[str] = []
+    with closing_iterator(rows):
         pending_row: list[str] | None = None
         pending_start: int | None = None
         pending_bytes = 0
@@ -456,75 +243,38 @@ def _iter_index_info_rows_under_policy(
         complete_bytes = 0
         row_number = 1
         header: list[str] | None = None
-
-        def retain_rows(*values: list[str] | None) -> None:
-            retained = 4 * io.DEFAULT_BUFFER_SIZE + sum(
-                sys.getsizeof(value) + sum(map(sys.getsizeof, value))
-                for value in (header, *values)
-                if value is not None
-            )
-            if retained > payload_lease.reserved_bytes:
-                additional = retained - payload_lease.reserved_bytes
-                _grow_source_lease(
-                    additional_bytes=additional,
-                    resource_policy=policy,
-                    payload_lease=payload_lease,
-                )
-            else:
-                payload_lease.shrink_to(retained)
-
         try:
             while True:
-                retain_rows(pending_row, complete_row)
                 try:
                     header, record, source_bytes = next(rows)
                 except StopIteration:
                     break
                 row_number += 1
-                # Streaming reconstruction can retain several decoded field fragments.
-                _grow_source_lease(
-                    additional_bytes=4 * source_bytes,
-                    resource_policy=policy,
-                    payload_lease=payload_lease,
-                )
                 if pending_row is not None:
                     if _record_starts_index_info(record):
                         raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
                     remaining_columns = len(header) - len(pending_row)
                     completes_row = (
-                        len(pending_row) <= 6
-                        and record.field_count >= remaining_columns
+                        len(pending_row) <= 6 and len(record) >= remaining_columns
                     )
                     next_bytes = pending_bytes + source_bytes
                     if next_bytes > record_limit_bytes:
                         raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
-                    pending_slot_bytes = _decoded_rows_slot_bytes((pending_row,))
-                    suffix_slot_bytes = (
-                        remaining_columns * struct.calcsize("P") if completes_row else 0
-                    )
-                    _require_raw_conversion_headroom(
-                        logical_bytes=pending_slot_bytes + suffix_slot_bytes,
-                        payload_lease=payload_lease,
-                    )
-                    suffix = continuations.append_fields(
-                        record.iter_fields(),
-                        field_count=record.field_count,
+                    suffix = _append_continuation_fields(
+                        continuations,
+                        iter(record),
+                        field_count=len(record),
                         suffix_count=remaining_columns if completes_row else 0,
                         include_empty=False,
-                        payload_lease=payload_lease,
                     )
                     pending_bytes = next_bytes
                     if completes_row:
-                        pending_row[-1] = continuations.joined(
-                            pending_row[-1],
-                            resource_policy=policy,
-                            payload_lease=payload_lease,
+                        pending_row[-1] = _join_continuations(
+                            pending_row[-1], continuations
                         )
                         pending_row.extend(suffix)
                         complete_row = _normalize_index_info_row(
-                            pending_row,
-                            len(header),
-                            pending_start,
+                            pending_row, len(header), pending_start
                         )
                         complete_bytes = pending_bytes
                         continuations.clear()
@@ -533,23 +283,16 @@ def _iter_index_info_rows_under_policy(
                         pending_bytes = 0
                     del record, suffix
                     continue
-
-                if record.field_count > len(header):
+                if len(record) > len(header):
                     if _record_starts_index_info(record):
                         row = _normalize_bounded_index_info_record(
-                            record,
-                            row_number,
-                            continuation_spool=continuations,
-                            resource_policy=policy,
-                            payload_lease=payload_lease,
+                            record, row_number, continuation_spool=continuations
                         )
                     elif complete_row is not None:
                         if complete_bytes + source_bytes > record_limit_bytes:
                             raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
-                        continuations.append_fields(
-                            record.iter_fields(),
-                            field_count=record.field_count,
-                            payload_lease=payload_lease,
+                        _append_continuation_fields(
+                            continuations, iter(record), field_count=len(record)
                         )
                         complete_bytes += source_bytes
                         del record
@@ -557,19 +300,19 @@ def _iter_index_info_rows_under_policy(
                     else:
                         raise ValueError(f"malformed_csmar_csv_row: {row_number}")
                 else:
-                    row = record.materialize(max_fields=len(header))
-
+                    row = record
                 if len(row) < len(header):
                     if _looks_like_index_info_record_start(row):
                         if complete_row is not None:
                             if continuations:
-                                complete_row[-1] = continuations.joined(
-                                    complete_row[-1],
-                                    resource_policy=policy,
-                                    payload_lease=payload_lease,
+                                complete_row[-1] = _join_continuations(
+                                    complete_row[-1], continuations
                                 )
-                            retain_rows(complete_row, row)
-                            yield header, complete_row, complete_bytes
+                            _yield_value = (header, complete_row, complete_bytes)
+                            try:
+                                yield _yield_value
+                            except GeneratorExit:
+                                return
                             complete_row = None
                         pending_row = row
                         pending_start = row_number
@@ -582,10 +325,8 @@ def _iter_index_info_rows_under_policy(
                     if complete_row is not None:
                         if complete_bytes + source_bytes > record_limit_bytes:
                             raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
-                        continuations.append_fields(
-                            row,
-                            field_count=len(row),
-                            payload_lease=payload_lease,
+                        _append_continuation_fields(
+                            continuations, row, field_count=len(row)
                         )
                         complete_bytes += source_bytes
                         del row
@@ -593,19 +334,16 @@ def _iter_index_info_rows_under_policy(
                     raise ValueError(f"malformed_csmar_csv_row: {row_number}")
                 if complete_row is not None:
                     if continuations:
-                        complete_row[-1] = continuations.joined(
-                            complete_row[-1],
-                            resource_policy=policy,
-                            payload_lease=payload_lease,
+                        complete_row[-1] = _join_continuations(
+                            complete_row[-1], continuations
                         )
-                    retain_rows(complete_row, row)
-                    yield header, complete_row, complete_bytes
+                    _yield_value = (header, complete_row, complete_bytes)
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
                     complete_row = None
-                complete_row = _normalize_index_info_row(
-                    row,
-                    len(header),
-                    row_number,
-                )
+                complete_row = _normalize_index_info_row(row, len(header), row_number)
                 del row
                 continuations.clear()
                 complete_bytes = source_bytes
@@ -614,13 +352,14 @@ def _iter_index_info_rows_under_policy(
                 raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
             if complete_row is not None:
                 if continuations:
-                    complete_row[-1] = continuations.joined(
-                        complete_row[-1],
-                        resource_policy=policy,
-                        payload_lease=payload_lease,
+                    complete_row[-1] = _join_continuations(
+                        complete_row[-1], continuations
                     )
-                retain_rows(complete_row)
-                yield header, complete_row, complete_bytes
+                _yield_value = (header, complete_row, complete_bytes)
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
                 complete_row = None
         finally:
             header = pending_row = complete_row = row = record = suffix = None
@@ -634,90 +373,58 @@ def _normalize_index_info_row(
     return row
 
 
-def _record_starts_index_info(record: BoundedCsvRecord) -> bool:
-    first = next(record.iter_fields(), "")
+def _record_starts_index_info(record: list[str]) -> bool:
+    first = next(iter(record), "")
     return bool(INDEX_INFO_CODE_RE.fullmatch(first))
 
 
 def _normalize_bounded_index_info_record(
-    record: BoundedCsvRecord,
-    row_number: int | None,
-    *,
-    continuation_spool: _IndexInfoContinuationSpool,
-    resource_policy: RuntimeResourcePolicy,
-    payload_lease: MemoryLease,
+    record: list[str], row_number: int | None, *, continuation_spool: list[str]
 ) -> list[str]:
-    """Normalize an over-width index record without a field-count-sized list."""
-
+    """Normalize an over-width index record while preserving text continuations."""
     window: list[str] = []
     candidate_start: int | None = None
-    for position, value in enumerate(record.iter_fields()):
+    for position, value in enumerate(iter(record)):
         window.append(value)
         if len(window) > 5:
             del window[0]
         start = position - 4
-        if start < 6 or len(window) != 5 or start + 5 >= record.field_count:
+        if start < 6 or len(window) != 5 or start + 5 >= len(record):
             continue
         if all(
-            _looks_like_source_category_code(item, allowed_values)
-            for item, allowed_values in zip(
-                window,
-                INDEX_INFO_SOURCE_CODE_ENUMS,
-                strict=True,
+            (
+                _looks_like_source_category_code(item, allowed_values)
+                for item, allowed_values in zip(
+                    window, INDEX_INFO_SOURCE_CODE_ENUMS, strict=True
+                )
             )
         ):
             if candidate_start is not None:
                 raise ValueError(f"malformed_csmar_csv_row: {row_number}")
             candidate_start = start
-    if candidate_start is None or candidate_start + 5 >= record.field_count:
+    if candidate_start is None or candidate_start + 5 >= len(record):
         raise ValueError(f"malformed_csmar_csv_row: {row_number}")
     del window, value
-    fixed = list(islice(record.iter_fields(), 5))
-    codes = list(islice(record.iter_fields(), candidate_start, candidate_start + 5))
+    fixed = list(islice(iter(record), 5))
+    codes = list(islice(iter(record), candidate_start, candidate_start + 5))
     continuation_spool.clear()
     sample_field_count = candidate_start - 5
-    continuation_spool.append_fields(
-        islice(record.iter_fields(), 5, candidate_start),
+    _append_continuation_fields(
+        continuation_spool,
+        islice(iter(record), 5, candidate_start),
         field_count=sample_field_count,
-        payload_lease=payload_lease,
     )
-    sample = continuation_spool.joined(
-        "",
-        resource_policy=resource_policy,
-        payload_lease=payload_lease,
-    )
+    sample = _join_continuations("", continuation_spool)
     continuation_spool.clear()
-    formula_field_count = record.field_count - candidate_start - 5
-    continuation_spool.append_fields(
-        islice(record.iter_fields(), candidate_start + 5, None),
+    formula_field_count = len(record) - candidate_start - 5
+    _append_continuation_fields(
+        continuation_spool,
+        islice(iter(record), candidate_start + 5, None),
         field_count=formula_field_count,
-        payload_lease=payload_lease,
     )
-    formula = continuation_spool.joined(
-        "",
-        resource_policy=resource_policy,
-        payload_lease=payload_lease,
-    )
+    formula = _join_continuations("", continuation_spool)
     continuation_spool.clear()
     return [*fixed, sample, *codes, formula]
-
-
-def _grow_source_lease(
-    *,
-    additional_bytes: int,
-    resource_policy: RuntimeResourcePolicy,
-    payload_lease: MemoryLease,
-) -> None:
-    if additional_bytes > resource_policy.operation_headroom_bytes:
-        raise DatasetReadCapacityExceeded(
-            "csmar_raw_working_set_exceeds_task_memory_budget"
-        )
-    try:
-        payload_lease.grow(additional_bytes)
-    except MemoryError:
-        raise DatasetReadCapacityExceeded(
-            "csmar_raw_working_set_exceeds_task_memory_budget"
-        ) from None
 
 
 def _looks_like_index_info_record_start(row: list[str]) -> bool:
@@ -725,8 +432,7 @@ def _looks_like_index_info_record_start(row: list[str]) -> bool:
 
 
 def _looks_like_source_category_code(
-    value: str,
-    allowed_values: frozenset[str],
+    value: str, allowed_values: frozenset[str]
 ) -> bool:
     stripped = value.strip()
     return stripped == "" or stripped in allowed_values
@@ -735,9 +441,7 @@ def _looks_like_source_category_code(
 def _clean_index_info_source_codes(frame: pd.DataFrame) -> pd.DataFrame:
     result = frame
     for column, allowed_values in zip(
-        INDEX_INFO_SOURCE_CODE_COLUMNS,
-        INDEX_INFO_SOURCE_CODE_ENUMS,
-        strict=True,
+        INDEX_INFO_SOURCE_CODE_COLUMNS, INDEX_INFO_SOURCE_CODE_ENUMS, strict=True
     ):
         if column not in result.columns:
             continue
@@ -747,124 +451,57 @@ def _clean_index_info_source_codes(frame: pd.DataFrame) -> pd.DataFrame:
     return result
 
 
-def iter_private_export_chunks_with_policy(
+def iter_private_export_chunks(
     path: str | Path,
     *,
     dataset: str,
     chunksize: int,
-    resource_policy: RuntimeResourcePolicy,
     expected_identity: DatasetFileIdentity | None = None,
-) -> Iterator[object]:
-    require_raw_resource_policy(resource_policy)
+) -> Iterator[pd.DataFrame]:
     if type(dataset) is not str or dataset not in RAW_TABLE_CONTRACTS:
         raise ValueError("unknown_csmar_dataset")
+    if type(chunksize) is not int or chunksize <= 0:
+        raise ValueError("invalid_csmar_chunksize")
     export_path = Path(path)
-    producer_bound = max(1, resource_policy.operation_headroom_bytes // 2)
-    batch_target = min(
-        producer_bound, max(1, resource_policy.planning_headroom_bytes // 2)
+    rows = (
+        iter_index_info_rows(export_path, expected_identity=expected_identity)
+        if dataset == "index_info"
+        else _iter_csv_records(
+            export_path,
+            dataset=dataset,
+            require_exact_width=True,
+            expected_identity=expected_identity,
+        )
     )
-    pointer_bytes = struct.calcsize("P")
-
-    if dataset == "index_info":
-        rows = iter(
-            iter_index_info_rows(
-                export_path,
-                resource_policy=resource_policy,
-                expected_identity=expected_identity,
-            )
-        )
-    else:
-        rows = iter(
-            _iter_csv_records(
-                export_path,
-                dataset=dataset,
-                resource_policy=resource_policy,
-                require_exact_width=True,
-                expected_identity=expected_identity,
-            )
-        )
     with closing_iterator(rows):
         while True:
-            lease = yield producer_bound
-            pending: list[object] = []
-            pending_bytes = 0
-            pending_source_bytes = 0
-            header: list[str] | None = None
+            pending = []
+            header = None
             while len(pending) < chunksize:
-                if pending and (
-                    pending_bytes
-                    + 2 * pending_source_bytes
-                    + _raw_frame_owner_known_bytes(len(pending), header)
-                    # Bound the next logical row's UCS4 payload and conversion buffers.
-                    + 6 * MAX_LOGICAL_RECORD_BYTES
-                    + len(header) * (80 + 16 + 2 * pointer_bytes)
-                    + pointer_bytes
-                    + 64 * 1024
-                    > batch_target
-                ):
-                    break
                 try:
-                    next_header, row, row_bytes = next(rows)
+                    header, row, _row_bytes = next(rows)
                 except StopIteration:
                     break
-                if header is None:
-                    header = next_header
-                pending_bytes += sum(map(sys.getsizeof, row))
-                pending_source_bytes += row_bytes
-                if (
-                    pending_bytes
-                    + 2 * pending_source_bytes
-                    + _raw_frame_owner_known_bytes(len(pending) + 1, header)
-                    + 64 * 1024
-                    > producer_bound
-                ):
-                    raise DatasetReadCapacityExceeded(
-                        "csmar_raw_working_set_exceeds_task_memory_budget"
-                    )
                 pending.append(row)
-            if not pending or header is None:
+            if not pending:
                 return
-            _require_raw_conversion_headroom(
-                logical_bytes=pending_bytes
-                + 2 * pending_source_bytes
-                + _raw_frame_owner_known_bytes(len(pending), header),
-                payload_lease=lease,
-            )
+            frame = _raw_frame(pending, header)
             if dataset == "index_info":
-                frame = _clean_index_info_source_codes(_raw_frame(pending, header))
-            else:
-                frame = _raw_frame(pending, header)
-            frame_bytes = pandas_frame_payload_bytes(frame)
-            column_label_bytes = sum(map(sys.getsizeof, frame.columns))
-            actual_bound = 2 * (frame_bytes + column_label_bytes) + 128 * 1024
-            if actual_bound > lease.reserved_bytes:
-                raise DatasetReadCapacityExceeded(
-                    "csmar_raw_working_set_exceeds_task_memory_budget"
-                )
-            row = None
-            next_header = None
-            header = None
-            del pending
-            lease.shrink_to(actual_bound)
-            yield OwnedValue(frame, lease)
-            del frame
+                frame = _clean_index_info_source_codes(frame)
+            try:
+                yield frame
+            except GeneratorExit:
+                return
 
 
 def _iter_csv_records(
     path: Path,
     *,
-    resource_policy: RuntimeResourcePolicy,
     require_exact_width: bool,
     dataset: str | None = None,
     expected_identity: DatasetFileIdentity | None = None,
-) -> Iterator[tuple[list[str], list[str] | BoundedCsvRecord, int]]:
-    rows = iter(
-        iter_export_csv_records(
-            path,
-            resource_policy=resource_policy,
-            expected_identity=expected_identity,
-        )
-    )
+) -> Iterator[tuple[list[str], list[str], int]]:
+    rows = iter(iter_export_csv_records(path, expected_identity=expected_identity))
     with closing_iterator(rows):
         header = physical_header = row = record = None
         try:
@@ -890,42 +527,43 @@ def _iter_csv_records(
                     for alias in aliases
                 )
                 selected_positions = frozenset(
-                    index
-                    for index, column in enumerate(physical_header)
-                    if column in selected_columns
+                    (
+                        index
+                        for index, column in enumerate(physical_header)
+                        if column in selected_columns
+                    )
                 )
                 header = [
                     physical_header[index] for index in sorted(selected_positions)
                 ]
                 del physical_header
             del header_record
-            with resource_policy.lease("source.csmar.csv.header", 0) as header_lease:
-                try:
-                    _grow_source_lease(
-                        additional_bytes=sys.getsizeof(header)
-                        + sum(map(sys.getsizeof, header)),
-                        resource_policy=resource_policy,
-                        payload_lease=header_lease,
-                    )
-                    while True:
-                        try:
-                            record, source_bytes = next(rows)
-                        except StopIteration:
-                            break
-                        row: list[str] | BoundedCsvRecord = record
-                        if require_exact_width:
-                            if record.field_count != physical_width:
-                                raise ValueError("malformed_csmar_csv_row")
-                            row = record.materialize(
-                                selected_positions=selected_positions
-                            )
-                            del record
-                        yield header, row, source_bytes
-                        del row
-                        if not require_exact_width:
-                            del record
-                finally:
-                    header = physical_header = row = record = None
+            try:
+                while True:
+                    try:
+                        record, source_bytes = next(rows)
+                    except StopIteration:
+                        break
+                    row: list[str] = record
+                    if require_exact_width:
+                        if len(record) != physical_width:
+                            raise ValueError("malformed_csmar_csv_row")
+                        row = [
+                            value
+                            for position, value in enumerate(record)
+                            if position in selected_positions
+                        ]
+                        del record
+                    _yield_value = (header, row, source_bytes)
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
+                    del row
+                    if not require_exact_width:
+                        del record
+            finally:
+                header = physical_header = row = record = None
         finally:
             header = physical_header = row = record = None
 
@@ -945,130 +583,75 @@ def _raw_frame(rows: list[list[str]], header: list[str]) -> pd.DataFrame:
     return frame
 
 
-def _raw_frame_owner_known_bytes(row_count: int, header: list[str] | None) -> int:
-    """Bound owner-known list, frame, and numeric decode buffers before allocation."""
-
-    if not row_count or header is None:
-        return 0
-    pointer_bytes = struct.calcsize("P")
-    cells = row_count * len(header)
-    pending_backing_bytes = row_count * pointer_bytes + cells * pointer_bytes
-    frame_reference_bytes = (len(header) + cells) * pointer_bytes
-    numeric_decode_bytes = cells * 16
-    return (
-        pending_backing_bytes
-        + frame_reference_bytes
-        + numeric_decode_bytes
-        + sum(map(sys.getsizeof, header))
-    )
-
-
-def _decoded_rows_slot_bytes(rows: Iterable[list[str] | None]) -> int:
-    pointer_bytes = struct.calcsize("P")
-    return sum((1 + len(row)) * pointer_bytes for row in rows if row is not None)
-
-
-def _require_raw_conversion_headroom(
-    *,
-    logical_bytes: int,
-    payload_lease: MemoryLease,
-) -> None:
-    available_bytes = payload_lease.reserved_bytes if payload_lease.active else 0
-    if logical_bytes > available_bytes:
-        raise DatasetReadCapacityExceeded(
-            "csmar_raw_working_set_exceeds_task_memory_budget"
-        )
-
-
 def dataset_files_with_identity_by_id(
     raw_root: Path,
     *,
-    resource_policy: RuntimeResourcePolicy | None = None,
     identity_index: ExactPrimaryKeyIndex | None = None,
     requested_datasets: Iterable[str] | None = None,
 ) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
     """Yield inspected files with the identity bound during inspection."""
-
-    bound_policy = resource_policy
     root = Path(raw_root)
     requested = _requested_raw_datasets(requested_datasets)
 
     def iter_files() -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
-        policy = bound_policy or current_runtime_resource_policy()
-        with runtime_resource_policy_scope(policy) as policy:
-            with _raw_export_path_session(root) as (paths, verify_root):
-                with ExitStack() as index_owner:
-                    if identity_index is None:
-                        index = ExactPrimaryKeyIndex(
-                            primary_key=("dataset_path",),
-                        )
-                        index_owner.enter_context(
-                            policy.lease(
-                                "source.csmar.raw.identity.index",
-                                index.retained_memory_bytes,
-                            )
-                        )
-                        index_owner.enter_context(index)
-                    else:
-                        index = identity_index
-                    files = _iter_indexed_raw_export_files(
-                        root,
-                        paths=paths,
-                        index=index,
-                        namespace="csmar-dataset-physical-exports",
-                        resource_policy=policy,
-                        requested_datasets=requested,
+        with _raw_export_path_session(root) as (paths, verify_root):
+            if identity_index is None:
+                index = ExactPrimaryKeyIndex(primary_key=("dataset_path",))
+            else:
+                index = identity_index
+            files = _iter_indexed_raw_export_files(
+                root,
+                paths=paths,
+                index=index,
+                namespace="csmar-dataset-physical-exports",
+                requested_datasets=requested,
+            )
+            for path, identity in files:
+                inspection = inspect_raw_export_file(path, expected_identity=identity)
+                if inspection.missing_required_columns:
+                    raise ValueError("csmar_raw_export_schema_invalid")
+                relative = path.relative_to(root).as_posix().encode("utf-8")
+                dataset = inspection.dataset.encode("utf-8")
+                identity_payload = b"\x00".join(
+                    str(value).encode("ascii")
+                    for value in (
+                        identity.device,
+                        identity.inode,
+                        identity.size,
+                        identity.modified_ns,
                     )
-                    for path, identity in files:
-                        inspection = inspect_raw_export_file(
-                            path,
-                            resource_policy=policy,
-                            expected_identity=identity,
-                        )
-                        if inspection.missing_required_columns:
-                            raise ValueError("csmar_raw_export_schema_invalid")
-                        relative = path.relative_to(root).as_posix().encode("utf-8")
-                        dataset = inspection.dataset.encode("utf-8")
-                        identity_payload = b"\0".join(
-                            str(value).encode("ascii")
-                            for value in (
-                                identity.device,
-                                identity.inode,
-                                identity.size,
-                                identity.modified_ns,
-                            )
-                        )
-                        payload = dataset + b"\0" + relative + b"\0" + identity_payload
-                        index.add_identity_payloads(
-                            namespace="csmar-dataset-paths",
-                            payloads=((dataset + b"\0" + relative, payload),),
-                        )
-                    with closing_iterator(
-                        _iter_dataset_file_identities(root, index)
-                    ) as records:
-                        for _, group in groupby(records, key=lambda item: item[0]):
-                            yield from group
-                            verify_root()
+                )
+                payload = dataset + b"\x00" + relative + b"\x00" + identity_payload
+                index.add_identity_payloads(
+                    namespace="csmar-dataset-paths",
+                    payloads=((dataset + b"\x00" + relative, payload),),
+                )
+            with closing_iterator(
+                _iter_dataset_file_identities(root, index)
+            ) as records:
+                for _, group in groupby(records, key=lambda item: item[0]):
+                    for _yield_value in group:
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
+                    verify_root()
 
     return iter_files()
 
 
 def _iter_dataset_file_identities(
-    root: Path,
-    index: ExactPrimaryKeyIndex,
-    *,
-    data_id: str | None = None,
+    root: Path, index: ExactPrimaryKeyIndex, *, data_id: str | None = None
 ) -> Iterator[tuple[str, Path, DatasetFileIdentity]]:
     """Replay the inspected inventory without retaining a second member list."""
-
     with closing_iterator(
         index.identity_payload_values(namespace="csmar-dataset-paths")
     ) as payloads:
         for payload in payloads:
-            dataset, relative, device, inode, size, modified_ns = payload.split(b"\0")
+            dataset, relative, device, inode, size, modified_ns = payload.split(b"\x00")
             dataset = dataset.decode("utf-8")
             if data_id is None or dataset == data_id:
-                yield (
+                _yield_value = (
                     dataset,
                     root / relative.decode("utf-8"),
                     DatasetFileIdentity(
@@ -1078,6 +661,10 @@ def _iter_dataset_file_identities(
                         modified_ns=int(modified_ns),
                     ),
                 )
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
 
 
 def _iter_indexed_raw_export_files(
@@ -1086,22 +673,17 @@ def _iter_indexed_raw_export_files(
     paths: Iterator[Path],
     index: ExactPrimaryKeyIndex,
     namespace: str,
-    resource_policy: RuntimeResourcePolicy,
     requested_datasets: frozenset[str] | None,
 ) -> Iterator[tuple[Path, DatasetFileIdentity]]:
     path_namespace = f"{namespace}-paths"
     for path in paths:
         identity = raw_export_file_identity(path)
         if requested_datasets is not None:
-            candidate = _raw_dataset_candidate(
-                path,
-                resource_policy=resource_policy,
-                expected_identity=identity,
-            )
+            candidate = _raw_dataset_candidate(path, expected_identity=identity)
             if candidate not in requested_datasets:
                 continue
         relative = path.relative_to(root).as_posix().encode("utf-8")
-        payload = relative + b"\0" + _file_identity_bytes(identity)
+        payload = relative + b"\x00" + _file_identity_bytes(identity)
         inserted = index.add_identity_payloads(
             namespace=namespace,
             payloads=((_raw_export_physical_key(identity), payload),),
@@ -1109,8 +691,7 @@ def _iter_indexed_raw_export_files(
         if inserted != 1:
             raise ValueError("csmar_raw_export_identity_changed")
         index.add_identity_payloads(
-            namespace=path_namespace,
-            payloads=((relative, payload),),
+            namespace=path_namespace, payloads=((relative, payload),)
         )
     payloads = iter(index.identity_payload_values(namespace=path_namespace))
     while True:
@@ -1118,7 +699,7 @@ def _iter_indexed_raw_export_files(
             payload = next(payloads)
         except StopIteration:
             return
-        relative, device, inode, size, modified_ns = payload.split(b"\0")
+        relative, device, inode, size, modified_ns = payload.split(b"\x00")
         path = root / relative.decode("utf-8")
         identity = DatasetFileIdentity(
             device=int(device),
@@ -1126,7 +707,7 @@ def _iter_indexed_raw_export_files(
             size=int(size),
             modified_ns=int(modified_ns),
         )
-        yield path, identity
+        yield (path, identity)
 
 
 def _requested_raw_datasets(
@@ -1141,10 +722,7 @@ def _requested_raw_datasets(
 
 
 def _raw_dataset_candidate(
-    path: Path,
-    *,
-    resource_policy: RuntimeResourcePolicy,
-    expected_identity: DatasetFileIdentity,
+    path: Path, *, expected_identity: DatasetFileIdentity
 ) -> str | None:
     try:
         return parse_raw_filename(path).dataset
@@ -1155,11 +733,7 @@ def _raw_dataset_candidate(
     except ValueError:
         pass
     try:
-        columns = read_export_header(
-            path,
-            resource_policy=resource_policy,
-            expected_identity=expected_identity,
-        )
+        columns = read_export_header(path, expected_identity=expected_identity)
     except ValueError as exc:
         if str(exc) == "csmar_raw_export_identity_changed":
             raise
@@ -1179,30 +753,24 @@ def _verify_csmar_member_set(
     requested_datasets: Iterable[str] | None = None,
 ) -> None:
     requested = _requested_raw_datasets(requested_datasets)
-    policy = current_runtime_resource_policy()
-    if requested is not None and policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
     with _raw_export_path_session(root) as (paths, _verify_root):
         current_count = 0
         for path in paths:
             identity = raw_export_file_identity(path)
             if (
                 requested is not None
-                and _raw_dataset_candidate(
-                    path,
-                    resource_policy=policy,
-                    expected_identity=identity,
-                )
+                and _raw_dataset_candidate(path, expected_identity=identity)
                 not in requested
             ):
                 continue
             relative = path.relative_to(root).as_posix().encode("utf-8")
             expected = index.identity_payload_value(
-                namespace=namespace,
-                payload=relative,
+                namespace=namespace, payload=relative
             )
             actual = (
-                relative + b"\0" + _file_identity_bytes(raw_export_file_identity(path))
+                relative
+                + b"\x00"
+                + _file_identity_bytes(raw_export_file_identity(path))
             )
             if expected != actual:
                 raise ValueError("csmar_raw_export_identity_changed")
@@ -1212,6 +780,6 @@ def _verify_csmar_member_set(
 
 
 def _raw_export_physical_key(identity: DatasetFileIdentity) -> bytes:
-    return b"\0".join(
+    return b"\x00".join(
         str(value).encode("ascii") for value in (identity.device, identity.inode)
     )

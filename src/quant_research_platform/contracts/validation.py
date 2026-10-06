@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import traceback
 import warnings
 from collections.abc import Iterable
 from datetime import date, datetime
@@ -53,23 +52,6 @@ def strict_finite_float(value: object, *, error: str) -> float:
     if not math.isfinite(number):
         raise ValueError(error)
     return number
-
-
-def clear_exception_frames(error: BaseException) -> None:
-    """Release locals retained by one exception and its chained tracebacks."""
-
-    pending = [error]
-    seen: set[int] = set()
-    while pending:
-        current = pending.pop()
-        if id(current) in seen:
-            continue
-        seen.add(id(current))
-        if current.__traceback__ is not None:
-            traceback.clear_frames(current.__traceback__)
-        for linked in (current.__cause__, current.__context__):
-            if linked is not None:
-                pending.append(linked)
 
 
 def strict_string_series(

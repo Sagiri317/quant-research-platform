@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from contextlib import nullcontext
 from dataclasses import dataclass
 
 import numpy as np
@@ -15,16 +14,15 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
 )
-from quant_research_platform.runtime.resources import current_runtime_resource_policy
 
 
 @dataclass(frozen=True)
 class OptimizerConfig:
     active_name_limit: float = 0.005
     tracking_error_limit: float = 0.05
-    target_turnover_limit: float = 0.20
+    target_turnover_limit: float = 0.2
     industry_active_limit: float = 0.02
-    style_active_limit: float = 0.20
+    style_active_limit: float = 0.2
     solver_ftol: float = 1e-12
     solver_maxiter: int = 1000
 
@@ -58,7 +56,6 @@ def optimize_portfolio(
     eligibility_column: str | None = None,
 ) -> OptimizationResult:
     """Maximize expected active alpha minus expected trade cost under hard limits."""
-
     required = {
         "asset_id",
         "expected_alpha",
@@ -71,7 +68,7 @@ def optimize_portfolio(
     }
     if not isinstance(assets, pd.DataFrame) or not required.issubset(assets.columns):
         raise ValueError("optimizer_columns_invalid")
-    if not industry_columns and not style_columns:
+    if not industry_columns and (not style_columns):
         raise ValueError("optimizer_exposure_columns_required")
     if not callable(expected_transaction_cost):
         raise ValueError("optimizer_cost_provider_invalid")
@@ -200,50 +197,17 @@ def optimize_portfolio(
             ),
         },
     ]
-    # SciPy 1.18 SLSQP keeps the native buffer, constraint Jacobian, numerical
-    # derivatives, multipliers and bounds alive together. Fixed variables are
-    # removed by scipy.optimize.minimize before entering the native solver.
-    n = sum(lower != upper for lower, upper in bounds)
-    m = 3 + len(columns) + len(data)
-    meq = 1
-    buffer_items = (
-        n * (n + 1) // 2
-        + 3 * m * n
-        - (m + 5 * n + 7) * meq
-        + 9 * m
-        + 8 * n * n
-        + 35 * n
-        + meq * meq
-        + 28
+    result = minimize(
+        lambda weights: float(
+            -(expected_alpha @ (weights - benchmark))
+            + float(expected_transaction_cost(weights)) / nav
+        ),
+        current.copy(),
+        method="SLSQP",
+        bounds=bounds,
+        constraints=constraints,
+        options={"ftol": config.solver_ftol, "maxiter": config.solver_maxiter},
     )
-    working_bytes = 8 * (
-        max(1, buffer_items)
-        + 3 * m * max(1, n)
-        + 2 * (m + 2 * n + 2)
-        + 16 * len(data)
-        + 4 * m
-    )
-    policy = current_runtime_resource_policy()
-    if policy is not None:
-        policy.require_working_set(
-            working_bytes, error="optimizer_working_set_exceeds_memory_capacity"
-        )
-    with (
-        policy.lease("research.portfolio.optimizer", working_bytes)
-        if policy is not None
-        else nullcontext()
-    ):
-        result = minimize(
-            lambda weights: float(
-                -(expected_alpha @ (weights - benchmark))
-                + float(expected_transaction_cost(weights)) / nav
-            ),
-            current.copy(),
-            method="SLSQP",
-            bounds=bounds,
-            constraints=constraints,
-            options={"ftol": config.solver_ftol, "maxiter": config.solver_maxiter},
-        )
     if not result.success:
         raise ValueError("optimizer_failed_closed")
     weights = np.asarray(result.x, dtype="float64")
@@ -292,9 +256,10 @@ def _bounds(
             bounds.append((0.0, 1.0))
             continue
         fixed = (
-            (financial_column is not None and bool(row[financial_column]))
+            financial_column is not None
+            and bool(row[financial_column])
             or float(benchmark[position]) == 0.0
-            or (eligibility_column is not None and not bool(row[eligibility_column]))
+            or (eligibility_column is not None and (not bool(row[eligibility_column])))
             or incomplete[position]
         )
         if fixed:
@@ -324,7 +289,7 @@ def _verify_solution(
     nav: float,
     assumptions: ExecutionAssumptions,
 ) -> None:
-    tolerance = 1e-8
+    tolerance = 1e-08
     active = weights - benchmark
     risk = float(
         active @ exposure @ covariance @ exposure.T @ active
@@ -335,8 +300,10 @@ def _verify_solution(
     ):
         raise ValueError("optimizer_solution_invalid")
     if any(
-        value < lower - tolerance or value > upper + tolerance
-        for value, (lower, upper) in zip(weights, bounds, strict=True)
+        (
+            value < lower - tolerance or value > upper + tolerance
+            for value, (lower, upper) in zip(weights, bounds, strict=True)
+        )
     ):
         raise ValueError("optimizer_solution_invalid")
     if risk > config.tracking_error_limit**2 + tolerance:

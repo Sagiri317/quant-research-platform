@@ -18,9 +18,6 @@ from quant_research_platform.contracts.business_manifest import (
 )
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.reports.a_share import REQUIRED_REPORT_SECTIONS
-from quant_research_platform.runtime.resources import (
-    runtime_resource_policy_scope as artifact_resource_scope,
-)
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_iterdir,
@@ -71,7 +68,7 @@ def _report() -> tuple[object, dict[str, object]]:
             section: {"status": "BLOCKED"} for section in REQUIRED_REPORT_SECTIONS
         },
     }
-    return envelope, payload
+    return (envelope, payload)
 
 
 def test_research_report_round_trips_only_matching_run_semantics(
@@ -79,23 +76,14 @@ def test_research_report_round_trips_only_matching_run_semantics(
 ) -> None:
     envelope, payload = _report()
     root = write_research_report_artifact(
-        tmp_path / "pv_all_report_artifact",
-        envelope=envelope,
-        payload=payload,
+        tmp_path / "pv_all_report_artifact", envelope=envelope, payload=payload
     )
-
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        assert (
-            read_research_report_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                report_lease=artifact_lease,
-            )
-            == payload
+    assert (
+        read_research_report_artifact(
+            root, expected_identity=envelope.instance_identity
         )
+        == payload
+    )
 
 
 def test_report_keeps_numeric_byte_counts_and_rejects_stock_strings(tmp_path):
@@ -106,25 +94,19 @@ def test_report_keeps_numeric_byte_counts_and_rejects_stock_strings(tmp_path):
     root = write_research_report_artifact(
         tmp_path / "numeric", envelope=envelope, payload=payload
     )
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        saved = read_research_report_artifact(
-            root,
-            expected_identity=envelope.instance_identity,
-            report_lease=artifact_lease,
+    saved = read_research_report_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    assert (
+        saved["sections"]["run observations"]["metrics"]["read_bytes"]["value"]
+        == 393216
+    )
+    assert "393,216" in filesystem_read_text(root / "report.md", encoding="utf-8")
+    payload["sections"]["Data/Coverage"]["sample"] = "600000.SH"
+    with pytest.raises(ValueError, match="unsafe_evidence: stock_sample"):
+        write_research_report_artifact(
+            tmp_path / "private", envelope=envelope, payload=payload
         )
-        assert (
-            saved["sections"]["run observations"]["metrics"]["read_bytes"]["value"]
-            == 393216
-        )
-        assert "393,216" in filesystem_read_text(root / "report.md", encoding="utf-8")
-        payload["sections"]["Data/Coverage"]["sample"] = "600000.SH"
-        with pytest.raises(ValueError, match="unsafe_evidence: stock_sample"):
-            write_research_report_artifact(
-                tmp_path / "private", envelope=envelope, payload=payload
-            )
 
 
 @pytest.mark.parametrize(
@@ -138,21 +120,14 @@ def test_report_keeps_numeric_byte_counts_and_rejects_stock_strings(tmp_path):
     ),
 )
 def test_research_report_rejects_payload_envelope_mismatch_before_publish(
-    tmp_path: Path,
-    field: str,
-    value: object,
+    tmp_path: Path, field: str, value: object
 ) -> None:
     envelope, payload = _report()
     changed = deepcopy(payload)
     changed[field] = value
     logical_root = tmp_path / "pv_all_report_artifact"
-
     with pytest.raises(ValueError, match="research_report_(payload|semantics)_invalid"):
-        write_research_report_artifact(
-            logical_root,
-            envelope=envelope,
-            payload=changed,
-        )
+        write_research_report_artifact(logical_root, envelope=envelope, payload=changed)
     assert not filesystem_exists(logical_root)
 
 
@@ -161,9 +136,7 @@ def test_research_report_reader_rejects_persisted_envelope_mismatch(
 ) -> None:
     envelope, payload = _report()
     valid_root = write_research_report_artifact(
-        tmp_path / "valid",
-        envelope=envelope,
-        payload=payload,
+        tmp_path / "valid", envelope=envelope, payload=payload
     )
     contract = envelope.semantic_metadata["target_contract"]
     mismatched = build_business_manifest_envelope(
@@ -190,16 +163,11 @@ def test_research_report_reader_rejects_persisted_envelope_mismatch(
 
     invalid_root = tmp_path / "invalid"
     write_semantic_artifact(invalid_root, mismatched, write)
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(ValueError, match="research_report_semantics_invalid"):
-            read_research_report_artifact(
-                invalid_root / "instances" / mismatched.instance_identity,
-                expected_identity=mismatched.instance_identity,
-                report_lease=artifact_lease,
-            )
+    with pytest.raises(ValueError, match="research_report_semantics_invalid"):
+        read_research_report_artifact(
+            invalid_root / "instances" / mismatched.instance_identity,
+            expected_identity=mismatched.instance_identity,
+        )
 
 
 def test_report_reader_preserves_valid_published_markdown_from_another_renderer(
@@ -221,17 +189,11 @@ def test_report_reader_preserves_valid_published_markdown_from_another_renderer(
         raise AssertionError("reader_rerendered_published_markdown")
 
     monkeypatch.setattr(research, "_markdown", forbidden)
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        assert (
-            research.read_research_report_artifact(
-                root, expected_identity=root.name, report_lease=artifact_lease
-            )
-            == payload
-        )
-        assert _files(root) == before
+    assert (
+        research.read_research_report_artifact(root, expected_identity=root.name)
+        == payload
+    )
+    assert _files(root) == before
 
 
 def test_report_markdown_lists_every_formal_result_without_json_walls(tmp_path):
@@ -263,8 +225,6 @@ def test_report_markdown_lists_every_formal_result_without_json_walls(tmp_path):
 
 
 def test_large_report_round_trip_and_resource_failure_preserves_old_artifact(tmp_path):
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-
     envelope, payload = _report()
     payload["sections"]["risk"] = {
         "results": [
@@ -275,33 +235,12 @@ def test_large_report_round_trip_and_resource_failure_preserves_old_artifact(tmp
     root = write_research_report_artifact(logical, envelope=envelope, payload=payload)
     original = filesystem_read_bytes(root / "report.json")
     assert len(original) > 1024 * 1024
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        assert (
-            read_research_report_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                report_lease=artifact_lease,
-            )
-            == payload
+    assert (
+        read_research_report_artifact(
+            root, expected_identity=envelope.instance_identity
         )
-    with (
-        runtime_resource_policy_scope(explicit_cap_bytes=1024 * 1024) as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(MemoryError):
-            read_research_report_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                report_lease=artifact_lease,
-            )
-        with pytest.raises(MemoryError):
-            write_research_report_artifact(
-                tmp_path / "rejected", envelope=envelope, payload=payload
-            )
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+        == payload
+    )
     assert filesystem_read_bytes(root / "report.json") == original
     assert not filesystem_exists(
         tmp_path / "rejected" / "instances" / envelope.instance_identity
@@ -311,22 +250,18 @@ def test_large_report_round_trip_and_resource_failure_preserves_old_artifact(tmp
 @pytest.mark.parametrize("directory", [False, True])
 def test_run_evidence_preserves_json_file_boundary_error(tmp_path, directory):
     from quant_research_platform.artifacts.research import read_research_run_record
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.manifests import read_manifest
 
     path = tmp_path / "run_missing.json"
     if directory:
         filesystem_mkdir(path)
-    with runtime_resource_policy_scope() as policy:
-        for reader in (read_manifest, read_research_run_record):
-            with pytest.raises(ValueError, match="^dataset_metadata_file_invalid$"):
-                reader(path)
-        assert policy.used_memory_bytes == 0
+    for reader in (read_manifest, read_research_run_record):
+        with pytest.raises(ValueError, match="^dataset_metadata_file_invalid$"):
+            reader(path)
 
 
 def test_report_parser_binds_actual_bytes_to_verified_member(tmp_path, monkeypatch):
     from quant_research_platform.artifacts import research
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     envelope, payload = _report()
     payload["sections"][REQUIRED_REPORT_SECTIONS[0]]["metric"] = 0.25
@@ -345,127 +280,8 @@ def test_report_parser_binds_actual_bytes_to_verified_member(tmp_path, monkeypat
         return original_reader(path, **kwargs)
 
     monkeypatch.setattr(research, "read_json_evidence", interleaved_reader)
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with pytest.raises(ValueError, match="report_payload_invalid"):
-            read_research_report_artifact(
-                root, expected_identity=root.name, report_lease=artifact_lease
-            )
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+    with pytest.raises(ValueError, match="report_payload_invalid"):
+        read_research_report_artifact(root, expected_identity=root.name)
     filesystem_write_bytes(member, original)
     monkeypatch.setattr(research, "read_json_evidence", original_reader)
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        assert (
-            read_research_report_artifact(
-                root, expected_identity=root.name, report_lease=artifact_lease
-            )
-            == payload
-        )
-
-
-def test_report_trial_aggregation_releases_each_real_ledger(tmp_path, monkeypatch):
-    import weakref
-    from contextlib import contextmanager
-    from dataclasses import replace
-
-    import quant_research_platform.artifacts.research as research
-    from quant_research_platform.contracts.experiments import (
-        trial_ledger_semantic_identity,
-    )
-    from quant_research_platform.contracts.json_codec import canonical_json_hash
-    from quant_research_platform.contracts.targets import (
-        ResearchRunRecord,
-        RunStatus,
-        unmeasured_operation_evidence,
-    )
-    from quant_research_platform.runtime.resources import (
-        MemoryLease,
-        runtime_resource_policy_scope,
-    )
-    from quant_research_platform.storage.experiments import append_trial_record
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.research.test_experiment_ledger import _plan, _record
-
-    layout = StorageLayout(tmp_path)
-    references = []
-    for number in range(2):
-        plan = replace(_plan(), experiment_id=f"report-{number}")
-        trial = replace(
-            _record(plan, event_id=f"event-{number}", attempt_index=1, status="failed"),
-            normalized_parameters={"blob": "x" * 200_000},
-        )
-        append_trial_record(
-            layout.trial_ledger_root(trial.run_id, plan.experiment_id), plan, trial
-        )
-        references.append(
-            {
-                "run_id": trial.run_id,
-                "experiment_id": plan.experiment_id,
-                "protocol_hash": plan.protocol_hash,
-                "semantic_identity": trial_ledger_semantic_identity(plan, (trial,)),
-            }
-        )
-    protocol = {
-        "scenario_id": "scenario_test",
-        "access_window": "development",
-        "research_configuration": {"stage": "evaluation"},
-        "portfolio_candidates": [],
-    }
-    record = ResearchRunRecord(
-        run_id="run_test",
-        profile_id="profile_test",
-        scenario_id="scenario_test",
-        protocol=protocol,
-        protocol_identity=canonical_json_hash(protocol),
-        research_window={
-            "start": "2020-01-01",
-            "end": "2020-01-04",
-            "access": "development",
-        },
-        software_identity="a" * 64,
-        terminal_targets=("scenario_test",),
-        target_results=(),
-        status=RunStatus.FAILED,
-        failure_reason="fixture_model_failures",
-        operation_evidence=unmeasured_operation_evidence("fixture"),
-        trial_ledgers=tuple(references),
-    )
-    objects = []
-    released = []
-    read = research.read_model_trial_ledger_reference
-    close = MemoryLease.close
-
-    @contextmanager
-    def observe_read(*args):
-        with read(*args) as (saved, records):
-            try:
-                objects.extend(weakref.ref(value) for value in (saved, *records))
-                yield saved, records
-            finally:
-                saved = records = None
-
-    def observe_release(lease):
-        if lease.owner == "storage.trial.ledger" and lease.active:
-            released.append(all(ref() is None for ref in objects))
-        close(lease)
-
-    monkeypatch.setattr(research, "read_model_trial_ledger_reference", observe_read)
-    monkeypatch.setattr(MemoryLease, "close", observe_release)
-    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
-        with policy.lease("test.report", 0) as lease:
-            evidence = research.load_a_share_run_evidence(
-                layout=layout, record=record, report_lease=lease, selections={}
-            )
-        assert policy.used_memory_bytes == 0
-    assert evidence["model_trials"] == {
-        "status": "DEFINED",
-        "attempt_count": 2,
-        "status_counts": {"failed": 2},
-        "ledger_count": 2,
-    }
-    assert len(objects) == 4 and released == [True, True]
+    assert read_research_report_artifact(root, expected_identity=root.name) == payload

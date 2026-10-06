@@ -1,324 +1,52 @@
-"""Exact spillable canonical key indexing for dataset storage."""
+"""Exact canonical key indexing for dataset storage."""
 
 from __future__ import annotations
 
 import math
-import sqlite3
 import struct
-import sys
 from array import array
-from bisect import bisect_right
 from collections.abc import Iterable, Iterator, Sequence
-from contextlib import contextmanager
-from dataclasses import dataclass
 from decimal import Decimal
-from pathlib import Path
-from tempfile import gettempdir
-from types import TracebackType
-from uuid import uuid4
 
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    current_runtime_resource_policy,
-    require_free_disk_headroom,
-)
-from quant_research_platform.storage._scratch_ownership import (
-    ScratchReservation,
-    handle_preserving_primary,
-    owned_scratch_name,
-    remove_owned_scratch,
-)
-from quant_research_platform.storage.identity import (
-    filesystem_mkdir,
-    native_filesystem_path,
-    require_unaliased_path,
-)
-
-_DISK_RESERVE_BATCH_BYTES = 1024**2
-EXACT_KEY_SQLITE_PAGE_BYTES = 1024
-EXACT_KEY_SQLITE_CACHE_BYTES = 1024**2
-_EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES = 8 * EXACT_KEY_SQLITE_PAGE_BYTES
-
-
-@dataclass(frozen=True, slots=True)
-class CompactPositionState(Sequence[int]):
-    """Expose admitted positions while retaining an explicit fixed backing state."""
-
-    _positions: array
-    keep_count: int
-
-    def __len__(self) -> int:
-        return self.keep_count
-
-    def __getitem__(self, index):  # noqa: ANN001, ANN204
-        return self.view[index]
-
-    @property
-    def view(self) -> memoryview:
-        return memoryview(self._positions)[: self.keep_count].toreadonly()
-
-    @property
-    def retained_memory_bytes(self) -> int:
-        return len(self._positions) * self._positions.itemsize
-
 
 class ExactPrimaryKeyIndex:
-    """Index Arrow-canonical keys in isolated SQLite namespaces."""
+    """One canonical-byte index for exact key, value, and namespace semantics."""
 
     def __init__(
-        self,
-        *,
-        primary_key: Sequence[str],
-        key_schema: pa.Schema | None = None,
+        self, *, primary_key: Sequence[str], key_schema: pa.Schema | None = None
     ) -> None:
         self._primary_key = tuple(str(column) for column in primary_key)
-        self._scratch_parent = Path(gettempdir())
         self._key_schema = key_schema
-        self._sqlite_cache_kib = EXACT_KEY_SQLITE_CACHE_BYTES // 1024
-        self._temporary_directory: Path | None = None
-        self._connection: sqlite3.Connection | None = None
-        self._scratch_reservation: ScratchReservation | None = None
-
-    @property
-    def database_path(self) -> Path:
-        if self._temporary_directory is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        return self._temporary_directory / "k.db"
+        self._namespaces: dict[str, dict[bytes, bytes | None]] = {}
 
     @property
     def primary_key(self) -> tuple[str, ...]:
         return self._primary_key
 
-    @property
-    def retained_memory_bytes(self) -> int:
-        """Return the Storage-controlled SQLite page-cache reserve."""
-
-        return EXACT_KEY_SQLITE_CACHE_BYTES
-
-    def __enter__(self) -> ExactPrimaryKeyIndex:
-        if self._connection is not None:
-            raise RuntimeError("exact_primary_key_index_already_open")
-        require_unaliased_path(
-            self._scratch_parent, error="invalid_storage_scratch_path"
-        )
-        filesystem_mkdir(self._scratch_parent, parents=True, exist_ok=True)
-        require_unaliased_path(
-            self._scratch_parent, error="invalid_storage_scratch_path"
-        )
-        require_free_disk_headroom(
-            self._scratch_parent,
-            reserve_bytes=_EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES,
-        )
-        require_unaliased_path(
-            self._scratch_parent, error="invalid_storage_scratch_path"
-        )
-        temporary_directory = self._scratch_parent / owned_scratch_name(
-            ".k-", uuid4().hex[:8]
-        )
-        claimed_temporary = False
-        connection: sqlite3.Connection | None = None
-        try:
-            self._scratch_reservation = ScratchReservation(self._scratch_parent)
-            self._scratch_reservation.resize(
-                2 * _EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES
-            )
-            filesystem_mkdir(temporary_directory, mode=0o700)
-            claimed_temporary = True
-            self._temporary_directory = temporary_directory
-            require_unaliased_path(
-                temporary_directory,
-                error="invalid_storage_scratch_path",
-            )
-            connection = sqlite3.connect(native_filesystem_path(self.database_path))
-            connection.execute(f"PRAGMA page_size={EXACT_KEY_SQLITE_PAGE_BYTES}")
-            sqlite_page_limit = (
-                _EXACT_KEY_SQLITE_STARTUP_RESERVE_BYTES // EXACT_KEY_SQLITE_PAGE_BYTES
-            )
-            connection.execute(f"PRAGMA main.max_page_count={sqlite_page_limit}")
-            connection.execute("PRAGMA journal_mode=DELETE")
-            # Operation-local scratch is rebuilt, never recovered after a crash.
-            connection.execute("PRAGMA synchronous=OFF")
-            connection.execute("PRAGMA temp_store=FILE")
-            connection.execute(f"PRAGMA temp.max_page_count={sqlite_page_limit}")
-            connection.execute(f"PRAGMA cache_size=-{self._sqlite_cache_kib}")
-            connection.execute(
-                "CREATE TABLE exact_keys ("
-                "namespace TEXT NOT NULL, "
-                "payload BLOB NOT NULL, "
-                "value BLOB, "
-                "PRIMARY KEY(namespace, payload)"
-                ") WITHOUT ROWID"
-            )
-            connection.execute(
-                "CREATE TABLE comparison_rows ("
-                "position INTEGER PRIMARY KEY, "
-                "namespace TEXT NOT NULL, "
-                "payload BLOB NOT NULL, "
-                "value BLOB NOT NULL"
-                ")"
-            )
-            connection.execute(
-                "CREATE INDEX comparison_rows_identity "
-                "ON comparison_rows(namespace, payload)"
-            )
-            connection.commit()
-            self._scratch_reservation.resize(
-                sum(
-                    int(connection.execute(f"PRAGMA {schema}.page_count").fetchone()[0])
-                    for schema in ("main", "temp")
-                )
-                * EXACT_KEY_SQLITE_PAGE_BYTES
-            )
-        except BaseException as primary:
-            connection_closed = True
-            if connection is not None:
-                try:
-                    connection.close()
-                except BaseException as close_error:
-                    connection_closed = False
-                    primary.add_note(
-                        "exact key connection close also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-            removed = not claimed_temporary
-            if claimed_temporary:
-                try:
-                    remove_owned_scratch(temporary_directory)
-                    removed = True
-                except BaseException as cleanup_error:
-                    primary.add_note(
-                        "exact key scratch cleanup also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-            if self._scratch_reservation is not None:
-                if removed and connection_closed:
-                    self._scratch_reservation.resize(0)
-                try:
-                    self._scratch_reservation.close()
-                except BaseException as cleanup_error:
-                    primary.add_note(
-                        "exact key scratch reservation close also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-            self._temporary_directory = None
-            raise
-        assert connection is not None
-        self._connection = connection
-        return self
-
-    def __exit__(
-        self,
-        _exc_type: type[BaseException] | None,
-        exc_value: BaseException | None,
-        traceback: TracebackType | None,
-    ) -> None:
-        if exc_value is None:
-            self.close()
-            return
-        try:
-            self.close()
-        except BaseException as cleanup_error:
-            exc_value.add_note(
-                f"exact key index cleanup also failed: {type(cleanup_error).__name__}"
-            )
-
-    @contextmanager
-    def _transaction(self):
-        connection = self._connection
-        try:
-            with connection:
-                yield
-        finally:
-            primary = sys.exception()
-            try:
-                if not connection.in_transaction:
-                    # Commit/rollback removes journal files and unused growth
-                    # reservations; only actual database pages remain resident.
-                    self._scratch_reservation.resize(
-                        sum(
-                            int(
-                                connection.execute(
-                                    f"PRAGMA {schema}.page_count"
-                                ).fetchone()[0]
-                            )
-                            for schema in ("main", "temp")
-                        )
-                        * EXACT_KEY_SQLITE_PAGE_BYTES
-                    )
-            except BaseException as cleanup_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    f"scratch settlement also failed: {type(cleanup_error).__name__}"
-                )
-
-    def close(self) -> None:
-        primary = sys.exception()
-        first_error: BaseException | None = None
-        connection = self._connection
-        temporary_directory = self._temporary_directory
-        self._connection = None
-        self._temporary_directory = None
-        connection_closed = True
-        removed = temporary_directory is None
-        if connection is not None:
-            try:
-                connection.close()
-            except BaseException as close_error:
-                connection_closed = False
-                if primary is not None:
-                    primary.add_note(
-                        "exact key connection close also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-                else:
-                    first_error = close_error
-        if temporary_directory is not None:
-            try:
-                remove_owned_scratch(temporary_directory)
-                removed = True
-            except BaseException as cleanup_error:
-                if primary is not None:
-                    primary.add_note(
-                        "exact key scratch cleanup also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-                elif first_error is None:
-                    first_error = cleanup_error
-                else:
-                    first_error.add_note(
-                        "exact key scratch cleanup also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-        if self._scratch_reservation is not None:
-            if connection_closed and removed:
-                self._scratch_reservation.resize(0)
-            try:
-                self._scratch_reservation.close()
-            except BaseException as cleanup_error:
-                if primary is not None:
-                    primary.add_note(
-                        "exact key scratch reservation close also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-                elif first_error is None:
-                    first_error = cleanup_error
-        if first_error is not None:
-            raise first_error
-
-    def add_table(self, table: pa.Table, *, namespace: str = "dataset") -> int:
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
+    def _namespace(self, namespace: str) -> dict[bytes, bytes | None]:
         if not isinstance(namespace, str) or not namespace:
             raise ValueError("invalid_exact_key_namespace")
-        missing = [
-            column for column in self._primary_key if column not in table.column_names
-        ]
-        if missing:
+        return self._namespaces.get(namespace, {})
+
+    def _insert_rows(self, rows: Iterable[tuple[str, bytes, bytes | None]]) -> int:
+        pending: dict[str, dict[bytes, bytes | None]] = {}
+        inserted = 0
+        for namespace, identity, value in rows:
+            existing = self._namespace(namespace)
+            key = bytes(identity)
+            additions = pending.setdefault(namespace, {})
+            if key not in existing and key not in additions:
+                additions[key] = None if value is None else bytes(value)
+                inserted += 1
+        for namespace, additions in pending.items():
+            self._namespaces.setdefault(namespace, {}).update(additions)
+        return inserted
+
+    def _key_table(self, table: pa.Table) -> pa.Table:
+        if any(column not in table.column_names for column in self._primary_key):
             raise ValueError("missing_dataset_primary_key_column")
         keys = table.select(self._primary_key)
         if self._key_schema is None:
@@ -334,311 +62,108 @@ class ExactPrimaryKeyIndex:
                 raise ValueError("invalid_dataset_primary_key_value") from exc
         if any(column.null_count for column in keys.columns):
             raise ValueError("dataset_primary_key_null")
-        before = connection.total_changes
-        with self._transaction():
-            connection.executemany(
-                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
-                "VALUES (?, ?, ?)",
-                self._gated_rows(self._payload_rows(keys, namespace=namespace)),
-            )
-        inserted = connection.total_changes - before
-        return int(keys.num_rows - inserted)
+        return keys
+
+    def add_table(self, table: pa.Table, *, namespace: str = "dataset") -> int:
+        self._namespace(namespace)
+        keys = self._key_table(table)
+        return table.num_rows - self._insert_rows(
+            self._payload_rows(keys, namespace=namespace)
+        )
 
     def add_identity_payloads(
-        self,
-        *,
-        namespace: str,
-        payloads: Iterable[tuple[bytes, bytes]],
+        self, *, namespace: str, payloads: Iterable[tuple[bytes, bytes]]
     ) -> int:
         return self.add_identity_payload_rows(
-            rows=(
-                (namespace, bytes(identity), bytes(value))
-                for identity, value in payloads
-            )
+            rows=((namespace, identity, value) for identity, value in payloads)
         )
 
     def add_identity_payload_rows(
-        self,
-        *,
-        rows: Iterable[tuple[str, bytes, bytes]],
+        self, *, rows: Iterable[tuple[str, bytes, bytes]]
     ) -> int:
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        before = connection.total_changes
-
-        def validated_rows() -> Iterator[tuple[str, bytes, bytes]]:
-            for namespace, identity, value in rows:
-                if not isinstance(namespace, str) or not namespace:
-                    raise ValueError("invalid_exact_key_namespace")
-                yield namespace, bytes(identity), bytes(value)
-
-        with self._transaction():
-            connection.executemany(
-                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
-                "VALUES (?, ?, ?)",
-                self._gated_rows(validated_rows()),
-            )
-        return connection.total_changes - before
+        return self._insert_rows(rows)
 
     def add_float_value_table(
-        self,
-        table: pa.Table,
-        *,
-        namespace: str,
-        value_column: str,
-        payload_target_bytes: int,
+        self, table: pa.Table, *, namespace: str, value_column: str
     ) -> int:
-        """Borrow an admitted Arrow batch; bound each streamed key in its workspace."""
-
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
         self._validate_comparison_table_grammar(
-            table,
-            namespace=namespace,
-            value_columns=(value_column,),
-            payload_target_bytes=payload_target_bytes,
+            table, namespace=namespace, value_columns=(value_column,)
         )
-        keys = table.select(self._primary_key)
-        if self._key_schema is None:
-            self._key_schema = keys.schema.remove_metadata()
-        else:
-            try:
-                keys = keys.cast(self._key_schema, safe=True)
-            except (
-                pa.ArrowInvalid,
-                pa.ArrowNotImplementedError,
-                pa.ArrowTypeError,
-            ) as exc:
-                raise ValueError("invalid_dataset_primary_key_value") from exc
-        if any(column.null_count for column in keys.columns):
-            raise ValueError("dataset_primary_key_null")
-        values = table.column(value_column)
+        keys = self._key_table(table)
 
-        def rows() -> Iterator[tuple[str, bytearray, bytes]]:
-            for (row_namespace, payload, _), scalar in zip(
-                self._payload_rows(
-                    keys, namespace=namespace, payload_target_bytes=payload_target_bytes
-                ),
-                values,
+        def rows():
+            for (_, key, _), scalar in zip(
+                self._payload_rows(keys, namespace=namespace),
+                table.column(value_column),
                 strict=True,
             ):
                 value = scalar.as_py()
                 if value is None or not math.isfinite(float(value)):
                     raise ValueError("invalid_exact_float_value")
-                yield row_namespace, payload, struct.pack(">d", float(value))
+                yield (namespace, key, struct.pack(">d", float(value)))
 
-        before = connection.total_changes
-        with self._transaction():
-            connection.executemany(
-                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
-                "VALUES (?, ?, ?)",
-                self._gated_rows(rows()),
-            )
-        return int(table.num_rows - (connection.total_changes - before))
+        return table.num_rows - self._insert_rows(rows())
 
     def lookup_float_values(
-        self,
-        table: pa.Table,
-        *,
-        source_namespace: str,
-        matched_namespace: str | None,
-        payload_target_bytes: int,
-    ) -> tuple[array, bytearray]:
-        """Look up one bounded Arrow key batch without materializing the index."""
-
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        if matched_namespace is not None and (
-            not isinstance(matched_namespace, str) or not matched_namespace
-        ):
-            raise ValueError("invalid_exact_key_namespace")
-        rows = self._prepared_comparison_rows(
-            table,
-            namespace=source_namespace,
-            value_columns=(),
-            payload_target_bytes=payload_target_bytes,
+        self, table: pa.Table, *, source_namespace: str, matched_namespace: str | None
+    ):
+        source = self._namespace(source_namespace)
+        if matched_namespace is not None:
+            self._namespace(matched_namespace)
+        values, found = (
+            array("d", [math.nan]) * table.num_rows,
+            bytearray(table.num_rows),
         )
-        state_bytes = table.num_rows * (array("d").itemsize + 1)
-        if state_bytes > payload_target_bytes:
-            raise ValueError("exact_key_position_state_exceeds_payload_target")
-        values = array("d", [math.nan]) * table.num_rows
-        found = bytearray(table.num_rows)
-        with self._transaction():
-            connection.executemany(
-                "INSERT INTO comparison_rows(position, namespace, payload, value) "
-                "VALUES (?, ?, ?, ?)",
-                (
-                    (position, namespace, identity, value)
-                    for position, (namespace, identity, value) in enumerate(rows)
-                ),
-            )
-            with handle_preserving_primary(
-                connection.execute(
-                    "SELECT incoming.position, existing.value "
-                    "FROM comparison_rows AS incoming "
-                    "LEFT JOIN exact_keys AS existing "
-                    "ON existing.namespace = ? "
-                    "AND existing.payload = incoming.payload "
-                    "ORDER BY incoming.position",
-                    (source_namespace,),
-                )
-            ) as matches:
-                for position, payload in matches:
-                    if payload is None:
-                        continue
-                    encoded = bytes(payload)
-                    if len(encoded) != 8:
-                        raise ValueError("invalid_exact_float_value")
-                    values[int(position)] = struct.unpack(">d", encoded)[0]
-                    found[int(position)] = 1
+        matched = []
+        rows = self._prepared_comparison_rows(
+            table, namespace=source_namespace, value_columns=()
+        )
+        for position, (_, key, _) in enumerate(rows):
+            payload = source.get(bytes(key))
+            if payload is None:
+                continue
+            if len(payload) != 8:
+                raise ValueError("invalid_exact_float_value")
+            values[position], found[position] = (struct.unpack(">d", payload)[0], 1)
             if matched_namespace is not None:
-                with (
-                    handle_preserving_primary(
-                        connection.execute(
-                            "SELECT ?, incoming.payload, existing.value "
-                            "FROM comparison_rows AS incoming "
-                            "JOIN exact_keys AS existing "
-                            "ON existing.namespace = ? "
-                            "AND existing.payload = incoming.payload",
-                            (matched_namespace, source_namespace),
-                        )
-                    ) as matches,
-                    handle_preserving_primary(self._gated_rows(matches)) as admitted,
-                ):
-                    connection.executemany(
-                        "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
-                        "VALUES (?, ?, ?)",
-                        admitted,
-                    )
-            connection.execute("DELETE FROM comparison_rows")
-        return values, found
+                matched.append((matched_namespace, key, payload))
+        if matched:
+            self._insert_rows(matched)
+        return (values, found)
 
     def add_comparison_table(
-        self,
-        table: pa.Table,
-        *,
-        namespace: str,
-        value_columns: Sequence[str],
-        payload_target_bytes: int,
+        self, table: pa.Table, *, namespace: str, value_columns: Sequence[str]
     ) -> int:
-        """Index persisted primary keys and selected row values exactly."""
-
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        before = connection.total_changes
-        policy = current_runtime_resource_policy()
-        with (
-            policy.lease("storage.dataset.comparison.payload", 0) as payload_lease,
-            self._transaction(),
-        ):
-            connection.executemany(
-                "INSERT OR IGNORE INTO exact_keys(namespace, payload, value) "
-                "VALUES (?, ?, ?)",
-                self._prepared_comparison_rows(
-                    table,
-                    namespace=namespace,
-                    value_columns=value_columns,
-                    payload_target_bytes=payload_target_bytes,
-                    payload_lease=payload_lease,
-                ),
-            )
-        inserted = connection.total_changes - before
-        return int(table.num_rows - inserted)
+        rows = self._prepared_comparison_rows(
+            table, namespace=namespace, value_columns=value_columns
+        )
+        return table.num_rows - self._insert_rows(rows)
 
     def classify_comparison_table(
-        self,
-        table: pa.Table,
-        *,
-        namespace: str,
-        value_columns: Sequence[str],
-        payload_target_bytes: int,
-    ) -> tuple[CompactPositionState, int]:
-        """Return new-row positions while rejecting conflicting exact keys."""
-
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        selected = self._validate_comparison_table_grammar(
-            table,
-            namespace=namespace,
-            value_columns=value_columns,
-            payload_target_bytes=payload_target_bytes,
-        )
-        position_bytes = table.num_rows * array("Q").itemsize
-        if position_bytes > payload_target_bytes:
-            raise ValueError("exact_key_position_state_exceeds_payload_target")
-        position_state = array("Q", [0]) * table.num_rows
-        rows = self._prepared_comparison_rows(
-            table,
-            namespace=namespace,
-            value_columns=value_columns,
-            payload_target_bytes=payload_target_bytes,
-            validated_columns=selected,
-        )
-        keep_count = 0
-        with self._transaction():
-            connection.executemany(
-                "INSERT INTO comparison_rows(position, namespace, payload, value) "
-                "VALUES (?, ?, ?, ?)",
-                (
-                    (position, row_namespace, identity, value)
-                    for position, (row_namespace, identity, value) in enumerate(rows)
-                ),
+        self, table: pa.Table, *, namespace: str, value_columns: Sequence[str]
+    ):
+        existing = self._namespace(namespace)
+        pending: dict[bytes, bytes] = {}
+        positions: list[int] = []
+        for position, (_, key, value) in enumerate(
+            self._prepared_comparison_rows(
+                table, namespace=namespace, value_columns=value_columns
             )
-            incoming_conflict = connection.execute(
-                "SELECT 1 FROM comparison_rows "
-                "GROUP BY namespace, payload HAVING MIN(value) != MAX(value) "
-                "LIMIT 1"
-            ).fetchone()
-            existing_conflict = connection.execute(
-                "SELECT 1 FROM comparison_rows AS incoming "
-                "JOIN exact_keys AS existing "
-                "ON existing.namespace = incoming.namespace "
-                "AND existing.payload = incoming.payload "
-                "WHERE existing.value != incoming.value LIMIT 1"
-            ).fetchone()
-            if incoming_conflict is not None or existing_conflict is not None:
-                raise ValueError("conflicting_exact_primary_key_payload")
-            with handle_preserving_primary(
-                connection.execute(
-                    "SELECT incoming.position FROM comparison_rows AS incoming "
-                    "WHERE NOT EXISTS (SELECT 1 FROM comparison_rows AS earlier "
-                    "WHERE earlier.namespace = incoming.namespace "
-                    "AND earlier.payload = incoming.payload "
-                    "AND earlier.position < incoming.position) "
-                    "AND NOT EXISTS (SELECT 1 FROM exact_keys AS existing "
-                    "WHERE existing.namespace = incoming.namespace "
-                    "AND existing.payload = incoming.payload) "
-                    "ORDER BY incoming.position"
-                )
-            ) as admitted:
-                for (position,) in admitted:
-                    position_state[keep_count] = int(position)
-                    keep_count += 1
-            with handle_preserving_primary(
-                connection.execute(
-                    "SELECT incoming.namespace, incoming.payload, MIN(incoming.value) "
-                    "FROM comparison_rows AS incoming "
-                    "LEFT JOIN exact_keys AS existing "
-                    "ON existing.namespace = incoming.namespace "
-                    "AND existing.payload = incoming.payload "
-                    "WHERE existing.payload IS NULL "
-                    "GROUP BY incoming.namespace, incoming.payload"
-                )
-            ) as new_rows:
-                connection.executemany(
-                    "INSERT INTO exact_keys(namespace, payload, value) "
-                    "VALUES (?, ?, ?)",
-                    self._gated_rows(new_rows),
-                )
-            connection.execute("DELETE FROM comparison_rows")
+        ):
+            key, value = (bytes(key), bytes(value))
+            if key in existing:
+                if existing[key] != value:
+                    raise ValueError("conflicting_exact_primary_key_payload")
+            elif key in pending:
+                if pending[key] != value:
+                    raise ValueError("conflicting_exact_primary_key_payload")
+            else:
+                pending[key] = value
+                positions.append(position)
+        self._namespaces.setdefault(namespace, {}).update(pending)
         return (
-            CompactPositionState(position_state, keep_count),
-            table.num_rows - keep_count,
+            positions,
+            table.num_rows - len(positions),
         )
 
     def _prepared_comparison_rows(
@@ -647,59 +172,62 @@ class ExactPrimaryKeyIndex:
         *,
         namespace: str,
         value_columns: Sequence[str],
-        payload_target_bytes: int,
         validated_columns: tuple[str, ...] | None = None,
-        payload_lease: MemoryLease | None = None,
-    ) -> Iterator[tuple[str, bytes, bytes]]:
-        selected = validated_columns
-        if selected is None:
-            selected = self._validate_comparison_table_grammar(
-                table,
-                namespace=namespace,
-                value_columns=value_columns,
-                payload_target_bytes=payload_target_bytes,
+    ):
+        selected = (
+            self._validate_comparison_table_grammar(
+                table, namespace=namespace, value_columns=value_columns
             )
-        keys = table.select(self._primary_key)
-        if self._key_schema is None:
-            self._key_schema = keys.schema.remove_metadata()
-        else:
-            try:
-                keys = keys.cast(self._key_schema, safe=True)
-            except (
-                pa.ArrowInvalid,
-                pa.ArrowNotImplementedError,
-                pa.ArrowTypeError,
-            ) as exc:
-                raise ValueError("invalid_dataset_primary_key_value") from exc
-        if any(column.null_count for column in keys.columns):
-            raise ValueError("dataset_primary_key_null")
-        return self._gated_rows(
-            self._comparison_payload_rows(
-                keys,
-                table.select(selected),
-                namespace=namespace,
-                payload_target_bytes=payload_target_bytes,
-                payload_lease=payload_lease,
-            ),
-            payload_lease=payload_lease,
+            if validated_columns is None
+            else validated_columns
+        )
+        keys = self._key_table(table)
+        return self._comparison_payload_rows(
+            keys, table.select(selected), namespace=namespace
         )
 
+    def identity_payload_values(self, *, namespace: str) -> Iterator[bytes]:
+        values = self._namespace(namespace)
+        for key in sorted(values):
+            value = values[key]
+            if value is None:
+                raise ValueError("exact_key_identity_payload_missing")
+            yield value
+
+    def identity_payload_count(self, *, namespace: str) -> int:
+        return len(self._namespace(namespace))
+
+    def identity_payload_value(self, *, namespace: str, payload: bytes) -> bytes | None:
+        return self._namespace(namespace).get(bytes(payload))
+
+    def difference_counts(self, *, expected_namespace: str, actual_namespace: str):
+        expected, actual = (
+            self._namespace(expected_namespace),
+            self._namespace(actual_namespace),
+        )
+        return (
+            sum(key not in actual for key in expected),
+            sum(key not in expected for key in actual),
+        )
+
+    def comparison_counts(self, *, expected_namespace: str, actual_namespace: str):
+        expected, actual = (
+            self._namespace(expected_namespace),
+            self._namespace(actual_namespace),
+        )
+        missing, extra = self.difference_counts(
+            expected_namespace=expected_namespace, actual_namespace=actual_namespace
+        )
+        changed = sum(
+            (value != actual[key] for key, value in expected.items() if key in actual)
+        )
+        return (missing, extra, changed)
+
     def _validate_comparison_table_grammar(
-        self,
-        table: pa.Table,
-        *,
-        namespace: str,
-        value_columns: Sequence[str],
-        payload_target_bytes: int,
+        self, table: pa.Table, *, namespace: str, value_columns: Sequence[str]
     ) -> tuple[str, ...]:
         if not isinstance(namespace, str) or not namespace:
             raise ValueError("invalid_exact_key_namespace")
-        if (
-            isinstance(payload_target_bytes, bool)
-            or not isinstance(payload_target_bytes, int)
-            or payload_target_bytes <= 0
-        ):
-            raise ValueError("invalid_dataset_comparison_payload_target")
         selected = tuple(str(column) for column in value_columns)
         if len(selected) != len(set(selected)) or any(
             column in self._primary_key for column in selected
@@ -712,125 +240,13 @@ class ExactPrimaryKeyIndex:
             raise ValueError("missing_dataset_comparison_column")
         return selected
 
-    def identity_payload_values(self, *, namespace: str) -> Iterator[bytes]:
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("invalid_exact_key_namespace")
-        rows = connection.execute(
-            "SELECT value FROM exact_keys WHERE namespace = ? ORDER BY payload",
-            (namespace,),
-        )
-        try:
-            for row in rows:
-                if row[0] is None:
-                    raise ValueError("exact_key_identity_payload_missing")
-                yield bytes(row[0])
-        finally:
-            primary = sys.exception()
-            if primary is None:
-                rows.close()
-            else:
-                try:
-                    rows.close()
-                except BaseException as close_error:
-                    primary.add_note(
-                        "exact key cursor close also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-
-    def identity_payload_count(self, *, namespace: str) -> int:
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("invalid_exact_key_namespace")
-        row = connection.execute(
-            "SELECT COUNT(*) FROM exact_keys WHERE namespace = ?",
-            (namespace,),
-        ).fetchone()
-        assert row is not None
-        return int(row[0])
-
-    def identity_payload_value(
-        self,
-        *,
-        namespace: str,
-        payload: bytes,
-    ) -> bytes | None:
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        if not isinstance(namespace, str) or not namespace:
-            raise ValueError("invalid_exact_key_namespace")
-        row = connection.execute(
-            "SELECT value FROM exact_keys WHERE namespace = ? AND payload = ?",
-            (namespace, bytes(payload)),
-        ).fetchone()
-        return None if row is None or row[0] is None else bytes(row[0])
-
-    def difference_counts(
-        self,
-        *,
-        expected_namespace: str,
-        actual_namespace: str,
-    ) -> tuple[int, int]:
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        missing = connection.execute(
-            "SELECT COUNT(*) FROM exact_keys AS expected "
-            "WHERE expected.namespace = ? AND NOT EXISTS ("
-            "SELECT 1 FROM exact_keys AS actual WHERE actual.namespace = ? "
-            "AND actual.payload = expected.payload)",
-            (expected_namespace, actual_namespace),
-        ).fetchone()
-        extra = connection.execute(
-            "SELECT COUNT(*) FROM exact_keys AS expected "
-            "WHERE expected.namespace = ? AND NOT EXISTS ("
-            "SELECT 1 FROM exact_keys AS actual WHERE actual.namespace = ? "
-            "AND actual.payload = expected.payload)",
-            (actual_namespace, expected_namespace),
-        ).fetchone()
-        assert missing is not None and extra is not None
-        return int(missing[0]), int(extra[0])
-
-    def comparison_counts(
-        self,
-        *,
-        expected_namespace: str,
-        actual_namespace: str,
-    ) -> tuple[int, int, int]:
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        missing_count, extra_count = self.difference_counts(
-            expected_namespace=expected_namespace,
-            actual_namespace=actual_namespace,
-        )
-        changed = connection.execute(
-            "SELECT COUNT(*) FROM exact_keys AS expected "
-            "JOIN exact_keys AS actual ON actual.namespace = ? "
-            "AND actual.payload = expected.payload "
-            "WHERE expected.namespace = ? AND expected.value IS NOT actual.value",
-            (actual_namespace, expected_namespace),
-        ).fetchone()
-        assert changed is not None
-        changed_count = int(changed[0])
-        return missing_count, extra_count, changed_count
-
     def _payload_rows(
-        self,
-        keys: pa.Table,
-        *,
-        namespace: str,
-        payload_target_bytes: int | None = None,
+        self, keys: pa.Table, *, namespace: str
     ) -> Iterator[tuple[str, bytearray, None]]:
         fields = tuple(keys.schema.field(column) for column in self._primary_key)
         columns = tuple(keys.column(column) for column in self._primary_key)
         for row_index in range(keys.num_rows):
-            payload = _BoundedPayloadSink(payload_target_bytes)
+            payload = bytearray()
             for column, field in zip(columns, fields, strict=True):
                 _append_arrow_scalar_payload(
                     payload,
@@ -838,16 +254,10 @@ class ExactPrimaryKeyIndex:
                     field.type,
                     normalize_float_zero=pa.types.is_floating(field.type),
                 )
-            yield namespace, payload.buffer, None
+            yield (namespace, payload, None)
 
     def _comparison_payload_rows(
-        self,
-        keys: pa.Table,
-        values: pa.Table,
-        *,
-        namespace: str,
-        payload_target_bytes: int,
-        payload_lease: MemoryLease | None = None,
+        self, keys: pa.Table, values: pa.Table, *, namespace: str
     ) -> Iterator[tuple[str, bytearray, bytearray]]:
         key_fields = tuple(keys.schema.field(column) for column in self._primary_key)
         key_columns = tuple(keys.column(column) for column in self._primary_key)
@@ -856,9 +266,7 @@ class ExactPrimaryKeyIndex:
         )
         value_arrays = tuple(values.column(column) for column in values.column_names)
         for row_index in range(keys.num_rows):
-            key_payload = value_payload = None
-            lease_row = (payload_lease, [0]) if payload_lease is not None else None
-            key_payload = _BoundedPayloadSink(payload_target_bytes, lease_row)
+            key_payload = bytearray()
             for column, field in zip(key_columns, key_fields, strict=True):
                 _append_arrow_scalar_payload(
                     key_payload,
@@ -866,7 +274,7 @@ class ExactPrimaryKeyIndex:
                     field.type,
                     normalize_float_zero=pa.types.is_floating(field.type),
                 )
-            value_payload = _BoundedPayloadSink(key_payload.remaining_bytes, lease_row)
+            value_payload = bytearray()
             for column, field in zip(value_arrays, value_fields, strict=True):
                 _append_arrow_scalar_payload(
                     value_payload,
@@ -875,183 +283,11 @@ class ExactPrimaryKeyIndex:
                     allow_null=True,
                     allow_nonfinite=True,
                 )
-            yield namespace, key_payload.buffer, value_payload.buffer
-
-    def _gated_rows(
-        self,
-        rows: Iterable[tuple[str, bytes | bytearray, bytes | bytearray | None]],
-        *,
-        payload_lease: MemoryLease | None = None,
-    ) -> Iterator[tuple[str, bytes | bytearray, bytes | bytearray | None]]:
-        admitted_bytes = 0
-        for namespace, payload, value in rows:
-            key_bytes = len(namespace.encode("utf-8")) + len(payload)
-            logical_row_bytes = 27 + key_bytes + (0 if value is None else len(value))
-            # Table + secondary index, doubled for journal, with B-tree page slack.
-            reserve_bytes = 2 * (
-                logical_row_bytes + 27 + key_bytes + 4 * EXACT_KEY_SQLITE_PAGE_BYTES
-            )
-            if reserve_bytes > admitted_bytes:
-                if payload_lease is not None:
-                    payload_lease.shrink_to(
-                        2 * (len(payload) + (0 if value is None else len(value)))
-                    )
-                admitted_bytes = self._admit_physical_write(
-                    max(_DISK_RESERVE_BATCH_BYTES, reserve_bytes),
-                    minimum_bytes=reserve_bytes,
-                )
-            admitted_bytes -= reserve_bytes
-            yield namespace, payload, value
-            payload = value = None
-
-    def _admit_physical_write(
-        self, reserve_bytes: int, *, minimum_bytes: int | None = None
-    ) -> int:
-        connection = self._connection
-        if connection is None:
-            raise RuntimeError("exact_primary_key_index_not_open")
-        pages = {
-            schema: int(connection.execute(f"PRAGMA {schema}.page_count").fetchone()[0])
-            for schema in ("main", "temp")
-        }
-        admitted_bytes = reserve_bytes
-        row_admission = (
-            self._scratch_reservation.memory_capacity_bytes is not None
-            and minimum_bytes is not None
-        )
-        if row_admission:
-            # Every streamed row spends at least eight pages of logical credit.
-            batch_rows = (reserve_bytes + 8 * EXACT_KEY_SQLITE_PAGE_BYTES - 1) // (
-                8 * EXACT_KEY_SQLITE_PAGE_BYTES
-            )
-
-            def with_split_slack(credit: int, row_count: int) -> int:
-                admitted = credit
-                while True:
-                    # Cover the deepest page reached anywhere in this admission.
-                    growth = (admitted + 2 * EXACT_KEY_SQLITE_PAGE_BYTES - 1) // (
-                        2 * EXACT_KEY_SQLITE_PAGE_BYTES
-                    )
-                    depth = (max(pages.values()) + growth).bit_length()
-                    split_pages = max(4, 4 * depth)
-                    required = (
-                        credit
-                        + row_count
-                        * 2
-                        * (split_pages - 4)
-                        * EXACT_KEY_SQLITE_PAGE_BYTES
-                    )
-                    if required <= admitted:
-                        return admitted
-                    admitted = required
-
-            row_reserve = with_split_slack(minimum_bytes, 1)
-            batch_reserve = with_split_slack(reserve_bytes, batch_rows)
-            row_growth_pages = (row_reserve + 2 * EXACT_KEY_SQLITE_PAGE_BYTES - 1) // (
-                2 * EXACT_KEY_SQLITE_PAGE_BYTES
-            )
-            batch_growth_pages = (
-                batch_reserve + 2 * EXACT_KEY_SQLITE_PAGE_BYTES - 1
-            ) // (2 * EXACT_KEY_SQLITE_PAGE_BYTES)
-            resident_pages = sum(pages.values())
-            reserved_bytes = self._scratch_reservation.reserved_bytes
-            row_capacity = (
-                2
-                * (resident_pages + len(pages) * row_growth_pages)
-                * EXACT_KEY_SQLITE_PAGE_BYTES
-            )
-            batch_capacity = (
-                2
-                * (resident_pages + len(pages) * batch_growth_pages)
-                * EXACT_KEY_SQLITE_PAGE_BYTES
-            )
-            free_disk = require_free_disk_headroom(
-                self._scratch_parent,
-                reserve_bytes=max(0, row_capacity - reserved_bytes),
-            )
-            if (
-                batch_capacity <= self._scratch_reservation.memory_capacity_bytes
-                and free_disk >= max(0, batch_capacity - reserved_bytes)
-            ):
-                reserve_bytes = batch_reserve
-            else:
-                reserve_bytes = row_reserve
-                admitted_bytes = minimum_bytes
-        else:
-            require_free_disk_headroom(
-                self._scratch_parent, reserve_bytes=reserve_bytes * len(pages)
-            )
-        # reserve_bytes already includes the rollback journal; page limits cover
-        # only database growth, with old and journal pages charged separately.
-        growth_pages = (reserve_bytes + 2 * EXACT_KEY_SQLITE_PAGE_BYTES - 1) // (
-            2 * EXACT_KEY_SQLITE_PAGE_BYTES
-        )
-        bounds = {schema: current + growth_pages for schema, current in pages.items()}
-        self._scratch_reservation.resize(
-            max(
-                self._scratch_reservation.reserved_bytes,
-                2 * sum(bounds.values()) * EXACT_KEY_SQLITE_PAGE_BYTES,
-            )
-        )
-        for schema, limit in bounds.items():
-            connection.execute(f"PRAGMA {schema}.max_page_count={limit}")
-        return admitted_bytes
-
-
-class _BoundedPayloadSink:
-    __slots__ = ("buffer", "_auxiliary_bytes", "_limit", "_lease_row")
-
-    def __init__(
-        self,
-        limit: int | None,
-        lease_row: tuple[MemoryLease, list[int]] | None = None,
-    ) -> None:
-        self.buffer = bytearray()
-        self._auxiliary_bytes = 0
-        self._limit = limit
-        self._lease_row = lease_row
-
-    def _reserve(self, size: int) -> None:
-        if self._lease_row is not None:
-            lease, row_charge = self._lease_row
-            required = row_charge[0] + 2 * size
-            growth = max(0, required - lease.reserved_bytes)
-            if growth:
-                policy = current_runtime_resource_policy()
-                policy.require_working_set(
-                    growth, error="dataset_comparison_payload_exceeds_capacity"
-                )
-                lease.grow(growth)
-            row_charge[0] = required
-
-    @property
-    def remaining_bytes(self) -> int | None:
-        if self._limit is None:
-            return None
-        return self._limit - len(self.buffer) - self._auxiliary_bytes
-
-    def append(self, payload: bytes | bytearray | memoryview | pa.Buffer) -> None:
-        remaining = self.remaining_bytes
-        if remaining is not None and len(payload) > remaining:
-            raise ValueError("dataset_comparison_payload_exceeds_target_bytes")
-        self._reserve(len(payload))
-        self.buffer.extend(payload)
-
-    def reserve_auxiliary(self, size: int) -> None:
-        remaining = self.remaining_bytes
-        if remaining is not None and size > remaining:
-            raise ValueError("dataset_comparison_payload_exceeds_target_bytes")
-        self._reserve(size)
-        self._auxiliary_bytes += size
-
-    def release_auxiliary(self, size: int) -> None:
-        self._auxiliary_bytes -= size
-        if self._lease_row is not None:
-            self._lease_row[1][0] -= 2 * size
+            yield (namespace, key_payload, value_payload)
 
 
 def _append_arrow_scalar_payload(
-    sink: _BoundedPayloadSink,
+    sink: bytearray,
     value: pa.Scalar,
     data_type: pa.DataType,
     *,
@@ -1064,10 +300,10 @@ def _append_arrow_scalar_payload(
     if not value.is_valid:
         if not allow_null:
             raise ValueError("dataset_primary_key_null")
-        sink.append(b"0")
+        sink.extend(b"0")
         _finish_frame(sink, length_offset, payload_start)
         return
-    sink.append(b"1")
+    sink.extend(b"1")
     if pa.types.is_dictionary(data_type):
         _append_arrow_scalar_payload(
             sink,
@@ -1077,24 +313,24 @@ def _append_arrow_scalar_payload(
             allow_nonfinite=allow_nonfinite,
         )
     elif pa.types.is_timestamp(data_type):
-        sink.append(struct.pack(">q", int(value.value)))
+        sink.extend(struct.pack(">q", int(value.value)))
     elif pa.types.is_time(data_type) or pa.types.is_duration(data_type):
-        sink.append(struct.pack(">q", int(value.value)))
+        sink.extend(struct.pack(">q", int(value.value)))
     elif pa.types.is_boolean(data_type):
-        sink.append(b"1" if bool(value.as_py()) else b"0")
+        sink.extend(b"1" if bool(value.as_py()) else b"0")
     elif pa.types.is_signed_integer(data_type) or pa.types.is_unsigned_integer(
         data_type
     ):
-        sink.append(str(int(value.as_py())).encode("ascii"))
+        sink.extend(str(int(value.as_py())).encode("ascii"))
     elif pa.types.is_floating(data_type):
         number = float(value.as_py())
-        if math.isnan(number) and not allow_nonfinite:
+        if math.isnan(number) and (not allow_nonfinite):
             raise ValueError("dataset_primary_key_null")
-        if not math.isfinite(number) and not allow_nonfinite:
+        if not math.isfinite(number) and (not allow_nonfinite):
             raise ValueError("invalid_dataset_primary_key_value")
         if number == 0.0 and normalize_float_zero:
             number = 0.0
-        sink.append(
+        sink.extend(
             struct.pack(">f", number)
             if pa.types.is_float32(data_type)
             else struct.pack(">d", number)
@@ -1109,13 +345,13 @@ def _append_arrow_scalar_payload(
         _append_arrow_scalar_buffer(sink, value)
     elif pa.types.is_decimal(data_type):
         decimal = Decimal(value.as_py())
-        if not decimal.is_finite() and not allow_nonfinite:
+        if not decimal.is_finite() and (not allow_nonfinite):
             raise ValueError("invalid_dataset_primary_key_value")
         if decimal == 0:
             decimal = Decimal(0)
-        sink.append(format(decimal, "f").encode("ascii"))
+        sink.extend(format(decimal, "f").encode("ascii"))
     elif pa.types.is_date(data_type):
-        sink.append(pd.Timestamp(value.as_py()).date().isoformat().encode("ascii"))
+        sink.extend(pd.Timestamp(value.as_py()).date().isoformat().encode("ascii"))
     elif pa.types.is_list(data_type) or pa.types.is_large_list(data_type):
         for item in value.values:
             _append_arrow_scalar_payload(
@@ -1137,10 +373,7 @@ def _append_arrow_scalar_payload(
     elif pa.types.is_struct(data_type):
         for field in data_type:
             field_name = field.name.encode("utf-8")
-            field_length_offset, field_payload_start = _start_frame(
-                sink,
-                field_name,
-            )
+            field_length_offset, field_payload_start = _start_frame(sink, field_name)
             _append_arrow_scalar_payload(
                 sink,
                 value[field.name],
@@ -1148,200 +381,43 @@ def _append_arrow_scalar_payload(
                 allow_null=allow_null,
                 allow_nonfinite=allow_nonfinite,
             )
-            _finish_frame(
-                sink,
-                field_length_offset,
-                field_payload_start,
-            )
+            _finish_frame(sink, field_length_offset, field_payload_start)
     elif pa.types.is_map(data_type):
-        entries = value.values
-        entry_count = len(entries)
-        array_bytes = (entry_count + 1 + entry_count + entry_count) * 8
-        boundary_bytes = entry_count * 4 * 8
-        sink.reserve_auxiliary(array_bytes + boundary_bytes)
-        offsets = array("Q")
-        key_starts = array("Q")
-        key_ends = array("Q")
-        item_starts = array("Q")
-        item_ends = array("Q")
-        order = array("Q", range(entry_count))
-        # Four comparison-boundary arrays replace Python tuple metadata. Their
-        # bytes participate in the same bounded sink before allocation.
-        region_start = len(sink.buffer)
-        offsets.append(region_start)
-        for entry in entries:
-            entry_length_offset, entry_payload_start = _start_frame(sink, b"entry")
-            key_starts.append(len(sink.buffer))
+        entries = []
+        for entry in value.values:
+            key, item = (bytearray(), bytearray())
             _append_arrow_scalar_payload(
-                sink,
-                entry["key"],
-                data_type.key_type,
-                allow_null=False,
-                allow_nonfinite=allow_nonfinite,
+                key, entry["key"], data_type.key_type, allow_nonfinite=allow_nonfinite
             )
-            key_ends.append(len(sink.buffer))
-            item_starts.append(len(sink.buffer))
             _append_arrow_scalar_payload(
-                sink,
+                item,
                 entry["value"],
                 data_type.item_type,
                 allow_null=allow_null,
                 allow_nonfinite=allow_nonfinite,
             )
-            item_ends.append(len(sink.buffer))
-            _finish_frame(sink, entry_length_offset, entry_payload_start)
-            offsets.append(len(sink.buffer))
-        _heap_sort_map_order(
-            sink.buffer,
-            order,
-            key_starts,
-            key_ends,
-            item_starts,
-            item_ends,
-        )
-        destinations = array("Q", [0]) * entry_count
-        destination = 0
-        for entry_index in order:
-            destinations[entry_index] = destination
-            destination += offsets[entry_index + 1] - offsets[entry_index]
-        sink.release_auxiliary(boundary_bytes)
-        del key_starts, key_ends, item_starts, item_ends
-        visited_bytes = (destination + 7) // 8
-        sink.reserve_auxiliary(visited_bytes)
-        visited = bytearray(visited_bytes)
-        _permute_map_region_in_place(
-            sink.buffer,
-            region_start=region_start,
-            offsets=offsets,
-            destinations=destinations,
-            visited=visited,
-        )
-        sink.release_auxiliary(visited_bytes + array_bytes)
+            entries.append((key, item))
+        for key, item in sorted(entries):
+            offset, start = _start_frame(sink, b"entry")
+            sink.extend(key)
+            sink.extend(item)
+            _finish_frame(sink, offset, start)
     else:
         raise ValueError("invalid_dataset_primary_key_value")
     _finish_frame(sink, length_offset, payload_start)
 
 
-def _start_frame(sink: _BoundedPayloadSink, tag: bytes) -> tuple[int, int]:
-    sink.append(struct.pack(">Q", len(tag)))
-    sink.append(tag)
-    length_offset = len(sink.buffer)
-    sink.append(b"\x00" * 8)
-    return length_offset, len(sink.buffer)
+def _start_frame(sink: bytearray, tag: bytes) -> tuple[int, int]:
+    sink.extend(struct.pack(">Q", len(tag)))
+    sink.extend(tag)
+    length_offset = len(sink)
+    sink.extend(b"\x00" * 8)
+    return (length_offset, len(sink))
 
 
-def _finish_frame(
-    sink: _BoundedPayloadSink,
-    length_offset: int,
-    payload_start: int,
-) -> None:
-    struct.pack_into(
-        ">Q",
-        sink.buffer,
-        length_offset,
-        len(sink.buffer) - payload_start,
-    )
+def _finish_frame(sink: bytearray, length_offset: int, payload_start: int) -> None:
+    struct.pack_into(">Q", sink, length_offset, len(sink) - payload_start)
 
 
-def _append_arrow_scalar_buffer(
-    sink: _BoundedPayloadSink,
-    value: pa.Scalar,
-) -> None:
-    buffer = value.as_buffer()
-    remaining_bytes = sink.remaining_bytes
-    if remaining_bytes is not None and buffer.size > remaining_bytes:
-        raise ValueError("dataset_comparison_payload_exceeds_target_bytes")
-    sink.append(buffer)
-
-
-def _heap_sort_map_order(
-    buffer: bytearray,
-    order: array[int],
-    key_starts: array[int],
-    key_ends: array[int],
-    item_starts: array[int],
-    item_ends: array[int],
-) -> None:
-    def greater(left: int, right: int) -> bool:
-        key_order = _compare_buffer_ranges(
-            buffer,
-            key_starts[left],
-            key_ends[left],
-            key_starts[right],
-            key_ends[right],
-        )
-        if key_order:
-            return key_order > 0
-        return (
-            _compare_buffer_ranges(
-                buffer,
-                item_starts[left],
-                item_ends[left],
-                item_starts[right],
-                item_ends[right],
-            )
-            > 0
-        )
-
-    def sift(root: int, stop: int) -> None:
-        while (child := root * 2 + 1) < stop:
-            if child + 1 < stop and greater(order[child + 1], order[child]):
-                child += 1
-            if not greater(order[child], order[root]):
-                return
-            order[root], order[child] = order[child], order[root]
-            root = child
-
-    for root in range(len(order) // 2 - 1, -1, -1):
-        sift(root, len(order))
-    for stop in range(len(order) - 1, 0, -1):
-        order[0], order[stop] = order[stop], order[0]
-        sift(0, stop)
-
-
-def _permute_map_region_in_place(
-    buffer: bytearray,
-    *,
-    region_start: int,
-    offsets: array[int],
-    destinations: array[int],
-    visited: bytearray,
-) -> None:
-    total = offsets[-1] - region_start
-
-    def destination_for(source: int) -> int:
-        entry = bisect_right(offsets, region_start + source) - 1
-        return destinations[entry] + source - (offsets[entry] - region_start)
-
-    for source in range(total):
-        if visited[source >> 3] & (1 << (source & 7)):
-            continue
-        current = source
-        held = buffer[region_start + current]
-        while True:
-            destination = destination_for(current)
-            displaced = buffer[region_start + destination]
-            buffer[region_start + destination] = held
-            visited[current >> 3] |= 1 << (current & 7)
-            current = destination
-            held = displaced
-            if current == source:
-                break
-
-
-def _compare_buffer_ranges(
-    buffer: bytearray,
-    left_start: int,
-    left_end: int,
-    right_start: int,
-    right_end: int,
-) -> int:
-    shared_length = min(left_end - left_start, right_end - right_start)
-    for offset in range(shared_length):
-        left_value = buffer[left_start + offset]
-        right_value = buffer[right_start + offset]
-        if left_value != right_value:
-            return -1 if left_value < right_value else 1
-    left_length = left_end - left_start
-    right_length = right_end - right_start
-    return (left_length > right_length) - (left_length < right_length)
+def _append_arrow_scalar_buffer(sink: bytearray, value: pa.Scalar) -> None:
+    sink.extend(value.as_buffer())

@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import math
-import sys
-from collections.abc import Callable, Iterable, Mapping
-from datetime import date, datetime, timezone
+from collections.abc import Mapping
+from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
 from typing import Any
@@ -37,14 +36,11 @@ from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.json_codec import (
     _MAX_NESTING_DEPTH,
     bounded_qrp_json_object_snapshot,
-    bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
-    json_record_working_set_bytes,
     parse_qrp_json_object,
     render_qrp_json_object,
 )
-from quant_research_platform.runtime.resources import RuntimeResourcePolicy
 from quant_research_platform.storage.datasets.paths import (
     parse_year_partition_label,
     timestamp_column_from_spec_payload,
@@ -181,10 +177,7 @@ def merge_dataset_instance_metadata(
     instance_metadata: Mapping[str, Any] | None,
     *,
     spec: Mapping[str, Any] | None = None,
-    _admit: Callable[[int], None] | None = None,
 ) -> dict[str, Any]:
-    if _admit is not None:
-        _admit(json_record_working_set_bytes(2 + 2 * len(payload)))
     result = dict(payload)
     if instance_metadata is None:
         return result
@@ -199,47 +192,36 @@ def merge_dataset_instance_metadata(
         if key not in _DATASET_INSTANCE_METADATA_ALLOWED_KEYS:
             raise ValueError(f"unsupported_dataset_instance_metadata_key: {key}")
         if key == "input_dataset_identities":
-            metadata[key] = _validate_input_dataset_identities_metadata(
-                value, _admit=_admit
-            )
+            metadata[key] = _validate_input_dataset_identities_metadata(value)
         elif key == "source_artifact_identity":
-            metadata[key] = _validate_source_artifact_identity(value, _admit=_admit)
+            metadata[key] = _validate_source_artifact_identity(value)
         elif key == "producer_diagnostics":
             metadata[key] = bounded_qrp_json_object_snapshot(
-                value, max_bytes=1024 * 1024, _admit=_admit
+                value, max_bytes=1024 * 1024
             )
         elif key == COMMON_MANIFEST_METADATA_KEY:
-            metadata[key] = validate_business_manifest_envelope(value, _admit=_admit)
+            metadata[key] = validate_business_manifest_envelope(value)
     result.update(metadata)
     if spec is not None and COMMON_MANIFEST_METADATA_KEY in result:
         _validate_common_manifest_binding(result[COMMON_MANIFEST_METADATA_KEY], spec)
     return result
 
 
-def _validate_input_dataset_identities_metadata(
-    value: Any, *, _admit: Callable[[int], None] | None = None
-) -> dict[str, Any]:
+def _validate_input_dataset_identities_metadata(value: Any) -> dict[str, Any]:
     if not isinstance(value, Mapping) or not value:
         raise ValueError("invalid_input_dataset_identities_metadata")
-    if _admit is not None:
-        _admit(json_record_working_set_bytes(2 + 2 * len(value)))
     identities: dict[str, Any] = {}
     for data_id, identity in value.items():
         if not isinstance(data_id, str) or not data_id:
             raise ValueError("invalid_input_dataset_identities_metadata")
         identities[data_id] = _validate_input_dataset_identity_payload(
-            identity,
-            expected_data_id=data_id,
-            _admit=_admit,
+            identity, expected_data_id=data_id
         )
     return identities
 
 
 def _validate_input_dataset_identity_payload(
-    value: Any,
-    *,
-    expected_data_id: str,
-    _admit: Callable[[int], None] | None = None,
+    value: Any, *, expected_data_id: str
 ) -> dict[str, str]:
     if not isinstance(value, Mapping) or set(value) != _DATASET_INPUT_IDENTITY_KEYS:
         raise ValueError("invalid_input_dataset_identities_metadata")
@@ -252,8 +234,6 @@ def _validate_input_dataset_identity_payload(
     manifest_hash = _require_identity_hash(
         value["manifest_hash"], error="invalid_input_dataset_identities_metadata"
     )
-    if _admit is not None:
-        _admit(json_record_working_set_bytes(2 + 2 * len(value)))
     return {
         "data_id": expected_data_id,
         "spec_hash": spec_hash,
@@ -261,22 +241,18 @@ def _validate_input_dataset_identity_payload(
     }
 
 
-def _validate_source_artifact_identity(
-    value: Any, *, _admit: Callable[[int], None] | None = None
-) -> dict[str, Any]:
+def _validate_source_artifact_identity(value: Any) -> dict[str, Any]:
     if isinstance(value, Mapping) and set(value) == {"schema_id", "archives"}:
         members = value["archives"]
         if type(members) is not list or not members:
             raise ValueError("invalid_source_artifact_identity")
-        if _admit is not None:
-            _admit(json_record_working_set_bytes(2 + 2 * len(members)))
         archives = []
         previous_date = None
         identities = set()
         for member in members:
-            if not isinstance(member, Mapping) or set(member) != (
-                _SOURCE_ARTIFACT_IDENTITY_KEYS | {"date"}
-            ):
+            if not isinstance(member, Mapping) or set(
+                member
+            ) != _SOURCE_ARTIFACT_IDENTITY_KEYS | {"date"}:
                 raise ValueError("invalid_source_artifact_identity")
             day = member["date"]
             try:
@@ -287,18 +263,13 @@ def _validate_source_artifact_identity(
                 valid_date = False
             if not valid_date or (previous_date is not None and day <= previous_date):
                 raise ValueError("invalid_source_artifact_identity")
-            if _admit is not None:
-                _admit(json_record_working_set_bytes(2 + 2 * len(member)))
             identity = _validate_source_artifact_identity(
-                {key: member[key] for key in _SOURCE_ARTIFACT_IDENTITY_KEYS},
-                _admit=_admit,
+                {key: member[key] for key in _SOURCE_ARTIFACT_IDENTITY_KEYS}
             )
-            key = identity["artifact_id"], identity["manifest_hash"]
+            key = (identity["artifact_id"], identity["manifest_hash"])
             if identity["schema_id"] != value["schema_id"] or key in identities:
                 raise ValueError("invalid_source_artifact_identity")
             identities.add(key)
-            if _admit is not None:
-                _admit(json_record_working_set_bytes(2 + 2 * len(member)))
             archives.append({"date": day, **identity})
             previous_date = day
         return {"schema_id": value["schema_id"], "archives": archives}
@@ -310,15 +281,13 @@ def _validate_source_artifact_identity(
         not isinstance(schema_id, str)
         or not schema_id
         or "/" in schema_id
-        or not isinstance(artifact_id, str)
-        or not artifact_id
+        or (not isinstance(artifact_id, str))
+        or (not artifact_id)
     ):
         raise ValueError("invalid_source_artifact_identity")
     manifest_hash = _require_identity_hash(
         value["manifest_hash"], error="invalid_source_artifact_identity"
     )
-    if _admit is not None:
-        _admit(json_record_working_set_bytes(2 + 2 * len(value)))
     return {
         "schema_id": schema_id,
         "artifact_id": artifact_id,
@@ -337,8 +306,7 @@ def _require_identity_hash(value: Any, error: str) -> str:
 
 
 def dataset_identity_payload(
-    spec: Mapping[str, Any],
-    manifest: Mapping[str, Any],
+    spec: Mapping[str, Any], manifest: Mapping[str, Any]
 ) -> dict[str, str]:
     data_id = spec.get("data_id")
     if not isinstance(data_id, str) or not data_id:
@@ -351,9 +319,7 @@ def dataset_identity_payload(
 
 
 def validate_dataset_manifest_instance_metadata(
-    manifest: Mapping[str, Any],
-    *,
-    spec: Mapping[str, Any] | None = None,
+    manifest: Mapping[str, Any], *, spec: Mapping[str, Any] | None = None
 ) -> None:
     unknown = set(manifest).difference(
         _DATASET_MANIFEST_RESERVED_KEYS,
@@ -383,8 +349,7 @@ def validate_dataset_manifest_instance_metadata(
 
 
 def _validate_common_manifest_binding(
-    envelope: Mapping[str, Any],
-    spec: Mapping[str, Any],
+    envelope: Mapping[str, Any], spec: Mapping[str, Any]
 ) -> None:
     if envelope["logical_artifact_id"] != spec["data_id"]:
         raise ValueError("dataset_manifest_common_logical_id_mismatch")
@@ -392,9 +357,7 @@ def _validate_common_manifest_binding(
         raise ValueError("dataset_manifest_common_schema_identity_mismatch")
 
 
-def validate_dataset_spec(
-    spec: DataSpec, *, _admit: Callable[[int], None] | None = None
-) -> str | None:
+def validate_dataset_spec(spec: DataSpec) -> str | None:
     if type(spec) not in {
         DataSpec,
         InterimDataSpec,
@@ -410,27 +373,21 @@ def validate_dataset_spec(
     if type(spec.grain) is not DataGrain:
         raise ValueError("dataset_grain_invalid")
     primary_key = _require_runtime_string_tuple(
-        spec.primary_key,
-        "dataset_primary_key_invalid",
-        allow_empty=False,
-        _admit=_admit,
+        spec.primary_key, "dataset_primary_key_invalid", allow_empty=False
     )
     _require_runtime_string_tuple(
-        spec.partition_columns,
-        "dataset_partition_columns_invalid",
-        allow_empty=True,
-        _admit=_admit,
+        spec.partition_columns, "dataset_partition_columns_invalid", allow_empty=True
     )
     column_roles_are_valid_mapping = type(spec.column_roles) is MappingProxyType
     if not column_roles_are_valid_mapping or not spec.column_roles:
         raise ValueError("dataset_column_roles_invalid")
     if any(
-        type(column) is not str or not column or type(role) is not ColumnRole
-        for column, role in spec.column_roles.items()
+        (
+            type(column) is not str or not column or type(role) is not ColumnRole
+            for column, role in spec.column_roles.items()
+        )
     ):
         raise ValueError("dataset_column_roles_invalid")
-    if _admit is not None:
-        _admit(json_record_working_set_bytes(2 + 2 * len(spec.column_roles)))
     if type(spec.required_columns) is not tuple or spec.required_columns != tuple(
         spec.column_roles
     ):
@@ -439,7 +396,7 @@ def validate_dataset_spec(
         raise ValueError("dataset_primary_key_invalid")
     if spec.partition_columns not in {("year",), ()}:
         raise ValueError("unsupported_partitioning")
-    _validate_dataset_spec_variant(spec, _admit=_admit)
+    _validate_dataset_spec_variant(spec)
     invalid_key_roles = [
         column
         for column in primary_key
@@ -461,9 +418,7 @@ def validate_dataset_spec(
     return timestamp_columns[0]
 
 
-def _validate_dataset_spec_variant(
-    spec: DataSpec, *, _admit: Callable[[int], None] | None = None
-) -> None:
+def _validate_dataset_spec_variant(spec: DataSpec) -> None:
     if type(spec) is DataSpec:
         return
     if type(spec) is InterimDataSpec:
@@ -477,25 +432,19 @@ def _validate_dataset_spec_variant(
             spec.source_input_data_ids,
             "dataset_source_input_data_ids_invalid",
             allow_empty=True,
-            _admit=_admit,
         )
         _require_runtime_string_tuple(
             spec.processed_input_data_ids,
             "dataset_processed_input_data_ids_invalid",
             allow_empty=True,
-            _admit=_admit,
         )
         return
     _require_runtime_string(spec.market_id, "dataset_market_id_invalid")
     input_data_ids = _require_runtime_string_tuple(
-        spec.input_data_ids,
-        "dataset_input_data_ids_invalid",
-        allow_empty=False,
-        _admit=_admit,
+        spec.input_data_ids, "dataset_input_data_ids_invalid", allow_empty=False
     )
     _require_runtime_string(
-        spec.base_input_data_id,
-        "dataset_base_input_data_id_invalid",
+        spec.base_input_data_id, "dataset_base_input_data_id_invalid"
     )
     for value, error, allow_empty in (
         (spec.factor_columns, "dataset_factor_columns_invalid", True),
@@ -504,41 +453,25 @@ def _validate_dataset_spec_variant(
         (spec.filter_columns, "dataset_filter_columns_invalid", True),
         (spec.context_columns, "dataset_context_columns_invalid", True),
     ):
-        _require_runtime_string_tuple(
-            value, error, allow_empty=allow_empty, _admit=_admit
-        )
+        _require_runtime_string_tuple(value, error, allow_empty=allow_empty)
     if type(spec.feature_transforms) is not tuple:
         raise ValueError("dataset_feature_transforms_invalid")
     for transform in spec.feature_transforms:
-        _validate_runtime_feature_transform(transform, _admit=_admit)
-    if type(spec.key_coverage) is MappingProxyType and _admit is not None:
-        _admit(json_record_working_set_bytes(2 + 2 * len(spec.key_coverage)))
+        _validate_runtime_feature_transform(transform)
     if (
         type(spec.key_coverage) is not MappingProxyType
         or set(spec.key_coverage) != set(input_data_ids)
         or any(
-            type(data_id) is not str
-            or not data_id
-            or type(policy) is not str
-            or policy not in {"strict", "sparse"}
-            for data_id, policy in spec.key_coverage.items()
+            (
+                type(data_id) is not str
+                or not data_id
+                or type(policy) is not str
+                or (policy not in {"strict", "sparse"})
+                for data_id, policy in spec.key_coverage.items()
+            )
         )
     ):
         raise ValueError("dataset_key_coverage_invalid")
-    if _admit is not None:
-        _admit(
-            json_record_working_set_bytes(
-                2
-                + 4 * len(spec.column_roles)
-                + 4 * len(spec.key_coverage)
-                + 2 * len(spec.input_data_ids)
-                + 2 * len(spec.factor_columns)
-                + 2 * len(spec.feature_columns)
-                + 2 * len(spec.label_columns)
-                + 2 * len(spec.filter_columns)
-                + 2 * len(spec.context_columns)
-            )
-        )
     try:
         ResearchDatasetSpec(
             data_id=spec.data_id,
@@ -563,25 +496,17 @@ def _validate_dataset_spec_variant(
         raise ValueError("dataset_research_spec_invalid") from exc
 
 
-def _validate_runtime_feature_transform(
-    value: object, *, _admit: Callable[[int], None] | None = None
-) -> None:
+def _validate_runtime_feature_transform(value: object) -> None:
     if type(value) is not FeatureTransformSpec:
         raise ValueError("dataset_feature_transforms_invalid")
     if type(value.contract_version) is not str or value.contract_version != "0.1":
         raise ValueError("dataset_feature_transforms_invalid")
     _require_runtime_string(value.transform_id, "dataset_feature_transforms_invalid")
     _require_runtime_string_tuple(
-        value.source_columns,
-        "dataset_feature_transforms_invalid",
-        allow_empty=False,
-        _admit=_admit,
+        value.source_columns, "dataset_feature_transforms_invalid", allow_empty=False
     )
     _require_runtime_string_tuple(
-        value.output_columns,
-        "dataset_feature_transforms_invalid",
-        allow_empty=False,
-        _admit=_admit,
+        value.output_columns, "dataset_feature_transforms_invalid", allow_empty=False
     )
     if type(value.transform) is not str or value.transform not in FEATURE_TRANSFORMS:
         raise ValueError("dataset_feature_transforms_invalid")
@@ -616,237 +541,17 @@ def _require_runtime_string(value: object, error: str) -> str:
 
 
 def _require_runtime_string_tuple(
-    value: object,
-    error: str,
-    *,
-    allow_empty: bool,
-    _admit: Callable[[int], None] | None = None,
+    value: object, error: str, *, allow_empty: bool
 ) -> tuple[str, ...]:
     if (
         type(value) is not tuple
-        or (not value and not allow_empty)
+        or (not value and (not allow_empty))
         or any(type(item) is not str or not item for item in value)
     ):
         raise ValueError(error)
-    if _admit is not None:
-        _admit(json_record_working_set_bytes(2 + 2 * len(value)))
     if len(value) != len(set(value)):
         raise ValueError(error)
     return value
-
-
-def _utf8_payload_length(value: str) -> int:
-    """Return the UTF-8 payload width without allocating an encoded copy."""
-
-    payload_bytes = 0
-    for character in value:
-        codepoint = ord(character)
-        if codepoint <= 0x7F:
-            payload_bytes += 1
-        elif codepoint <= 0x7FF:
-            payload_bytes += 2
-        elif 0xD800 <= codepoint <= 0xDFFF:
-            raise ValueError("invalid_dataset_physical_filter_value")
-        elif codepoint <= 0xFFFF:
-            payload_bytes += 3
-        else:
-            payload_bytes += 4
-    return payload_bytes
-
-
-# A physical field has three entries and its type record has at most four.
-# These are the same record owners used by the recursive payload builder below.
-_PHYSICAL_FIELD_RECORD_BYTES = json_record_working_set_bytes(2 + 2 * 3)
-_PHYSICAL_TYPE_RECORD_BYTES = json_record_working_set_bytes(2 + 2 * 4)
-_PHYSICAL_NODE_BYTES = _PHYSICAL_FIELD_RECORD_BYTES + _PHYSICAL_TYPE_RECORD_BYTES
-
-
-def _schema_text_working_set_bytes(value: str | bytes) -> int:
-    width = len(value) if isinstance(value, bytes) else _utf8_payload_length(value)
-    return json_record_working_set_bytes(width)
-
-
-def _timezone_schema_bytes(value: object) -> int:
-    zone = getattr(value, "zone", None)
-    if zone is None:
-        zone = getattr(value, "key", None)
-    if zone is None and type(value) is timezone:
-        zone = value.tzname(None)
-    return _schema_text_working_set_bytes(zone) if isinstance(zone, str) else 0
-
-
-def _input_schema_extra_bytes(
-    value: object,
-    *,
-    active: list[object],
-    remaining: int,
-) -> tuple[int, int]:
-    if len(active) >= _MAX_NESTING_DEPTH:
-        raise ValueError("qrp_json_recursion_limit")
-    if not isinstance(value, (dict, list, tuple, np.ndarray)):
-        metadata = (
-            _timezone_schema_bytes(value.tzinfo)
-            if isinstance(value, (datetime, pd.Timestamp))
-            else 0
-        )
-        native = 0
-        if isinstance(value, memoryview):
-            native = value.nbytes
-            if not value.c_contiguous:
-                native += value.nbytes
-        if not active:
-            return metadata, native
-        # Nested leaves are absent from pandas' shallow object-cell accounting.
-        # A conversion graph includes its native value and any UTF-8 working copy.
-        native += sys.getsizeof(value)
-        if isinstance(value, str):
-            native += _utf8_payload_length(value)
-        elif isinstance(value, bytes):
-            native += len(value)
-        return metadata, native
-    if any(value is parent for parent in active):
-        raise ValueError("qrp_json_cycle")
-    active.append(value)
-    metadata = native = 0
-    try:
-        if isinstance(value, dict):
-            for name, child in value.items():
-                metadata += _PHYSICAL_NODE_BYTES
-                if isinstance(name, (str, bytes)):
-                    metadata += _schema_text_working_set_bytes(name)
-                if metadata + 2 * native > remaining:
-                    raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-                child_metadata, child_native = _input_schema_extra_bytes(
-                    child, active=active, remaining=remaining - metadata - 2 * native
-                )
-                metadata += child_metadata
-                native += child_native
-        else:
-            levels = max(1, value.ndim) if isinstance(value, np.ndarray) else 1
-            metadata = levels * (
-                _PHYSICAL_NODE_BYTES + _schema_text_working_set_bytes("item")
-            )
-            if isinstance(value, np.ndarray) and value.dtype.kind != "O":
-                # Fixed-width array buffers bound their native values. Iterating
-                # Unicode/bytes arrays would instead allocate scalar copies here.
-                offsets = (value.size + 1) * np.dtype(np.int64).itemsize
-                validity = (value.size + 7) // 8
-                scalar_workspace = 2 * value.dtype.itemsize + sys.getsizeof("")
-                native = value.nbytes + offsets + validity + scalar_workspace
-            else:
-                children = value.flat if isinstance(value, np.ndarray) else value
-                for child in children:
-                    if metadata + 2 * native > remaining:
-                        raise ValueError(
-                            "dataset_working_set_exceeds_task_memory_budget"
-                        )
-                    child_metadata, child_native = _input_schema_extra_bytes(
-                        child,
-                        active=active,
-                        remaining=remaining - metadata - 2 * native,
-                    )
-                    metadata += child_metadata
-                    native += child_native
-        if metadata + 2 * native > remaining:
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        return metadata, native
-    finally:
-        active.pop()
-
-
-def frame_schema_working_set_bounds(
-    frame: pd.DataFrame,
-    *,
-    resource_policy: RuntimeResourcePolicy,
-) -> tuple[int, int, int, tuple[str, ...]]:
-    """Bound fixed schema, row schema, and nested native conversion separately.
-
-    Count borrowed structures without a whole-input identity set or an inferred
-    Arrow schema. Per-column row maxima cover any slice; the caller reserves two
-    native graphs for the original Arrow table and the schema-converted table.
-    The same scan records object columns with observed strings and only nulls.
-    """
-
-    stack_slots = (
-        len(_input_schema_extra_bytes.__code__.co_varnames)
-        + _input_schema_extra_bytes.__code__.co_stacksize
-    ) * _MAX_NESTING_DEPTH
-    with resource_policy.lease(
-        "storage.dataset.schema.plan", json_record_working_set_bytes(stack_slots)
-    ):
-        limit = resource_policy.operation_headroom_bytes
-        fixed = _PHYSICAL_NODE_BYTES
-        per_row = native_per_row = 0
-        active: list[object] = []
-        object_strings: list[str] = []
-        column_array = value = None
-        try:
-            for name, column_array in zip(
-                frame.columns, frame._iter_column_arrays(), strict=True
-            ):
-                if type(name) is not str or not name:
-                    raise ValueError("invalid_dataset_column_labels")
-                fixed += _PHYSICAL_NODE_BYTES + _schema_text_working_set_bytes(name)
-                dtype = column_array.dtype
-                if isinstance(dtype, pd.DatetimeTZDtype):
-                    fixed += _timezone_schema_bytes(dtype.tz)
-                if isinstance(dtype, pd.CategoricalDtype):
-                    fixed += 2 * _PHYSICAL_TYPE_RECORD_BYTES
-                    for value in dtype.categories:
-                        fixed += json_record_working_set_bytes(2 + 2 * 2)
-                        if isinstance(value, (str, bytes)):
-                            fixed += _schema_text_working_set_bytes(value)
-                        elif isinstance(value, (datetime, pd.Timestamp)):
-                            fixed += _timezone_schema_bytes(value.tzinfo)
-                        if fixed > limit:
-                            raise ValueError(
-                                "dataset_working_set_exceeds_task_memory_budget"
-                            )
-                if fixed > limit:
-                    raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-                if pd.api.types.is_object_dtype(dtype):
-                    column_max = column_native_max = 0
-                    has_string = False
-                    strings_or_nulls = True
-                    for value in column_array:
-                        metadata, native = _input_schema_extra_bytes(
-                            value, active=active, remaining=limit - fixed
-                        )
-                        column_max = max(column_max, metadata)
-                        column_native_max = max(column_native_max, native)
-                        if isinstance(value, str):
-                            has_string = True
-                        elif not pd.api.types.is_scalar(value) or not pd.isna(value):
-                            strings_or_nulls = False
-                    per_row += column_max
-                    native_per_row += column_native_max
-                    if has_string and strings_or_nulls:
-                        object_strings.append(name)
-                if fixed + per_row + 2 * native_per_row > limit:
-                    raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-            return fixed, per_row, native_per_row, tuple(object_strings)
-        finally:
-            column_array = value = None
-            active.clear()
-
-
-def physical_schema_working_set_bytes(schema: pa.Schema) -> int:
-    """Measure the retained schema through the physical schema rule owner.
-
-    The caller must already own the construction workspace. Each field's
-    physical payload is released after counting. Persistence validation remains
-    at the stored-schema boundary, after Parquet normalizes physical types.
-    """
-
-    total = _PHYSICAL_NODE_BYTES
-
-    def charge(size: int) -> None:
-        nonlocal total
-        total += size
-
-    for field in schema:
-        _physical_field_payload(field, _schema_charge=charge)
-    return total
 
 
 def physical_schema_from_schema(schema: pa.Schema) -> list[dict[str, Any]]:
@@ -858,9 +563,7 @@ def physical_schema_from_schema(schema: pa.Schema) -> list[dict[str, Any]]:
 
 
 def logical_dtype_payload_from_frame(
-    frame: pd.DataFrame,
-    *,
-    columns: tuple[str, ...] | None = None,
+    frame: pd.DataFrame, *, columns: tuple[str, ...] | None = None
 ) -> dict[str, Any]:
     if not isinstance(frame, pd.DataFrame):
         raise TypeError("dataset_frame_required")
@@ -882,133 +585,14 @@ def logical_dtype_metadata_bytes(payload: Mapping[str, Any]) -> bytes:
     return (render_qrp_json_object(validated) + "\n").encode("utf-8")
 
 
-def require_logical_dtype_metadata_within_target(
-    payload: Mapping[str, Any],
-    *,
-    category_payloads: Callable[[Mapping[str, Any]], Iterable[Mapping[str, Any]]],
-    target_chunk_bytes: int,
-) -> int:
-    """Require exact bounded metadata bytes while category arrays remain lazy."""
-
-    if type(target_chunk_bytes) is not int or target_chunk_bytes <= 0:
-        raise ValueError("invalid_target_chunk_bytes")
-    validated = validate_logical_dtype_payload(payload)
-    skeleton = {
-        "schema_id": validated["schema_id"],
-        "columns": [
-            {
-                **descriptor,
-                **({"categories": []} if descriptor["kind"] == "categorical" else {}),
-            }
-            for descriptor in validated["columns"]
-        ],
-    }
-    lazy_arrays = {
-        ("columns", index, "categories"): _validated_category_payloads(
-            category_payloads(descriptor),
-            target_chunk_bytes=target_chunk_bytes,
-        )
-        for index, descriptor in enumerate(validated["columns"])
-        if descriptor["kind"] == "categorical"
-    }
-    try:
-        rendered_size = bounded_rendered_qrp_json_object_size(
-            skeleton,
-            lazy_arrays=lazy_arrays,
-            max_bytes=target_chunk_bytes - 1,
-        )
-    except ValueError as exc:
-        if str(exc) == "qrp_json_render_exceeds_max_bytes":
-            raise ValueError(
-                "dataset_logical_dtype_metadata_exceeds_payload_target"
-            ) from None
-        raise
-    return rendered_size + 1
-
-
-def require_frame_logical_dtype_metadata_within_target(
-    frame: pd.DataFrame,
-    *,
-    columns: tuple[str, ...],
-    target_chunk_bytes: int,
-) -> int:
-    if not isinstance(frame, pd.DataFrame):
-        raise TypeError("dataset_frame_required")
-    descriptors: list[dict[str, Any]] = []
-    for column in columns:
-        if column not in frame:
-            raise ValueError("dataset_column_not_found")
-        series = frame[column]
-        dtype = series.dtype
-        if isinstance(dtype, pd.CategoricalDtype):
-            descriptors.append(
-                {
-                    "name": column,
-                    "kind": "categorical",
-                    "ordered": bool(dtype.ordered),
-                    "categories": [],
-                }
-            )
-        else:
-            descriptors.append(_logical_dtype_descriptor(column, series))
-    payload = {
-        "schema_id": "qrp-dataset-part-logical-dtypes",
-        "columns": descriptors,
-    }
-
-    def category_values(
-        descriptor: Mapping[str, Any],
-    ) -> Iterable[Mapping[str, Any]]:
-        dtype = frame[str(descriptor["name"])].dtype
-        return (_typed_category_value_payload(value) for value in dtype.categories)
-
-    return require_logical_dtype_metadata_within_target(
-        payload,
-        category_payloads=category_values,
-        target_chunk_bytes=target_chunk_bytes,
+def encode_logical_category_value(value: Mapping[str, Any]) -> tuple[bytes, bytes]:
+    return (
+        canonical_identity_bytes(value),
+        (
+            render_qrp_json_object({"schema_id": "qrp-category-value", "value": value})
+            + "\n"
+        ).encode("utf-8"),
     )
-
-
-def _validated_category_payloads(
-    payloads: Iterable[Mapping[str, Any]],
-    *,
-    target_chunk_bytes: int,
-) -> Iterable[Mapping[str, Any]]:
-    for payload in payloads:
-        try:
-            canonical = _typed_category_value_payload(_typed_category_value(payload))
-            matches = canonical_identity_bytes(canonical) == canonical_identity_bytes(
-                payload
-            )
-        except (TypeError, ValueError, OverflowError):
-            matches = False
-        if not matches:
-            raise ValueError("dataset_logical_dtypes_invalid")
-        encode_logical_category_value(
-            canonical,
-            target_chunk_bytes=target_chunk_bytes,
-        )
-        yield canonical
-
-
-def encode_logical_category_value(
-    value: Mapping[str, Any],
-    *,
-    target_chunk_bytes: int,
-) -> tuple[bytes, bytes]:
-    identity = canonical_identity_bytes(value)
-    rendered = (
-        render_qrp_json_object(
-            {
-                "schema_id": "qrp-category-value",
-                "value": value,
-            }
-        )
-        + "\n"
-    ).encode("utf-8")
-    if max(len(identity), len(rendered)) > target_chunk_bytes:
-        raise ValueError("dataset_categorical_value_exceeds_payload_target")
-    return identity, rendered
 
 
 def parse_logical_dtype_metadata(raw: bytes) -> dict[str, Any]:
@@ -1033,7 +617,7 @@ def validate_logical_dtype_payload(value: object) -> dict[str, Any]:
             raise ValueError("dataset_logical_dtypes_invalid")
         name = descriptor.get("name")
         kind = descriptor.get("kind")
-        if type(name) is not str or not name or type(kind) is not str or not kind:
+        if type(name) is not str or not name or type(kind) is not str or (not kind):
             raise ValueError("dataset_logical_dtypes_invalid")
         names.append(name)
         if kind == "categorical":
@@ -1069,11 +653,9 @@ def validate_logical_dtype_payload(value: object) -> dict[str, Any]:
 
 
 def validate_persisted_logical_schema(
-    schema: pa.Schema,
-    logical_dtypes: Mapping[str, Any],
+    schema: pa.Schema, logical_dtypes: Mapping[str, Any]
 ) -> None:
     """Require logical dtypes to preserve the persisted physical values."""
-
     if {item["name"] for item in logical_dtypes["columns"]} != set(schema.names):
         raise ValueError("dataset_logical_dtype_mismatch")
     for descriptor in logical_dtypes["columns"]:
@@ -1092,7 +674,7 @@ def validate_persisted_logical_schema(
         if (
             pa.types.is_timestamp(data_type)
             and pa.types.is_timestamp(expected)
-            and data_type.tz == expected.tz
+            and (data_type.tz == expected.tz)
         ):
             continue
         if (pa.types.is_string(data_type) or pa.types.is_large_string(data_type)) and (
@@ -1119,9 +701,7 @@ def _canonical_logical_dtype_descriptor(
     return _logical_dtype_descriptor(name, pd.Series([], dtype=dtype))
 
 
-def merge_logical_dtype_payloads(
-    payloads: list[Mapping[str, Any]],
-) -> dict[str, Any]:
+def merge_logical_dtype_payloads(payloads: list[Mapping[str, Any]]) -> dict[str, Any]:
     if not payloads:
         raise ValueError("dataset_logical_dtypes_missing")
     validated = [validate_logical_dtype_payload(payload) for payload in payloads]
@@ -1155,7 +735,7 @@ def merge_logical_dtype_payloads(
             }
             expected["categories"] = list(domains.values())
     for descriptor in merged:
-        if descriptor["kind"] == "categorical" and not descriptor["ordered"]:
+        if descriptor["kind"] == "categorical" and (not descriptor["ordered"]):
             descriptor["categories"] = sorted(
                 descriptor["categories"], key=_typed_category_identity
             )
@@ -1163,8 +743,7 @@ def merge_logical_dtype_payloads(
 
 
 def _promote_compatible_logical_dtype(
-    left: Mapping[str, Any],
-    right: Mapping[str, Any],
+    left: Mapping[str, Any], right: Mapping[str, Any]
 ) -> dict[str, Any] | None:
     kinds = {left["kind"], right["kind"]}
     if kinds == {"numpy_integer", "nullable_integer"}:
@@ -1184,9 +763,7 @@ def _promote_compatible_logical_dtype(
 
 
 def pandas_dtype_overrides_from_logical_payload(
-    payload: Mapping[str, Any],
-    *,
-    columns: tuple[str, ...],
+    payload: Mapping[str, Any], *, columns: tuple[str, ...]
 ) -> dict[str, object]:
     validated = validate_logical_dtype_payload(payload)
     selected = set(columns)
@@ -1299,7 +876,6 @@ def _typed_category_value_payload(value: object) -> dict[str, Any]:
             raise ValueError("dataset_categorical_value_invalid")
         if value.is_zero():
             value = Decimal(0)
-        # A category cannot exceed the control manifest that must contain it.
         from quant_research_platform.contracts.json_codec import MAX_QRP_JSON_BYTES
 
         sign, digits, exponent = value.as_tuple()
@@ -1373,25 +949,15 @@ def physical_schema_columns(schema: object) -> tuple[str, ...]:
     return tuple(field["name"] for field in schema)
 
 
-def _physical_field_payload(
-    field: pa.Field, *, _schema_charge: Callable[[int], None] | None = None
-) -> dict[str, Any]:
-    if _schema_charge is not None:
-        _schema_charge(
-            _PHYSICAL_FIELD_RECORD_BYTES + _schema_text_working_set_bytes(field.name)
-        )
+def _physical_field_payload(field: pa.Field) -> dict[str, Any]:
     return {
         "name": field.name,
         "nullable": field.nullable,
-        "type": _physical_type_payload(field.type, _schema_charge=_schema_charge),
+        "type": _physical_type_payload(field.type),
     }
 
 
-def _physical_type_payload(
-    data_type: pa.DataType, *, _schema_charge: Callable[[int], None] | None = None
-) -> dict[str, Any]:
-    if _schema_charge is not None:
-        _schema_charge(_PHYSICAL_TYPE_RECORD_BYTES)
+def _physical_type_payload(data_type: pa.DataType) -> dict[str, Any]:
     if pa.types.is_boolean(data_type):
         return {"kind": "bool"}
     if pa.types.is_integer(data_type):
@@ -1414,13 +980,7 @@ def _physical_type_payload(
     if pa.types.is_time32(data_type) or pa.types.is_time64(data_type):
         return {"kind": "time", "unit": data_type.unit}
     if pa.types.is_timestamp(data_type):
-        if _schema_charge is not None and data_type.tz is not None:
-            _schema_charge(_schema_text_working_set_bytes(data_type.tz))
-        return {
-            "kind": "timestamp",
-            "unit": data_type.unit,
-            "timezone": data_type.tz,
-        }
+        return {"kind": "timestamp", "unit": data_type.unit, "timezone": data_type.tz}
     if pa.types.is_duration(data_type):
         return {"kind": "duration", "unit": data_type.unit}
     if pa.types.is_string(data_type):
@@ -1436,73 +996,43 @@ def _physical_type_payload(
     if pa.types.is_struct(data_type):
         return {
             "kind": "struct",
-            "fields": [
-                _physical_field_payload(field, _schema_charge=_schema_charge)
-                for field in data_type
-            ],
+            "fields": [_physical_field_payload(field) for field in data_type],
         }
     if pa.types.is_list(data_type):
         return {
             "kind": "list",
-            "value_field": _physical_field_payload(
-                data_type.value_field, _schema_charge=_schema_charge
-            ),
+            "value_field": _physical_field_payload(data_type.value_field),
         }
     if pa.types.is_large_list(data_type):
         return {
             "kind": "large_list",
-            "value_field": _physical_field_payload(
-                data_type.value_field, _schema_charge=_schema_charge
-            ),
+            "value_field": _physical_field_payload(data_type.value_field),
         }
     if pa.types.is_fixed_size_list(data_type):
         return {
             "kind": "fixed_size_list",
             "list_size": data_type.list_size,
-            "value_field": _physical_field_payload(
-                data_type.value_field, _schema_charge=_schema_charge
-            ),
+            "value_field": _physical_field_payload(data_type.value_field),
         }
     if pa.types.is_map(data_type):
         return {
             "kind": "map",
             "keys_sorted": data_type.keys_sorted,
-            "key_field": _physical_field_payload(
-                data_type.key_field, _schema_charge=_schema_charge
-            ),
-            "item_field": _physical_field_payload(
-                data_type.item_field, _schema_charge=_schema_charge
-            ),
+            "key_field": _physical_field_payload(data_type.key_field),
+            "item_field": _physical_field_payload(data_type.item_field),
         }
     if pa.types.is_dictionary(data_type):
         return {
             "kind": "dictionary",
-            "index_type": _physical_type_payload(
-                data_type.index_type, _schema_charge=_schema_charge
-            ),
-            "value_type": _physical_type_payload(
-                data_type.value_type, _schema_charge=_schema_charge
-            ),
+            "index_type": _physical_type_payload(data_type.index_type),
+            "value_type": _physical_type_payload(data_type.value_type),
             "ordered": data_type.ordered,
         }
     raise ValueError("unsupported_dataset_arrow_type")
 
 
-def data_spec_payload(
-    spec: DataSpec, *, _admit: Callable[[int], None] | None = None
-) -> dict[str, Any]:
-    validate_dataset_spec(spec, _admit=_admit)
-    if _admit is not None:
-        # Scalars are borrowed; reserve the new containers and sorting workspace.
-        _admit(
-            json_record_working_set_bytes(
-                2
-                + len(spec.primary_key)
-                + len(spec.partition_columns)
-                + len(spec.required_columns)
-                + 2 * len(spec.column_roles)
-            )
-        )
+def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
+    validate_dataset_spec(spec)
     payload: dict[str, Any] = {
         "schema_id": "qrp-dataset-spec",
         "data_id": spec.data_id,
@@ -1518,15 +1048,6 @@ def data_spec_payload(
     if isinstance(spec, InterimDataSpec):
         payload.update({"source_id": spec.source_id})
     if isinstance(spec, ProcessedDataSpec):
-        if _admit is not None:
-            _admit(
-                json_record_working_set_bytes(
-                    2
-                    + len(spec.source_input_data_ids)
-                    + len(spec.processed_input_data_ids)
-                )
-            )
-            _admit(json_record_working_set_bytes(4 * len(spec.parameters_json)))
         payload.update(
             {
                 "market_id": spec.market_id,
@@ -1539,20 +1060,6 @@ def data_spec_payload(
             }
         )
     if isinstance(spec, ResearchDatasetSpec):
-        if _admit is not None:
-            _admit(
-                json_record_working_set_bytes(
-                    2
-                    + len(spec.input_data_ids)
-                    + len(spec.factor_columns)
-                    + len(spec.feature_columns)
-                    + len(spec.feature_transforms)
-                    + len(spec.label_columns)
-                    + len(spec.filter_columns)
-                    + len(spec.context_columns)
-                    + 2 * len(spec.key_coverage)
-                )
-            )
         payload.update(
             {
                 "market_id": spec.market_id,
@@ -1561,7 +1068,7 @@ def data_spec_payload(
                 "factor_columns": list(spec.factor_columns),
                 "feature_columns": list(spec.feature_columns),
                 "feature_transforms": [
-                    _feature_transform_payload(transform, _admit=_admit)
+                    _feature_transform_payload(transform)
                     for transform in spec.feature_transforms
                 ],
                 "label_columns": list(spec.label_columns),
@@ -1573,32 +1080,15 @@ def data_spec_payload(
     return payload
 
 
-def _feature_transform_payload(
-    transform: FeatureTransformSpec, *, _admit: Callable[[int], None] | None = None
-) -> dict[str, Any]:
-    if _admit is not None:
-        _admit(
-            json_record_working_set_bytes(
-                2
-                + len(transform.source_columns)
-                + len(transform.output_columns)
-                + (
-                    0
-                    if transform.winsorize_quantiles is None
-                    else len(transform.winsorize_quantiles)
-                )
-            )
-        )
+def _feature_transform_payload(transform: FeatureTransformSpec) -> dict[str, Any]:
     return {
         "transform_id": transform.transform_id,
         "source_columns": list(transform.source_columns),
         "transform": transform.transform,
         "output_columns": list(transform.output_columns),
-        "winsorize_quantiles": (
-            None
-            if transform.winsorize_quantiles is None
-            else list(transform.winsorize_quantiles)
-        ),
+        "winsorize_quantiles": None
+        if transform.winsorize_quantiles is None
+        else list(transform.winsorize_quantiles),
         "fillna_policy": transform.fillna_policy,
     }
 
@@ -1622,14 +1112,10 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
         "dataset_frequency_invalid",
     )
     grain = _require_enum_string(
-        spec.get("grain"),
-        {item.value for item in DataGrain},
-        "dataset_grain_invalid",
+        spec.get("grain"), {item.value for item in DataGrain}, "dataset_grain_invalid"
     )
     primary_key = _require_string_list(
-        spec.get("primary_key"),
-        "dataset_primary_key_invalid",
-        allow_empty=False,
+        spec.get("primary_key"), "dataset_primary_key_invalid", allow_empty=False
     )
     partition_columns = _require_string_list(
         spec.get("partition_columns"),
@@ -1647,10 +1133,12 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
     if not isinstance(column_roles, dict) or set(column_roles) != set(required_columns):
         raise ValueError("dataset_column_roles_invalid")
     if any(
-        not isinstance(key, str)
-        or not isinstance(value, str)
-        or value not in {role.value for role in ColumnRole}
-        for key, value in column_roles.items()
+        (
+            not isinstance(key, str)
+            or not isinstance(value, str)
+            or value not in {role.value for role in ColumnRole}
+            for key, value in column_roles.items()
+        )
     ):
         raise ValueError("dataset_column_roles_invalid")
     if not set(primary_key).issubset(required_columns):
@@ -1665,7 +1153,6 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
         "primary_key": tuple(primary_key),
         "partition_columns": tuple(partition_columns),
     }
-
     if keys == _DATASET_SPEC_BASE_KEYS:
         validate_dataset_spec(DataSpec(**common_kwargs))
         return
@@ -1707,42 +1194,29 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
             )
         )
         return
-
     market_id = _require_nonempty_string(
         spec.get("market_id"), "dataset_market_id_invalid"
     )
     input_data_ids = _require_string_list(
-        spec.get("input_data_ids"),
-        "dataset_input_data_ids_invalid",
-        allow_empty=False,
+        spec.get("input_data_ids"), "dataset_input_data_ids_invalid", allow_empty=False
     )
     base_input_data_id = _require_nonempty_string(
         spec.get("base_input_data_id"), "dataset_base_input_data_id_invalid"
     )
     factor_columns = _require_string_list(
-        spec.get("factor_columns"),
-        "dataset_factor_columns_invalid",
-        allow_empty=True,
+        spec.get("factor_columns"), "dataset_factor_columns_invalid", allow_empty=True
     )
     feature_columns = _require_string_list(
-        spec.get("feature_columns"),
-        "dataset_feature_columns_invalid",
-        allow_empty=True,
+        spec.get("feature_columns"), "dataset_feature_columns_invalid", allow_empty=True
     )
     label_columns = _require_string_list(
-        spec.get("label_columns"),
-        "dataset_label_columns_invalid",
-        allow_empty=False,
+        spec.get("label_columns"), "dataset_label_columns_invalid", allow_empty=False
     )
     filter_columns = _require_string_list(
-        spec.get("filter_columns"),
-        "dataset_filter_columns_invalid",
-        allow_empty=True,
+        spec.get("filter_columns"), "dataset_filter_columns_invalid", allow_empty=True
     )
     context_columns = _require_string_list(
-        spec.get("context_columns"),
-        "dataset_context_columns_invalid",
-        allow_empty=True,
+        spec.get("context_columns"), "dataset_context_columns_invalid", allow_empty=True
     )
     feature_transforms = _validate_feature_transform_payloads(
         spec.get("feature_transforms")
@@ -1752,9 +1226,7 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
         raise ValueError("dataset_key_coverage_invalid")
     for value in key_coverage.values():
         _require_enum_string(
-            value,
-            {"strict", "sparse"},
-            "dataset_key_coverage_invalid",
+            value, {"strict", "sparse"}, "dataset_key_coverage_invalid"
         )
     try:
         research_spec = ResearchDatasetSpec(
@@ -1776,9 +1248,7 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
 
 
 def validate_dataset_manifest_payload(
-    manifest: Mapping[str, Any],
-    *,
-    spec: Mapping[str, Any],
+    manifest: Mapping[str, Any], *, spec: Mapping[str, Any]
 ) -> None:
     validate_dataset_spec_payload(spec)
     if (
@@ -1787,7 +1257,7 @@ def validate_dataset_manifest_payload(
     ):
         raise ValueError("dataset_manifest_schema_id_invalid")
     expected_keys = (
-        (set(spec) - {"schema_id"}) | _DATASET_MANIFEST_RUNTIME_KEYS | {"schema_id"}
+        set(spec) - {"schema_id"} | _DATASET_MANIFEST_RUNTIME_KEYS | {"schema_id"}
     )
     actual_keys = set(manifest)
     if not expected_keys.issubset(actual_keys) or not (
@@ -1803,7 +1273,6 @@ def validate_dataset_manifest_payload(
             matches_spec = False
         if not matches_spec:
             raise ValueError(f"dataset_manifest_spec_mismatch: {key}")
-
     for key in (
         "row_count",
         "file_count",
@@ -1835,12 +1304,10 @@ def validate_dataset_manifest_payload(
     if [item["name"] for item in logical_dtypes["columns"]] != columns:
         raise ValueError("manifest_logical_dtypes_mismatch")
     logical_dtype_hash = _require_identity_hash(
-        manifest.get("logical_dtype_hash"),
-        "manifest_logical_dtype_hash_invalid",
+        manifest.get("logical_dtype_hash"), "manifest_logical_dtype_hash_invalid"
     )
     if canonical_json_hash(logical_dtypes) != logical_dtype_hash:
         raise ValueError("manifest_logical_dtype_hash_mismatch")
-
     partitions = _require_string_list(
         manifest.get("partitions"), "manifest_partitions_invalid", allow_empty=False
     )
@@ -1855,10 +1322,8 @@ def validate_dataset_manifest_payload(
         raise ValueError("manifest_partition_count_mismatch")
     if sum(partition_counts.values()) != manifest["row_count"]:
         raise ValueError("manifest_row_count_mismatch")
-
     date_range = _validate_date_range(
-        manifest.get("date_min"),
-        manifest.get("date_max"),
+        manifest.get("date_min"), manifest.get("date_max")
     )
     null_counts = _require_count_mapping(
         manifest.get("null_count_summary"),
@@ -1915,7 +1380,7 @@ def validate_dataset_manifest_payload(
                 if (
                     partition == "unpartitioned"
                     and row_count == 0
-                    and partition_counts[partition] == 0
+                    and (partition_counts[partition] == 0)
                 ):
                     continue
                 partition_year_by_label[partition] = parse_year_partition_label(
@@ -1953,14 +1418,13 @@ def validate_dataset_manifest_payload(
 
 def validate_dataset_primary_key_null_summary(manifest: Mapping[str, Any]) -> None:
     """Require an observed zero null count for every declared primary-key column."""
-
     primary_key = manifest.get("primary_key")
     null_counts = manifest.get("null_count_summary")
     if (
         not isinstance(primary_key, list)
         or not primary_key
         or any(not isinstance(column, str) or not column for column in primary_key)
-        or not isinstance(null_counts, Mapping)
+        or (not isinstance(null_counts, Mapping))
     ):
         raise ValueError("dataset_manifest_not_consumable")
     try:
@@ -1973,13 +1437,12 @@ def validate_dataset_primary_key_null_summary(manifest: Mapping[str, Any]) -> No
 
 def validate_dataset_manifest_consumable(manifest: Mapping[str, Any]) -> None:
     """Reject structurally readable manifests that normal consumers cannot use."""
-
     non_finite_counts = manifest.get("non_finite_count_summary")
     if (
         manifest.get("validation_status") != "PASS"
         or type(manifest.get("duplicate_primary_key_count")) is not int
         or manifest.get("duplicate_primary_key_count") != 0
-        or not isinstance(non_finite_counts, Mapping)
+        or (not isinstance(non_finite_counts, Mapping))
         or any(
             type(count) is not int or count != 0 for count in non_finite_counts.values()
         )
@@ -2039,12 +1502,12 @@ def _validate_physical_type_payload(value: object) -> None:
         if (
             not _is_exact_int(value["bit_width"])
             or value["bit_width"] not in {128, 256}
-            or not _is_exact_int(value["precision"])
-            or value["precision"] <= 0
-            or value["precision"] > (38 if value["bit_width"] == 128 else 76)
-            or not _is_exact_int(value["scale"])
-            or value["scale"] < 0
-            or value["scale"] > value["precision"]
+            or (not _is_exact_int(value["precision"]))
+            or (value["precision"] <= 0)
+            or (value["precision"] > (38 if value["bit_width"] == 128 else 76))
+            or (not _is_exact_int(value["scale"]))
+            or (value["scale"] < 0)
+            or (value["scale"] > value["precision"])
         ):
             raise ValueError("manifest_physical_schema_invalid")
         return
@@ -2067,9 +1530,7 @@ def _validate_physical_type_payload(value: object) -> None:
     if kind == "duration":
         _require_exact_keys(value, {"kind", "unit"})
         _require_enum_string(
-            value["unit"],
-            {"s", "ms", "us", "ns"},
-            "manifest_physical_schema_invalid",
+            value["unit"], {"s", "ms", "us", "ns"}, "manifest_physical_schema_invalid"
         )
         return
     if kind == "timestamp":
@@ -2138,14 +1599,10 @@ def _validate_feature_transform_payloads(value: object) -> list[FeatureTransform
         }:
             raise ValueError("dataset_feature_transforms_invalid")
         transform = _require_enum_string(
-            item["transform"],
-            FEATURE_TRANSFORMS,
-            "dataset_feature_transforms_invalid",
+            item["transform"], FEATURE_TRANSFORMS, "dataset_feature_transforms_invalid"
         )
         fillna_policy = _require_enum_string(
-            item["fillna_policy"],
-            FILLNA_POLICIES,
-            "dataset_feature_transforms_invalid",
+            item["fillna_policy"], FILLNA_POLICIES, "dataset_feature_transforms_invalid"
         )
         source_columns = _require_string_list(
             item["source_columns"],
@@ -2200,17 +1657,12 @@ def _require_enum_string(value: object, allowed: set[str], error: str) -> str:
     return value
 
 
-def _require_string_list(
-    value: object,
-    error: str,
-    *,
-    allow_empty: bool,
-) -> list[str]:
+def _require_string_list(value: object, error: str, *, allow_empty: bool) -> list[str]:
     if (
         not isinstance(value, list)
-        or (not value and not allow_empty)
+        or (not value and (not allow_empty))
         or any(not isinstance(item, str) or not item for item in value)
-        or len(value) != len(set(value))
+        or (len(value) != len(set(value)))
     ):
         raise ValueError(error)
     return value
@@ -2221,10 +1673,7 @@ def _is_exact_int(value: object) -> bool:
 
 
 def _require_count_mapping(
-    value: object,
-    *,
-    allowed_keys: set[str],
-    error: str,
+    value: object, *, allowed_keys: set[str], error: str
 ) -> dict[str, int]:
     if not isinstance(value, dict):
         raise ValueError(error)
@@ -2234,8 +1683,8 @@ def _require_count_mapping(
             not isinstance(key, str)
             or not key
             or key not in allowed_keys
-            or not _is_exact_int(item)
-            or item < 0
+            or (not _is_exact_int(item))
+            or (item < 0)
         ):
             raise ValueError(error)
         result[key] = item
@@ -2243,8 +1692,7 @@ def _require_count_mapping(
 
 
 def _validate_date_range(
-    date_min: object,
-    date_max: object,
+    date_min: object, date_max: object
 ) -> tuple[date, date] | None:
     if date_min is None and date_max is None:
         return None
@@ -2259,9 +1707,51 @@ def _validate_date_range(
         raise ValueError("manifest_date_range_invalid")
     if minimum > maximum:
         raise ValueError("manifest_date_range_invalid")
-    return minimum, maximum
+    return (minimum, maximum)
 
 
 def _require_exact_keys(value: Mapping[str, Any], expected: set[str]) -> None:
     if set(value) != expected:
         raise ValueError("manifest_physical_schema_invalid")
+
+
+def validate_frame_objects(frame: pd.DataFrame) -> tuple[str, ...]:
+    """Reject recursive object graphs and identify strings before batch slicing."""
+
+    def visit(value: object, active: list[object]) -> None:
+        if not isinstance(value, (dict, list, tuple, np.ndarray)):
+            return
+        if len(active) >= _MAX_NESTING_DEPTH:
+            raise ValueError("qrp_json_recursion_limit")
+        if any(value is parent for parent in active):
+            raise ValueError("qrp_json_cycle")
+        if isinstance(value, np.ndarray) and value.dtype.kind != "O":
+            return
+        active.append(value)
+        try:
+            children = (
+                value.values()
+                if isinstance(value, dict)
+                else value.flat
+                if isinstance(value, np.ndarray)
+                else value
+            )
+            for child in children:
+                visit(child, active)
+        finally:
+            active.pop()
+
+    strings = []
+    for name, values in zip(frame.columns, frame._iter_column_arrays(), strict=True):
+        if not pd.api.types.is_object_dtype(values.dtype):
+            continue
+        has_string, strings_or_nulls = (False, True)
+        for value in values:
+            if isinstance(value, str):
+                has_string = True
+            elif not pd.api.types.is_scalar(value) or not pd.isna(value):
+                strings_or_nulls = False
+            visit(value, [])
+        if has_string and strings_or_nulls:
+            strings.append(name)
+    return tuple(strings)

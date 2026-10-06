@@ -2,10 +2,9 @@
 
 from __future__ import annotations
 
-import sys
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
+from contextlib import ExitStack
 from dataclasses import asdict, dataclass, fields
 from pathlib import Path
 
@@ -26,7 +25,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     _industry_group_codes,
@@ -64,22 +62,13 @@ from quant_research_platform.research.portfolios.schedules import (
     is_rebalance_session,
 )
 from quant_research_platform.runtime.execution_metrics import record_run_observations
-from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    RuntimeResourcePolicy,
-    _close_lease_preserving_primary,
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-)
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.datasets.reading import (
     iter_dataset_file_batches,
     open_dataset_session,
     read_dataset,
 )
-from quant_research_platform.storage.identity import (
-    filesystem_exists,
-)
+from quant_research_platform.storage.identity import filesystem_exists
 from quant_research_platform.storage.layout import StorageLayout
 
 _CALENDAR_COLUMNS = ("calendar_date", "source_market_type", "is_trading_day")
@@ -150,9 +139,11 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
             payload["schema_id"] != "qrp-final-alpha-calibration-v1"
             or payload["selection_group"] != selection_group
             or pd.Timestamp(payload["cutoff"]) != pd.Timestamp(cutoff)
-            or type(payload["calibration"]) is not dict
-            or set(payload["calibration"])
-            != {field.name for field in fields(AlphaCalibration)}
+            or (type(payload["calibration"]) is not dict)
+            or (
+                set(payload["calibration"])
+                != {field.name for field in fields(AlphaCalibration)}
+            )
         )
     ):
         raise ValueError("holdout_alpha_calibration_binding_invalid")
@@ -172,8 +163,8 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
         calibration.slope_standard_error < 0
         or not 0 <= calibration.coverage <= 1
         or type(calibration.valid_rebalance_dates) is not int
-        or type(calibration.scheduled_rebalance_dates) is not int
-        or calibration.scheduled_rebalance_dates < calibration.valid_rebalance_dates
+        or (type(calibration.scheduled_rebalance_dates) is not int)
+        or (calibration.scheduled_rebalance_dates < calibration.valid_rebalance_dates)
     ):
         raise ValueError("holdout_alpha_calibration_statistics_invalid")
     optional = (
@@ -195,7 +186,7 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
         or len({values[name] is None for name in optional[:4]}) != 1
         or (
             calibration.slope_pvalue is not None
-            and not 0 <= calibration.slope_pvalue <= 1
+            and (not 0 <= calibration.slope_pvalue <= 1)
         )
         or (
             calibration.slope_ci_low is not None
@@ -203,7 +194,7 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
         )
     ):
         raise ValueError("holdout_alpha_calibration_statistics_invalid")
-    return calibration, payload["cutoff"]
+    return (calibration, payload["cutoff"])
 
 
 @dataclass(frozen=True, slots=True)
@@ -232,7 +223,6 @@ def build_portfolio_ledger(
     persisted_model: object,
     access_window: str,
     assumptions: ExecutionAssumptions,
-    resource_policy: RuntimeResourcePolicy | None,
     fee_schedule_from_frame: Callable[..., object],
     require_fee_coverage: Callable[..., None],
     prepare_trade_cost: Callable[..., object],
@@ -240,7 +230,6 @@ def build_portfolio_ledger(
     unified_trading_sessions: Callable[[pd.DataFrame], pd.DatetimeIndex],
 ) -> Iterator[PortfolioLedgerBatch]:
     """Build formal candidate sessions from bounded, exact-date reads."""
-
     if not isinstance(candidate, PortfolioCandidateSpec):
         raise ValueError("portfolio_candidate_invalid")
     if not isinstance(assumptions, ExecutionAssumptions):
@@ -248,22 +237,15 @@ def build_portfolio_ledger(
     _validate_windows(output_window, input_window, formal_dataset_window)
     enhanced = candidate.construction == "benchmark_enhanced"
     risk_style_columns = candidate.risk_style_columns
-
     calendar_identity = _required_identity(
-        upstream_identities,
-        candidate.trading_calendar_target_id,
+        upstream_identities, candidate.trading_calendar_target_id
     )
     calendar_root = _required_target_root(
         layout,
         candidate.trading_calendar_target_id,
         expected_identity=calendar_identity,
     )
-    calendar = _read_materialized(
-        calendar_root,
-        _CALENDAR_COLUMNS,
-        time_window=None,
-        resource_policy=resource_policy,
-    )
+    calendar = _read_materialized(calendar_root, _CALENDAR_COLUMNS, time_window=None)
     try:
         sessions = pd.DatetimeIndex(unified_trading_sessions(calendar))
     except (TypeError, ValueError) as exc:
@@ -292,7 +274,7 @@ def build_portfolio_ledger(
     output_intervals = holding_intervals(sessions, output_window).set_index(
         "decision_at"
     )
-    del calendar
+
     if sessions.empty:
         raise PortfolioTargetBlocked("portfolio_execution_window_empty")
     prediction_window = prediction_window or TimeWindow(
@@ -339,27 +321,15 @@ def build_portfolio_ledger(
     calibration_intervals = calibration_intervals.loc[
         calibration_intervals.timestamp.ge(alpha_start)
     ].copy()
-
     fee_identity = _required_identity(
-        upstream_identities,
-        candidate.fee_schedule_target_id,
+        upstream_identities, candidate.fee_schedule_target_id
     )
     fee_root = _required_target_root(
-        layout,
-        candidate.fee_schedule_target_id,
-        expected_identity=fee_identity,
+        layout, candidate.fee_schedule_target_id, expected_identity=fee_identity
     )
-    fee_frame = _read_materialized(
-        fee_root,
-        None,
-        time_window=None,
-        resource_policy=resource_policy,
-    )
-    fee_schedule = fee_schedule_from_frame(
-        fee_frame,
-        content_identity=fee_identity,
-    )
-    del fee_frame
+    fee_frame = _read_materialized(fee_root, None, time_window=None)
+    fee_schedule = fee_schedule_from_frame(fee_frame, content_identity=fee_identity)
+
     try:
         require_fee_coverage(
             fee_schedule,
@@ -369,30 +339,20 @@ def build_portfolio_ledger(
         )
     except ValueError as exc:
         raise PortfolioTargetBlocked("portfolio_fee_coverage_missing") from exc
-
     dataset_root = _required_input_root(
-        layout,
-        upstream_identities,
-        candidate.research_dataset_id,
+        layout, upstream_identities, candidate.research_dataset_id
     )
     panel_root = _required_input_root(
-        layout,
-        upstream_identities,
-        candidate.market_panel_target_id,
+        layout, upstream_identities, candidate.market_panel_target_id
     )
     execution_root = _required_input_root(
-        layout,
-        upstream_identities,
-        candidate.execution_mask_target_id,
+        layout, upstream_identities, candidate.execution_mask_target_id
     )
     benchmark_root = None
     if enhanced:
         benchmark_root = _required_input_root(
-            layout,
-            upstream_identities,
-            candidate.benchmark_weights_target_id or "",
+            layout, upstream_identities, candidate.benchmark_weights_target_id or ""
         )
-
     holdings = pd.Series(dtype="float64")
     cash = float(assumptions.initial_nav)
     nav = cash
@@ -408,536 +368,345 @@ def build_portfolio_ledger(
     pending_calibration: tuple[pd.Series, pd.Series, pd.Timestamp] | None = None
     waiting_alpha: tuple[pd.Series, pd.Timestamp] | None = None
     calibration_dates = calibration_intervals.set_index("timestamp")
-    calibration_column_bytes = int(
-        calibration_intervals.memory_usage(index=False, deep=True).sum()
-        + calibration_dates.memory_usage(index=False, deep=True).sum()
-    )
     previous_benchmark_assets: frozenset[str] | None = None
     emitted = False
     sequence = 0
-    state_lease: MemoryLease | None = None
-    if resource_policy is not None:
-        state_lease = resource_policy.lease(
-            "research.portfolio.state",
-            1,
+    with ExitStack() as input_channels:
+        history = TimeWindow(sessions[0], sessions[-1])
+        panel_columns = _ENHANCED_PANEL_COLUMNS if enhanced else _PANEL_COLUMNS
+        panel_frames = input_channels.enter_context(
+            closing_iterator(_iter_input_sessions(panel_root, panel_columns, history))
         )
-
-    def resize_state(*, extra_assets=0, extra_bytes=0):
-        if state_lease is None:
-            return
-        retained_bytes = (
-            4096
-            + (len(amount_history) + len(holdings) + extra_assets) * 672
-            + len(calibration_rows) * 640
-        )
-        if enhanced:
-            retained_bytes += max(65536, (len(risk_assets) + extra_assets) * 16384)
-        # Column payloads are fixed; index lookup engines can grow during the run.
-        retained_bytes += (
-            calibration_column_bytes
-            + calibration_intervals.index.memory_usage(deep=True)
-            + calibration_dates.index.memory_usage(deep=True)
-        )
-        if previous_risk_cross is not None:
-            retained_bytes += pandas_frame_payload_bytes(previous_risk_cross)
-        if waiting_alpha is not None:
-            retained_bytes += int(waiting_alpha[0].memory_usage(deep=True))
-        if pending_calibration is not None:
-            retained_bytes += sum(
-                int(value.memory_usage(deep=True)) for value in pending_calibration[:2]
+        dataset_frames = input_channels.enter_context(
+            closing_iterator(
+                _iter_input_sessions(dataset_root, dataset_columns, history)
             )
-        retained_bytes += extra_bytes
-        if retained_bytes > state_lease.reserved_bytes:
-            state_lease.grow(retained_bytes - state_lease.reserved_bytes)
-        else:
-            state_lease.shrink_to(retained_bytes)
+        )
+        risk_inputs = (
+            _risk_context_input_sessions(
+                roots=tuple(
+                    _required_input_root(layout, upstream_identities, target_id)
+                    for target_id in candidate.risk_context_target_ids
+                ),
+                style_columns=risk_style_columns,
+                time_window=history,
+                retained=input_channels,
+            )
+            if enhanced
+            else {}
+        )
+        panel_window = {}
 
-    try:
-        with ExitStack() as input_channels:
-            history = TimeWindow(sessions[0], sessions[-1])
-            panel_columns = _ENHANCED_PANEL_COLUMNS if enhanced else _PANEL_COLUMNS
-            panel_frames = input_channels.enter_context(
+        def release_panels(before):
+            for timestamp in tuple(panel_window):
+                if timestamp < before:
+                    del panel_window[timestamp]
+
+        def panel_at(timestamp):
+            if timestamp not in panel_window:
+                panel_window[timestamp] = _read_next_session(
+                    panel_frames, panel_columns, timestamp
+                )
+            return panel_window[timestamp]
+
+        execution_frames = input_channels.enter_context(
+            closing_iterator(
+                _iter_input_sessions(execution_root, _EXECUTION_COLUMNS, history)
+            )
+        )
+        benchmark_frames = (
+            input_channels.enter_context(
                 closing_iterator(
-                    _iter_input_sessions(
-                        panel_root, panel_columns, history, resource_policy
+                    _iter_benchmark_weights(
+                        benchmark_root, candidate.benchmark_id, sessions
                     )
                 )
             )
-            dataset_frames = input_channels.enter_context(
-                closing_iterator(
-                    _iter_input_sessions(
-                        dataset_root, dataset_columns, history, resource_policy
-                    )
-                )
+            if enhanced
+            else None
+        )
+        for position, decision_timestamp in enumerate(sessions):
+            next_timestamp = (
+                sessions[position + 1]
+                if position + 1 < len(sessions)
+                else decision_timestamp
             )
-            risk_inputs = (
-                _risk_context_input_sessions(
-                    roots=tuple(
-                        _required_input_root(layout, upstream_identities, target_id)
-                        for target_id in candidate.risk_context_target_ids
-                    ),
+
+            release_panels(decision_timestamp)
+            panel = panel_at(decision_timestamp)
+            if panel.empty:
+                raise PortfolioTargetBlocked("portfolio_panel_session_missing")
+            if enhanced:
+                risk_assets.update(panel.asset_id.astype(str))
+            _update_amount_history(panel, amount_history, holdings)
+            benchmark_weights = pd.Series(dtype="float64")
+            alpha: pd.Series | None = None
+            current_cross: pd.DataFrame | None = None
+            if enhanced:
+                assert factor_risk is not None
+                risk_frames = []
+                for columns, context_frames in risk_inputs.values():
+                    context = _read_next_session(
+                        context_frames, columns, decision_timestamp
+                    )
+                    _validate_input_keys(panel, context)
+                    risk_frames.append(context)
+                current_cross = _enhanced_risk_cross(
+                    panel=panel,
+                    risk_frames=risk_frames,
                     style_columns=risk_style_columns,
-                    time_window=history,
-                    resource_policy=resource_policy,
-                    retained=input_channels,
                 )
-                if enhanced
-                else {}
-            )
-            panel_window = {}
+                risk_frames.clear()
 
-            def release_panels(before=None):
-                expired = ExitStack()
-                for timestamp in tuple(panel_window):
-                    if before is None or timestamp < before:
-                        expired.push(panel_window.pop(timestamp)[1])
-                expired.__exit__(*sys.exc_info())
-
-            def panel_at(timestamp):
-                if timestamp not in panel_window:
-                    with ExitStack() as owner:
-                        frame = _read_next_session(
-                            panel_frames, panel_columns, timestamp, owner
-                        )
-                        panel_window[timestamp] = (frame, owner.pop_all())
-                return panel_window[timestamp][0]
-
-            input_channels.callback(release_panels)
-            execution_frames = input_channels.enter_context(
-                closing_iterator(
-                    _iter_input_sessions(
-                        execution_root, _EXECUTION_COLUMNS, history, resource_policy
+                if previous_risk_cross is not None:
+                    factor_risk.observe_return_session(
+                        _factor_return_cross(exposures=previous_risk_cross, panel=panel)
                     )
-                )
-            )
-            benchmark_frames = (
-                input_channels.enter_context(
-                    closing_iterator(
-                        _iter_benchmark_weights(
-                            benchmark_root,
-                            candidate.benchmark_id,
-                            sessions,
-                            resource_policy,
-                        )
+                previous_risk_cross = current_cross.copy(deep=True)
+                if calibration_rows and calibration_rows[0][
+                    "timestamp"
+                ] < decision_timestamp - pd.DateOffset(months=12):
+                    calibration_rows[:] = [
+                        row
+                        for row in calibration_rows
+                        if row["timestamp"]
+                        >= decision_timestamp - pd.DateOffset(months=12)
+                    ]
+                if (
+                    pending_calibration is not None
+                    and decision_timestamp
+                    == calibration_dates.loc[pending_calibration[2], "available_at"]
+                ):
+                    calibration_rows.extend(
+                        _completed_calibration_rows(pending_calibration, panel)
                     )
-                )
-                if enhanced
-                else None
-            )
-            for position, decision_timestamp in enumerate(sessions):
-                with ExitStack() as retained:
-                    next_timestamp = (
-                        sessions[position + 1]
-                        if position + 1 < len(sessions)
-                        else decision_timestamp
+                    pending_calibration = None
+                if (
+                    waiting_alpha is not None
+                    and decision_timestamp
+                    == calibration_dates.loc[waiting_alpha[1], "entry_at"]
+                ):
+                    pending_calibration = (
+                        waiting_alpha[0],
+                        panel.set_index("asset_id")["adj_open"].astype("float64"),
+                        waiting_alpha[1],
                     )
-                    panel = next_panel = endpoint_panel = None
-                    release_panels(decision_timestamp)
-                    panel = panel_at(decision_timestamp)
-                    if panel.empty:
-                        raise PortfolioTargetBlocked("portfolio_panel_session_missing")
-                    resize_state(extra_assets=len(panel))
-                    if enhanced:
-                        risk_assets.update(panel.asset_id.astype(str))
-                    _update_amount_history(panel, amount_history, holdings)
-                    resize_state()
-
-                    benchmark_weights = pd.Series(dtype="float64")
-                    alpha: pd.Series | None = None
-                    current_cross: pd.DataFrame | None = None
-                    if enhanced:
-                        assert factor_risk is not None
-                        risk_frames = []
-                        for columns, context_frames in risk_inputs.values():
-                            context = _read_next_session(
-                                context_frames,
-                                columns,
-                                decision_timestamp,
-                                retained,
-                            )
-                            _validate_input_keys(panel, context)
-                            risk_frames.append(context)
-                        current_cross = _enhanced_risk_cross(
-                            panel=panel,
-                            risk_frames=risk_frames,
-                            style_columns=risk_style_columns,
+                    waiting_alpha = None
+                if decision_timestamp >= alpha_start:
+                    dataset = _read_next_session(
+                        dataset_frames, dataset_columns, decision_timestamp
+                    )
+                    if dataset.empty:
+                        raise PortfolioTargetBlocked(
+                            "portfolio_research_dataset_session_missing"
                         )
-                        risk_frames.clear()
-                        context = None
-                        retained.enter_context(
-                            _retain_frame(
-                                current_cross,
-                                resource_policy,
-                                "research.portfolio.risk_cross",
-                            )
-                        )
-                        if previous_risk_cross is not None:
-                            factor_risk.observe_return_session(
-                                _factor_return_cross(
-                                    exposures=previous_risk_cross,
-                                    panel=panel,
-                                )
-                            )
-                        resize_state(
-                            extra_bytes=pandas_frame_payload_bytes(current_cross)
-                        )
-                        previous_risk_cross = current_cross.copy(deep=True)
-                        resize_state()
-
-                        if calibration_rows and calibration_rows[0][
-                            "timestamp"
-                        ] < decision_timestamp - pd.DateOffset(months=12):
-                            resize_state(extra_bytes=8 * len(calibration_rows))
-                            calibration_rows[:] = [
-                                row
-                                for row in calibration_rows
-                                if row["timestamp"]
-                                >= decision_timestamp - pd.DateOffset(months=12)
-                            ]
-                            resize_state()
-                        if (
-                            pending_calibration is not None
-                            and decision_timestamp
-                            == calibration_dates.loc[
-                                pending_calibration[2], "available_at"
-                            ]
-                        ):
-                            resize_state(extra_bytes=1536 * len(pending_calibration[0]))
-                            calibration_rows.extend(
-                                _completed_calibration_rows(pending_calibration, panel)
-                            )
-                            pending_calibration = None
-                            resize_state()
-                        if (
-                            waiting_alpha is not None
-                            and decision_timestamp
-                            == calibration_dates.loc[waiting_alpha[1], "entry_at"]
-                        ):
-                            resize_state(
-                                extra_bytes=2 * pandas_frame_payload_bytes(panel)
-                            )
-                            pending_calibration = (
-                                waiting_alpha[0],
-                                panel.set_index("asset_id")["adj_open"].astype(
-                                    "float64"
-                                ),
-                                waiting_alpha[1],
-                            )
-                            waiting_alpha = None
-                            resize_state()
-                        if decision_timestamp >= alpha_start:
-                            dataset = _read_next_session(
-                                dataset_frames,
-                                dataset_columns,
-                                decision_timestamp,
-                                retained,
-                            )
-                            if dataset.empty:
-                                raise PortfolioTargetBlocked(
-                                    "portfolio_research_dataset_session_missing"
-                                )
-                            _validate_input_keys(dataset, panel)
-                            alpha = _prediction_alpha(
-                                dataset,
-                                prediction_lookup,
-                                validity_by_quarter[
-                                    str(decision_timestamp.to_period("Q"))
-                                ],
-                            )
-                            if alpha is not None:
-                                retained.enter_context(
-                                    _retain_payload(
-                                        alpha,
-                                        resource_policy,
-                                        "research.portfolio.alpha",
-                                    )
-                                )
-                            has_next_session = position + 1 < len(sessions)
-                            if (
-                                alpha is not None
-                                and frozen_calibration is None
-                                and has_next_session
-                                and decision_timestamp in calibration_dates.index
-                                and is_rebalance_session(
-                                    decision_timestamp,
-                                    next_timestamp,
-                                    candidate.rebalance_schedule,
-                                )
-                            ):
-                                resize_state(
-                                    extra_bytes=int(alpha.memory_usage(deep=True))
-                                )
-                                waiting_alpha = (
-                                    alpha.copy(deep=True),
-                                    decision_timestamp,
-                                )
-                                resize_state()
-
-                        assert benchmark_frames is not None
-                        benchmark_weights = next(benchmark_frames)
-
-                    if decision_timestamp < output_start:
-                        continue
-                    if not enhanced:
-                        dataset = _read_next_session(
-                            dataset_frames,
-                            dataset_columns,
+                    _validate_input_keys(dataset, panel)
+                    alpha = _prediction_alpha(
+                        dataset,
+                        prediction_lookup,
+                        validity_by_quarter[str(decision_timestamp.to_period("Q"))],
+                    )
+                    has_next_session = position + 1 < len(sessions)
+                    if (
+                        alpha is not None
+                        and frozen_calibration is None
+                        and has_next_session
+                        and (decision_timestamp in calibration_dates.index)
+                        and is_rebalance_session(
                             decision_timestamp,
-                            retained,
+                            next_timestamp,
+                            candidate.rebalance_schedule,
                         )
-                        if dataset.empty:
-                            raise PortfolioTargetBlocked(
-                                "portfolio_research_dataset_session_missing"
-                            )
-                    assert dataset is not None
-                    execution = _read_next_session(
-                        execution_frames,
-                        _EXECUTION_COLUMNS,
-                        decision_timestamp,
-                        retained,
-                    )
-                    if execution.empty:
-                        raise PortfolioTargetBlocked("portfolio_execution_mask_missing")
-                    with _retain_session_workspace(
-                        len(dataset),
-                        len(holdings),
-                        resource_policy,
                     ):
-                        _validate_input_keys(dataset, panel)
-                        _validate_input_keys(dataset, execution)
-                        if not enhanced:
-                            alpha = _prediction_alpha(
-                                dataset,
-                                prediction_lookup,
-                                validity_by_quarter[
-                                    str(decision_timestamp.to_period("Q"))
-                                ],
-                            )
-                            retained.enter_context(
-                                _retain_payload(
-                                    alpha,
-                                    resource_policy,
-                                    "research.portfolio.alpha",
-                                )
-                            )
-                        if decision_timestamp not in output_intervals.index:
-                            continue
-                        endpoint_timestamp = output_intervals.loc[
-                            decision_timestamp, "end_at"
-                        ]
-                        next_panel = panel_at(next_timestamp)
-                        if next_panel.empty:
-                            raise PortfolioTargetBlocked(
-                                "portfolio_market_session_missing"
-                            )
-                        endpoint_panel = panel_at(endpoint_timestamp)
-                        if endpoint_panel.empty:
-                            raise PortfolioTargetBlocked(
-                                "portfolio_market_session_missing"
-                            )
-
-                        enhanced_decision: _EnhancedDecision | None = None
-                        target_override: pd.Series | None = None
-                        decision_reason = PORTFOLIO_DECISION_REASON_SIMPLE
-                        # Retained state is the last post-trade execution open. Mark
-                        # only to today's close before selecting the next target.
-                        if not holdings.empty:
-                            prices = panel.set_index("asset_id")
-                            holdings, cash, nav = drift_continuous_holdings(
-                                holdings,
-                                cash,
-                                prices.adj_close.reindex(holdings.index).div(
-                                    prices.adj_open.reindex(holdings.index)
-                                )
-                                - 1.0,
-                            )
-                        if enhanced:
-                            assert alpha is not None and current_cross is not None
-                            decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
-                            scheduled = is_rebalance_session(
-                                decision_timestamp,
-                                next_timestamp,
-                                candidate.rebalance_schedule,
-                            )
-                            membership_changed = (
-                                not benchmark_weights.empty
-                                and previous_benchmark_assets is not None
-                                and frozenset(benchmark_weights.index)
-                                != previous_benchmark_assets
-                            )
-                            if not benchmark_weights.empty:
-                                previous_benchmark_assets = frozenset(
-                                    benchmark_weights.index
-                                )
-                            initializing = not emitted
-                            maintenance = membership_changed and not scheduled
-                            if initializing:
-                                if benchmark_weights.empty:
-                                    raise PortfolioTargetBlocked(
-                                        "portfolio_benchmark_snapshot_missing"
-                                    )
-                                holdings = benchmark_weights.multiply(nav)
-                                cash = 0.0
-                            if scheduled or maintenance:
-                                if benchmark_weights.empty:
-                                    raise PortfolioTargetBlocked(
-                                        "portfolio_benchmark_snapshot_missing"
-                                    )
-                                resize_state(extra_bytes=512 * len(calibration_rows))
-                                enhanced_decision = _enhanced_decision(
-                                    benchmark_weights=benchmark_weights,
-                                    alpha=alpha,
-                                    factor_risk=factor_risk,
-                                    current_cross=current_cross,
-                                    calibration_rows=calibration_rows,
-                                    calibration_intervals=calibration_intervals,
-                                    as_of=decision_timestamp,
-                                    risk_style_columns=risk_style_columns,
-                                    frozen_calibration=frozen_calibration,
-                                )
-                                resize_state()
-                                if maintenance:
-                                    target_override = benchmark_weights.copy(deep=True)
-                                    decision_reason = (
-                                        PORTFOLIO_DECISION_REASON_MAINTENANCE
-                                    )
-                            else:
-                                target_override = holdings.div(nav).copy(deep=True)
-                                decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
-
-                        if enhanced:
-                            required_assets = benchmark_weights.index.union(
-                                holdings.index
-                            )
-                            industry = _industry_group_codes(
-                                panel.set_index("asset_id"), "industry_level1_code"
-                            ).reindex(required_assets)
-                            if industry.isna().any():
-                                raise PortfolioTargetBlocked(
-                                    "portfolio_industry_context_missing"
-                                )
-                        account, returns, adv, _optimization, decision_delta = (
-                            _build_session(
-                                candidate=candidate,
-                                decision_timestamp=decision_timestamp,
-                                next_timestamp=next_timestamp,
-                                panel=panel,
-                                next_panel=next_panel,
-                                endpoint_panel=endpoint_panel,
-                                dataset=dataset,
-                                execution=execution,
-                                holdings=holdings,
-                                cash=cash,
-                                nav=nav,
-                                initialize_at_execution=enhanced and not emitted,
-                                amount_history=amount_history,
-                                alpha=alpha,
-                                enhanced_decision=enhanced_decision,
-                                target_override=target_override,
-                                decision_reason=decision_reason,
-                                optimizer_config=optimizer_config,
-                                assumptions=assumptions,
-                                fee_schedule=fee_schedule,
-                                fee_identity=fee_identity,
-                                prepare_trade_cost=prepare_trade_cost,
-                                market_name_for_type=market_name_for_type,
-                            )
-                        )
-                        output = _ledger_frame(
-                            account=account,
-                            decision_timestamp=decision_timestamp,
-                            returns=returns,
-                            alpha_score=alpha,
-                            adv20=adv,
-                            enhanced_decision=enhanced_decision,
-                            benchmark_weights=(benchmark_weights if enhanced else None),
-                            optimization_result=_optimization,
-                            decision_reason=decision_reason,
-                            decision_delta=decision_delta,
-                        )
-                        holdings = account.asset_ledger.set_index("asset_id")[
-                            "post_trade_notional"
-                        ]
-                        holdings = holdings.loc[holdings.ne(0.0)]
-                        cash, nav = account.post_trade_cash, account.nav_after
-                        resize_state()
-                        retained.enter_context(
-                            _retain_frame(
-                                output,
-                                resource_policy,
-                                "research.portfolio.output",
-                            )
-                        )
-                        emitted = True
-                        yield continuous_ledger_batch(
-                            output, sequence, end_timestamp=endpoint_timestamp
-                        )
-                        sequence += 1
-
-            missing, extra = prediction_lookup.coverage_counts()
-            if missing or extra:
-                raise ValueError("misaligned_persisted_prediction_keys")
-            if not emitted:
-                raise PortfolioTargetBlocked("portfolio_execution_window_empty")
-            if enhanced and access_window == "development":
-                if on_final_calibration is None:
-                    raise ValueError("portfolio_final_calibration_sink_required")
-                resize_state(extra_bytes=512 * len(calibration_rows))
-                observation = {}
-                with record_run_observations(resource_policy, observation):
-                    calibration = calibrate_expected_alpha(
-                        pd.DataFrame(
-                            calibration_rows,
-                            columns=["timestamp", "alpha_score", "holding_return"],
-                        ),
-                        as_of=pd.Timestamp(output_window.end),
-                        scheduled_intervals=calibration_intervals,
-                    )
-                on_final_calibration(
-                    {
-                        "schema_id": "qrp-final-alpha-calibration-v1",
-                        "selection_group": candidate.selection_group,
-                        "cutoff": pd.Timestamp(output_window.end).date().isoformat(),
-                        "upstream_identities": dict(upstream_identities),
-                        "calibration": asdict(calibration),
-                        "observations": observation,
-                    }
+                        waiting_alpha = (alpha.copy(deep=True), decision_timestamp)
+                assert benchmark_frames is not None
+                benchmark_weights = next(benchmark_frames)
+            if decision_timestamp < output_start:
+                continue
+            if not enhanced:
+                dataset = _read_next_session(
+                    dataset_frames, dataset_columns, decision_timestamp
                 )
-    finally:
-        primary = sys.exception()
-        if primary is not None:
-            clear_exception_frames(primary)
-        calibration_rows.clear()
-        amount_history.clear()
-        risk_assets.clear()
-        previous_risk_cross = pending_calibration = waiting_alpha = holdings = None
-        risk_frames = context = None
-        factor_risk = None
-        account = output = current_cross = dataset = panel = next_panel = (
-            endpoint_panel
-        ) = None
-        returns = adv = _optimization = decision_delta = enhanced_decision = None
-        calibration_intervals = calibration_dates = None
-        if state_lease is not None:
-            _close_lease_preserving_primary(
-                state_lease,
-                owner="research.portfolio.state",
+                if dataset.empty:
+                    raise PortfolioTargetBlocked(
+                        "portfolio_research_dataset_session_missing"
+                    )
+            assert dataset is not None
+            execution = _read_next_session(
+                execution_frames, _EXECUTION_COLUMNS, decision_timestamp
+            )
+            if execution.empty:
+                raise PortfolioTargetBlocked("portfolio_execution_mask_missing")
+            _validate_input_keys(dataset, panel)
+            _validate_input_keys(dataset, execution)
+            if not enhanced:
+                alpha = _prediction_alpha(
+                    dataset,
+                    prediction_lookup,
+                    validity_by_quarter[str(decision_timestamp.to_period("Q"))],
+                )
+            if decision_timestamp not in output_intervals.index:
+                continue
+            endpoint_timestamp = output_intervals.loc[decision_timestamp, "end_at"]
+            next_panel = panel_at(next_timestamp)
+            if next_panel.empty:
+                raise PortfolioTargetBlocked("portfolio_market_session_missing")
+            endpoint_panel = panel_at(endpoint_timestamp)
+            if endpoint_panel.empty:
+                raise PortfolioTargetBlocked("portfolio_market_session_missing")
+            enhanced_decision: _EnhancedDecision | None = None
+            target_override: pd.Series | None = None
+            decision_reason = PORTFOLIO_DECISION_REASON_SIMPLE
+            if not holdings.empty:
+                prices = panel.set_index("asset_id")
+                holdings, cash, nav = drift_continuous_holdings(
+                    holdings,
+                    cash,
+                    prices.adj_close.reindex(holdings.index).div(
+                        prices.adj_open.reindex(holdings.index)
+                    )
+                    - 1.0,
+                )
+            if enhanced:
+                assert alpha is not None and current_cross is not None
+                decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
+                scheduled = is_rebalance_session(
+                    decision_timestamp, next_timestamp, candidate.rebalance_schedule
+                )
+                membership_changed = (
+                    not benchmark_weights.empty
+                    and previous_benchmark_assets is not None
+                    and (
+                        frozenset(benchmark_weights.index) != previous_benchmark_assets
+                    )
+                )
+                if not benchmark_weights.empty:
+                    previous_benchmark_assets = frozenset(benchmark_weights.index)
+                initializing = not emitted
+                maintenance = membership_changed and (not scheduled)
+                if initializing:
+                    if benchmark_weights.empty:
+                        raise PortfolioTargetBlocked(
+                            "portfolio_benchmark_snapshot_missing"
+                        )
+                    holdings = benchmark_weights.multiply(nav)
+                    cash = 0.0
+                if scheduled or maintenance:
+                    if benchmark_weights.empty:
+                        raise PortfolioTargetBlocked(
+                            "portfolio_benchmark_snapshot_missing"
+                        )
+                    enhanced_decision = _enhanced_decision(
+                        benchmark_weights=benchmark_weights,
+                        alpha=alpha,
+                        factor_risk=factor_risk,
+                        current_cross=current_cross,
+                        calibration_rows=calibration_rows,
+                        calibration_intervals=calibration_intervals,
+                        as_of=decision_timestamp,
+                        risk_style_columns=risk_style_columns,
+                        frozen_calibration=frozen_calibration,
+                    )
+                    if maintenance:
+                        target_override = benchmark_weights.copy(deep=True)
+                        decision_reason = PORTFOLIO_DECISION_REASON_MAINTENANCE
+                else:
+                    target_override = holdings.div(nav).copy(deep=True)
+                    decision_reason = PORTFOLIO_DECISION_REASON_BENCHMARK
+            if enhanced:
+                required_assets = benchmark_weights.index.union(holdings.index)
+                industry = _industry_group_codes(
+                    panel.set_index("asset_id"), "industry_level1_code"
+                ).reindex(required_assets)
+                if industry.isna().any():
+                    raise PortfolioTargetBlocked("portfolio_industry_context_missing")
+            account, returns, adv, _optimization, decision_delta = _build_session(
+                candidate=candidate,
+                decision_timestamp=decision_timestamp,
+                next_timestamp=next_timestamp,
+                panel=panel,
+                next_panel=next_panel,
+                endpoint_panel=endpoint_panel,
+                dataset=dataset,
+                execution=execution,
+                holdings=holdings,
+                cash=cash,
+                nav=nav,
+                initialize_at_execution=enhanced and (not emitted),
+                amount_history=amount_history,
+                alpha=alpha,
+                enhanced_decision=enhanced_decision,
+                target_override=target_override,
+                decision_reason=decision_reason,
+                optimizer_config=optimizer_config,
+                assumptions=assumptions,
+                fee_schedule=fee_schedule,
+                fee_identity=fee_identity,
+                prepare_trade_cost=prepare_trade_cost,
+                market_name_for_type=market_name_for_type,
+            )
+            output = _ledger_frame(
+                account=account,
+                decision_timestamp=decision_timestamp,
+                returns=returns,
+                alpha_score=alpha,
+                adv20=adv,
+                enhanced_decision=enhanced_decision,
+                benchmark_weights=benchmark_weights if enhanced else None,
+                optimization_result=_optimization,
+                decision_reason=decision_reason,
+                decision_delta=decision_delta,
+            )
+            holdings = account.asset_ledger.set_index("asset_id")["post_trade_notional"]
+            holdings = holdings.loc[holdings.ne(0.0)]
+            cash, nav = (account.post_trade_cash, account.nav_after)
+            emitted = True
+            yielded_value = continuous_ledger_batch(
+                output, sequence, end_timestamp=endpoint_timestamp
+            )
+            try:
+                yield yielded_value
+            except GeneratorExit:
+                return
+            sequence += 1
+        missing, extra = prediction_lookup.coverage_counts()
+        if missing or extra:
+            raise ValueError("misaligned_persisted_prediction_keys")
+        if not emitted:
+            raise PortfolioTargetBlocked("portfolio_execution_window_empty")
+        if enhanced and access_window == "development":
+            if on_final_calibration is None:
+                raise ValueError("portfolio_final_calibration_sink_required")
+            observation = {}
+            with record_run_observations(observation):
+                calibration = calibrate_expected_alpha(
+                    pd.DataFrame(
+                        calibration_rows,
+                        columns=["timestamp", "alpha_score", "holding_return"],
+                    ),
+                    as_of=pd.Timestamp(output_window.end),
+                    scheduled_intervals=calibration_intervals,
+                )
+            on_final_calibration(
+                {
+                    "schema_id": "qrp-final-alpha-calibration-v1",
+                    "selection_group": candidate.selection_group,
+                    "cutoff": pd.Timestamp(output_window.end).date().isoformat(),
+                    "upstream_identities": dict(upstream_identities),
+                    "calibration": asdict(calibration),
+                    "observations": observation,
+                }
             )
 
 
 def _read_materialized(
-    root: Path,
-    columns: tuple[str, ...] | None,
-    *,
-    time_window: TimeWindow | None,
-    resource_policy: RuntimeResourcePolicy | None,
+    root: Path, columns: tuple[str, ...] | None, *, time_window: TimeWindow | None
 ) -> pd.DataFrame:
     frame = read_dataset(
         root,
         columns=columns,
         time_window=time_window,
         mode=DatasetReadMode.MATERIALIZED,
-        resource_policy=resource_policy,
     )
     if not isinstance(frame, pd.DataFrame):
         raise ValueError("portfolio_input_reader_not_materialized")
@@ -945,48 +714,39 @@ def _read_materialized(
 
 
 def _iter_input_sessions(
-    root: Path,
-    columns: tuple[str, ...],
-    time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy | None,
+    root: Path, columns: tuple[str, ...], time_window: TimeWindow
 ) -> Iterator[pd.DataFrame]:
-    with open_dataset_session(
-        root,
-        columns=columns,
-        time_window=time_window,
-        resource_policy=resource_policy,
-    ) as session:
-        yield from _iter_input_session_frames(session, columns)
+    session = open_dataset_session(root, columns=columns, time_window=time_window)
+    with closing_iterator(
+        _iter_input_session_frames(session, columns)
+    ) as delegated_chunks:
+        for yielded_value in delegated_chunks:
+            try:
+                yield yielded_value
+            except GeneratorExit:
+                return
 
 
 def _iter_input_session_frames(session, columns):
     from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 
     with closing_iterator(
-        iter_dataset_file_batches(
-            session,
-            columns=columns,
-            target_chunk_bytes=max(1, session.resource_policy.planning_headroom_bytes),
-        )
+        iter_dataset_file_batches(session, columns=columns)
     ) as batches:
         source = (frame for _, frame in batches)
         with closing_iterator(
-            iter_complete_session_frames(
-                source,
-                timestamp_column="timestamp",
-                resource_policy=session.resource_policy,
-            )
+            iter_complete_session_frames(source, timestamp_column="timestamp")
         ) as frames:
             for frame in frames:
                 if not frame.empty:
-                    yield frame
+                    try:
+                        yield frame
+                    except GeneratorExit:
+                        return
 
 
 def _read_next_session(
-    frames: Iterator[pd.DataFrame],
-    columns: tuple[str, ...],
-    timestamp: pd.Timestamp,
-    retained: ExitStack,
+    frames: Iterator[pd.DataFrame], columns: tuple[str, ...], timestamp: pd.Timestamp
 ) -> pd.DataFrame:
     for frame in frames:
         actual = pd.Timestamp(frame["timestamp"].iloc[0])
@@ -994,70 +754,9 @@ def _read_next_session(
             continue
         if actual > timestamp:
             break
-        policy = current_runtime_resource_policy()
-        assert policy is not None
-        lease = retained.enter_context(
-            policy.lease(
-                "research.portfolio.input_session",
-                2 * pandas_frame_payload_bytes(frame) + 4096,
-            )
-        )
         normalized = _session_frame(frame, columns)
-        lease.shrink_to(pandas_frame_payload_bytes(normalized))
         return normalized
     return pd.DataFrame(columns=columns)
-
-
-@contextmanager
-def _retain_frame(
-    frame: pd.DataFrame,
-    resource_policy: RuntimeResourcePolicy | None,
-    owner: str,
-) -> Iterator[pd.DataFrame]:
-    if resource_policy is None:
-        yield frame
-        return
-    with resource_policy.lease(owner, max(1, pandas_frame_payload_bytes(frame))):
-        yield frame
-
-
-@contextmanager
-def _retain_payload(
-    payload: pd.Series,
-    resource_policy: RuntimeResourcePolicy | None,
-    owner: str,
-) -> Iterator[pd.Series]:
-    if resource_policy is None:
-        yield payload
-        return
-    with resource_policy.lease(owner, max(1, int(payload.memory_usage(deep=True)))):
-        yield payload
-
-
-@contextmanager
-def _retain_session_workspace(
-    input_rows: int,
-    holding_count: int,
-    resource_policy: RuntimeResourcePolicy | None,
-) -> Iterator[None]:
-    if resource_policy is None:
-        yield
-        return
-    if (
-        isinstance(input_rows, bool)
-        or input_rows < 0
-        or isinstance(holding_count, bool)
-        or holding_count < 0
-    ):
-        raise ValueError("portfolio_session_workspace_invalid")
-    # Covers the transient execution frame and typed rows through the consumer yield.
-    reserved = max(
-        1,
-        (input_rows + holding_count) * len(CONTINUOUS_EXECUTION_COLUMNS) * 256
-        + 16 * 1024,
-    )
-    with resource_policy.lease("research.portfolio.session_workspace", reserved):
-        yield
 
 
 def _risk_context_input_sessions(
@@ -1065,21 +764,13 @@ def _risk_context_input_sessions(
     roots: tuple[Path, ...],
     style_columns: tuple[str, ...],
     time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy | None,
     retained: ExitStack,
 ):
     required = set(style_columns)
     available: set[str] = set()
     inputs = {}
     for root in roots:
-        session = retained.enter_context(
-            open_dataset_session(
-                root,
-                columns=None,
-                time_window=time_window,
-                resource_policy=resource_policy,
-            )
-        )
+        session = open_dataset_session(root, columns=None, time_window=time_window)
         columns = tuple(
             column for column in style_columns if column in session.arrow_schema.names
         )
@@ -1140,9 +831,7 @@ def _enhanced_risk_cross(
 
 
 def _factor_return_cross(
-    *,
-    exposures: pd.DataFrame,
-    panel: pd.DataFrame,
+    *, exposures: pd.DataFrame, panel: pd.DataFrame
 ) -> pd.DataFrame:
     previous = exposures.set_index("asset_id")
     current = panel.set_index("asset_id")
@@ -1158,8 +847,7 @@ def _factor_return_cross(
 
 
 def _completed_calibration_rows(
-    pending: tuple[pd.Series, pd.Series, pd.Timestamp],
-    panel: pd.DataFrame,
+    pending: tuple[pd.Series, pd.Series, pd.Timestamp], panel: pd.DataFrame
 ) -> list[dict[str, float]]:
     alpha, previous_open, timestamp = pending
     current_open = (
@@ -1179,34 +867,33 @@ def _completed_calibration_rows(
     ]
 
 
-def _iter_benchmark_weights(root, benchmark_id, sessions, resource_policy):
+def _iter_benchmark_weights(root, benchmark_id, sessions):
     """Align sparse snapshots without consuming a future session prematurely."""
     with closing_iterator(
         _iter_input_sessions(
-            root,
-            _BENCHMARK_COLUMNS,
-            TimeWindow(sessions[0], sessions[-1]),
-            resource_policy,
+            root, _BENCHMARK_COLUMNS, TimeWindow(sessions[0], sessions[-1])
         )
     ) as frames:
         pending = next(frames, None)
-        try:
-            for timestamp in sessions:
-                while pending is not None and pending["timestamp"].iloc[0] < timestamp:
-                    pending = next(frames, None)
-                if pending is None or pending["timestamp"].iloc[0] > timestamp:
-                    yield pd.Series(dtype="float64")
-                else:
-                    with _retain_session_workspace(len(pending), 0, resource_policy):
-                        yield _benchmark_weights(pending, benchmark_id, timestamp)
-        finally:
-            pending = None
+        for timestamp in sessions:
+            while pending is not None and pending["timestamp"].iloc[0] < timestamp:
+                pending = next(frames, None)
+            if pending is None or pending["timestamp"].iloc[0] > timestamp:
+                yielded_value = pd.Series(dtype="float64")
+                try:
+                    yield yielded_value
+                except GeneratorExit:
+                    return
+            else:
+                yielded_value = _benchmark_weights(pending, benchmark_id, timestamp)
+                try:
+                    yield yielded_value
+                except GeneratorExit:
+                    return
 
 
 def _benchmark_weights(
-    frame: pd.DataFrame,
-    benchmark_id: str,
-    timestamp: pd.Timestamp,
+    frame: pd.DataFrame, benchmark_id: str, timestamp: pd.Timestamp
 ) -> pd.Series:
     if type(frame) is not pd.DataFrame:
         raise ValueError("portfolio_input_reader_not_materialized")
@@ -1229,7 +916,7 @@ def _benchmark_weights(
         frame["asset_id"].duplicated().any()
         or weights.isna().any()
         or weights.le(0.0).any()
-        or not np.isclose(float(weights.sum()), 1.0, rtol=0.0, atol=1e-8)
+        or (not np.isclose(float(weights.sum()), 1.0, rtol=0.0, atol=1e-08))
     ):
         raise ValueError("portfolio_benchmark_weights_invalid")
     return pd.Series(
@@ -1253,8 +940,7 @@ def _enhanced_decision(
 ) -> _EnhancedDecision:
     calibration = frozen_calibration or calibrate_expected_alpha(
         pd.DataFrame(
-            calibration_rows,
-            columns=["timestamp", "alpha_score", "holding_return"],
+            calibration_rows, columns=["timestamp", "alpha_score", "holding_return"]
         ),
         as_of=as_of,
         scheduled_intervals=calibration_intervals,
@@ -1353,10 +1039,7 @@ def _optimizer_assets(
             "is_cash": True,
             **{column: 0.0 for column in exposure_columns},
         }
-        result = pd.concat(
-            [result, pd.DataFrame([cash_row])],
-            ignore_index=True,
-        )
+        result = pd.concat([result, pd.DataFrame([cash_row])], ignore_index=True)
     if not np.isclose(float(result["current_weight"].sum()), 1.0):
         raise ValueError("optimizer_current_state_invalid")
     return result
@@ -1407,25 +1090,19 @@ def _build_session(
     elif enhanced_decision is not None:
         target = enhanced_decision.benchmark_weights.copy(deep=True)
     elif is_rebalance_session(
-        decision_timestamp,
-        next_timestamp,
-        candidate.rebalance_schedule,
+        decision_timestamp, next_timestamp, candidate.rebalance_schedule
     ):
         target = build_simple_target_weights(
             alpha,
             eligible=prediction_eligible,
-            method=(
-                "float_cap_weight"
-                if candidate.construction == "top20_float_cap"
-                else "equal_weight"
-            ),
+            method="float_cap_weight"
+            if candidate.construction == "top20_float_cap"
+            else "equal_weight",
             top_quantile=float(candidate.top_quantile),
             bottom_quantile=float(candidate.top_quantile),
-            float_market_cap=(
-                dataset["float_market_cap"]
-                if candidate.construction == "top20_float_cap"
-                else None
-            ),
+            float_market_cap=dataset["float_market_cap"]
+            if candidate.construction == "top20_float_cap"
+            else None,
         )
     else:
         target = holdings.div(nav).copy(deep=True)
@@ -1444,17 +1121,14 @@ def _build_session(
     }
     adv = pd.Series(
         {
-            asset: (
-                float(np.mean(amount_history[asset]))
-                if asset in amount_history and len(amount_history[asset]) == 20
-                else np.nan
-            )
+            asset: float(np.mean(amount_history[asset]))
+            if asset in amount_history and len(amount_history[asset]) == 20
+            else np.nan
             for asset in assets
         },
         dtype="float64",
     )
     masks = _mask_values(execution, assets)
-
     prepared = {
         (market, side): prepare_trade_cost(
             next_timestamp.date(), market, side, fee_schedule, assumptions
@@ -1483,8 +1157,8 @@ def _build_session(
     if (
         target_override is None
         and enhanced_decision is not None
-        and enhanced_decision.risk is not None
-        and not enhanced_decision.calibration.benchmark_only
+        and (enhanced_decision.risk is not None)
+        and (not enhanced_decision.calibration.benchmark_only)
     ):
         risk = enhanced_decision.risk
         assets_frame = _optimizer_assets(
@@ -1540,7 +1214,6 @@ def _build_session(
         target = optimization.weights.loc[
             optimization.weights.index != PORTFOLIO_CASH_ASSET_ID
         ]
-
     orders_requested = (
         is_rebalance_session(
             decision_timestamp, next_timestamp, candidate.rebalance_schedule
@@ -1553,10 +1226,8 @@ def _build_session(
         if orders_requested
         else pd.Series(0.0, index=assets)
     )
-    execution_holdings, execution_cash, execution_nav = current, cash, nav
-    # Seed enhanced capital at its first execution open; later executions carry
-    # the existing exposure through the overnight adjusted-price move.
-    if not initialize_at_execution and not current.empty:
+    execution_holdings, execution_cash, execution_nav = (current, cash, nav)
+    if not initialize_at_execution and (not current.empty):
         overnight = (
             next_panel.set_index("asset_id")
             .adj_open.reindex(current.index)
@@ -1587,13 +1258,11 @@ def _build_session(
             raise
         raise PortfolioTargetBlocked("portfolio_adv_warmup_insufficient") from error
     returns = _holding_returns(account, next_panel, endpoint_panel)
-    return account, returns, adv, optimization, decision_delta
+    return (account, returns, adv, optimization, decision_delta)
 
 
 def _prediction_alpha(
-    dataset: pd.DataFrame,
-    prediction_lookup: object,
-    validity_columns: tuple[str, ...],
+    dataset: pd.DataFrame, prediction_lookup: object, validity_columns: tuple[str, ...]
 ) -> pd.Series:
     dataset = dataset.set_index("asset_id", drop=False)
     eligible = _bool_series(dataset["eligible"], "portfolio_eligibility_invalid")
@@ -1607,13 +1276,10 @@ def _prediction_alpha(
     values_for_frame = getattr(prediction_lookup, "values_for_frame", None)
     if not callable(values_for_frame):
         raise ValueError("portfolio_prediction_lookup_invalid")
-    with values_for_frame(
-        required_rows,
-        mark_matched=True,
-    ) as (values, found):
-        if not all(found):
-            raise ValueError("missing_required_prediction_keys")
-        alpha.loc[required_rows["asset_id"]] = np.asarray(values, dtype="float64")
+    values, found = values_for_frame(required_rows, mark_matched=True)
+    if not all(found):
+        raise ValueError("missing_required_prediction_keys")
+    alpha.loc[required_rows["asset_id"]] = np.asarray(values, dtype="float64")
     if (
         alpha.loc[prediction_eligible].isna().any()
         or not np.isfinite(
@@ -1645,15 +1311,13 @@ def _session_keys(frame: pd.DataFrame) -> set[tuple[pd.Timestamp, str]]:
     return {
         (pd.Timestamp(timestamp), str(asset))
         for timestamp, asset in frame.loc[:, list(_SESSION_KEY)].itertuples(
-            index=False,
-            name=None,
+            index=False, name=None
         )
     }
 
 
 def _session_frame(
-    frame: pd.DataFrame | None,
-    required_columns: tuple[str, ...],
+    frame: pd.DataFrame | None, required_columns: tuple[str, ...]
 ) -> pd.DataFrame:
     if frame is None:
         return pd.DataFrame(columns=required_columns)
@@ -1666,8 +1330,7 @@ def _session_frame(
         result["asset_id"] = result["asset_id"].astype("string")
     if "timestamp" in result:
         result["timestamp"] = pd.to_datetime(
-            result["timestamp"],
-            errors="raise",
+            result["timestamp"], errors="raise"
         ).dt.normalize()
     if "asset_id" in result and result["asset_id"].isna().any():
         raise ValueError("portfolio_input_key_invalid")
@@ -1684,9 +1347,7 @@ def _session_frame(
 
 
 def _update_amount_history(
-    panel: pd.DataFrame,
-    history: dict[str, deque[float]],
-    holdings: pd.Series,
+    panel: pd.DataFrame, history: dict[str, deque[float]], holdings: pd.Series
 ) -> None:
     current_assets = set(panel["asset_id"].astype(str))
     for asset in tuple(history):
@@ -1726,9 +1387,7 @@ def _mask_values(execution: pd.DataFrame, assets: pd.Index) -> dict[str, pd.Seri
 
 
 def _holding_returns(
-    account: ExecutionAccounting,
-    next_panel: pd.DataFrame,
-    endpoint_panel: pd.DataFrame,
+    account: ExecutionAccounting, next_panel: pd.DataFrame, endpoint_panel: pd.DataFrame
 ) -> pd.Series:
     assets = account.asset_ledger["asset_id"].astype(str)
     returns = pd.Series(0.0, index=assets, dtype="float64")
@@ -1782,30 +1441,23 @@ def _ledger_frame(
             * (1.0 + float(returns.get(asset, 0.0))),
             "block_reason": row.reason,
             "adv20": float(adv20[asset]) if pd.notna(adv20.get(asset)) else np.nan,
-            "alpha_score": (
-                float(alpha_score.get(asset))
-                if pd.notna(alpha_score.get(asset))
-                else np.nan
-            ),
-            "expected_alpha": (
-                float(enhanced_decision.expected_alpha.get(asset))
-                if enhanced_decision is not None
-                and pd.notna(enhanced_decision.expected_alpha.get(asset))
-                else np.nan
-            ),
-            "benchmark_weight": (
-                float(benchmark_weights.get(asset))
-                if benchmark_weights is not None
-                and pd.notna(benchmark_weights.get(asset))
-                else np.nan
-            ),
-            "asset_specific_variance": (
-                float(enhanced_decision.risk.specific_variance.get(asset))
-                if enhanced_decision is not None
-                and enhanced_decision.risk is not None
-                and pd.notna(enhanced_decision.risk.specific_variance.get(asset))
-                else np.nan
-            ),
+            "alpha_score": float(alpha_score.get(asset))
+            if pd.notna(alpha_score.get(asset))
+            else np.nan,
+            "expected_alpha": float(enhanced_decision.expected_alpha.get(asset))
+            if enhanced_decision is not None
+            and pd.notna(enhanced_decision.expected_alpha.get(asset))
+            else np.nan,
+            "benchmark_weight": float(benchmark_weights.get(asset))
+            if benchmark_weights is not None and pd.notna(benchmark_weights.get(asset))
+            else np.nan,
+            "asset_specific_variance": float(
+                enhanced_decision.risk.specific_variance.get(asset)
+            )
+            if enhanced_decision is not None
+            and enhanced_decision.risk is not None
+            and pd.notna(enhanced_decision.risk.specific_variance.get(asset))
+            else np.nan,
             "decision_reason": None,
         }
         values.update(
@@ -1822,7 +1474,6 @@ def _ledger_frame(
             }
         )
         rows.append(values)
-
     asset_target_total = float(account.asset_ledger["target_notional"].sum())
     cash_row: dict[str, object] = {
         "decision_timestamp": decision_timestamp,
@@ -1847,28 +1498,22 @@ def _ledger_frame(
             else np.nan
             for name, field in _ALPHA_DIAGNOSTICS.items()
         },
-        "predicted_tracking_error": (
-            optimization_result.predicted_tracking_error
-            if optimization_result
-            else np.nan
-        ),
-        "portfolio_factor_variance": (
-            optimization_result.factor_variance if optimization_result else np.nan
-        ),
-        "portfolio_specific_variance": (
-            optimization_result.specific_variance if optimization_result else np.nan
-        ),
-        "expected_transaction_cost": (
-            optimization_result.expected_transaction_cost
-            if optimization_result
-            else np.nan
-        ),
-        "decision_reason": (
-            PORTFOLIO_DECISION_REASON_ENHANCED
-            if optimization_result is not None
-            and decision_reason == PORTFOLIO_DECISION_REASON_BENCHMARK
-            else decision_reason
-        ),
+        "predicted_tracking_error": optimization_result.predicted_tracking_error
+        if optimization_result
+        else np.nan,
+        "portfolio_factor_variance": optimization_result.factor_variance
+        if optimization_result
+        else np.nan,
+        "portfolio_specific_variance": optimization_result.specific_variance
+        if optimization_result
+        else np.nan,
+        "expected_transaction_cost": optimization_result.expected_transaction_cost
+        if optimization_result
+        else np.nan,
+        "decision_reason": PORTFOLIO_DECISION_REASON_ENHANCED
+        if optimization_result is not None
+        and decision_reason == PORTFOLIO_DECISION_REASON_BENCHMARK
+        else decision_reason,
     }
     cash_row.update({column: 0.0 for column in PORTFOLIO_LEDGER_COST_COLUMNS})
     cash_row.update(
@@ -1896,16 +1541,14 @@ def _validate_windows(
         input_window.start > input_window.end
         or formal_dataset_window.start > formal_dataset_window.end
         or output_window.start > output_window.end
-        or output_window.start < formal_dataset_window.start
-        or output_window.end > input_window.end
+        or (output_window.start < formal_dataset_window.start)
+        or (output_window.end > input_window.end)
     ):
         raise ValueError("portfolio_windows_invalid")
 
 
 def _required_input_root(
-    layout: StorageLayout,
-    upstream_identities: Mapping[str, str],
-    target_id: str,
+    layout: StorageLayout, upstream_identities: Mapping[str, str], target_id: str
 ) -> Path:
     return _required_target_root(
         layout,
@@ -1915,10 +1558,7 @@ def _required_input_root(
 
 
 def _required_target_root(
-    layout: StorageLayout,
-    target_id: str,
-    *,
-    expected_identity: str,
+    layout: StorageLayout, target_id: str, *, expected_identity: str
 ) -> Path:
     marker = Path("__missing_portfolio_target__")
     root = layout.target_root(target_id, marker)
@@ -1927,10 +1567,7 @@ def _required_target_root(
     return root
 
 
-def _required_identity(
-    upstream_identities: Mapping[str, str],
-    target_id: str,
-) -> str:
+def _required_identity(upstream_identities: Mapping[str, str], target_id: str) -> str:
     identity = upstream_identities.get(target_id)
     if (
         type(identity) is not str

@@ -16,7 +16,3 @@ class OutputAlreadyExistsError(WriteRejectedError):
     """Raised when a writer would overwrite an existing output."""
 
     failure_code = "output_already_exists"
-
-
-class DatasetReadCapacityExceeded(ValueError):
-    """Typed internal signal for bounded dataset-read capacity failures."""

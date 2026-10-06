@@ -6,10 +6,6 @@ from pathlib import Path
 import pandas as pd
 import pytest
 
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.sources.csmar import interim, raw_exports, raw_schemas
 from quant_research_platform.storage.identity import (
     filesystem_exists,
@@ -26,7 +22,6 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
-from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
@@ -86,81 +81,72 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     _write_csmar(raw, "analyst_forecast", _analyst_rows())
     raw_path = next(filesystem_glob(raw, "*.csv"))
     original = filesystem_read_bytes(raw_path)
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout,
-            data_ids=("analyst_forecast",),
-            chunksize=chunksize,
-            start_date="2025-01-06",
-            end_date="2025-01-07",
-            resource_policy=policy,
-        )
-        root = result.artifact_roots["analyst_forecast"]
-        saved = read_dataset(root, resource_policy=policy)
-        manifest = json.loads(
-            filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
-        )
-        assert manifest["producer_diagnostics"]["source_row_counts"] == {
-            "raw_rows": 8,
-            "missing_declare_date_rows": 2,
-            "missing_institution_id_rows": 2,
-            "excluded_missing_required_rows": 3,
-            "retained_before_date_filter_rows": 5,
-            "retained_after_date_filter_rows": 5,
-            "excluded_date_range_rows": 0,
+    result = interim.materialize_interim_data(
+        layout=layout,
+        data_ids=("analyst_forecast",),
+        chunksize=chunksize,
+        start_date="2025-01-06",
+        end_date="2025-01-07",
+    )
+    root = result.artifact_roots["analyst_forecast"]
+    saved = read_dataset(root)
+    manifest = json.loads(
+        filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
+    )
+    assert manifest["producer_diagnostics"]["source_row_counts"] == {
+        "raw_rows": 8,
+        "missing_declare_date_rows": 2,
+        "missing_institution_id_rows": 2,
+        "excluded_missing_required_rows": 3,
+        "retained_before_date_filter_rows": 5,
+        "retained_after_date_filter_rows": 5,
+        "excluded_date_range_rows": 0,
+    }
+    spec = interim.interim_catalog().get("analyst_forecast")
+    assert spec.primary_key == (
+        "source_asset_id",
+        "timestamp",
+        "report_id",
+        "forecast_end_date",
+    )
+    assert spec.column_roles["forecast_end_date"] is ColumnRole.KEY
+    assert spec.column_roles["timestamp"] is ColumnRole.TIMESTAMP
+    assert len(saved) == 5
+    assert saved.report_id.str.startswith("900719925474099").sum() == 3
+    assert saved.loc[saved.institution_id.eq("A"), "analyst_ids"].tolist() == [
+        "001,002",
+        "001,002",
+        "001,002",
+    ]
+    assert saved.loc[saved.institution_id.eq("B"), "analyst_ids"].isna().all()
+    assert saved.timestamp.eq(saved.declare_date).all()
+    sessions = pd.bdate_range("2025-01-03", "2025-01-07").as_unit("ns")
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "000001",
+            "timestamp": sessions,
+            "close": 10.0,
         }
-        spec = interim.interim_catalog().get("analyst_forecast")
-        assert spec.primary_key == (
-            "source_asset_id",
-            "timestamp",
-            "report_id",
-            "forecast_end_date",
-        )
-        assert spec.column_roles["forecast_end_date"] is ColumnRole.KEY
-        assert spec.column_roles["timestamp"] is ColumnRole.TIMESTAMP
-        assert len(saved) == 5
-        assert saved.report_id.str.startswith("900719925474099").sum() == 3
-        assert saved.loc[saved.institution_id.eq("A"), "analyst_ids"].tolist() == [
-            "001,002",
-            "001,002",
-            "001,002",
-        ]
-        assert saved.loc[saved.institution_id.eq("B"), "analyst_ids"].isna().all()
-        assert saved.timestamp.eq(saved.declare_date).all()
-        sessions = pd.bdate_range("2025-01-03", "2025-01-07").as_unit("ns")
-        panel = pd.DataFrame(
-            {
-                "market_id": "a_share",
-                "asset_id": "000001",
-                "timestamp": sessions,
-                "close": 10.0,
-            }
-        )
-        processed_spec = research_profile().processed.get("expectations_factors")
-        actual = producer._compute_processed_frame(
-            processed_spec,
-            source={"analyst_forecast": saved},
-            dependencies={"market_panel_1d": panel},
-            trading_sessions=tuple(sessions),
-        )
-        processed_root = layout.processed_data_root(
-            "a_share", "factor", "expectations_factors"
-        )
-        write_dataset(
-            processed_root,
-            actual,
-            spec=processed_spec,
-            resource_policy=policy,
-            borrowed_input=True,
-        )
-        persisted = read_dataset(processed_root, resource_policy=policy)
-        pd.testing.assert_frame_equal(persisted, actual, check_exact=True)
-        assert persisted.iloc[0, 3:].isna().all()
-        assert persisted.loc[1, "forward_earnings_yield_fy1"] == 1.3
-        assert persisted.loc[1, "forecast_dispersion_fy1"] == 1.0
-        assert persisted.loc[1, "log_analyst_coverage"] == pytest.approx(np.log(3))
-        assert persisted.forward_earnings_yield_fy2.isna().all()
-        assert policy.used_memory_bytes == 0
+    )
+    processed_spec = research_profile().processed.get("expectations_factors")
+    actual = producer._compute_processed_frame(
+        processed_spec,
+        source={"analyst_forecast": saved},
+        dependencies={"market_panel_1d": panel},
+        trading_sessions=tuple(sessions),
+    )
+    processed_root = layout.processed_data_root(
+        "a_share", "factor", "expectations_factors"
+    )
+    write_dataset(processed_root, actual, spec=processed_spec)
+    persisted = read_dataset(processed_root)
+    pd.testing.assert_frame_equal(persisted, actual, check_exact=True)
+    assert persisted.iloc[0, 3:].isna().all()
+    assert persisted.loc[1, "forward_earnings_yield_fy1"] == 1.3
+    assert persisted.loc[1, "forecast_dispersion_fy1"] == 1.0
+    assert persisted.loc[1, "log_analyst_coverage"] == pytest.approx(np.log(3))
+    assert persisted.forward_earnings_yield_fy2.isna().all()
     assert filesystem_read_bytes(raw_path) == original
 
 
@@ -179,39 +165,34 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
     raw = layout.raw_source_root("csmar")
     filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, "analyst_forecast", _analyst_rows()[5:])
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout,
-            data_ids=("analyst_forecast",),
-            chunksize=1,
-            resource_policy=policy,
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=("analyst_forecast",), chunksize=1
+    )
+    root = result.artifact_roots["analyst_forecast"]
+    empty = read_dataset(root)
+    assert empty.empty
+    manifest = json.loads(
+        filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
+    )
+    counts = manifest["producer_diagnostics"]["source_row_counts"]
+    assert counts["raw_rows"] == counts["excluded_missing_required_rows"] == 3
+    assert counts["retained_after_date_filter_rows"] == 0
+    sessions = pd.bdate_range("2025-01-03", periods=2).as_unit("ns")
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "000001",
+            "timestamp": sessions,
+            "close": 10.0,
+        }
+    )
+    with pytest.raises(ValueError, match="BLOCKED_EXTERNAL_DATA: analyst_forecast"):
+        producer._compute_processed_frame(
+            research_profile().processed.get("expectations_factors"),
+            source={"analyst_forecast": empty},
+            dependencies={"market_panel_1d": panel},
+            trading_sessions=tuple(sessions),
         )
-        root = result.artifact_roots["analyst_forecast"]
-        empty = read_dataset(root, resource_policy=policy)
-        assert empty.empty
-        manifest = json.loads(
-            filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
-        )
-        counts = manifest["producer_diagnostics"]["source_row_counts"]
-        assert counts["raw_rows"] == counts["excluded_missing_required_rows"] == 3
-        assert counts["retained_after_date_filter_rows"] == 0
-        sessions = pd.bdate_range("2025-01-03", periods=2).as_unit("ns")
-        panel = pd.DataFrame(
-            {
-                "market_id": "a_share",
-                "asset_id": "000001",
-                "timestamp": sessions,
-                "close": 10.0,
-            }
-        )
-        with pytest.raises(ValueError, match="BLOCKED_EXTERNAL_DATA: analyst_forecast"):
-            producer._compute_processed_frame(
-                research_profile().processed.get("expectations_factors"),
-                source={"analyst_forecast": empty},
-                dependencies={"market_panel_1d": panel},
-                trading_sessions=tuple(sessions),
-            )
-        assert policy.used_memory_bytes == 0
 
 
 def test_analyst_duplicate_report_key_is_folded_and_counted_across_chunks(tmp_path):
@@ -225,22 +206,17 @@ def test_analyst_duplicate_report_key_is_folded_and_counted_across_chunks(tmp_pa
     filesystem_mkdir(raw, parents=True)
     row = _analyst_rows()[0]
     _write_csmar(raw, "analyst_forecast", [row, row])
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout,
-            data_ids=("analyst_forecast",),
-            chunksize=1,
-            resource_policy=policy,
-        )
-        root = result.artifact_roots["analyst_forecast"]
-        assert len(read_dataset(root, resource_policy=policy)) == 1
-        assert (
-            read_dataset_manifest_evidence(root)["producer_diagnostics"][
-                "exact_duplicate_count"
-            ]
-            == 1
-        )
-        assert policy.used_memory_bytes == 0
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=("analyst_forecast",), chunksize=1
+    )
+    root = result.artifact_roots["analyst_forecast"]
+    assert len(read_dataset(root)) == 1
+    assert (
+        read_dataset_manifest_evidence(root)["producer_diagnostics"][
+            "exact_duplicate_count"
+        ]
+        == 1
+    )
 
 
 @pytest.mark.parametrize("column", ("Markettype", "Daywk"))
@@ -269,27 +245,22 @@ def test_invalid_analyst_raw_preserves_published_dataset(tmp_path, column, value
     raw = layout.raw_source_root("csmar")
     filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, "analyst_forecast", _analyst_rows()[:1])
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout, data_ids=("analyst_forecast",), resource_policy=policy
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=("analyst_forecast",)
+    )
+    root = result.artifact_roots["analyst_forecast"]
+    before = read_dataset(root)
+    rows = _analyst_rows()[:1]
+    rows[0][column] = value
+    rows[0]["InstitutionID"] = ""
+    _write_csmar(raw, "analyst_forecast", rows)
+    with pytest.raises(ValueError, match="invalid_"):
+        interim.materialize_interim_data(
+            layout=StorageLayout(tmp_path / "candidate"),
+            raw_root=raw,
+            data_ids=("analyst_forecast",),
         )
-        root = result.artifact_roots["analyst_forecast"]
-        before = read_dataset(root, resource_policy=policy)
-        rows = _analyst_rows()[:1]
-        rows[0][column] = value
-        rows[0]["InstitutionID"] = ""
-        _write_csmar(raw, "analyst_forecast", rows)
-        with pytest.raises(ValueError, match="invalid_"):
-            interim.materialize_interim_data(
-                layout=StorageLayout(tmp_path / "candidate"),
-                raw_root=raw,
-                data_ids=("analyst_forecast",),
-                resource_policy=policy,
-            )
-        pd.testing.assert_frame_equal(
-            before, read_dataset(root, resource_policy=policy)
-        )
-        assert policy.used_memory_bytes == 0
+    pd.testing.assert_frame_equal(before, read_dataset(root))
 
 
 @pytest.mark.parametrize(
@@ -314,28 +285,23 @@ def test_calendar_raw_rejects_nonintegers_and_preserves_old_good(
     filesystem_mkdir(raw, parents=True)
     row = {"Markettype": "4", "Clddt": "2025-01-03", "Daywk": "5", "State": "O"}
     _write_csmar(raw, "trading_calendar", [row])
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout, data_ids=("trading_calendar",), resource_policy=policy
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=("trading_calendar",)
+    )
+    root = result.artifact_roots["trading_calendar"]
+    before = read_dataset(root)
+    assert before.source_market_type.tolist() == [4]
+    assert before.source_day_of_week.tolist() == [5]
+    assert before.is_trading_day.tolist() == [True]
+    row[column] = value
+    _write_csmar(raw, "trading_calendar", [row])
+    with pytest.raises(ValueError, match="invalid_"):
+        interim.materialize_interim_data(
+            layout=StorageLayout(tmp_path / "candidate"),
+            raw_root=raw,
+            data_ids=("trading_calendar",),
         )
-        root = result.artifact_roots["trading_calendar"]
-        before = read_dataset(root, resource_policy=policy)
-        assert before.source_market_type.tolist() == [4]
-        assert before.source_day_of_week.tolist() == [5]
-        assert before.is_trading_day.tolist() == [True]
-        row[column] = value
-        _write_csmar(raw, "trading_calendar", [row])
-        with pytest.raises(ValueError, match="invalid_"):
-            interim.materialize_interim_data(
-                layout=StorageLayout(tmp_path / "candidate"),
-                raw_root=raw,
-                data_ids=("trading_calendar",),
-                resource_policy=policy,
-            )
-        pd.testing.assert_frame_equal(
-            before, read_dataset(root, resource_policy=policy)
-        )
-        assert policy.used_memory_bytes == 0
+    pd.testing.assert_frame_equal(before, read_dataset(root))
 
 
 @pytest.mark.parametrize("state", ("SYNTHETIC_PRIVATE_STATE", None))
@@ -420,27 +386,22 @@ def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> 
         Ahvaltrd_D=3.0,
     )
     _write_csmar(raw, "market_bars_1d", [row])
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout, data_ids=("market_bars_1d",), resource_policy=policy
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=("market_bars_1d",)
+    )
+    root = result.artifact_roots["market_bars_1d"]
+    loaded = read_dataset(root)
+    assert loaded.volume.iloc[0] == 3.0 and loaded.amount.iloc[0] == 4.0
+    before = _file_bytes(root)
+    row["Ahvaltrd_D"] = None
+    _write_csmar(raw, "market_bars_1d", [row])
+    with pytest.raises(ValueError, match="invalid_csmar_after_hours_amount_missing"):
+        interim.materialize_interim_data(
+            layout=StorageLayout(tmp_path / "candidate"),
+            raw_root=raw,
+            data_ids=("market_bars_1d",),
         )
-        root = result.artifact_roots["market_bars_1d"]
-        loaded = read_dataset(root, resource_policy=policy)
-        assert loaded.volume.iloc[0] == 3.0 and loaded.amount.iloc[0] == 4.0
-        before = _file_bytes(root)
-        row["Ahvaltrd_D"] = None
-        _write_csmar(raw, "market_bars_1d", [row])
-        with pytest.raises(
-            ValueError, match="invalid_csmar_after_hours_amount_missing"
-        ):
-            interim.materialize_interim_data(
-                layout=StorageLayout(tmp_path / "candidate"),
-                raw_root=raw,
-                data_ids=("market_bars_1d",),
-                resource_policy=policy,
-            )
-        assert _file_bytes(root) == before
-        assert policy.used_memory_bytes == 0
+    assert _file_bytes(root) == before
 
 
 def _collect_raw_export(
@@ -453,107 +414,14 @@ def _collect_raw_export(
     return pd.concat(chunks, ignore_index=True) if chunks else pd.DataFrame()
 
 
-@pytest.mark.parametrize("memory_cap", (None, 16 * 1024**2))
-def test_index_weight_handoff_releases_raw_frame_before_persisting_normalized_rows(
-    tmp_path, monkeypatch, memory_cap
-):
-    import weakref
-
-    from quant_research_platform.storage.datasets import writing
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.a_share_raw import _write_csmar
-
-    layout = StorageLayout(tmp_path)
-    root = layout.raw_source_root("csmar")
-    filesystem_mkdir(root, parents=True)
-    sessions = pd.bdate_range("2019-03-01", periods=21 if memory_cap is None else 63)
-    _write_csmar(
-        root,
-        "index_weights",
-        (
-            {
-                "Indexcd": benchmark,
-                "Enddt": timestamp.date().isoformat(),
-                "Stkcd": f"{index:06}",
-                "Constdnme": f"synthetic_{index:06}",
-                "Weight": 1.0,
-            }
-            for benchmark in (
-                ("000852", "000905")
-                if memory_cap is None
-                else ("000852", "000852", "000905")
-            )
-            for timestamp in sessions
-            for index in range(1, 101)
-        ),
-    )
-    references = []
-    actual_frame = raw_exports._raw_frame
-    actual_declared = writing._WriteStats.declared_frame
-
-    def tracked_frame(*args):
-        frame = actual_frame(*args)
-        references.append(weakref.ref(frame))
-        return frame
-
-    def declared_frame(self, frame, **kwargs):
-        assert references and all(reference() is None for reference in references)
-        return actual_declared(self, frame, **kwargs)
-
-    monkeypatch.setattr(raw_exports, "_raw_frame", tracked_frame)
-    monkeypatch.setattr(writing._WriteStats, "declared_frame", declared_frame)
-    with runtime_resource_policy_scope(explicit_cap_bytes=memory_cap) as policy:
-        result = interim.materialize_interim_data(
-            layout=layout,
-            data_ids=("index_weights",),
-            resource_policy=policy,
-        )
-        saved = read_dataset(
-            result.artifact_roots["index_weights"], resource_policy=policy
-        )
-        assert len(saved) == 200 * len(sessions)
-        assert (
-            saved.groupby(["source_asset_id", "timestamp"]).weight.sum().eq(1.0).all()
-        )
-        assert policy.used_memory_bytes == 0
-
-
 def _collect_raw_chunks(
-    path: Path,
-    dataset: str,
-    *,
-    chunksize: int,
+    path: Path, dataset: str, *, chunksize: int
 ) -> list[pd.DataFrame]:
-    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    producer = raw_exports.iter_private_export_chunks_with_policy(
-        path,
-        dataset=dataset,
-        chunksize=chunksize,
-        resource_policy=policy,
+    return list(
+        raw_exports.iter_private_export_chunks(
+            path, dataset=dataset, chunksize=chunksize
+        )
     )
-    chunks: list[pd.DataFrame] = []
-    with runtime_resource_policy_scope(policy):
-        try:
-            bound = next(producer)
-            while True:
-                lease = policy.lease("test.csmar.consumer", bound)
-                try:
-                    try:
-                        owned = producer.send(lease)
-                    except StopIteration:
-                        return chunks
-                    if not isinstance(owned, OwnedValue):
-                        raise AssertionError("invalid_bound_first_output")
-                    chunks.append(owned.value)
-                    try:
-                        bound = producer.send(None)
-                    except StopIteration:
-                        return chunks
-                finally:
-                    lease.close()
-        finally:
-            producer.close()
 
 
 def _financial_fixture_row(
@@ -599,37 +467,6 @@ def test_index_weights_raw_date_and_constituent_name_remain_text(
     assert normalized["effective_date"].tolist() == [pd.Timestamp("2019-01-02")]
     assert normalized["constituent_asset_id"].tolist() == ["000001"]
     assert normalized["weight"].tolist() == [0.01]
-
-
-def test_raw_csv_batch_accounting_visits_row_sizes_only_linearly(tmp_path, monkeypatch):
-    from quant_research_platform.policy.lifecycle import closing_iterator
-
-    dates = pd.date_range("2020-01-01", periods=512).strftime("%Y-%m-%d").tolist()
-    path = tmp_path / "csmar__trading_calendar__synthetic__full__export-20260101.csv"
-    filesystem_write_text(
-        path,
-        "Markettype,Clddt,Daywk,State\n"
-        + "".join(f"4,{stamp},1,O\n" for stamp in dates),
-        encoding="utf-8",
-    )
-    actual_records = raw_exports._iter_csv_records
-    size_visits = 0
-
-    class CountedRow(list):
-        def __len__(self):
-            nonlocal size_visits
-            size_visits += 1
-            return super().__len__()
-
-    def observed_records(*args, **kwargs):
-        with closing_iterator(actual_records(*args, **kwargs)) as records:
-            for header, row, source_bytes in records:
-                yield header, CountedRow(row), source_bytes
-
-    monkeypatch.setattr(raw_exports, "_iter_csv_records", observed_records)
-    result = _collect_raw_export(path, "trading_calendar", chunksize=len(dates))
-    assert result["Clddt"].tolist() == dates
-    assert size_visits <= 16 * len(dates), size_visits
 
 
 def test_raw_export_discovery_contract_keeps_csv_only(
@@ -696,66 +533,57 @@ def test_csmar_source_identity_is_selected_content_only(tmp_path: Path) -> None:
         encoding="utf-8",
     )
 
-    with pytest.raises(RuntimeError, match="runtime_resource_policy_not_active"):
-        interim.source_content_identity(tmp_path, "market_bars_1d")
+    first = interim.source_content_identity(tmp_path, "market_bars_1d")
+    assert first is not None
 
-    with runtime_resource_policy_scope(None) as policy:
-        first = interim.source_content_identity(tmp_path, "market_bars_1d")
-        assert first is not None
+    sidecar = bars.with_suffix(".metadata.json")
+    filesystem_write_text(sidecar, "{}", encoding="utf-8")
+    assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+    filesystem_write_text(sidecar, '{"row_count": 1}', encoding="utf-8")
+    assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
 
-        sidecar = bars.with_suffix(".metadata.json")
-        filesystem_write_text(sidecar, "{}", encoding="utf-8")
-        assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
-        filesystem_write_text(sidecar, '{"row_count": 1}', encoding="utf-8")
-        assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+    filesystem_write_text(
+        unrelated,
+        ",".join(raw_exports.RAW_TABLE_CONTRACTS["stock_master"].required_columns)
+        + "\n# unrelated\n",
+        encoding="utf-8",
+    )
+    assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
 
-        filesystem_write_text(
-            unrelated,
-            ",".join(raw_exports.RAW_TABLE_CONTRACTS["stock_master"].required_columns)
-            + "\n# unrelated\n",
-            encoding="utf-8",
-        )
-        assert interim.source_content_identity(tmp_path, "market_bars_1d") == first
+    filesystem_write_text(
+        bars,
+        ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
+        + "\n# changed\n",
+        encoding="utf-8",
+    )
+    second = interim.source_content_identity(tmp_path, "market_bars_1d")
+    assert second is not None
+    assert second != first
 
-        filesystem_write_text(
-            bars,
-            ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
-            + "\n# changed\n",
-            encoding="utf-8",
-        )
-        second = interim.source_content_identity(tmp_path, "market_bars_1d")
-        assert second is not None
-        assert second != first
+    renamed = tmp_path / "renamed-market-file.csv"
+    filesystem_rename(bars, renamed)
+    assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
+    bars = renamed
 
-        renamed = tmp_path / "renamed-market-file.csv"
-        filesystem_rename(bars, renamed)
-        assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
-        bars = renamed
-
-        shard = tmp_path / (
-            "csmar__market_bars_1d__all_market_types__full__"
-            "part-01__export-20260605.csv"
-        )
-        filesystem_write_text(
-            shard,
-            ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
-            + "\n",
-            encoding="utf-8",
-        )
-        third = interim.source_content_identity(tmp_path, "market_bars_1d")
-        assert third is not None
-        assert third != second
-        filesystem_unlink(shard)
-        assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
-        assert policy.used_memory_bytes == 0
+    shard = tmp_path / (
+        "csmar__market_bars_1d__all_market_types__full__part-01__export-20260605.csv"
+    )
+    filesystem_write_text(
+        shard,
+        ",".join(raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns)
+        + "\n",
+        encoding="utf-8",
+    )
+    third = interim.source_content_identity(tmp_path, "market_bars_1d")
+    assert third is not None
+    assert third != second
+    filesystem_unlink(shard)
+    assert interim.source_content_identity(tmp_path, "market_bars_1d") == second
 
 
 def test_csmar_source_identity_uses_only_one_recursive_root(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
-    monkeypatch.setattr(
-        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(tmp_path)
-    )
     primary = tmp_path / "raw"
     nested = primary / "calendar" / "history"
     sibling = tmp_path / "sibling-root"
@@ -773,40 +601,32 @@ def test_csmar_source_identity_uses_only_one_recursive_root(
         encoding="utf-8",
     )
 
-    with runtime_resource_policy_scope(None) as policy:
-        identity = interim.source_content_identity(primary, "trading_calendar")
-        assert identity is not None
-        raw_only = primary / "raw_only"
-        filesystem_mkdir(raw_only)
-        raw_only_file = raw_only / "native-calendar.csv"
-        filesystem_write_text(
-            raw_only_file,
-            ",".join(columns) + "\n4,2020-01-03,5,C\n",
-            encoding="utf-8",
-        )
-        assert interim.source_content_identity(primary, "trading_calendar") == identity
-        filesystem_write_text(
-            raw_only_file,
-            ",".join(columns) + "\n4,2020-01-04,6,O\n",
-            encoding="utf-8",
-        )
-        assert interim.source_content_identity(primary, "trading_calendar") == identity
-        filesystem_unlink(raw_only_file)
-        assert interim.source_content_identity(primary, "trading_calendar") == identity
-        assert interim.source_content_identity(sibling, "trading_calendar") is not None
-        assert interim.source_content_identity(primary, "stock_master") is None
-        assert policy.used_memory_bytes == 0
-    assert not tuple(filesystem_glob(tmp_path, ".k-*/k.db"))
-
-
-def test_csmar_identity_ignores_unrequested_bad_schema_and_cleans_scratch(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        "quant_research_platform.storage.exact_keys.gettempdir",
-        lambda: str(tmp_path.parent),
+    identity = interim.source_content_identity(primary, "trading_calendar")
+    assert identity is not None
+    raw_only = primary / "raw_only"
+    filesystem_mkdir(raw_only)
+    raw_only_file = raw_only / "native-calendar.csv"
+    filesystem_write_text(
+        raw_only_file,
+        ",".join(columns) + "\n4,2020-01-03,5,C\n",
+        encoding="utf-8",
     )
+    assert interim.source_content_identity(primary, "trading_calendar") == identity
+    filesystem_write_text(
+        raw_only_file,
+        ",".join(columns) + "\n4,2020-01-04,6,O\n",
+        encoding="utf-8",
+    )
+    assert interim.source_content_identity(primary, "trading_calendar") == identity
+    filesystem_unlink(raw_only_file)
+    assert interim.source_content_identity(primary, "trading_calendar") == identity
+    assert interim.source_content_identity(sibling, "trading_calendar") is not None
+    assert interim.source_content_identity(primary, "stock_master") is None
+
+
+def test_csmar_identity_ignores_unrequested_bad_schema(
+    tmp_path: Path,
+) -> None:
     calendar = tmp_path / (
         "csmar__trading_calendar__all_market_types__full__export-20260605.csv"
     )
@@ -820,43 +640,14 @@ def test_csmar_identity_ignores_unrequested_bad_schema_and_cleans_scratch(
     )
     filesystem_write_text(unrelated, "bad,header\n", encoding="utf-8")
 
-    with runtime_resource_policy_scope(None) as policy:
-        identity = interim.source_content_identity(tmp_path, "trading_calendar")
-        assert identity is not None
-        assert policy.used_memory_bytes == 0
-    assert not tuple(filesystem_glob(tmp_path.parent, ".k-*/k.db"))
+    identity = interim.source_content_identity(tmp_path, "trading_calendar")
+    assert identity is not None
 
 
-def test_csmar_source_identity_streams_inventory_with_accounted_members(
-    tmp_path, monkeypatch
-):
+def test_csmar_source_identity_hashes_every_inventory_member(tmp_path):
     import hashlib
-    import sys
 
-    from quant_research_platform.storage import identity as identity_owner
-
-    scratch = tmp_path / "scratch"
-    filesystem_mkdir(scratch)
-    monkeypatch.setattr(
-        "quant_research_platform.storage.exact_keys.gettempdir", lambda: str(scratch)
-    )
-    real_hash = identity_owner._hash_file_content
-    real_content_hash = interim.content_hash_for_files
-    reservations = []
-
-    def hash_member(*args, **kwargs):
-        metadata = sys._getframe(1).f_locals["metadata"]
-        reservations.append(metadata.reserved_bytes)
-        return real_hash(*args, **kwargs)
-
-    def hash_stream(files, **kwargs):
-        assert iter(files) is files
-        return real_content_hash(files, **kwargs)
-
-    monkeypatch.setattr(identity_owner, "_hash_file_content", hash_member)
-    monkeypatch.setattr(interim, "content_hash_for_files", hash_stream)
     payload = b"Markettype,Clddt,Daywk,State\n"
-    peaks = []
     for count in (1, 64):
         raw = tmp_path / str(count)
         filesystem_mkdir(raw)
@@ -865,10 +656,7 @@ def test_csmar_source_identity_streams_inventory_with_accounted_members(
                 raw / f"csmar__trading_calendar__p{index}__full__export-20260101.csv",
                 payload,
             )
-        reservations.clear()
-        with runtime_resource_policy_scope(explicit_cap_bytes=8 * 1024**2) as policy:
-            actual = interim.source_content_identity(raw, "trading_calendar")
-            assert policy.used_memory_bytes == 0
+        actual = interim.source_content_identity(raw, "trading_calendar")
         expected = hashlib.sha256()
         for _ in range(count):
             for value in ("trading_calendar", hashlib.sha256(payload).hexdigest()):
@@ -876,10 +664,6 @@ def test_csmar_source_identity_streams_inventory_with_accounted_members(
                 expected.update(len(encoded).to_bytes(8, "big"))
                 expected.update(encoded)
         assert actual == expected.hexdigest()
-        assert len(reservations) == count
-        peaks.append(max(reservations))
-        assert not tuple(filesystem_iterdir(scratch))
-    assert peaks[1] > peaks[0] * 16
 
 
 def test_csmar_materialization_replays_each_dataset_from_one_inventory(
@@ -925,26 +709,20 @@ def test_csmar_materialization_replays_each_dataset_from_one_inventory(
         return real_content_hash(files, **kwargs)
 
     monkeypatch.setattr(interim, "content_hash_for_files", hash_stream)
-    with runtime_resource_policy_scope() as policy:
-        expected = {}
-        for data_id in data_ids:
-            result = interim.materialize_interim_data(
-                layout=single, raw_root=raw, data_ids=(data_id,), resource_policy=policy
-            )
-            expected[data_id] = read_dataset(
-                result.artifact_roots[data_id], resource_policy=policy
-            )
+    expected = {}
+    for data_id in data_ids:
         result = interim.materialize_interim_data(
-            layout=combined, raw_root=raw, data_ids=data_ids, resource_policy=policy
+            layout=single, raw_root=raw, data_ids=(data_id,)
         )
-        assert set(result.artifact_roots) == set(data_ids)
-        for data_id in data_ids:
-            actual = read_dataset(
-                result.artifact_roots[data_id], resource_policy=policy
-            )
-            pd.testing.assert_frame_equal(actual, expected[data_id], check_exact=True)
-            assert len(actual) == 2
-        assert policy.used_memory_bytes == 0
+        expected[data_id] = read_dataset(result.artifact_roots[data_id])
+    result = interim.materialize_interim_data(
+        layout=combined, raw_root=raw, data_ids=data_ids
+    )
+    assert set(result.artifact_roots) == set(data_ids)
+    for data_id in data_ids:
+        actual = read_dataset(result.artifact_roots[data_id])
+        pd.testing.assert_frame_equal(actual, expected[data_id], check_exact=True)
+        assert len(actual) == 2
     # Each selected dataset is hashed before reading and again before publication.
     assert calls == 8
 
@@ -1045,37 +823,33 @@ def test_csmar_materialization_binds_inspected_content_to_plan(
             encoding="utf-8",
         )
 
-    with runtime_resource_policy_scope() as policy:
+    def materialize():
+        return interim.materialize_interim_data(
+            layout=layout.with_target_roots({"trading_calendar": target}),
+            raw_root=source,
+            data_ids=("trading_calendar",),
+            start_date=None,
+            end_date=None,
+            instance_metadata=metadata,
+        )
 
-        def materialize():
-            return interim.materialize_interim_data(
-                layout=layout.with_target_roots({"trading_calendar": target}),
-                raw_root=source,
-                data_ids=("trading_calendar",),
-                start_date=None,
-                end_date=None,
-                instance_metadata=metadata,
-                resource_policy=policy,
-            )
-
-        if mutation == "unrelated":
+    if mutation == "unrelated":
+        materialize()
+        pd.testing.assert_frame_equal(
+            read_dataset(target),
+            read_dataset(root),
+            check_exact=True,
+        )
+        assert (
+            read_dataset_manifest_evidence(target)["common_manifest"]
+            == metadata["common_manifest"]
+        )
+        assert set(filesystem_iterdir(target.parent)) == previous_members | {target}
+    else:
+        with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
             materialize()
-            pd.testing.assert_frame_equal(
-                read_dataset(target, resource_policy=policy),
-                read_dataset(root, resource_policy=policy),
-                check_exact=True,
-            )
-            assert (
-                read_dataset_manifest_evidence(target)["common_manifest"]
-                == metadata["common_manifest"]
-            )
-            assert set(filesystem_iterdir(target.parent)) == previous_members | {target}
-        else:
-            with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
-                materialize()
-            assert set(filesystem_iterdir(target.parent)) == previous_members
-            assert not filesystem_exists(target)
-        assert policy.used_memory_bytes == 0
+        assert set(filesystem_iterdir(target.parent)) == previous_members
+        assert not filesystem_exists(target)
     assert _file_bytes(root) == old_good
     assert filesystem_read_text(unrelated, encoding="utf-8") == "keep"
 
@@ -1175,48 +949,19 @@ def test_financial_correction_date_order_is_validated() -> None:
         )
 
 
-def test_csmar_identity_rejects_requested_bad_schema_and_cleans_scratch(
+def test_csmar_identity_rejects_requested_bad_schema(
     tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(
-        "quant_research_platform.storage.exact_keys.gettempdir",
-        lambda: str(tmp_path.parent),
-    )
     requested = tmp_path / (
         "csmar__trading_calendar__all_market_types__full__export-20260605.csv"
     )
     filesystem_write_text(requested, "bad,header\n", encoding="utf-8")
 
-    with runtime_resource_policy_scope(None) as policy:
-        with pytest.raises(ValueError, match="csmar_raw_export_"):
-            interim.source_content_identity(tmp_path, "trading_calendar")
-        assert policy.used_memory_bytes == 0
-    assert not tuple(filesystem_glob(tmp_path.parent, ".k-*/k.db"))
+    with pytest.raises(ValueError, match="csmar_raw_export_"):
+        interim.source_content_identity(tmp_path, "trading_calendar")
 
 
-def test_dirty_index_info_csv_preserves_semantics_and_closes_scratch(
-    tmp_path: Path, monkeypatch
-) -> None:
-    scratch = tmp_path / "scratch"
-    filesystem_mkdir(scratch)
-    monkeypatch.setattr(
-        raw_schemas.tempfile, "tempdir", native_filesystem_path(scratch)
-    )
-    from quant_research_platform.storage import _scratch_ownership
-
-    temporary_file = _scratch_ownership.TemporaryFile
-    handles = []
-
-    def open_scratch(*args, **kwargs):
-        assert Path(raw_schemas.tempfile.gettempdir()) == Path(
-            native_filesystem_path(scratch)
-        )
-        handle = temporary_file(*args, **kwargs)
-        handles.append(handle)
-        return handle
-
-    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", open_scratch)
+def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
     index_path = tmp_path / "index_info_dirty.csv"
     filesystem_write_text(
         index_path,
@@ -1239,9 +984,6 @@ def test_dirty_index_info_csv_preserves_semantics_and_closes_scratch(
         "index_info",
         overrides=interim._validated_column_overrides({}),
     )
-
-    assert handles and all(handle.closed for handle in handles)
-    assert not list(filesystem_iterdir(scratch))
 
     assert len(raw) == len(pruned) == 4
     by_asset = pruned.set_index("source_asset_id")
@@ -1343,7 +1085,7 @@ def test_read_export_header_preserves_keyboard_interrupt_over_close_failure(
         original_close(self)
         raise OSError("header_close_failed")
 
-    monkeypatch.setattr(raw_schemas._BoundedCsvRecords, "_parse_record", interrupted)
+    monkeypatch.setattr(raw_schemas._BoundedCsvRecords, "__next__", interrupted)
     monkeypatch.setattr(raw_schemas._BoundedCsvRecords, "close", failing_close)
     with pytest.raises(KeyboardInterrupt) as raised:
         raw_schemas.read_export_header(path)
@@ -1397,10 +1139,9 @@ def test_index_market_preserves_nullable_official_open_without_close_substitutio
 
 @pytest.mark.parametrize("quoted", [False, True])
 @pytest.mark.parametrize("width", (32, 154, 160))
-def test_legal_provider_width_uses_bounded_fast_path(
+def test_legal_provider_width_and_quoting_preserve_fields(
     tmp_path, monkeypatch, width, quoted
 ):
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 
     path = tmp_path / "legal.csv"
     fields = [f"field_{position}" for position in range(width)]
@@ -1412,22 +1153,16 @@ def test_legal_provider_width_uses_bounded_fast_path(
         )
         writer.writerows((fields, ["1"] * width))
 
-    def forbidden(_self):
-        raise AssertionError("legal_csv_row_entered_byte_parser")
-
-    monkeypatch.setattr(raw_schemas._BoundedCsvRecords, "_parse_record", forbidden)
-    with runtime_resource_policy_scope() as policy:
-        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
-        try:
-            header, _ = next(records)
-            assert raw_schemas.materialize_header_record(header) == fields
-            record, _ = next(records)
-            assert record.materialize(max_fields=160) == ["1"] * width
-            with pytest.raises(StopIteration):
-                next(records)
-        finally:
-            records.close()
-        assert policy.used_memory_bytes == 0
+    records = raw_schemas.iter_export_csv_records(path)
+    try:
+        header, _ = next(records)
+        assert raw_schemas.materialize_header_record(header) == fields
+        record, _ = next(records)
+        assert record == ["1"] * width
+        with pytest.raises(StopIteration):
+            next(records)
+    finally:
+        records.close()
 
 
 @pytest.mark.parametrize(
@@ -1474,45 +1209,31 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
                 filesystem_read_bytes(next(filesystem_glob(raw, "*.csv")))
             ).hexdigest()
         )
-        with runtime_resource_policy_scope() as policy:
-            result = interim.materialize_interim_data(
-                layout=layout,
-                data_ids=(data_id,),
-                chunksize=size,
-                resource_policy=policy,
-            )
-            root = result.artifact_roots[data_id]
-            roots.append(root)
-            saved = read_dataset(root, resource_policy=policy)
-            frames.append(
-                saved.sort_values(list(spec.primary_key)).reset_index(drop=True)
-            )
-            metadata = read_dataset_manifest_evidence(root)["producer_diagnostics"]
-            assert metadata["exact_duplicate_count"] == 1
-            if data_id == "analyst_forecast":
-                counts = metadata["source_row_counts"]
-                assert counts["raw_rows"] == len(rows)
-                assert counts["excluded_missing_required_rows"] + len(saved) + metadata[
-                    "exact_duplicate_count"
-                ] == len(rows)
-                assert {"9007199254740992", "9007199254740993"}.issubset(
-                    saved.report_id
-                )
-                assert "张三,李四" in set(saved.analyst_ids.dropna())
-                assert saved.forecast_eps.isna().any()
-            assert str(saved.timestamp.dtype) == "datetime64[ns]"
-            assert not saved.duplicated(list(spec.primary_key)).any()
-            assert policy.used_memory_bytes == 0
+        result = interim.materialize_interim_data(
+            layout=layout, data_ids=(data_id,), chunksize=size
+        )
+        root = result.artifact_roots[data_id]
+        roots.append(root)
+        saved = read_dataset(root)
+        frames.append(saved.sort_values(list(spec.primary_key)).reset_index(drop=True))
+        metadata = read_dataset_manifest_evidence(root)["producer_diagnostics"]
+        assert metadata["exact_duplicate_count"] == 1
+        if data_id == "analyst_forecast":
+            counts = metadata["source_row_counts"]
+            assert counts["raw_rows"] == len(rows)
+            assert counts["excluded_missing_required_rows"] + len(saved) + metadata[
+                "exact_duplicate_count"
+            ] == len(rows)
+            assert {"9007199254740992", "9007199254740993"}.issubset(saved.report_id)
+            assert "张三,李四" in set(saved.analyst_ids.dropna())
+            assert saved.forecast_eps.isna().any()
+        assert str(saved.timestamp.dtype) == "datetime64[ns]"
+        assert not saved.duplicated(list(spec.primary_key)).any()
     assert len(set(hashes)) == 1
     for frame in frames[1:]:
         pd.testing.assert_frame_equal(frames[0], frame, check_exact=True)
-    with runtime_resource_policy_scope() as policy:
-        for root in roots[1:]:
-            assert (
-                compare_datasets(roots[0], root, resource_policy=policy).status
-                == "MATCH"
-            )
-        assert policy.used_memory_bytes == 0
+    for root in roots[1:]:
+        assert compare_datasets(roots[0], root).status == "MATCH"
 
 
 @pytest.mark.parametrize("chunksize", (1, 2))
@@ -1525,177 +1246,20 @@ def test_csmar_conflicting_duplicate_keeps_prior_published_dataset(tmp_path, chu
     filesystem_mkdir(raw, parents=True)
     first = _analyst_rows()[0]
     _write_csmar(raw, "analyst_forecast", [first])
-    with runtime_resource_policy_scope() as policy:
-        original = interim.materialize_interim_data(
-            layout=layout, data_ids=("analyst_forecast",), resource_policy=policy
-        ).artifact_roots["analyst_forecast"]
-        old_good = _file_bytes(original)
-        _write_csmar(raw, "analyst_forecast", [first, {**first, "Feps": 999}])
-        candidate = layout.instance_root(original, "f" * 64)
-        with pytest.raises(
-            ValueError, match="conflicting_csmar_primary_key_duplicates"
-        ):
-            interim.materialize_interim_data(
-                layout=layout.with_target_roots({"analyst_forecast": candidate}),
-                data_ids=("analyst_forecast",),
-                chunksize=chunksize,
-                resource_policy=policy,
-            )
-        assert not filesystem_exists(candidate)
-        assert _file_bytes(original) == old_good
-        assert policy.used_memory_bytes == 0
-
-
-@pytest.mark.parametrize(
-    ("cancel", "cleanup_error"),
-    (
-        (None, False),
-        ("consumer", False),
-        ("source_advance", False),
-        ("source_advance", True),
-    ),
-)
-def test_csmar_capacity_preserves_pending_duplicates_next_batch_and_cleanup(
-    tmp_path, monkeypatch, cancel, cleanup_error
-):
-    from quant_research_platform.runtime.resources import (
-        MemoryLease,
-        RuntimeResourcePolicy,
-    )
-    from quant_research_platform.storage.datasets import writing
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
-    from tests.helpers.a_share_raw import _write_csmar
-
-    layout = StorageLayout(tmp_path)
-    raw = layout.raw_source_root("csmar")
-    filesystem_mkdir(raw, parents=True)
-    row = {
-        "Indexcd": "000852",
-        "Enddt": "2019-03-01",
-        "Stkcd": "000001",
-        "Constdnme": "synthetic",
-        "Weight": 1.0,
-    }
-    _write_csmar(
-        raw,
-        "index_weights",
-        [row, row, {**row, "Stkcd": "000002"}, {**row, "Stkcd": "000003"}],
-    )
-    transform = interim._transform_interim_chunk
-    observed = []
-    refusals = []
-
-    def transform_under_pressure(frame, **kwargs):
-        if not refusals:
-            size = policy.explicit_memory_cap_bytes - policy.used_memory_bytes - 1
-            with policy.lease("test.concurrent_payload", size):
-                payload = bytearray(size)
-                try:
-                    return transform(frame, **kwargs)
-                except interim._InterimCapacityExceeded:
-                    refusals.append(len(payload))
-                    raise
-                finally:
-                    del payload
-        observed.append(len(frame))
-        return transform(frame, **kwargs)
-
-    pending = []
-    create_lease = RuntimeResourcePolicy.lease
-
-    def record_pending(policy, owner, reserved_bytes):
-        lease = create_lease(policy, owner, reserved_bytes)
-        if owner == "source.csmar.interim.pending":
-            pending.append(lease)
-        return lease
-
-    raw_chunks = interim.iter_private_export_chunks_with_policy
-    close_lease = MemoryLease.close
-    cleanup_failures = []
-    primary = KeyboardInterrupt("pending_cancel")
-
-    def chunks_with_cancel(*args, **kwargs):
-        source = iter(raw_chunks(*args, **kwargs))
-        with interim.closing_iterator(source):
-            value = next(source)
-            while True:
-                handoff = yield value
-                if isinstance(value, OwnedValue) and pending:
-                    assert pending[-1].active
-                    raise primary
-                try:
-                    value = source.send(handoff)
-                except StopIteration:
-                    return
-
-    def close_pending_then_fail(lease):
-        was_pending = any(lease is item for item in pending) and lease.active
-        close_lease(lease)
-        if was_pending:
-            cleanup_failures.append(True)
-            raise OSError("pending_cleanup_failed")
-
-    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
-        original = interim.materialize_interim_data(
-            layout=layout,
-            data_ids=("index_weights",),
-            chunksize=2,
-            resource_policy=policy,
-        ).artifact_roots["index_weights"]
-        old_good = _file_bytes(original)
-        candidate = layout.instance_root(original, "e" * 64)
-        monkeypatch.setattr(
-            interim, "_transform_interim_chunk", transform_under_pressure
+    original = interim.materialize_interim_data(
+        layout=layout, data_ids=("analyst_forecast",)
+    ).artifact_roots["analyst_forecast"]
+    old_good = _file_bytes(original)
+    _write_csmar(raw, "analyst_forecast", [first, {**first, "Feps": 999}])
+    candidate = layout.instance_root(original, "f" * 64)
+    with pytest.raises(ValueError, match="conflicting_csmar_primary_key_duplicates"):
+        interim.materialize_interim_data(
+            layout=layout.with_target_roots({"analyst_forecast": candidate}),
+            data_ids=("analyst_forecast",),
+            chunksize=chunksize,
         )
-        monkeypatch.setattr(RuntimeResourcePolicy, "lease", record_pending)
-        if cancel == "source_advance":
-            monkeypatch.setattr(
-                interim, "iter_private_export_chunks_with_policy", chunks_with_cancel
-            )
-        if cleanup_error:
-            monkeypatch.setattr(MemoryLease, "close", close_pending_then_fail)
-        if cancel == "consumer":
-
-            def fail_consumer(_self, _frame, **_kwargs):
-                raise primary
-
-            monkeypatch.setattr(writing._WriteStats, "declared_frame", fail_consumer)
-        request = dict(
-            layout=layout.with_target_roots({"index_weights": candidate}),
-            data_ids=("index_weights",),
-            chunksize=2,
-            resource_policy=policy,
-        )
-        if cancel:
-            with pytest.raises(KeyboardInterrupt) as caught:
-                interim.materialize_interim_data(**request)
-            assert caught.value is primary
-            assert not filesystem_exists(candidate)
-        else:
-            interim.materialize_interim_data(**request)
-            saved = read_dataset(candidate, resource_policy=policy)
-            assert saved.constituent_asset_id.tolist() == ["000001", "000002", "000003"]
-            assert observed == [1, 1, 2]
-            assert (
-                read_dataset_manifest_evidence(candidate)["producer_diagnostics"][
-                    "exact_duplicate_count"
-                ]
-                == 1
-            )
-        assert len(refusals) == 1
-        assert pending and all(not lease.active for lease in pending)
-        assert bool(cleanup_failures) == cleanup_error
-        if cleanup_error:
-            assert any(
-                "lease close also failed: OSError" in note for note in primary.__notes__
-            )
-        assert {
-            relative: filesystem_read_bytes(original / relative)
-            for relative in old_good
-        } == old_good
-        assert policy.used_memory_bytes == 0
+    assert not filesystem_exists(candidate)
+    assert _file_bytes(original) == old_good
 
 
 @pytest.mark.parametrize("primary_type", (MemoryError, OSError, KeyboardInterrupt))
@@ -1712,11 +1276,9 @@ def test_csmar_inspection_keeps_fatal_source_failure(
         raise primary
 
     monkeypatch.setattr(raw_exports, "inspect_raw_export_file", fail)
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(primary_type) as caught:
-            interim.source_content_identity(tmp_path, "trading_calendar")
-        assert caught.value is primary
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(primary_type) as caught:
+        interim.source_content_identity(tmp_path, "trading_calendar")
+    assert caught.value is primary
 
 
 @pytest.mark.parametrize(
@@ -1798,41 +1360,35 @@ def test_index_membership_raw_text_survives_public_materialization(
     _write_csmar(raw, "index_membership", rows)
     path = next(filesystem_glob(raw, "*.csv"))
     original = filesystem_read_bytes(path)
-    with runtime_resource_policy_scope() as policy:
-        if bad_numeric:
-            with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
-                interim.materialize_interim_data(
-                    layout=layout,
-                    raw_root=raw,
-                    data_ids=("index_membership",),
-                    chunksize=chunksize,
-                    resource_policy=policy,
-                )
-        else:
-            result = interim.materialize_interim_data(
+    if bad_numeric:
+        with pytest.raises(ValueError, match="invalid_csmar_numeric_value"):
+            interim.materialize_interim_data(
                 layout=layout,
                 raw_root=raw,
                 data_ids=("index_membership",),
                 chunksize=chunksize,
-                resource_policy=policy,
             )
-            frame = read_dataset(
-                result.artifact_roots["index_membership"], resource_policy=policy
-            )
-            frame = frame.sort_values("constituent_stock_code")
-            assert frame.constituent_stock_code.tolist() == ["000001", "000002"]
-            assert frame.constituent_asset_id.nunique() == 2
-            assert frame.constituent_name.tolist() == ["示例甲", "示例乙"]
-            assert frame.market_code.tolist() == ["SZSE", "SZSE"]
-            assert frame.effective_date.dt.strftime("%Y-%m-%d").tolist() == [
-                "2020-01-06",
-                "2020-01-07",
-            ]
-            assert frame.announcement_date.dt.strftime("%Y-%m-%d").tolist() == [
-                "2020-01-03",
-                "2020-01-04",
-            ]
-        assert policy.used_memory_bytes == 0
+    else:
+        result = interim.materialize_interim_data(
+            layout=layout,
+            raw_root=raw,
+            data_ids=("index_membership",),
+            chunksize=chunksize,
+        )
+        frame = read_dataset(result.artifact_roots["index_membership"])
+        frame = frame.sort_values("constituent_stock_code")
+        assert frame.constituent_stock_code.tolist() == ["000001", "000002"]
+        assert frame.constituent_asset_id.nunique() == 2
+        assert frame.constituent_name.tolist() == ["示例甲", "示例乙"]
+        assert frame.market_code.tolist() == ["SZSE", "SZSE"]
+        assert frame.effective_date.dt.strftime("%Y-%m-%d").tolist() == [
+            "2020-01-06",
+            "2020-01-07",
+        ]
+        assert frame.announcement_date.dt.strftime("%Y-%m-%d").tolist() == [
+            "2020-01-03",
+            "2020-01-04",
+        ]
     assert filesystem_read_bytes(path) == original
 
 
@@ -1872,27 +1428,19 @@ def test_index_membership_preserves_native_codes_and_venue_type_identity(
             for code, market, kind in identities
         ],
     )
-    with runtime_resource_policy_scope() as policy:
-        imported = interim.materialize_interim_data(
-            layout=layout,
-            raw_root=raw,
-            data_ids=("index_membership",),
-            chunksize=chunksize,
-            resource_policy=policy,
-        )
-        saved = read_dataset(
-            imported.artifact_roots["index_membership"], resource_policy=policy
-        )
-        actual = {
-            (code, "" if pd.isna(market) else market, int(kind))
-            for code, market, kind in saved[
-                ["constituent_stock_code", "market_code", "security_type"]
-            ].itertuples(index=False, name=None)
-        }
-        assert actual == set(identities)
-        assert len(saved) == saved.constituent_asset_id.nunique() == len(identities)
-        assert saved.market_code.isna().sum() == 1
-        assert policy.used_memory_bytes == 0
+    imported = interim.materialize_interim_data(
+        layout=layout, raw_root=raw, data_ids=("index_membership",), chunksize=chunksize
+    )
+    saved = read_dataset(imported.artifact_roots["index_membership"])
+    actual = {
+        (code, "" if pd.isna(market) else market, int(kind))
+        for code, market, kind in saved[
+            ["constituent_stock_code", "market_code", "security_type"]
+        ].itertuples(index=False, name=None)
+    }
+    assert actual == set(identities)
+    assert len(saved) == saved.constituent_asset_id.nunique() == len(identities)
+    assert saved.market_code.isna().sum() == 1
 
 
 @pytest.mark.parametrize("kind", [1, 1.0, None])
@@ -1922,195 +1470,6 @@ def test_index_membership_identity_uses_normalized_provider_types(kind):
         assert pd.api.types.is_integer_dtype(actual.security_type.dtype)
 
 
-@pytest.mark.parametrize("size", [46080, 460800])
-@pytest.mark.parametrize("suffix", ["", "中", "中😀"])
-@pytest.mark.parametrize("finish", ["normal", "early", "invalid"])
-@pytest.mark.parametrize("quoted", [False, True])
-def test_csv_unicode_fast_heap_is_covered_by_live_leases(
-    tmp_path, size, suffix, finish, quoted
-):
-    import os
-    import subprocess
-    import sys
-    from textwrap import dedent
-
-    # tracemalloc is process-wide: earlier tests can make this parser's first
-    # scratch path trigger a multi-MiB resize of Python's global intern table.
-    root = Path(__file__).resolve().parents[2]
-    script = dedent(
-        """
-        import sys
-        from pathlib import Path
-        import pytest
-        from tests.correctness.test_raw_csmar_semantics import (
-            _assert_csv_unicode_heap_coverage,
-        )
-
-        with pytest.MonkeyPatch.context() as monkeypatch:
-            _assert_csv_unicode_heap_coverage(
-                Path(sys.argv[1]), monkeypatch, int(sys.argv[2]),
-                sys.argv[3], sys.argv[4], sys.argv[5] == "True",
-            )
-        """
-    )
-    child = subprocess.run(
-        [
-            sys.executable,
-            "-c",
-            script,
-            str(tmp_path),
-            str(size),
-            suffix,
-            finish,
-            str(quoted),
-        ],
-        env={
-            **os.environ,
-            "PYTHONPATH": os.pathsep.join((str(root / "src"), str(root))),
-            **{
-                key: "1"
-                for key in (
-                    "OMP_NUM_THREADS",
-                    "OPENBLAS_NUM_THREADS",
-                    "MKL_NUM_THREADS",
-                    "NUMEXPR_NUM_THREADS",
-                    "VECLIB_MAXIMUM_THREADS",
-                    "BLIS_NUM_THREADS",
-                )
-            },
-        },
-        capture_output=True,
-        text=True,
-        check=False,
-    )
-    assert child.returncode == 0, child.stderr
-
-
-def _assert_csv_unicode_heap_coverage(
-    tmp_path, monkeypatch, size, suffix, finish, quoted
-):
-    import tempfile
-    import tracemalloc
-
-    import psutil
-
-    from quant_research_platform.runtime.resources import MemoryLease
-    from tests.helpers.runtime_resources import capture_test_policy
-
-    scratch = tmp_path / "scratch"
-    filesystem_mkdir(scratch)
-    monkeypatch.setenv("TMPDIR", str(native_filesystem_path(scratch)))
-    monkeypatch.setattr(tempfile, "tempdir", None)
-    expected = ["a" * size + suffix, "b" * size + suffix]
-    encoded_fields = [f'"{value}"' for value in expected] if quoted else expected
-    payload = (",".join(encoded_fields) + "\n").encode()
-    if finish == "invalid":
-        payload = payload[:-1] + b"\xff\n"
-    path = tmp_path / "unicode.csv"
-    filesystem_write_bytes(path, payload)
-    process = psutil.Process()
-    descriptors = (
-        process.num_fds if hasattr(process, "num_fds") else process.num_handles
-    )
-    fd_before, threads_before = descriptors(), process.num_threads()
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2)
-    ) as policy:
-        shrink = MemoryLease.shrink_to
-
-        def shrink_after_covered_peak(lease, actual_bytes):
-            if lease.owner != "source.csmar.csv.record":
-                return shrink(lease, actual_bytes)
-            assert tracemalloc.get_traced_memory()[1] <= policy.used_memory_bytes
-            shrink(lease, actual_bytes)
-            assert tracemalloc.get_traced_memory()[0] <= policy.used_memory_bytes
-            tracemalloc.reset_peak()
-
-        monkeypatch.setattr(MemoryLease, "shrink_to", shrink_after_covered_peak)
-        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
-        tracemalloc.start()
-        try:
-            if finish == "invalid":
-                with pytest.raises(ValueError, match="malformed_csmar_csv_row"):
-                    next(records)
-            else:
-                record, raw_bytes = next(records)
-                assert raw_bytes == len(payload)
-                actual = record.materialize(max_fields=160)
-                peak = tracemalloc.get_traced_memory()[1]
-                # Input/expected are allocated before tracing. RSS is deliberately
-                # not substituted for the Python heap covered by these owners.
-                assert peak <= policy.used_memory_bytes
-                assert actual == expected
-                if finish == "normal":
-                    del actual, record
-                    with pytest.raises(StopIteration):
-                        next(records)
-        finally:
-            records.close()
-            tracemalloc.stop()
-        assert policy.used_memory_bytes == 0
-    # Earlier test workers can retire while this parser runs on Windows.
-    assert descriptors() <= fd_before
-    assert all(Path(item.path).name != path.name for item in process.open_files())
-    assert process.num_threads() <= threads_before
-    assert list(filesystem_iterdir(scratch)) == []
-
-
-def test_csv_unicode_insufficient_budget_fails_before_decode_and_releases(tmp_path):
-    from quant_research_platform.storage.errors import DatasetReadCapacityExceeded
-    from tests.helpers.runtime_resources import capture_test_policy
-
-    path = tmp_path / "unicode.csv"
-    filesystem_write_text(
-        path, "a" * 460800 + "😀," + "b" * 460800 + "😀\n", encoding="utf-8"
-    )
-    with runtime_resource_policy_scope(
-        capture_test_policy(
-            available_memory_bytes=64 * 1024**2, explicit_cap_bytes=4 * 1024**2
-        )
-    ) as policy:
-        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
-        try:
-            with pytest.raises(DatasetReadCapacityExceeded):
-                next(records)
-        finally:
-            records.close()
-        assert policy.used_memory_bytes == 0
-
-
-def test_expired_csv_records_do_not_retain_previous_unicode_payload(tmp_path):
-    import tracemalloc
-
-    from tests.helpers.runtime_resources import capture_test_policy
-
-    text = "a" * 460800 + "😀," + "b" * 460800 + "😀\n"
-    path = tmp_path / "records.csv"
-    filesystem_write_text(path, text * 3, encoding="utf-8")
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2)
-    ) as policy:
-        rows = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
-        expired = []
-        tracemalloc.start()
-        try:
-            for record, _ in rows:
-                assert tracemalloc.get_traced_memory()[1] <= policy.used_memory_bytes
-                fields = record.iter_fields()
-                next(fields)
-                expired.append((record, fields))
-            assert tracemalloc.get_traced_memory()[0] < 128 * 1024
-            for record, fields in expired:
-                with pytest.raises(RuntimeError, match="csmar_csv_record_expired"):
-                    record.materialize()
-                with pytest.raises(RuntimeError, match="csmar_csv_record_expired"):
-                    next(fields)
-        finally:
-            rows.close()
-            tracemalloc.stop()
-        assert policy.used_memory_bytes == 0
-
-
 @pytest.mark.parametrize(
     "failure_type", (FileNotFoundError, NotADirectoryError, OSError, PermissionError)
 )
@@ -2136,51 +1495,47 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
     )
     normal_layout = StorageLayout(tmp_path / "normal")
     failed_layout = StorageLayout(tmp_path / "failed")
-    with runtime_resource_policy_scope() as policy:
-        result = research.data_materialize(layout=normal_layout, **arguments)
-        assert result["status"] == "COMPLETE"
-        originals = _file_bytes(normal_layout.project_root)
-        primary = failure_type("parent_failure")
-        native_check = interim.require_unaliased_path
-        native_stat = interim.filesystem_stat
-        armed = False
-        calls = []
+    result = research.data_materialize(layout=normal_layout, **arguments)
+    assert result["status"] == "COMPLETE"
+    originals = _file_bytes(normal_layout.project_root)
+    primary = failure_type("parent_failure")
+    native_check = interim.require_unaliased_path
+    native_stat = interim.filesystem_stat
+    armed = False
+    calls = []
 
-        def checked(path, *, error):
-            nonlocal armed
-            result = native_check(path, error=error)
-            if error == "csmar_interim_source_parent_invalid":
-                armed = True
-            return result
+    def checked(path, *, error):
+        nonlocal armed
+        result = native_check(path, error=error)
+        if error == "csmar_interim_source_parent_invalid":
+            armed = True
+        return result
 
-        def failed_stat(path, *args, **kwargs):
-            nonlocal armed
-            if armed and path == raw:
-                armed = False
-                calls.append(path)
-                raise primary
-            return native_stat(path, *args, **kwargs)
+    def failed_stat(path, *args, **kwargs):
+        nonlocal armed
+        if armed and path == raw:
+            armed = False
+            calls.append(path)
+            raise primary
+        return native_stat(path, *args, **kwargs)
 
-        with monkeypatch.context() as patch:
-            patch.setattr(interim, "require_unaliased_path", checked)
-            patch.setattr(interim, "filesystem_stat", failed_stat)
-            if failure_type in (FileNotFoundError, NotADirectoryError):
-                failed = research.data_materialize(layout=failed_layout, **arguments)
-                assert failed["status"] == "FAILED"
-                assert failed["target_results"][0]["reason"] == (
-                    "interim_build_failed:csmar_interim_source_parent_invalid"
-                )
-            else:
-                with pytest.raises(failure_type) as caught:
-                    research.data_materialize(layout=failed_layout, **arguments)
-                assert caught.value is primary
-        assert calls == [raw]
-        assert policy.used_memory_bytes == 0
-        assert _file_bytes(normal_layout.project_root) == originals
-        assert not tuple(filesystem_glob(failed_layout.project_root, "**/.a-*"))
-        assert not tuple(
-            filesystem_glob(failed_layout.project_root, "**/manifest.json")
-        )
+    with monkeypatch.context() as patch:
+        patch.setattr(interim, "require_unaliased_path", checked)
+        patch.setattr(interim, "filesystem_stat", failed_stat)
+        if failure_type in (FileNotFoundError, NotADirectoryError):
+            failed = research.data_materialize(layout=failed_layout, **arguments)
+            assert failed["status"] == "FAILED"
+            assert failed["target_results"][0]["reason"] == (
+                "interim_build_failed:csmar_interim_source_parent_invalid"
+            )
+        else:
+            with pytest.raises(failure_type) as caught:
+                research.data_materialize(layout=failed_layout, **arguments)
+            assert caught.value is primary
+    assert calls == [raw]
+    assert _file_bytes(normal_layout.project_root) == originals
+    assert not tuple(filesystem_glob(failed_layout.project_root, "**/.a-*"))
+    assert not tuple(filesystem_glob(failed_layout.project_root, "**/manifest.json"))
 
 
 @pytest.mark.parametrize("exponent", (0, 600, -600))
@@ -2219,23 +1574,19 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(tmp_path, expo
         )
         rows.append(row)
     _write_csmar(raw, "market_bars_1d", rows)
-    with runtime_resource_policy_scope() as policy:
-        built = interim.materialize_interim_data(
-            layout=layout, data_ids=("market_bars_1d",), resource_policy=policy
-        )
-        loaded = read_dataset(
-            built.artifact_roots["market_bars_1d"], resource_policy=policy
-        )
-        # open == close == adjusted close: the exact adjusted open is that price.
-        np.testing.assert_array_equal(loaded.adj_open, loaded.open)
-        panel = loaded.rename(columns={"source_asset_id": "asset_id"}).assign(
-            can_enter=True
-        )
-        labeled = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
-        assert labeled.forward_return_1d.iloc[0] == pytest.approx(0.5)
-        assert labeled.forward_return_1d_available_at.iloc[0] == sessions[2]
-        assert labeled.forward_return_1d.iloc[1:].isna().all()
-        assert policy.used_memory_bytes == 0
+    built = interim.materialize_interim_data(
+        layout=layout, data_ids=("market_bars_1d",)
+    )
+    loaded = read_dataset(built.artifact_roots["market_bars_1d"])
+    # open == close == adjusted close: the exact adjusted open is that price.
+    np.testing.assert_array_equal(loaded.adj_open, loaded.open)
+    panel = loaded.rename(columns={"source_asset_id": "asset_id"}).assign(
+        can_enter=True
+    )
+    labeled = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
+    assert labeled.forward_return_1d.iloc[0] == pytest.approx(0.5)
+    assert labeled.forward_return_1d_available_at.iloc[0] == sessions[2]
+    assert labeled.forward_return_1d.iloc[1:].isna().all()
 
 
 @pytest.mark.parametrize(
@@ -2302,134 +1653,6 @@ def test_adjusted_open_keeps_missing_and_zero_close_semantics(
         assert pd.isna(actual)
     else:
         assert actual == expected
-
-
-def test_csmar_pending_copy_admits_payload_before_concurrent_allocation(
-    tmp_path, monkeypatch
-):
-    import sys
-    import threading
-
-    from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.a_share_raw import _write_csmar
-
-    layout = StorageLayout(tmp_path)
-    raw = layout.raw_source_root("csmar")
-    filesystem_mkdir(raw, parents=True)
-    _write_csmar(
-        raw,
-        "index_weights",
-        [
-            dict(
-                Indexcd="000852",
-                Enddt="2019-03-01",
-                Stkcd=f"{i + 1:06d}",
-                Constdnme="synthetic",
-                Weight=25.0,
-            )
-            for i in range(4)
-        ],
-    )
-    transform = interim._transform_interim_chunk
-    classify = ExactPrimaryKeyIndex.classify_comparison_table
-    copy = pd.DataFrame.copy
-    workers, releases, worker_errors, copies, refusals = [], [], [], [], []
-    armed = False
-    first = True
-    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
-
-        def hold_remaining_capacity():
-            ready, release = threading.Event(), threading.Event()
-
-            def worker():
-                _payload = None
-                lease = None
-                try:
-                    size = (
-                        policy.explicit_memory_cap_bytes - policy.used_memory_bytes - 1
-                    )
-                    lease = policy.lease("test.concurrent_payload", size)
-                    _payload = bytearray(size)
-                    ready.set()
-                    if not release.wait(10):
-                        raise AssertionError("concurrent_payload_timeout")
-                except BaseException as error:
-                    worker_errors.append(type(error).__name__)
-                    ready.set()
-                finally:
-                    _payload = None
-                    if lease is not None:
-                        lease.close()
-
-            thread = threading.Thread(target=worker)
-            workers.append(thread)
-            releases.append(release)
-            thread.start()
-            assert ready.wait(10)
-            assert not worker_errors
-            return release, thread
-
-        def transform_under_pressure(frame, **kwargs):
-            nonlocal first, armed
-            if not first:
-                return transform(frame, **kwargs)
-            first = False
-            release, thread = hold_remaining_capacity()
-            try:
-                return transform(frame, **kwargs)
-            except interim._InterimCapacityExceeded:
-                refusals.append(True)
-                armed = True
-                raise
-            finally:
-                release.set()
-                thread.join(10)
-                assert not thread.is_alive()
-
-        def classify_then_contend(self, *args, **kwargs):
-            nonlocal armed
-            result = classify(self, *args, **kwargs)
-            if armed:
-                armed = False
-                hold_remaining_capacity()
-            return result
-
-        def observe_copy(frame, *args, **kwargs):
-            caller = sys._getframe(1)
-            if (
-                caller.f_code.co_name == "_iter_pruned_interim_frames"
-                and caller.f_locals.get("pending_lease") is not None
-            ):
-                copies.append(len(frame))
-            return copy(frame, *args, **kwargs)
-
-        monkeypatch.setattr(
-            interim, "_transform_interim_chunk", transform_under_pressure
-        )
-        monkeypatch.setattr(
-            ExactPrimaryKeyIndex, "classify_comparison_table", classify_then_contend
-        )
-        monkeypatch.setattr(pd.DataFrame, "copy", observe_copy)
-        try:
-            with pytest.raises(MemoryError, match="^runtime_memory_budget_exceeded$"):
-                interim.materialize_interim_data(
-                    layout=layout,
-                    data_ids=("index_weights",),
-                    chunksize=2,
-                    resource_policy=policy,
-                )
-        finally:
-            for release in releases:
-                release.set()
-            for worker in workers:
-                worker.join(10)
-                assert not worker.is_alive()
-        assert refusals == [True]
-        assert not copies
-        assert not worker_errors
-        assert policy.used_memory_bytes == 0
-    assert not list(filesystem_glob(tmp_path, "**/manifest.json"))
 
 
 def test_raw_table_identity_ignores_parent_directory_and_rejects_conflict(tmp_path):
@@ -2571,412 +1794,6 @@ def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
     assert expected in json.dumps(report)
 
 
-@pytest.mark.parametrize(
-    "available,cap",
-    [(64 * 1024**2, 8 * 1024**2), (64 * 1024**2, 384 * 1024), (384 * 1024, None)],
-)
-def test_csv_scratch_remains_admitted_when_extra_fields_leave_the_frame(
-    tmp_path, monkeypatch, available, cap
-):
-    import os
-    import tempfile
-
-    from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
-    from quant_research_platform.sources.csmar.field_mappings import RAW_TABLE_CONTRACTS
-    from quant_research_platform.storage import _scratch_ownership
-
-    scratch = tmp_path / "scratch"
-    filesystem_mkdir(scratch)
-    monkeypatch.setattr(tempfile, "tempdir", native_filesystem_path(scratch))
-    monkeypatch.setattr(_scratch_ownership, "_memory_filesystem", lambda _path: True)
-    temporary_file = _scratch_ownership.TemporaryFile
-    handles = []
-
-    def tracked_file(*args, **kwargs):
-        handle = temporary_file(*args, **kwargs)
-        handles.append(handle)
-        return handle
-
-    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", tracked_file)
-    columns = RAW_TABLE_CONTRACTS["financial_balance"].required_columns
-    values = {column: "1" for column in columns}
-    values.update(
-        Stkcd="000001",
-        ShortName="Synthetic",
-        IfCorrect="0",
-        DeclareDate="2020-04-01",
-        Accper="2019-12-31",
-        Typrep="A",
-    )
-    path = tmp_path / "extra.csv"
-    filesystem_write_text(
-        path,
-        ",".join((*columns, "OptionalProviderField"))
-        + "\n"
-        + ",".join(values[column] for column in columns)
-        + ',"'
-        + "x" * (896 * 1024)
-        + '\nx"\n',
-        encoding="utf-8",
-    )
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=available, explicit_cap_bytes=cap)
-    ) as policy:
-        chunks = raw_exports.iter_private_export_chunks_with_policy(
-            path, dataset="financial_balance", chunksize=1, resource_policy=policy
-        )
-        lease = policy.lease("test.csmar.producer", next(chunks))
-        try:
-            if cap == 8 * 1024**2:
-                owned = chunks.send(lease)
-                assert "OptionalProviderField" not in owned.value
-                assert owned.value.Stkcd.tolist() == ["000001"]
-                scratch_bytes = sum(
-                    os.fstat(handle.fileno()).st_size
-                    for handle in handles
-                    if not handle.closed
-                )
-                assert scratch_bytes > 896 * 1024
-                assert policy.used_memory_bytes >= (
-                    scratch_bytes + pandas_frame_payload_bytes(owned.value)
-                )
-                owned.release(owner="test.csmar.consumer")
-            else:
-                with pytest.raises(
-                    ValueError, match="^storage_scratch_exceeds_memory_capacity$"
-                ):
-                    chunks.send(lease)
-        finally:
-            chunks.close()
-            lease.close()
-        assert policy.used_memory_bytes == 0
-    assert handles and all(handle.closed for handle in handles)
-    assert list(filesystem_iterdir(scratch)) == []
-
-
-def test_index_info_continuation_scratch_survives_the_reconstructed_frame_handoff(
-    tmp_path, monkeypatch
-):
-    import os
-    import tempfile
-
-    from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
-    from quant_research_platform.storage import _scratch_ownership
-
-    scratch = tmp_path / "scratch"
-    filesystem_mkdir(scratch)
-    monkeypatch.setattr(tempfile, "tempdir", native_filesystem_path(scratch))
-    monkeypatch.setattr(_scratch_ownership, "_memory_filesystem", lambda _path: True)
-    temporary_file = _scratch_ownership.TemporaryFile
-    handles = []
-
-    def tracked_file(*args, **kwargs):
-        handle = temporary_file(*args, **kwargs)
-        handles.append(handle)
-        return handle
-
-    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", tracked_file)
-    count = 393216
-    path = tmp_path / "continuation.csv"
-    # Keep the logical record's source bytes identical across platforms.
-    filesystem_write_bytes(
-        path,
-        b"Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
-        b"Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10\n"
-        b"000985,synthetic,2014-01-02,2013-12-31,1000,scope,1,2,3,4,5,formula\n"
-        + b"#\n" * count
-        + b"000300,next,2014-01-03,2013-12-31,1000,scope,1,2,3,4,5,end\n",
-    )
-    with runtime_resource_policy_scope(
-        capture_test_policy(
-            available_memory_bytes=64 * 1024**2, explicit_cap_bytes=32 * 1024**2
-        )
-    ) as policy:
-        chunks = raw_exports.iter_private_export_chunks_with_policy(
-            path, dataset="index_info", chunksize=1, resource_policy=policy
-        )
-        lease = policy.lease("test.csmar.producer", next(chunks))
-        try:
-            owned = chunks.send(lease)
-            assert owned.value.Idxinfo10.iloc[0] == "formula" + "\n#" * count
-            scratch_bytes = sum(
-                os.fstat(handle.fileno()).st_size
-                for handle in handles
-                if not handle.closed
-            )
-            assert scratch_bytes >= 5 * count
-            assert policy.used_memory_bytes >= (
-                scratch_bytes + pandas_frame_payload_bytes(owned.value)
-            )
-            owned.release(owner="test.csmar.consumer")
-        finally:
-            chunks.close()
-            lease.close()
-        assert policy.used_memory_bytes == 0
-    assert handles and all(handle.closed for handle in handles)
-    assert list(filesystem_iterdir(scratch)) == []
-
-
-def test_expired_slow_record_releases_scratch_before_fast_records(tmp_path):
-    import os
-
-    path = tmp_path / "slow_fast.csv"
-    # End the slow record at the buffer boundary so the next records take the fast path.
-    filesystem_write_bytes(path, b'"' + b"s" * (8192 - 5) + b'\nx"\n' + b"a,b\n" * 3)
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2)
-    ) as policy:
-        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
-        try:
-            slow, _ = next(records)
-            owner = slow._owner
-            assert os.fstat(owner._spool.fileno()).st_size > 0
-            for _ in range(3):
-                fast, _ = next(records)
-                assert fast.materialize() == ["a", "b"]
-                assert owner._decoded_fields is not None
-                assert os.fstat(owner._spool.fileno()).st_size == 0
-            with pytest.raises(RuntimeError, match="csmar_csv_record_expired"):
-                slow.materialize()
-        finally:
-            records.close()
-        assert policy.used_memory_bytes == 0
-
-
-@pytest.mark.parametrize("cancel", [False, True])
-def test_csmar_releases_decoded_batch_before_normalization(
-    tmp_path, monkeypatch, cancel
-):
-    import weakref
-
-    from quant_research_platform.policy.lifecycle import closing_iterator
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.a_share_raw import _write_csmar
-
-    class TrackedRow(list):
-        pass
-
-    class TrackedNumericText(str):
-        pass
-
-    layout = StorageLayout(tmp_path)
-    raw = layout.raw_source_root("csmar")
-    filesystem_mkdir(raw, parents=True)
-    rows = []
-    for day, price in ((1, 10.0), (2, 11.0), (3, 12.0)):
-        row = dict.fromkeys(
-            raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns, 1.0
-        )
-        row.update(
-            Stkcd="000001",
-            Trddt=f"2019-08-{day:02}",
-            Markettype=32,
-            Filling=0,
-            Opnprc=price,
-            Hiprc=price,
-            Loprc=price,
-            Clsprc=price,
-            Adjprcwd=price,
-        )
-        rows.append(row)
-    _write_csmar(raw, "market_bars_1d", rows)
-    records = raw_exports._iter_csv_records
-    transform = interim._transform_interim_chunk
-    references, observations = [], []
-    primary = KeyboardInterrupt("decoded_batch_consumer_cancel")
-
-    def tracked_records(*args, **kwargs):
-        with closing_iterator(records(*args, **kwargs)) as source:
-            for header, row, source_bytes in source:
-                tracked = TrackedRow(row)
-                position = header.index("Opnprc")
-                tracked[position] = TrackedNumericText(tracked[position])
-                references.append(
-                    (weakref.ref(tracked), weakref.ref(tracked[position]))
-                )
-                try:
-                    yield header, tracked, source_bytes
-                finally:
-                    tracked = None
-
-    def observe_transform(frame, **kwargs):
-        assert len(references) == len(frame) == 3
-        # The suspended row iterator may still own its final row.
-        assert all(ref() is None for pair in references[:-1] for ref in pair)
-        observations.append(len(frame))
-        if cancel:
-            raise primary
-        return transform(frame, **kwargs)
-
-    with runtime_resource_policy_scope(explicit_cap_bytes=32 * 1024**2) as policy:
-        original = interim.materialize_interim_data(
-            layout=layout,
-            data_ids=("market_bars_1d",),
-            chunksize=3,
-            resource_policy=policy,
-        ).artifact_roots["market_bars_1d"]
-        expected = read_dataset(original, resource_policy=policy)
-        old_good = _file_bytes(original)
-        candidate = StorageLayout(tmp_path / "comparison").interim_data_root(
-            "csmar", "market_bars_1d"
-        )
-        monkeypatch.setattr(raw_exports, "_iter_csv_records", tracked_records)
-        monkeypatch.setattr(interim, "_transform_interim_chunk", observe_transform)
-        request = dict(
-            layout=layout.with_target_roots({"market_bars_1d": candidate}),
-            data_ids=("market_bars_1d",),
-            chunksize=3,
-            resource_policy=policy,
-        )
-        if cancel:
-            with pytest.raises(KeyboardInterrupt) as caught:
-                interim.materialize_interim_data(**request)
-            assert caught.value is primary
-            assert not filesystem_exists(candidate)
-        else:
-            interim.materialize_interim_data(**request)
-            actual = read_dataset(candidate, resource_policy=policy)
-            pd.testing.assert_frame_equal(actual, expected)
-        assert observations == [3]
-        remaining = [
-            type(ref()).__name__
-            for pair in references
-            for ref in pair
-            if ref() is not None
-        ]
-        assert not remaining, remaining
-        assert _file_bytes(original) == old_good
-        assert policy.used_memory_bytes == 0
-
-
-@pytest.mark.parametrize(
-    "case",
-    ["index_lookahead", "index_lookahead_unicode", "projected_field", "column_label"],
-)
-def test_csmar_reader_payload_survives_output_lease_close(tmp_path, monkeypatch, case):
-    import sys
-    import weakref
-
-    from quant_research_platform.runtime.resources import pandas_frame_payload_bytes
-
-    class TrackedText(str):
-        pass
-
-    width = 900_000 if case == "index_lookahead_unicode" else 600_000
-    wide_text = "x" * (width - 1) + ("😀" if case == "index_lookahead_unicode" else "x")
-    path = tmp_path / "reader.csv"
-    if case == "projected_field":
-        dataset = "market_cap"
-        header = "Stkcd,Shrchgdt,Nshrttl,Nshra,OptionalProviderField"
-        text = (
-            header
-            + "\n000001,2019-08-01,100,50,"
-            + "x" * width
-            + "\n000001,2019-08-02,200,100,small\n"
-        )
-    else:
-        dataset = "index_info"
-        header = (
-            "Indexcd,Idxinfo01,Idxinfo11,Idxinfo02,Idxinfo03,Idxinfo04,"
-            "Idxinfo05,Idxinfo06,Idxinfo07,Idxinfo08,Idxinfo09,Idxinfo10"
-        )
-        if case == "column_label":
-            text = (
-                header
-                + ","
-                + "x" * width
-                + "\n000985,short,2014-01-02,2013-12-31,1000,scope,1,2,3,4,5,end,1\n"
-            )
-        else:
-            text = (
-                header
-                + "\n000985,short,2014-01-02,2013-12-31,1000,scope,1,2,3,4,5,end\n"
-                + "000300,"
-                + wide_text
-                + ",2014-01-03,2013-12-31,1000,scope,1,2,3,4,5,end\n"
-            )
-    filesystem_write_text(path, text, encoding="utf-8")
-    del text
-    references = []
-    parse = raw_schemas._BoundedCsvRecords._try_fast_fields
-
-    def tracked_fields(reader):
-        result = parse(reader)
-        if result is not None:
-            fields = result[0]
-            for position, value in enumerate(fields):
-                if len(value) == width:
-                    fields[position] = TrackedText(value)
-                    references.append(weakref.ref(fields[position]))
-        return result
-
-    monkeypatch.setattr(
-        raw_schemas._BoundedCsvRecords, "_try_fast_fields", tracked_fields
-    )
-    with runtime_resource_policy_scope(
-        capture_test_policy(
-            available_memory_bytes=64 * 1024**2, explicit_cap_bytes=32 * 1024**2
-        )
-    ) as policy:
-        chunks = raw_exports.iter_private_export_chunks_with_policy(
-            path, dataset=dataset, chunksize=1, resource_policy=policy
-        )
-        lease = policy.lease("test.csmar.producer", next(chunks))
-        try:
-            owned = chunks.send(lease)
-            assert len(references) == 1 and references[0]() is not None
-            retained = sys.getsizeof(references[0]())
-            assert retained >= width
-            if case == "column_label":
-                assert len(owned.value.columns[-1]) == width
-                assert lease.reserved_bytes >= (
-                    retained + pandas_frame_payload_bytes(owned.value)
-                )
-            elif case.startswith("index_lookahead"):
-                assert owned.value.Idxinfo01.tolist() == ["short"]
-            else:
-                assert "OptionalProviderField" not in owned.value
-                assert owned.value.Nshrttl.tolist() == [100.0]
-            assert (
-                sum(
-                    item.reserved_bytes
-                    for item in policy._leases
-                    if item.owner.startswith("source.csmar.")
-                )
-                >= retained
-            )
-            del owned
-            next_bound = chunks.send(None)
-            lease.close()
-            # The reader still holds its last record/lookahead after output closes.
-            assert references[0]() is not None
-            assert (
-                sum(
-                    item.reserved_bytes
-                    for item in policy._leases
-                    if item.owner.startswith("source.csmar.")
-                )
-                >= retained
-            )
-            lease = policy.lease("test.csmar.next", next_bound)
-            if case == "column_label":
-                with pytest.raises(StopIteration):
-                    chunks.send(lease)
-            else:
-                owned = chunks.send(lease)
-                if case.startswith("index_lookahead"):
-                    assert owned.value.Idxinfo01.iloc[0] == wide_text
-                else:
-                    assert owned.value.Nshrttl.tolist() == [200.0]
-                del owned
-        finally:
-            chunks.close()
-            lease.close()
-        assert all(reference() is None for reference in references)
-        assert policy.used_memory_bytes == 0
-
-
 def _nullable_index_numeric_rows(data_id):
     if data_id == "index_weights":
         return [
@@ -3032,40 +1849,35 @@ def test_index_source_null_numeric_values_persist_without_claiming_complete_weig
     filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, data_id, _nullable_index_numeric_rows(data_id))
     original = _file_bytes(raw)
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout,
-            data_ids=(data_id,),
-            chunksize=chunksize,
-            resource_policy=policy,
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=(data_id,), chunksize=chunksize
+    )
+    root = result.artifact_roots[data_id]
+    saved = read_dataset(root).sort_values(
+        "constituent_asset_id" if data_id == "index_weights" else "timestamp"
+    )
+    pd.testing.assert_series_equal(
+        saved[column].reset_index(drop=True),
+        pd.Series(expected, name=column, dtype="float64"),
+        check_exact=True,
+    )
+    nulls = 0
+    for path in filesystem_glob(root, "**/*.parquet"):
+        table = pq.ParquetFile(native_filesystem_path(path)).read(columns=[column])
+        assert table.schema.field(column).type == pa.float64()
+        nulls += table[column].null_count
+    assert nulls == 1
+    if data_id == "index_weights":
+        info = pd.DataFrame(
+            {
+                "source_asset_id": ["000905", "000852"],
+                "index_name": ["中证小盘500指数", "中证1000指数"],
+            }
         )
-        root = result.artifact_roots[data_id]
-        saved = read_dataset(root, resource_policy=policy).sort_values(
-            "constituent_asset_id" if data_id == "index_weights" else "timestamp"
-        )
-        pd.testing.assert_series_equal(
-            saved[column].reset_index(drop=True),
-            pd.Series(expected, name=column, dtype="float64"),
-            check_exact=True,
-        )
-        nulls = 0
-        for path in filesystem_glob(root, "**/*.parquet"):
-            table = pq.ParquetFile(native_filesystem_path(path)).read(columns=[column])
-            assert table.schema.field(column).type == pa.float64()
-            nulls += table[column].null_count
-        assert nulls == 1
-        if data_id == "index_weights":
-            info = pd.DataFrame(
-                {
-                    "source_asset_id": ["000905", "000852"],
-                    "index_name": ["中证小盘500指数", "中证1000指数"],
-                }
-            )
-            # The known weights sum to one, but the missing member is still unknown.
-            assert saved.weight.sum() == 1.0
-            with pytest.raises(ValueError, match="a_share_benchmark_weight_invalid"):
-                list(iter_benchmark_weight_snapshots(info, [saved]))
-        assert policy.used_memory_bytes == 0
+        # The known weights sum to one, but the missing member is still unknown.
+        assert saved.weight.sum() == 1.0
+        with pytest.raises(ValueError, match="a_share_benchmark_weight_invalid"):
+            list(iter_benchmark_weight_snapshots(info, [saved]))
     assert _file_bytes(raw) == original
 
 
@@ -3090,7 +1902,6 @@ def test_nullable_index_source_numeric_values_still_reject_invalid_facts(
         interim.normalize_raw_frame(pd.DataFrame(rows), data_id)
 
 
-@pytest.mark.parametrize("cap", (None, 512 * 1024, 8 * 1024**2))
 @pytest.mark.parametrize(
     "payload,expected",
     (
@@ -3114,9 +1925,7 @@ def test_nullable_index_source_numeric_values_still_reject_invalid_facts(
         (b'"' + b"x" * 8190 + b'"0,2\n', None),
     ),
 )
-def test_csv_strict_grammar_matches_across_memory_budgets(
-    tmp_path, cap, payload, expected
-):
+def test_csv_strict_grammar_matches_standard_parser(tmp_path, payload, expected):
     import io
 
     path = tmp_path / "grammar.csv"
@@ -3130,31 +1939,18 @@ def test_csv_strict_grammar_matches_across_memory_budgets(
     else:
         assert list(oracle) == expected
 
-    with runtime_resource_policy_scope(
-        None
-        if cap is None
-        else capture_test_policy(
-            available_memory_bytes=64 * 1024**2, explicit_cap_bytes=cap
-        )
-    ) as policy:
-        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
-        actual, modes = [], []
-        try:
-            if expected is None:
-                with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
-                    next(records)
-            else:
-                for record, _ in records:
-                    modes.append(record._owner._decoded_fields is not None)
-                    actual.append(record.materialize())
-                assert actual == expected
-                if cap == 512 * 1024:
-                    assert modes and not any(modes)
-                elif payload == b'"1",2\r\n':
-                    assert modes == [True]
-        finally:
-            records.close()
-        assert policy.used_memory_bytes == 0
+    records = raw_schemas.iter_export_csv_records(path)
+    actual = []
+    try:
+        if expected is None:
+            with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
+                next(records)
+        else:
+            for record, _ in records:
+                actual.append(record)
+            assert actual == expected
+    finally:
+        records.close()
 
 
 def test_malformed_quoted_numeric_cannot_publish_over_old_good(tmp_path):
@@ -3166,32 +1962,27 @@ def test_malformed_quoted_numeric_cannot_publish_over_old_good(tmp_path):
     raw = layout.raw_source_root("csmar")
     filesystem_mkdir(raw, parents=True)
     _write_csmar(raw, "analyst_forecast", _analyst_rows()[:1])
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout, data_ids=("analyst_forecast",), resource_policy=policy
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=("analyst_forecast",)
+    )
+    root = result.artifact_roots["analyst_forecast"]
+    old_good = _file_bytes(root)
+    before = read_dataset(root)
+    path = next(filesystem_glob(raw, "*.csv"))
+    payload = filesystem_read_bytes(path)
+    assert payload.count(b",18,10") == 1
+    malformed = payload.replace(b",18,10", b',"1"0,10')
+    filesystem_write_bytes(path, malformed)
+    candidate = layout.instance_root(root, "f" * 64)
+    with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
+        interim.materialize_interim_data(
+            layout=layout.with_target_roots({"analyst_forecast": candidate}),
+            data_ids=("analyst_forecast",),
         )
-        root = result.artifact_roots["analyst_forecast"]
-        old_good = _file_bytes(root)
-        before = read_dataset(root, resource_policy=policy)
-        path = next(filesystem_glob(raw, "*.csv"))
-        payload = filesystem_read_bytes(path)
-        assert payload.count(b",18,10") == 1
-        malformed = payload.replace(b",18,10", b',"1"0,10')
-        filesystem_write_bytes(path, malformed)
-        candidate = layout.instance_root(root, "f" * 64)
-        with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
-            interim.materialize_interim_data(
-                layout=layout.with_target_roots({"analyst_forecast": candidate}),
-                data_ids=("analyst_forecast",),
-                resource_policy=policy,
-            )
-        assert not filesystem_exists(candidate)
-        assert _file_bytes(root) == old_good
-        pd.testing.assert_frame_equal(
-            before, read_dataset(root, resource_policy=policy)
-        )
-        assert filesystem_read_bytes(path) == malformed
-        assert policy.used_memory_bytes == 0
+    assert not filesystem_exists(candidate)
+    assert _file_bytes(root) == old_good
+    pd.testing.assert_frame_equal(before, read_dataset(root))
+    assert filesystem_read_bytes(path) == malformed
 
 
 def _short_analyst_csv_records(count):
@@ -3217,27 +2008,17 @@ def _short_analyst_csv_records(count):
 
 @pytest.fixture
 def real_csv_handles(monkeypatch):
-    from quant_research_platform.storage import _scratch_ownership
-
-    handles, spools = [], []
+    handles = []
     real_open = raw_schemas.open_filesystem_file
-    real_temporary_file = _scratch_ownership.TemporaryFile
 
     def open_source(*args, **kwargs):
         handle = real_open(*args, **kwargs)
         handles.append(handle)
         return handle
 
-    def open_spool(*args, **kwargs):
-        handle = real_temporary_file(*args, **kwargs)
-        spools.append(handle)
-        return handle
-
     monkeypatch.setattr(raw_schemas, "open_filesystem_file", open_source)
-    monkeypatch.setattr(_scratch_ownership, "TemporaryFile", open_spool)
-    yield handles, spools
+    yield handles
     assert handles and all(handle.closed for handle in handles)
-    assert all(handle.closed for handle in spools)
 
 
 @pytest.mark.parametrize(
@@ -3297,32 +2078,19 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
         expected[column] = expected[column].astype("Float64")
     keys = ["source_asset_id", "timestamp", "report_id", "forecast_end_date"]
     expected = expected.sort_values(keys).reset_index(drop=True)
-    with runtime_resource_policy_scope() as policy:
-        assert policy.explicit_memory_cap_bytes is None
-        assert raw_schemas.read_export_header(path, resource_policy=policy) == tuple(
-            header.decode().split(",")
-        )
-        identity = interim.source_content_identity(raw_root, "analyst_forecast")
-        assert identity is not None
-        result = interim.materialize_interim_data(
-            layout=layout,
-            raw_root=raw_root,
-            data_ids=("analyst_forecast",),
-            resource_policy=policy,
-        )
-        saved = read_dataset(
-            result.artifact_roots["analyst_forecast"], resource_policy=policy
-        )
-        assert len(saved) == count and not saved.duplicated(keys).any()
-        pd.testing.assert_frame_equal(
-            saved.sort_values(keys).reset_index(drop=True), expected, check_exact=True
-        )
-        assert interim.source_content_identity(raw_root, "analyst_forecast") == identity
-        assert policy.used_memory_bytes == 0
-    assert policy.state == "CLOSED" and policy._lock.closed
+    assert raw_schemas.read_export_header(path) == tuple(header.decode().split(","))
+    identity = interim.source_content_identity(raw_root, "analyst_forecast")
+    assert identity is not None
+    result = interim.materialize_interim_data(
+        layout=layout, raw_root=raw_root, data_ids=("analyst_forecast",)
+    )
+    saved = read_dataset(result.artifact_roots["analyst_forecast"])
+    assert len(saved) == count and not saved.duplicated(keys).any()
+    pd.testing.assert_frame_equal(
+        saved.sort_values(keys).reset_index(drop=True), expected, check_exact=True
+    )
+    assert interim.source_content_identity(raw_root, "analyst_forecast") == identity
     assert filesystem_read_bytes(path) == payload
-    if case == "large-cr":
-        assert real_csv_handles[1]
 
 
 @pytest.mark.parametrize("ending", (b"\n", b"\r"))
@@ -3344,25 +2112,13 @@ def test_true_oversize_record_after_short_header_cannot_publish(
     filesystem_write_bytes(path, payload)
     target = layout.interim_data_root("csmar", "analyst_forecast")
     assert not filesystem_exists(target)
-    with runtime_resource_policy_scope() as policy:
-        assert policy.explicit_memory_cap_bytes is None
-        assert raw_schemas.read_export_header(path, resource_policy=policy) == tuple(
-            header.decode().split(",")
+    assert raw_schemas.read_export_header(path) == tuple(header.decode().split(","))
+    assert interim.source_content_identity(raw_root, "analyst_forecast") is not None
+    with pytest.raises(ValueError, match="^csmar_logical_record_exceeds_source_limit$"):
+        interim.materialize_interim_data(
+            layout=layout, raw_root=raw_root, data_ids=("analyst_forecast",)
         )
-        assert interim.source_content_identity(raw_root, "analyst_forecast") is not None
-        with pytest.raises(
-            ValueError, match="^csmar_logical_record_exceeds_source_limit$"
-        ):
-            interim.materialize_interim_data(
-                layout=layout,
-                raw_root=raw_root,
-                data_ids=("analyst_forecast",),
-                resource_policy=policy,
-            )
-        assert not filesystem_exists(target)
-        assert policy.used_memory_bytes == 0
-    assert policy.state == "CLOSED" and policy._lock.closed
-    assert real_csv_handles[1]
+    assert not filesystem_exists(target)
     assert filesystem_read_bytes(path) == payload
 
 
@@ -3372,35 +2128,25 @@ def test_large_cr_reader_early_close_releases_real_handles(tmp_path, real_csv_ha
     assert len(payload) == 1048625
     path = tmp_path / "early-close.csv"
     filesystem_write_bytes(path, payload)
-    with runtime_resource_policy_scope() as policy:
-        assert policy.explicit_memory_cap_bytes is None
-        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
-        try:
-            record, _ = next(records)
-            assert record.materialize() == header.decode().split(",")
-            record, _ = next(records)
-            assert record.materialize() == rows[0]
-        finally:
-            records.close()
-        assert policy.used_memory_bytes == 0
-    assert policy.state == "CLOSED" and policy._lock.closed
-    assert real_csv_handles[1]
+    records = raw_schemas.iter_export_csv_records(path)
+    try:
+        record, _ = next(records)
+        assert record == header.decode().split(",")
+        record, _ = next(records)
+        assert record == rows[0]
+    finally:
+        records.close()
     assert filesystem_read_bytes(path) == payload
 
 
 @pytest.mark.parametrize("payload", (b"bad\xff,2\n", b'"bad\r\n\xff",2\r\n'))
-def test_invalid_utf8_remains_strict_after_physical_fragment_fallback(
-    tmp_path, real_csv_handles, payload
-):
+def test_invalid_utf8_is_rejected_in_csv_records(tmp_path, real_csv_handles, payload):
     path = tmp_path / "invalid-utf8.csv"
     filesystem_write_bytes(path, payload)
-    with runtime_resource_policy_scope() as policy:
-        records = raw_schemas.iter_export_csv_records(path, resource_policy=policy)
-        try:
-            with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
-                next(records)
-        finally:
-            records.close()
-        assert policy.used_memory_bytes == 0
-    assert policy.state == "CLOSED" and policy._lock.closed
+    records = raw_schemas.iter_export_csv_records(path)
+    try:
+        with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
+            next(records)
+    finally:
+        records.close()
     assert filesystem_read_bytes(path) == payload

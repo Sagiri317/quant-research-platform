@@ -3,9 +3,8 @@
 from __future__ import annotations
 
 import os
-import sys
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -17,38 +16,22 @@ import pyarrow.parquet as pq
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import DataSpec
 from quant_research_platform.contracts.json_codec import (
-    bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
     canonical_json_hash,
-    json_record_working_set_bytes,
     parse_qrp_json_object,
 )
-from quant_research_platform.contracts.validation import (
-    clear_exception_frames,
-    strict_timestamp_series,
-)
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    OwnedValue,
-    RuntimeResourcePolicy,
-    _close_lease_preserving_primary,
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
+    DEFAULT_BATCH_ROWS,
     require_free_disk_headroom,
-    runtime_resource_policy_scope,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.datasets.inspection import (
-    _inspection_result_bound,
     inspection_from_persisted_session,
 )
-from quant_research_platform.storage.datasets.inventory import (
-    DatasetSessionInventory,
-)
-from quant_research_platform.storage.datasets.observation import (
-    DatasetSummaryObserver,
-)
+from quant_research_platform.storage.datasets.inventory import DatasetSessionInventory
+from quant_research_platform.storage.datasets.observation import DatasetSummaryObserver
 from quant_research_platform.storage.datasets.paths import (
     partition_frames,
     partition_part_path,
@@ -59,13 +42,12 @@ from quant_research_platform.storage.datasets.paths import (
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     dataset_session_from_inventory,
-    iter_bounded_frame_chunks,
     iter_declared_parquet_member_batches,
+    iter_frame_chunks,
 )
 from quant_research_platform.storage.datasets.schema import (
     data_spec_payload,
     encode_logical_category_value,
-    frame_schema_working_set_bounds,
     logical_dtype_metadata_bytes,
     logical_dtype_payload_from_frame,
     merge_dataset_instance_metadata,
@@ -74,18 +56,13 @@ from quant_research_platform.storage.datasets.schema import (
     parse_logical_dtype_metadata,
     physical_schema_columns,
     physical_schema_from_schema,
-    physical_schema_working_set_bytes,
-    require_frame_logical_dtype_metadata_within_target,
-    require_logical_dtype_metadata_within_target,
     validate_dataset_spec,
+    validate_frame_objects,
     validate_persisted_logical_schema,
 )
 from quant_research_platform.storage.datasets.types import DatasetInspection
 from quant_research_platform.storage.errors import OutputAlreadyExistsError
-from quant_research_platform.storage.exact_keys import (
-    EXACT_KEY_SQLITE_CACHE_BYTES,
-    ExactPrimaryKeyIndex,
-)
+from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
     filesystem_mkdir,
@@ -94,18 +71,9 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.manifests import write_internal_artifact_manifest
 from quant_research_platform.storage.parquet import (
-    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
     DatasetPartMetadata,
-    _parquet_row_group_footer_upper_bound,
     _parquet_row_group_size,
-    _table_parquet_page_working_set_bytes,
-    table_with_decoded_row_bounds,
 )
-
-_TIMESTAMP_PREPARATION_BYTES_PER_ROW = 256
-_ARROW_CELL_OVERHEAD_BYTES = 9
-_ARROW_FRAME_FIXED_BYTES = 4 * 1024
-_DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES = EXACT_KEY_SQLITE_CACHE_BYTES
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,7 +100,6 @@ class _WriteStats:
     logical_dtype_hash: str | None = None
     _schema: list[dict[str, Any]] | None = None
     _arrow_schema: pa.Schema | None = None
-    _arrow_schema_bytes: int = 0
     _logical_dtype_plan: dict[str, Any] | None = None
     _summary_observer: DatasetSummaryObserver = field(init=False)
 
@@ -146,14 +113,8 @@ class _WriteStats:
             exact_key_index=self.key_tracker,
         )
 
-    def declared_frame(
-        self,
-        frame: pd.DataFrame,
-        *,
-        target_chunk_bytes: int,
-    ) -> pd.DataFrame:
+    def declared_frame(self, frame: pd.DataFrame) -> pd.DataFrame:
         """Validate the input declaration without copying or Arrow conversion."""
-
         if type(frame) is not pd.DataFrame:
             raise TypeError("invalid_dataset_chunk")
         labels = list(frame.columns)
@@ -167,17 +128,9 @@ class _WriteStats:
         missing = sorted(set(self.spec.required_columns).difference(frame.columns))
         if missing:
             raise ValueError(f"missing_required_columns: {', '.join(missing)}")
-        require_frame_logical_dtype_metadata_within_target(
-            frame,
-            columns=tuple(self.spec.required_columns),
-            target_chunk_bytes=target_chunk_bytes,
-        )
         return frame
 
-    def prepare_frame(
-        self,
-        frame: pd.DataFrame,
-    ) -> tuple[pd.DataFrame, dict[str, Any]]:
+    def prepare_frame(self, frame: pd.DataFrame) -> tuple[pd.DataFrame, dict[str, Any]]:
         output = frame.loc[:, list(self.spec.required_columns)].copy()
         for column in self.spec.primary_key:
             if self.spec.column_roles.get(column) is ColumnRole.TIMESTAMP:
@@ -187,7 +140,7 @@ class _WriteStats:
                     allow_null=True,
                 )
         logical_dtypes = logical_dtype_payload_from_frame(output)
-        return output, logical_dtypes
+        return (output, logical_dtypes)
 
     def table_for_frame(
         self,
@@ -195,7 +148,6 @@ class _WriteStats:
         *,
         schema: pa.Schema | None,
         object_string_columns: tuple[str, ...],
-        admit: Callable[[int], None],
     ) -> pa.Table:
         try:
             table = pa.Table.from_pandas(frame, schema=schema, preserve_index=False)
@@ -203,7 +155,6 @@ class _WriteStats:
             raise ValueError("unsupported_dataset_logical_dtype") from exc
         physical_schema = _canonical_storage_schema(table.schema.remove_metadata())
         if self._arrow_schema is None:
-            # A bounded slice can be null-only while its declared frame has strings.
             for name in object_string_columns:
                 field = physical_schema.field(name)
                 if pa.types.is_null(field.type):
@@ -211,10 +162,7 @@ class _WriteStats:
                         physical_schema.get_field_index(name),
                         field.with_type(pa.string()),
                     )
-            schema_bytes = physical_schema_working_set_bytes(physical_schema)
-            admit(schema_bytes)
             self._arrow_schema = physical_schema
-            self._arrow_schema_bytes = schema_bytes
         elif physical_schema != self._arrow_schema:
             try:
                 unified = pa.unify_schemas(
@@ -227,13 +175,7 @@ class _WriteStats:
             physical_schema = self._arrow_schema
         return table.cast(physical_schema, safe=True)
 
-    def observe_file(
-        self,
-        path: Path,
-        *,
-        target_chunk_bytes: int,
-        operation_headroom_bytes: int,
-    ) -> None:
+    def observe_file(self, path: Path, *, batch_rows: int = DEFAULT_BATCH_ROWS) -> None:
         observed_metadata: DatasetPartMetadata | None = None
         observed_logical_dtypes: dict[str, Any] | None = None
         dtype_overrides: dict[str, object] = {}
@@ -246,14 +188,10 @@ class _WriteStats:
                 metadata.logical_dtype_payload
             )
             observed_logical_dtypes = logical_payload
-            self.observe_logical_dtype_payload(
-                logical_payload,
-                target_chunk_bytes=operation_headroom_bytes,
-            )
+            self.observe_logical_dtype_payload(logical_payload)
             dtype_overrides.update(
                 pandas_dtype_overrides_from_logical_payload(
-                    logical_payload,
-                    columns=tuple(metadata.schema.names),
+                    logical_payload, columns=tuple(metadata.schema.names)
                 )
             )
             physical_schema = physical_schema_from_schema(metadata.schema)
@@ -268,8 +206,7 @@ class _WriteStats:
         def observe_persisted_frame(persisted_frame: pd.DataFrame) -> None:
             assert observed_logical_dtypes is not None
             _validate_persisted_categorical_values(
-                persisted_frame,
-                observed_logical_dtypes,
+                persisted_frame, observed_logical_dtypes
             )
 
         def observe_batch(batch: pa.RecordBatch, logical_frame: pd.DataFrame) -> None:
@@ -282,8 +219,7 @@ class _WriteStats:
         for _ in iter_declared_parquet_member_batches(
             path,
             expected_identity=dataset_file_identity(path),
-            target_chunk_bytes=target_chunk_bytes,
-            operation_headroom_bytes=operation_headroom_bytes,
+            batch_rows=batch_rows,
             metadata_observer=observe_metadata,
             dtype_overrides=dtype_overrides,
             persisted_frame_observer=observe_persisted_frame,
@@ -301,29 +237,18 @@ class _WriteStats:
         self.partition_row_counts[partition] = (
             self.partition_row_counts.get(partition, 0) + observed_rows
         )
-        self.inventory.add(path, observed_metadata, selected=True)
+        self.inventory.add(path, observed_metadata)
 
-    def observe_logical_dtype_payload(
-        self,
-        logical_payload: Mapping[str, Any],
-        *,
-        target_chunk_bytes: int,
-    ) -> None:
-        spillable_payload = {
-            "schema_id": logical_payload["schema_id"],
-            "columns": [],
-        }
+    def observe_logical_dtype_payload(self, logical_payload: Mapping[str, Any]) -> None:
+        category_plan = {"schema_id": logical_payload["schema_id"], "columns": []}
         for descriptor in logical_payload["columns"]:
             current = dict(descriptor)
             if current["kind"] == "categorical":
                 encoded_values = (
-                    encode_logical_category_value(
-                        item,
-                        target_chunk_bytes=target_chunk_bytes,
-                    )
+                    encode_logical_category_value(item)
                     for item in current["categories"]
                 )
-            if current["kind"] == "categorical" and not current["ordered"]:
+            if current["kind"] == "categorical" and (not current["ordered"]):
                 self.key_tracker.add_identity_payloads(
                     namespace=_category_namespace(current["name"]),
                     payloads=encoded_values,
@@ -332,45 +257,18 @@ class _WriteStats:
             elif current["kind"] == "categorical":
                 for _ in encoded_values:
                     pass
-            spillable_payload["columns"].append(current)
+            category_plan["columns"].append(current)
         self._logical_dtype_plan = (
-            spillable_payload
+            category_plan
             if self._logical_dtype_plan is None
-            else merge_logical_dtype_payloads(
-                [self._logical_dtype_plan, spillable_payload]
-            )
+            else merge_logical_dtype_payloads([self._logical_dtype_plan, category_plan])
         )
 
-    def payload(
-        self,
-        *,
-        target_chunk_bytes: int,
-        spec_payload: Mapping[str, Any],
-        admit: Callable[[int], None],
-    ) -> dict[str, Any]:
+    def payload(self, *, spec_payload: Mapping[str, Any]) -> dict[str, Any]:
         if self.columns is None or self._schema is None or self.schema_hash is None:
             raise ValueError("dataset_schema_missing")
-        self.logical_dtypes = self.materialized_logical_dtypes(
-            target_chunk_bytes=target_chunk_bytes, admit=admit
-        )
+        self.logical_dtypes = self.materialized_logical_dtypes()
         self.logical_dtype_hash = canonical_json_hash(self.logical_dtypes)
-        # The accumulator owns scalars; these are the new sorted containers.
-        admit(
-            json_record_working_set_bytes(
-                2
-                + 2 * len(spec_payload)
-                + len(self.columns)
-                + 2 * len(self.partition_row_counts)
-                + len(self.partitions)
-                + 2
-                * (
-                    len(self._summary_observer.null_count_summary)
-                    + len(self._summary_observer.non_finite_count_summary)
-                    + len(self._summary_observer.factor_nan_profile)
-                    + len(self._summary_observer.label_nan_profile)
-                )
-            )
-        )
         payload = dict(spec_payload)
         summary = self._summary_observer.summary_payload()
         payload.update(
@@ -395,892 +293,148 @@ class _WriteStats:
         )
         return payload
 
-    def materialized_logical_dtypes(
-        self,
-        *,
-        target_chunk_bytes: int,
-        admit: Callable[[int], None],
-    ) -> dict[str, Any]:
+    def materialized_logical_dtypes(self) -> dict[str, Any]:
         if self._logical_dtype_plan is None:
             raise ValueError("dataset_logical_dtypes_missing")
-        plan_bytes = bounded_rendered_qrp_json_object_size(
-            self._logical_dtype_plan, lazy_arrays={}, max_bytes=target_chunk_bytes
-        )
-        admit(json_record_working_set_bytes(plan_bytes))
         logical_dtypes = merge_logical_dtype_payloads([self._logical_dtype_plan])
-
-        def streamed_category_payloads(
-            descriptor: Mapping[str, Any],
-        ) -> Iterable[Mapping[str, Any]]:
-            if descriptor["ordered"]:
-                return iter(descriptor["categories"])
-            return (
-                parse_qrp_json_object(raw)["value"]
-                for raw in self.key_tracker.identity_payload_values(
-                    namespace=_category_namespace(str(descriptor["name"]))
-                )
-            )
-
-        exact_metadata_bytes = require_logical_dtype_metadata_within_target(
-            logical_dtypes,
-            category_payloads=streamed_category_payloads,
-            target_chunk_bytes=target_chunk_bytes,
-        )
-        admit(json_record_working_set_bytes(exact_metadata_bytes))
         for descriptor in logical_dtypes["columns"]:
-            if descriptor["kind"] != "categorical" or descriptor["ordered"]:
-                continue
-            descriptor["categories"] = [
-                parse_qrp_json_object(raw)["value"]
-                for raw in self.key_tracker.identity_payload_values(
-                    namespace=_category_namespace(descriptor["name"])
-                )
-            ]
-        if len(logical_dtype_metadata_bytes(logical_dtypes)) != exact_metadata_bytes:
-            raise AssertionError("dataset_logical_dtype_metadata_size_mismatch")
+            if descriptor["kind"] == "categorical" and (not descriptor["ordered"]):
+                descriptor["categories"] = [
+                    parse_qrp_json_object(raw)["value"]
+                    for raw in self.key_tracker.identity_payload_values(
+                        namespace=_category_namespace(descriptor["name"])
+                    )
+                ]
         return logical_dtypes
 
 
 def write_dataset(
     dataset_root: Path,
-    data: pd.DataFrame | Iterable[object],
+    data: pd.DataFrame | Iterable[pd.DataFrame],
     *,
     spec: DataSpec,
     instance_metadata: Mapping[str, Any] | None = None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
-    resource_policy: RuntimeResourcePolicy | None,
-    borrowed_input: bool = False,
 ) -> DatasetInspection:
-    with runtime_resource_policy_scope(resource_policy) as policy:
-        final_root = Path(dataset_root)
-        with policy.lease("storage.dataset.write", 0) as write_lease:
-
-            def admit(size: int) -> None:
-                cap = policy.explicit_memory_cap_bytes
-                if cap is None or policy.used_memory_bytes + size <= cap:
-                    policy.require_working_set(
-                        size, error="dataset_working_set_exceeds_task_memory_budget"
-                    )
-                write_lease.grow(size)
-
-            try:
-                validate_dataset_spec(spec, _admit=admit)
-                validate_dataset_artifact_root(final_root, spec)
-                final_root = require_artifact_root(final_root)
-                write_lease.shrink_to(0)
-                admit(_DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES)
-                owned = _write_dataset_body(
-                    final_root,
-                    data,
-                    spec=spec,
-                    instance_metadata=instance_metadata,
-                    staged_validator=staged_validator,
-                    borrowed_input=borrowed_input,
-                    resource_policy=policy,
-                    write_lease=write_lease,
-                    admit=admit,
-                )
-            except BaseException as error:
-                clear_exception_frames(error)
-                raise
-        result = owned.value
-        owned.release(owner="storage.dataset.write.result")
-        return result
-
-
-def _write_dataset_body(
-    final_root: Path,
-    data: pd.DataFrame | Iterable[object],
-    *,
-    spec: DataSpec,
-    instance_metadata: Mapping[str, Any] | None,
-    staged_validator: Callable[[DatasetWriteReceipt], None] | None,
-    borrowed_input: bool,
-    resource_policy: RuntimeResourcePolicy,
-    write_lease: MemoryLease,
-    admit: Callable[[int], None],
-) -> OwnedValue[DatasetInspection]:
+    validate_dataset_spec(spec)
+    final_root = Path(dataset_root)
+    validate_dataset_artifact_root(final_root, spec)
+    final_root = require_artifact_root(final_root)
     input_chunks = iter((data,)) if isinstance(data, pd.DataFrame) else iter(data)
-    close = getattr(input_chunks, "close", None)
-    input_closed = close is None
-    input_cleanup_failed = False
-    lease_cleanup_failed = False
-    active_producer_leases: list[MemoryLease] = []
-    active_producer_values: list[OwnedValue[pd.DataFrame]] = []
-    pending_result: OwnedValue[DatasetInspection] | None = None
+    with closing_iterator(ExitStack()) as input_owner:
+        close = getattr(input_chunks, "close", None)
+        if close is not None:
+            input_owner.callback(close)
+        chunks = input_chunks
 
-    def close_input_once() -> None:
-        nonlocal input_cleanup_failed, input_closed
-        if input_closed or input_cleanup_failed:
-            return
-        try:
-            close()
-        except BaseException:
-            input_cleanup_failed = True
-            raise
-        input_closed = True
+        def writer(temp_root: Path) -> DatasetInspection:
+            inventory = DatasetSessionInventory(data_root=temp_root / "data")
+            key_tracker = ExactPrimaryKeyIndex(primary_key=spec.primary_key)
+            accumulator = _write_contents(
+                chunks,
+                temp_root / "data",
+                spec=spec,
+                batch_rows=DEFAULT_BATCH_ROWS,
+                key_tracker=key_tracker,
+                inventory=inventory,
+            )
+            spec_payload = data_spec_payload(spec)
+            write_internal_artifact_manifest(temp_root / "spec.json", spec_payload)
+            payload = accumulator.payload(spec_payload=spec_payload)
+            payload["schema_id"] = "qrp-dataset-manifest"
+            inventory.sort_parts()
+            payload["content_hash"] = inventory.content_hash()
+            manifest = merge_dataset_instance_metadata(
+                payload, instance_metadata, spec=spec_payload
+            )
+            write_internal_artifact_manifest(
+                temp_root / "_manifest" / "manifest.json", manifest
+            )
+            session = dataset_session_from_inventory(
+                temp_root, inventory=inventory, columns=None, time_window=None
+            )
+            if staged_validator is not None:
+                staged_validator(DatasetWriteReceipt(temp_root, session, key_tracker))
+            session.verify()
+            result = inspection_from_persisted_session(
+                session, published_root=final_root
+            )
+            input_owner.close()
+            return result
 
-    def close_input_and_active_leases() -> None:
-        nonlocal lease_cleanup_failed
-        primary = sys.exception()
-        first_failure: BaseException | None = None
         try:
-            close_input_once()
-        except BaseException as cleanup_error:
-            if primary is None:
-                first_failure = cleanup_error
-            else:
-                primary.add_note(
-                    "dataset producer close also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-        active_producer_values.clear()
-        if lease_cleanup_failed:
-            return
-        while active_producer_leases:
-            lease = active_producer_leases.pop()
-            try:
-                lease.close()
-            except BaseException as cleanup_error:
-                lease_cleanup_failed = True
-                if primary is None:
-                    if first_failure is None:
-                        first_failure = cleanup_error
-                    else:
-                        first_failure.add_note(
-                            "dataset producer lease close also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
-                else:
-                    primary.add_note(
-                        "dataset producer lease close also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-        if first_failure is not None:
-            raise first_failure
-
-    def _writer(temp_root: Path) -> OwnedValue[DatasetInspection]:
-        nonlocal pending_result
-        try:
-            if resource_policy.operation_headroom_bytes <= 0:
-                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-            with (
-                DatasetSessionInventory(
-                    data_root=temp_root / "data",
-                    resource_policy=resource_policy,
-                ) as inventory,
-                ExactPrimaryKeyIndex(
-                    primary_key=spec.primary_key,
-                ) as key_tracker,
-            ):
-                accumulator = _write_contents(
-                    input_chunks,
-                    temp_root / "data",
-                    spec=spec,
-                    target_chunk_bytes=resource_policy.operation_headroom_bytes,
-                    key_tracker=key_tracker,
-                    inventory=inventory,
-                    borrowed_input=borrowed_input,
-                    active_producer_leases=active_producer_leases,
-                    active_producer_values=active_producer_values,
-                    admit=admit,
-                )
-                spec_payload = data_spec_payload(spec, _admit=admit)
-                write_internal_artifact_manifest(
-                    temp_root / "spec.json",
-                    spec_payload,
-                    _admit=admit,
-                )
-                payload = accumulator.payload(
-                    target_chunk_bytes=resource_policy.operation_headroom_bytes,
-                    spec_payload=spec_payload,
-                    admit=admit,
-                )
-                payload["schema_id"] = "qrp-dataset-manifest"
-                payload["content_hash"] = inventory.content_hash(
-                    resource_policy=resource_policy
-                )
-                manifest = merge_dataset_instance_metadata(
-                    payload,
-                    instance_metadata,
-                    spec=spec_payload,
-                    _admit=admit,
-                )
-                write_internal_artifact_manifest(
-                    temp_root / "_manifest" / "manifest.json",
-                    manifest,
-                    _admit=admit,
-                )
-                del manifest, payload, spec_payload, accumulator
-                write_lease.shrink_to(_DATASET_WRITE_FIXED_OWNER_RESERVE_BYTES)
-                with dataset_session_from_inventory(
-                    temp_root,
-                    inventory=inventory,
-                    columns=None,
-                    time_window=None,
-                    resource_policy=resource_policy,
-                ) as session:
-                    if staged_validator is not None:
-                        staged_validator(
-                            DatasetWriteReceipt(
-                                root=temp_root,
-                                session=session,
-                                exact_primary_key_index=key_tracker,
-                            )
-                        )
-                    session.verify()
-                    result_bound = _inspection_result_bound(session)
-                    resource_policy.require_working_set(
-                        result_bound,
-                        error="dataset_working_set_exceeds_task_memory_budget",
-                    )
-                    try:
-                        result_lease = resource_policy.lease(
-                            "storage.dataset.write.result",
-                            result_bound,
-                        )
-                    except MemoryError:
-                        raise ValueError(
-                            "dataset_working_set_exceeds_task_memory_budget"
-                        ) from None
-                    try:
-                        result = inspection_from_persisted_session(
-                            session,
-                            published_root=final_root,
-                        )
-                        pending_result = OwnedValue(result, result_lease)
-                    except BaseException:
-                        result = None
-                        _close_lease_preserving_primary(
-                            result_lease,
-                            owner="storage.dataset.write.result",
-                        )
-                        raise
-                return pending_result
-        finally:
-            accumulator = spec_payload = payload = manifest = None
-            del accumulator, spec_payload, payload, manifest
-            close_input_and_active_leases()
-
-    try:
-        try:
-            published = atomic_write_directory(final_root, _writer)
-            pending_result = None
-            return published
+            return atomic_write_directory(final_root, writer)
         except OutputAlreadyExistsError as exc:
             raise ValueError("dataset_exists") from exc
-    finally:
-        result_to_release = pending_result
-        pending_result = None
-        try:
-            if result_to_release is not None:
-                result_to_release.release(owner="storage.dataset.write.result")
-        finally:
-            close_input_and_active_leases()
 
 
 def _write_contents(
-    chunks: Iterator[Any],
+    chunks: Iterator[pd.DataFrame],
     root: Path,
     *,
     spec: DataSpec,
-    target_chunk_bytes: int,
+    batch_rows: int = DEFAULT_BATCH_ROWS,
     key_tracker: ExactPrimaryKeyIndex,
     inventory: DatasetSessionInventory,
-    borrowed_input: bool,
-    active_producer_leases: list[MemoryLease],
-    active_producer_values: list[OwnedValue[pd.DataFrame]],
-    admit: Callable[[int], None],
 ) -> _WriteStats:
-    resource_policy = current_runtime_resource_policy()
-    if resource_policy is None:
-        raise RuntimeError("runtime_resource_policy_not_active")
-    timestamp_column = validate_dataset_spec(spec, _admit=admit)
-    timestamp_key_count = sum(
-        spec.column_roles.get(column) is ColumnRole.TIMESTAMP
-        for column in spec.primary_key
-    )
+    timestamp_column = validate_dataset_spec(spec)
     accumulator = _WriteStats(
-        spec=spec,
-        data_root=root,
-        key_tracker=key_tracker,
-        inventory=inventory,
+        spec=spec, data_root=root, key_tracker=key_tracker, inventory=inventory
     )
     part_indices: dict[str, int] = {}
     saw_empty_schema = False
-    producer_bound: int | tuple[int, MemoryLease] | None = None
-    chunk: pd.DataFrame | None = None
-    declared: pd.DataFrame | None = None
-    frame: pd.DataFrame | None = None
-    planning_frame: pd.DataFrame | None = None
-    bounded_frame: pd.DataFrame | None = None
-    prepared_frame: pd.DataFrame | None = None
-    partition_frame: pd.DataFrame | None = None
-    bounded_partition: pd.DataFrame | None = None
-    table: pa.Table | None = None
-    persisted_table: pa.Table | None = None
-
-    def clear_current_chunk() -> None:
-        nonlocal bounded_frame, bounded_partition, chunk, declared, frame
-        nonlocal planning_frame
-        nonlocal partition_frame, persisted_table, prepared_frame, table
-        chunk = None
-        declared = None
-        frame = None
-        planning_frame = None
-        bounded_frame = None
-        prepared_frame = None
-        partition_frame = None
-        bounded_partition = None
-        table = None
-        persisted_table = None
-
-    while True:
-        producer_lease: MemoryLease | None = None
-        if borrowed_input:
-            try:
-                chunk = next(chunks)
-            except StopIteration:
-                break
-        else:
-            if producer_bound is None:
-                try:
-                    producer_bound = next(chunks)
-                except StopIteration:
-                    break
-            if isinstance(producer_bound, tuple):
-                if len(producer_bound) != 2:
-                    raise ValueError("invalid_dataset_producer_handoff")
-                handoff_bound, handoff_lease = producer_bound
-                if (
-                    isinstance(handoff_bound, bool)
-                    or type(handoff_bound) is not int
-                    or handoff_bound <= 0
-                    or not isinstance(handoff_lease, MemoryLease)
-                ):
-                    raise ValueError("invalid_dataset_producer_handoff")
-                if (
-                    handoff_lease._root is not resource_policy
-                    or not handoff_lease.active
-                ):
-                    raise ValueError("invalid_dataset_producer_handoff")
-                if handoff_lease.reserved_bytes < handoff_bound:
-                    additional = handoff_bound - handoff_lease.reserved_bytes
-                    cap = resource_policy.explicit_memory_cap_bytes
-                    if (
-                        cap is None
-                        or resource_policy.used_memory_bytes + additional <= cap
-                    ):
-                        resource_policy.require_working_set(
-                            additional,
-                            error="dataset_producer_working_set_exceeds_memory_capacity",
-                        )
-                    handoff_lease.grow(additional)
-                handoff_lease.transfer("storage.dataset.producer")
-                producer_lease = handoff_lease
-            else:
-                if (
-                    isinstance(producer_bound, bool)
-                    or type(producer_bound) is not int
-                    or producer_bound <= 0
-                ):
-                    raise ValueError("invalid_dataset_producer_bound")
-                cap = resource_policy.explicit_memory_cap_bytes
-                if (
-                    cap is None
-                    or resource_policy.used_memory_bytes + producer_bound <= cap
-                ):
-                    resource_policy.require_working_set(
-                        producer_bound,
-                        error="dataset_producer_working_set_exceeds_memory_capacity",
-                    )
-                producer_lease = resource_policy.lease(
-                    "storage.dataset.producer",
-                    producer_bound,
+    for chunk in chunks:
+        declared = pd.DataFrame(accumulator.declared_frame(chunk), copy=False)
+        object_string_columns = validate_frame_objects(declared)
+        for bounded_frame in (
+            (declared,)
+            if declared.empty
+            else iter_frame_chunks(declared, batch_rows=batch_rows)
+        ):
+            frame, logical_dtypes = accumulator.prepare_frame(bounded_frame)
+            if frame.empty:
+                accumulator.table_for_frame(
+                    frame, schema=None, object_string_columns=object_string_columns
                 )
-            if (
-                not active_producer_leases
-                or active_producer_leases[-1] is not producer_lease
-            ):
-                active_producer_leases.append(producer_lease)
-            send = getattr(chunks, "send", None)
-            if not callable(send):
-                raise TypeError("invalid_dataset_producer")
-            try:
-                owned = send(producer_lease)
-            except StopIteration:
-                producer_lease.close()
-                active_producer_leases.pop()
-                producer_lease = None
-            if producer_lease is None:
-                break
-            if not isinstance(owned, OwnedValue):
-                raise TypeError("invalid_dataset_owned_frame")
-            if owned.lease is not producer_lease:
-                raise RuntimeError("runtime_memory_lease_transfer_mismatch")
-            if type(owned.value) is not pd.DataFrame:
-                raise TypeError("invalid_dataset_chunk")
-            producer_lease.transfer("storage.dataset.input")
-            chunk = owned.value
-            active_producer_values.append(owned)
-            del owned
-            producer_bound = None
-        if type(chunk) is not pd.DataFrame:
-            raise TypeError("invalid_dataset_chunk")
-        with ExitStack() as publication_state:
-            try:
-                (
-                    schema_fixed_bytes,
-                    schema_per_row_bytes,
-                    nested_arrow_per_row_bytes,
-                    object_string_columns,
-                ) = frame_schema_working_set_bounds(
-                    chunk, resource_policy=resource_policy
-                )
-                if accumulator._logical_dtype_plan is None and any(
-                    isinstance(dtype, pd.CategoricalDtype) and dtype.ordered
-                    for dtype in chunk.dtypes
-                ):
-                    # Ordered domains survive the batch; later domains must match.
-                    admit(schema_fixed_bytes)
-                # Each field's container bound also covers its shallow manager/block
-                # wrappers. Index levels add only borrowed views, not value copies.
-                view_bound = schema_fixed_bytes + json_record_working_set_bytes(
-                    2 + 2 * (chunk.index.nlevels + chunk.columns.nlevels)
-                )
-                publication_state.enter_context(
-                    resource_policy.lease("storage.dataset.input.view", view_bound)
-                )
-            except BaseException as error:
-                clear_current_chunk()
-                clear_exception_frames(error)
-                raise
-            publication_state.callback(clear_current_chunk)
-            # Construct before memory inspection/slicing can finalize pandas views.
-            chunk = pd.DataFrame(chunk, copy=False)
-            chunk_bytes = pandas_frame_payload_bytes(chunk)
-            if (
-                producer_lease is not None
-                and chunk_bytes > producer_lease.reserved_bytes
-            ):
-                raise ValueError("dataset_producer_bound_invalid")
-            metadata_budget = resource_policy.operation_headroom_bytes
-            if metadata_budget <= 0:
-                raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-            with resource_policy.lease("storage.dataset.schema", schema_fixed_bytes):
-                try:
-                    declared = accumulator.declared_frame(
-                        chunk, target_chunk_bytes=schema_fixed_bytes
-                    )
-                except BaseException as error:
-                    clear_exception_frames(error)
-                    raise
-            provisional_target_bytes = _dataset_write_operator_target_bytes(
-                declared,
-                operation_headroom_bytes=metadata_budget,
-                timestamp_key_count=timestamp_key_count,
-                partitioned=bool(spec.partition_columns),
-                native_working_set_bytes=_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
-                schema_fixed_bytes=max(
-                    schema_fixed_bytes, accumulator._arrow_schema_bytes
-                ),
-                schema_per_row_bytes=schema_per_row_bytes,
-                nested_arrow_per_row_bytes=nested_arrow_per_row_bytes,
-            )
-            provisional_target_bytes = min(
-                provisional_target_bytes,
-                max(1, resource_policy.planning_headroom_bytes),
-            )
-            if declared.empty:
-                prepared_bound = (
-                    chunk_bytes
-                    + len(declared)
-                    * timestamp_key_count
-                    * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
-                )
-                with (
-                    resource_policy.lease("storage.dataset.schema", schema_fixed_bytes),
-                    resource_policy.lease("storage.dataset.prepare", prepared_bound),
-                ):
-                    try:
-                        frame, logical_dtypes = accumulator.prepare_frame(declared)
-                        frame_bytes = pandas_frame_payload_bytes(frame)
-                        arrow_bound = (
-                            _ARROW_FRAME_FIXED_BYTES
-                            + frame_bytes
-                            + len(frame)
-                            * len(frame.columns)
-                            * _ARROW_CELL_OVERHEAD_BYTES
-                            + len(frame) * nested_arrow_per_row_bytes
-                        )
-                        arrow_cast_bound = arrow_bound
-                        with resource_policy.lease(
-                            "storage.dataset.arrow",
-                            arrow_bound + arrow_cast_bound,
-                        ):
-                            try:
-                                table = accumulator.table_for_frame(
-                                    frame,
-                                    schema=None,
-                                    object_string_columns=object_string_columns,
-                                    admit=admit,
-                                )
-                                del table
-                            except BaseException as error:
-                                clear_exception_frames(error)
-                                raise
-                            finally:
-                                table = persisted_table = None
-                        metadata_budget = resource_policy.operation_headroom_bytes
-                        accumulator.observe_logical_dtype_payload(
-                            logical_dtypes,
-                            target_chunk_bytes=metadata_budget,
-                        )
-                    except BaseException as error:
-                        clear_exception_frames(error)
-                        raise
-                    finally:
-                        frame = logical_dtypes = prepared_frame = (
-                            bounded_logical_dtypes
-                        ) = None
+                accumulator.observe_logical_dtype_payload(logical_dtypes)
                 saw_empty_schema = True
-                del frame, logical_dtypes, declared, chunk
-                if producer_lease is not None:
-                    active_producer_values.pop()
-                    try:
-                        producer_bound = send(None)
-                    except StopIteration:
-                        producer_bound = None
-                        producer_finished = True
-                    else:
-                        producer_finished = False
-                    if not (
-                        isinstance(producer_bound, tuple)
-                        and len(producer_bound) == 2
-                        and producer_bound[1] is producer_lease
-                    ):
-                        producer_lease.close()
-                        active_producer_leases.pop()
-                    producer_lease = None
-                    if producer_finished:
-                        break
                 continue
-            for planning_frame in iter_bounded_frame_chunks(
-                declared,
-                target_chunk_bytes=provisional_target_bytes,
+            for partition, partition_frame in partition_frames(
+                frame,
+                timestamp_column=timestamp_column,
+                partition_columns=spec.partition_columns,
             ):
-                prepared_bound = (
-                    pandas_frame_payload_bytes(planning_frame)
-                    + len(planning_frame)
-                    * timestamp_key_count
-                    * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
+                table = accumulator.table_for_frame(
+                    partition_frame,
+                    schema=None,
+                    object_string_columns=object_string_columns,
                 )
-                with (
-                    resource_policy.lease(
-                        "storage.dataset.schema",
-                        max(schema_fixed_bytes, accumulator._arrow_schema_bytes)
-                        + len(planning_frame) * schema_per_row_bytes,
-                    ),
-                    resource_policy.lease("storage.dataset.prepare", prepared_bound),
-                ):
-                    try:
-                        frame, logical_dtypes = accumulator.prepare_frame(
-                            planning_frame
+                persisted = table.replace_schema_metadata(
+                    {
+                        b"qrp.logical-dtypes": logical_dtype_metadata_bytes(
+                            logical_dtypes
                         )
-                        frame_bytes = pandas_frame_payload_bytes(frame)
-                        if frame_bytes > prepared_bound:
-                            raise ValueError(
-                                "dataset_working_set_exceeds_task_memory_budget"
-                            )
-                        arrow_bound = (
-                            _ARROW_FRAME_FIXED_BYTES
-                            + frame_bytes
-                            + len(frame)
-                            * len(frame.columns)
-                            * _ARROW_CELL_OVERHEAD_BYTES
-                            + len(frame) * nested_arrow_per_row_bytes
-                        )
-                        with resource_policy.lease(
-                            "storage.dataset.arrow", 2 * arrow_bound
-                        ):
-                            try:
-                                table = accumulator.table_for_frame(
-                                    frame,
-                                    schema=None,
-                                    object_string_columns=object_string_columns,
-                                    admit=admit,
-                                )
-                                if table.nbytes > arrow_bound:
-                                    raise ValueError(
-                                        "dataset_working_set_exceeds_task_memory_budget"
-                                    )
-                                with closing_iterator(
-                                    _bounded_persisted_tables(
-                                        table,
-                                        logical_dtypes=logical_dtypes,
-                                        target_chunk_bytes=sys.maxsize,
-                                    )
-                                ) as preview_tables:
-                                    try:
-                                        persisted_table = table_with_decoded_row_bounds(
-                                            next(preview_tables)
-                                        )
-                                        native_working_set_bytes = (
-                                            _parquet_row_group_footer_upper_bound(
-                                                persisted_table.schema,
-                                                rows=persisted_table.num_rows,
-                                            )
-                                            + _table_parquet_page_working_set_bytes(
-                                                persisted_table, rows=1
-                                            )
-                                        )
-                                    finally:
-                                        persisted_table = None
-                            except BaseException as error:
-                                clear_exception_frames(error)
-                                raise
-                            finally:
-                                table = None
-                    except BaseException as error:
-                        clear_exception_frames(error)
-                        raise
-                    finally:
-                        frame = logical_dtypes = None
-                operator_target_bytes = _dataset_write_operator_target_bytes(
-                    planning_frame,
-                    operation_headroom_bytes=resource_policy.operation_headroom_bytes,
-                    timestamp_key_count=timestamp_key_count,
-                    partitioned=bool(spec.partition_columns),
-                    native_working_set_bytes=native_working_set_bytes,
-                    schema_fixed_bytes=max(
-                        schema_fixed_bytes, accumulator._arrow_schema_bytes
-                    ),
-                    schema_per_row_bytes=schema_per_row_bytes,
-                    nested_arrow_per_row_bytes=nested_arrow_per_row_bytes,
+                    }
                 )
-                operator_target_bytes = min(
-                    operator_target_bytes,
-                    max(1, resource_policy.planning_headroom_bytes),
-                )
-                for bounded_frame in iter_bounded_frame_chunks(
-                    planning_frame,
-                    target_chunk_bytes=operator_target_bytes,
-                ):
-                    bounded_frame_bytes = pandas_frame_payload_bytes(bounded_frame)
-                    prepared_bound = (
-                        bounded_frame_bytes
-                        + len(bounded_frame)
-                        * timestamp_key_count
-                        * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
-                    )
-                    with (
-                        resource_policy.lease(
-                            "storage.dataset.schema",
-                            max(schema_fixed_bytes, accumulator._arrow_schema_bytes)
-                            + len(bounded_frame) * schema_per_row_bytes,
-                        ),
-                        resource_policy.lease(
-                            "storage.dataset.prepare", prepared_bound
-                        ),
-                    ):
-                        try:
-                            prepared_frame, bounded_logical_dtypes = (
-                                accumulator.prepare_frame(bounded_frame)
-                            )
-                            prepared_frame_bytes = pandas_frame_payload_bytes(
-                                prepared_frame
-                            )
-                            if prepared_frame_bytes > prepared_bound:
-                                raise ValueError(
-                                    "dataset_working_set_exceeds_task_memory_budget"
-                                )
-                            partition_mask_bytes = (
-                                len(prepared_frame) if spec.partition_columns else 0
-                            )
-                            lower_bound_mask_bytes = partition_mask_bytes
-                            upper_bound_mask_bytes = partition_mask_bytes
-                            combined_mask_bytes = partition_mask_bytes
-                            partition_output_bound = (
-                                prepared_frame_bytes if spec.partition_columns else 0
-                            )
-                            partition_bound = sum(
-                                (
-                                    lower_bound_mask_bytes,
-                                    upper_bound_mask_bytes,
-                                    combined_mask_bytes,
-                                    partition_output_bound,
-                                )
-                            )
-                            with resource_policy.lease(
-                                "storage.dataset.partition",
-                                partition_bound,
-                            ):
-                                try:
-                                    for partition, partition_frame in partition_frames(
-                                        prepared_frame,
-                                        timestamp_column=timestamp_column,
-                                        partition_columns=spec.partition_columns,
-                                    ):
-                                        for (
-                                            bounded_partition
-                                        ) in iter_bounded_frame_chunks(
-                                            partition_frame,
-                                            target_chunk_bytes=operator_target_bytes,
-                                        ):
-                                            bounded_partition_bytes = (
-                                                pandas_frame_payload_bytes(
-                                                    bounded_partition
-                                                )
-                                            )
-                                            arrow_bound = (
-                                                _ARROW_FRAME_FIXED_BYTES
-                                                + bounded_partition_bytes
-                                                + len(bounded_partition)
-                                                * len(bounded_partition.columns)
-                                                * _ARROW_CELL_OVERHEAD_BYTES
-                                                + len(bounded_partition)
-                                                * nested_arrow_per_row_bytes
-                                            )
-                                            arrow_cast_bound = arrow_bound
-                                            written_paths: list[Path] = []
-                                            with resource_policy.lease(
-                                                "storage.dataset.arrow",
-                                                arrow_bound + arrow_cast_bound,
-                                            ):
-                                                try:
-                                                    table = accumulator.table_for_frame(
-                                                        bounded_partition,
-                                                        schema=accumulator._arrow_schema,
-                                                        object_string_columns=(),
-                                                        admit=admit,
-                                                    )
-                                                    if table.nbytes > arrow_bound:
-                                                        raise ValueError(
-                                                            "dataset_working_set_exceeds_task_memory_budget"
-                                                        )
-                                                    for (
-                                                        persisted_table
-                                                    ) in _bounded_persisted_tables(
-                                                        table,
-                                                        logical_dtypes=bounded_logical_dtypes,
-                                                        target_chunk_bytes=operator_target_bytes,
-                                                    ):
-                                                        part_index = part_indices.get(
-                                                            partition, 0
-                                                        )
-                                                        part_indices[partition] = (
-                                                            part_index + 1
-                                                        )
-                                                        output_path = (
-                                                            partition_part_path(
-                                                                root,
-                                                                partition,
-                                                                part_index,
-                                                            )
-                                                        )
-                                                        write_parquet_file(
-                                                            persisted_table,
-                                                            output_path,
-                                                        )
-                                                        written_paths.append(
-                                                            output_path
-                                                        )
-                                                        del persisted_table, output_path
-                                                    del table, bounded_partition
-                                                except BaseException as error:
-                                                    clear_exception_frames(error)
-                                                    raise
-                                                finally:
-                                                    table = persisted_table = None
-                                            for output_path in written_paths:
-                                                readback_headroom = resource_policy.operation_headroom_bytes  # noqa: E501
-                                                if readback_headroom <= 0:
-                                                    raise ValueError(
-                                                        "dataset_working_set_exceeds_task_memory_budget"
-                                                    )
-                                                accumulator.observe_file(
-                                                    output_path,
-                                                    target_chunk_bytes=operator_target_bytes,
-                                                    operation_headroom_bytes=readback_headroom,
-                                                )
-                                                _raise_accumulated_failures(accumulator)
-                                            del written_paths
-                                        del partition, partition_frame
-                                except BaseException as error:
-                                    clear_exception_frames(error)
-                                    raise
-                                finally:
-                                    partition_frame = bounded_partition = None
-                            del prepared_frame, bounded_logical_dtypes, bounded_frame
-                        except BaseException as error:
-                            clear_exception_frames(error)
-                            raise
-                        finally:
-                            frame = logical_dtypes = prepared_frame = (
-                                bounded_logical_dtypes
-                            ) = None
-            del planning_frame
-            del declared, chunk
-        if producer_lease is not None:
-            active_producer_values.pop()
-            try:
-                producer_bound = send(None)
-            except StopIteration:
-                producer_bound = None
-                producer_finished = True
-            else:
-                producer_finished = False
-            if not (
-                isinstance(producer_bound, tuple)
-                and len(producer_bound) == 2
-                and producer_bound[1] is producer_lease
-            ):
-                producer_lease.close()
-                active_producer_leases.pop()
-            producer_lease = None
-            if producer_finished:
-                break
-    if accumulator.row_count == 0 and not saw_empty_schema:
+                part_index = part_indices.get(partition, 0)
+                part_indices[partition] = part_index + 1
+                path = partition_part_path(root, partition, part_index)
+                write_parquet_file(persisted, path)
+                accumulator.observe_file(path, batch_rows=batch_rows)
+                _raise_accumulated_failures(accumulator)
+    if accumulator.row_count == 0 and (not saw_empty_schema):
         raise ValueError("empty_dataset_schema_missing")
     if saw_empty_schema:
-        metadata_budget = resource_policy.operation_headroom_bytes
-        logical_dtypes = accumulator.materialized_logical_dtypes(
-            target_chunk_bytes=metadata_budget, admit=admit
-        )
+        logical_dtypes = accumulator.materialized_logical_dtypes()
         partition = "" if accumulator.row_count == 0 else min(part_indices)
-        part_index = part_indices.get(partition, 0)
-        part_indices[partition] = part_index + 1
-        output_path = partition_part_path(root, partition, part_index)
+        path = partition_part_path(root, partition, part_indices.get(partition, 0))
         assert accumulator._arrow_schema is not None
-        empty_table_bound = _ARROW_FRAME_FIXED_BYTES
-        empty_cast_bound = _ARROW_FRAME_FIXED_BYTES
-        with resource_policy.lease(
-            "storage.dataset.arrow",
-            empty_table_bound + empty_cast_bound,
-        ):
-            try:
-                empty_table = pa.Table.from_batches(
-                    [], schema=accumulator._arrow_schema
-                )
-                persisted_table = next(
-                    _bounded_persisted_tables(
-                        empty_table,
-                        logical_dtypes=logical_dtypes,
-                        target_chunk_bytes=target_chunk_bytes,
-                    )
-                )
-                write_parquet_file(persisted_table, output_path)
-                readback_headroom = resource_policy.operation_headroom_bytes
-                accumulator.observe_file(
-                    output_path,
-                    target_chunk_bytes=target_chunk_bytes,
-                    operation_headroom_bytes=readback_headroom,
-                )
-            except BaseException as error:
-                clear_exception_frames(error)
-                raise
-            finally:
-                empty_table = persisted_table = None
+        table = pa.Table.from_batches([], schema=accumulator._arrow_schema)
+        table = table.replace_schema_metadata(
+            {b"qrp.logical-dtypes": logical_dtype_metadata_bytes(logical_dtypes)}
+        )
+        write_parquet_file(table, path)
+        accumulator.observe_file(path, batch_rows=batch_rows)
     return accumulator
 
 
@@ -1294,43 +448,6 @@ def _raise_accumulated_failures(accumulator: _WriteStats) -> None:
         raise ValueError("dataset_infinite_value")
 
 
-def _dataset_write_operator_target_bytes(
-    frame: pd.DataFrame,
-    *,
-    operation_headroom_bytes: int,
-    timestamp_key_count: int,
-    partitioned: bool,
-    native_working_set_bytes: int,
-    schema_fixed_bytes: int,
-    schema_per_row_bytes: int,
-    nested_arrow_per_row_bytes: int,
-) -> int:
-    if frame.empty:
-        return operation_headroom_bytes
-    fixed_bytes = (
-        2 * _ARROW_FRAME_FIXED_BYTES + native_working_set_bytes + schema_fixed_bytes
-    )
-    available = operation_headroom_bytes - fixed_bytes
-    if available <= 0:
-        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-    payload_per_row = max(
-        1,
-        (pandas_frame_payload_bytes(frame) + len(frame) - 1) // len(frame),
-    )
-    payload_overlaps = 5 if partitioned else 4
-    row_overlap_bytes = (
-        timestamp_key_count * _TIMESTAMP_PREPARATION_BYTES_PER_ROW
-        + (3 if partitioned else 0)
-        + 2 * len(frame.columns) * _ARROW_CELL_OVERHEAD_BYTES
-        + schema_per_row_bytes
-        + 2 * nested_arrow_per_row_bytes
-    )
-    rows = available // (payload_overlaps * payload_per_row + row_overlap_bytes)
-    if rows <= 0:
-        raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-    return rows * payload_per_row
-
-
 def _category_namespace(column: str) -> str:
     return f"logical-category:{column}"
 
@@ -1341,9 +458,7 @@ def _canonical_storage_schema(schema: pa.Schema) -> pa.Schema:
             pa.field(
                 field.name,
                 pa.dictionary(
-                    pa.int32(),
-                    field.type.value_type,
-                    ordered=field.type.ordered,
+                    pa.int32(), field.type.value_type, ordered=field.type.ordered
                 )
                 if pa.types.is_dictionary(field.type)
                 else field.type,
@@ -1355,8 +470,7 @@ def _canonical_storage_schema(schema: pa.Schema) -> pa.Schema:
 
 
 def _validate_persisted_categorical_values(
-    frame: pd.DataFrame,
-    logical_dtypes: Mapping[str, Any],
+    frame: pd.DataFrame, logical_dtypes: Mapping[str, Any]
 ) -> None:
     actual = logical_dtype_payload_from_frame(frame)
     actual_by_name = {item["name"]: item for item in actual["columns"]}
@@ -1380,107 +494,18 @@ def _validate_persisted_categorical_values(
             raise ValueError("dataset_categorical_domain_mismatch")
 
 
-def _bounded_persisted_tables(
-    table: pa.Table,
-    *,
-    logical_dtypes: Mapping[str, Any],
-    target_chunk_bytes: int,
-) -> Iterator[pa.Table]:
-    persisted = table.replace_schema_metadata(
-        {b"qrp.logical-dtypes": logical_dtype_metadata_bytes(logical_dtypes)}
-    )
-    if persisted.num_rows == 0:
-        yield persisted
-        return
-    pending = [persisted]
-    while pending:
-        candidate = pending.pop()
-        if candidate.nbytes <= target_chunk_bytes:
-            yield candidate
-            continue
-        if candidate.num_rows == 1:
-            yield candidate
-            continue
-        left_rows = candidate.num_rows // 2
-        pending.append(candidate.slice(left_rows))
-        pending.append(candidate.slice(0, left_rows))
-
-
 def write_parquet_file(table: pa.Table, path: Path) -> Path:
     filesystem_mkdir(path.parent, parents=True, exist_ok=True)
-    persisted = table_with_decoded_row_bounds(table)
-    policy = current_runtime_resource_policy()
-    if policy is None:
-        batch_rows = max(1, persisted.num_rows)
-    else:
-        remaining = policy.operation_headroom_bytes
-        footer_bytes = _parquet_row_group_footer_upper_bound(
-            persisted.schema,
-            rows=persisted.num_rows,
-        )
-        page_headroom = remaining - footer_bytes
-        minimum_rows = 0 if persisted.num_rows == 0 else 1
-        minimum_bytes = _table_parquet_page_working_set_bytes(
-            persisted,
-            rows=minimum_rows,
-        )
-        if minimum_bytes > page_headroom:
-            raise ValueError("dataset_working_set_exceeds_task_memory_budget")
-        page_headroom = min(
-            page_headroom,
-            max(minimum_bytes, policy.planning_headroom_bytes - footer_bytes),
-        )
-        batch_rows = 1
-        page_working_bytes = minimum_bytes
-        if persisted.num_rows:
-            low = 1
-            high = _parquet_row_group_size(persisted.num_rows)
-            while low <= high:
-                candidate = (low + high) // 2
-                candidate_bytes = _table_parquet_page_working_set_bytes(
-                    persisted,
-                    rows=candidate,
-                )
-                if candidate_bytes <= page_headroom:
-                    batch_rows = candidate
-                    page_working_bytes = candidate_bytes
-                    low = candidate + 1
-                else:
-                    high = candidate - 1
-    require_free_disk_headroom(
-        path.parent,
-        reserve_bytes=(
-            _table_parquet_page_working_set_bytes(
-                persisted,
-                rows=persisted.num_rows,
-            )
-            + _parquet_row_group_footer_upper_bound(
-                persisted.schema,
-                rows=persisted.num_rows,
-            )
-        ),
+    require_free_disk_headroom(path.parent, reserve_bytes=table.nbytes)
+    pq.write_table(
+        table,
+        native_filesystem_path(path),
+        compression="zstd",
+        row_group_size=_parquet_row_group_size(table.num_rows),
+        use_dictionary=False,
+        write_statistics=False,
+        write_page_index=False,
+        write_page_checksum=False,
     )
-    if policy is None:
-        reservation = nullcontext()
-    else:
-        reservation = policy.lease(
-            "storage.parquet.native",
-            page_working_bytes + footer_bytes,
-        )
-    with reservation:
-        pq.write_table(
-            persisted,
-            native_filesystem_path(path),
-            compression="zstd",
-            row_group_size=_parquet_row_group_size(persisted.num_rows),
-            write_batch_size=batch_rows,
-            max_rows_per_page=batch_rows,
-            use_dictionary=False,
-            write_statistics=False,
-            write_page_index=False,
-            write_page_checksum=False,
-        )
-    # Finalize writer-owned metadata before readers freeze the file identity.
-    # FUSE can otherwise expose a deferred mtime update during the first read.
     os.utime(native_filesystem_path(path), None)
     return path

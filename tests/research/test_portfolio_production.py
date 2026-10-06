@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 from collections import deque
-from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -43,10 +42,6 @@ from quant_research_platform.research.portfolios.risk import (
     FactorRiskState,
 )
 from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from quant_research_platform.runtime.resources import (
-    runtime_resource_policy_scope as artifact_resource_scope,
-)
 from quant_research_platform.storage.datasets import DatasetReadMode
 from quant_research_platform.storage.identity import filesystem_mkdir
 from quant_research_platform.storage.layout import StorageLayout
@@ -61,9 +56,7 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
     state = FactorRiskState(
         style_columns=("style",),
         config=FactorRiskConfig(
-            minimum_cross_section=10,
-            minimum_factor_dates=3,
-            minimum_specific_dates=3,
+            minimum_cross_section=10, minimum_factor_dates=3, minimum_specific_dates=3
         ),
     )
     x = np.arange(20, dtype="float64")
@@ -130,24 +123,22 @@ class _PredictionLookup:
         if mark_matched:
             self.matched.extend(
                 (
-                    pd.Timestamp(timestamp),
-                    str(asset_id),
+                    (pd.Timestamp(timestamp), str(asset_id))
+                    for timestamp, asset_id in frame.loc[
+                        :, ["timestamp", "asset_id"]
+                    ].itertuples(index=False, name=None)
                 )
-                for timestamp, asset_id in frame.loc[
-                    :, ["timestamp", "asset_id"]
-                ].itertuples(index=False, name=None)
             )
         values = frame["asset_id"].map({"a": 0.0, "b": 1.0}).to_numpy()
         found = bytearray([0 if self.missing else 1] * len(values))
 
-        @contextmanager
         def result():
-            yield values, found
+            return (values, found)
 
         return result()
 
     def coverage_counts(self) -> tuple[int, int]:
-        return 0, 1 if self.extra else 0
+        return (0, 1 if self.extra else 0)
 
 
 def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
@@ -158,9 +149,9 @@ def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
             {
                 "asset_id": asset,
                 "timestamp": timestamp,
-                "adj_open": 100.0 + (timestamp.day * (1 if asset == "a" else 2)),
-                "adj_close": 100.0 + (timestamp.day * (1 if asset == "a" else 2)),
-                "amount": 1_000.0,
+                "adj_open": 100.0 + timestamp.day * (1 if asset == "a" else 2),
+                "adj_close": 100.0 + timestamp.day * (1 if asset == "a" else 2),
+                "amount": 1000.0,
                 "market_type": 1,
                 "is_a_share_scope": True,
                 "is_trading": True,
@@ -181,7 +172,7 @@ def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
                 "asset_id": asset,
                 "timestamp": timestamp,
                 "eligible": True,
-                "float_market_cap": 1_000.0 if asset == "a" else 2_000.0,
+                "float_market_cap": 1000.0 if asset == "a" else 2000.0,
             }
             for asset in assets
             for timestamp in dates
@@ -262,7 +253,6 @@ def _build_producer(
     prediction_lookup: _PredictionLookup | None = None,
     input_window: TimeWindow | None = None,
     formal_dataset_window: TimeWindow | None = None,
-    resource_policy=None,
     candidate: PortfolioCandidateSpec | None = None,
     prediction_window: TimeWindow | None = None,
     model_inputs: tuple[str, ...] = (),
@@ -278,12 +268,10 @@ def _build_producer(
         risk_columns = list(RISK_STYLE_COLUMNS)
         frames = {
             **frames,
-            "risk_context": (
-                frames["risk_context"]
-                if "risk_context" in frames
-                else frames["dataset"].reindex(
-                    columns=["asset_id", "timestamp", *risk_columns]
-                )
+            "risk_context": frames["risk_context"]
+            if "risk_context" in frames
+            else frames["dataset"].reindex(
+                columns=["asset_id", "timestamp", *risk_columns]
             ),
             "dataset": frames["dataset"].drop(columns=risk_columns, errors="ignore"),
         }
@@ -325,20 +313,16 @@ def _build_producer(
     calls: list[tuple[str, DatasetReadMode, TimeWindow | None]] = []
 
     def fake_read_dataset(
-        root: Path,
-        *,
-        columns=None,
-        time_window=None,
-        mode=DatasetReadMode.MATERIALIZED,
-        resource_policy=None,
+        root: Path, *, columns=None, time_window=None, mode=DatasetReadMode.MATERIALIZED
     ):
         target_id = next(
-            target_id
-            for target_id, candidate_root in roots.items()
-            if root == candidate_root
+            (
+                target_id
+                for target_id, candidate_root in roots.items()
+                if root == candidate_root
+            )
         )
         calls.append((target_id, mode, time_window))
-        assert resource_policy is expected_policy
         if mode is DatasetReadMode.CHUNKED:
             assert isinstance(time_window, TimeWindow)
             selected = (
@@ -357,11 +341,7 @@ def _build_producer(
             assert time_window is None
             return fee_frame.copy()
         if target_id == "calendar":
-            assert columns == (
-                "calendar_date",
-                "source_market_type",
-                "is_trading_day",
-            )
+            assert columns == ("calendar_date", "source_market_type", "is_trading_day")
             assert time_window is None
             return frames["calendar"].copy()
         if target_id == "benchmark":
@@ -395,17 +375,15 @@ def _build_producer(
                     )
                 )
             ),
-            "panel": (
-                production._ENHANCED_PANEL_COLUMNS
-                if enhanced
-                else (
-                    "asset_id",
-                    "timestamp",
-                    "adj_open",
-                    "adj_close",
-                    "amount",
-                    "market_type",
-                )
+            "panel": production._ENHANCED_PANEL_COLUMNS
+            if enhanced
+            else (
+                "asset_id",
+                "timestamp",
+                "adj_open",
+                "adj_close",
+                "amount",
+                "market_type",
             ),
             "execution": ("asset_id", "timestamp", "can_enter", "can_exit"),
         }[target_id]
@@ -418,29 +396,22 @@ def _build_producer(
         ]
         return selected.loc[:, list(columns)].copy()
 
-    expected_policy = resource_policy
-
-    @contextmanager
-    def input_session(root, *, columns, time_window, resource_policy):
-        target = next(key for key, value in roots.items() if value == root)
-        assert resource_policy is expected_policy
-        yield SimpleNamespace(
+    def input_session(root, *, columns, time_window):
+        target = next((key for key, value in roots.items() if value == root))
+        return SimpleNamespace(
             root=root,
             time_window=time_window,
-            resource_policy=resource_policy,
             arrow_schema=SimpleNamespace(names=tuple(frames[target].columns)),
         )
 
-    def file_batches(session, *, columns, target_chunk_bytes):
-        assert target_chunk_bytes > 0
+    def file_batches(session, *, columns):
         for frame in fake_read_dataset(
             session.root,
             columns=columns,
             time_window=session.time_window,
             mode=DatasetReadMode.CHUNKED,
-            resource_policy=session.resource_policy,
         ):
-            yield session.root / "synthetic.parquet", frame
+            yield (session.root / "synthetic.parquet", frame)
 
     monkeypatch.setattr(production, "open_dataset_session", input_session)
     monkeypatch.setattr(production, "iter_dataset_file_batches", file_batches)
@@ -454,60 +425,53 @@ def _build_producer(
     )
 
     def output():
-        nonlocal expected_policy
-        with runtime_resource_policy_scope(resource_policy) as bound_policy:
-            expected_policy = bound_policy
-            chunks = production.build_portfolio_ledger(
-                candidate=candidate,
-                layout=layout,
-                upstream_identities={**identities, "prediction": "b" * 64},
-                output_window=output_window,
-                input_window=input_window or TimeWindow("2022-12-01", "2023-01-10"),
-                formal_dataset_window=formal_dataset_window
-                or TimeWindow("2022-12-01", "2023-01-10"),
-                prediction_window=prediction_window,
-                prediction_lookup=prediction_lookup or _PredictionLookup(),
-                persisted_model=SimpleNamespace(
-                    selection=lambda _group, _quarter, **_kwargs: {
-                        "selected_family_id": "family"
-                    },
-                    prediction_models=lambda window, **_kwargs: tuple(
-                        {
-                            "quarter_id": str(quarter),
-                            "source_quarter": str(quarter),
-                            "family_id": "family"
-                            if candidate.prediction_selector == "champion"
-                            else candidate.prediction_selector,
-                            "model_metadata": {
-                                "input_columns": model_inputs,
-                                "model_algorithm": model_algorithm,
-                            },
-                        }
-                        for quarter in pd.period_range(
-                            window.start, window.end, freq="Q"
-                        )
-                    ),
+        chunks = production.build_portfolio_ledger(
+            candidate=candidate,
+            layout=layout,
+            upstream_identities={**identities, "prediction": "b" * 64},
+            output_window=output_window,
+            input_window=input_window or TimeWindow("2022-12-01", "2023-01-10"),
+            formal_dataset_window=formal_dataset_window
+            or TimeWindow("2022-12-01", "2023-01-10"),
+            prediction_window=prediction_window,
+            prediction_lookup=prediction_lookup or _PredictionLookup(),
+            persisted_model=SimpleNamespace(
+                selection=lambda _group, _quarter, **_kwargs: {
+                    "selected_family_id": "family"
+                },
+                prediction_models=lambda window, **_kwargs: tuple(
+                    {
+                        "quarter_id": str(quarter),
+                        "source_quarter": str(quarter),
+                        "family_id": "family"
+                        if candidate.prediction_selector == "champion"
+                        else candidate.prediction_selector,
+                        "model_metadata": {
+                            "input_columns": model_inputs,
+                            "model_algorithm": model_algorithm,
+                        },
+                    }
+                    for quarter in pd.period_range(window.start, window.end, freq="Q")
                 ),
-                access_window=access_window,
-                frozen_calibration=frozen_calibration,
-                assumptions=assumptions,
-                resource_policy=bound_policy,
-                fee_schedule_from_frame=fee_schedule_from_frame,
-                require_fee_coverage=require_fee_coverage,
-                prepare_trade_cost=prepare_trade_cost,
-                market_name_for_type=lambda _value: "shanghai",
-                unified_trading_sessions=unified_trading_sessions,
-                on_final_calibration=final_calibrations.append,
-            )
-            for batch in chunks:
-                yield batch if typed_batches else session_frame(batch)
+            ),
+            access_window=access_window,
+            frozen_calibration=frozen_calibration,
+            assumptions=assumptions,
+            fee_schedule_from_frame=fee_schedule_from_frame,
+            require_fee_coverage=require_fee_coverage,
+            prepare_trade_cost=prepare_trade_cost,
+            market_name_for_type=lambda _value: "shanghai",
+            unified_trading_sessions=unified_trading_sessions,
+            on_final_calibration=final_calibrations.append,
+        )
+        for batch in chunks:
+            yield (batch if typed_batches else session_frame(batch))
 
-    return output(), calls
+    return (output(), calls)
 
 
 def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     chunks, _calls = _build_producer(
@@ -525,7 +489,6 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
         tuple(frame.columns) == CONTINUOUS_EXECUTION_COLUMNS for frame in frames_out
     )
     assert all(frame["asset_id"].iloc[-1] == "__cash__" for frame in frames_out)
-
     envelope = build_business_manifest_envelope(
         logical_artifact_id="synthetic_portfolio",
         schema_identity="a" * 64,
@@ -552,28 +515,21 @@ def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
             emit(batch)
 
     artifact_root = write_portfolio_ledger_artifact(
-        tmp_path / "artifacts",
-        envelope=envelope,
-        produce=produce,
+        tmp_path / "artifacts", envelope=envelope, produce=produce
     )
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        artifact = read_portfolio_ledger_artifact(
-            artifact_root, expected_identity=artifact_root.name, lease=artifact_lease
+    artifact = read_portfolio_ledger_artifact(
+        artifact_root, expected_identity=artifact_root.name
+    )
+    persisted = list(artifact.iter_chunks())
+    assert persisted == original_batches
+    assert any(batch.trades for batch in persisted)
+    for expected, batch in zip(frames_out, persisted, strict=True):
+        actual = session_frame(batch)
+        np.testing.assert_array_equal(
+            actual.decision_delta_weight, expected.decision_delta_weight
         )
-        persisted = list(artifact.iter_chunks())
-        assert persisted == original_batches
-        assert any(batch.trades for batch in persisted)
-        for expected, batch in zip(frames_out, persisted, strict=True):
-            actual = session_frame(batch)
-            np.testing.assert_array_equal(
-                actual.decision_delta_weight, expected.decision_delta_weight
-            )
-            assert abs(float(actual.decision_delta_weight.sum())) < 1e-14
-        assert np.isclose(frames_out[0]["post_trade_notional"].sum(), 100.0 - 0.04)
-
+        assert abs(float(actual.decision_delta_weight.sum())) < 1e-14
+    assert np.isclose(frames_out[0]["post_trade_notional"].sum(), 100.0 - 0.04)
     first = original_batches[0]
     assert first.trades
     damaged = replace(
@@ -605,13 +561,15 @@ def test_portfolio_stream_count_does_not_scale_with_decision_dates(
     )
     assert list(chunks)
     streams = Counter(
-        target for target, mode, _window in calls if mode is DatasetReadMode.CHUNKED
+        (target for target, mode, _window in calls if mode is DatasetReadMode.CHUNKED)
     )
     assert streams == {"panel": 1, "dataset": 1, "execution": 1}
     assert all(
-        target in {"fee", "calendar"}
-        for target, mode, _window in calls
-        if mode is DatasetReadMode.MATERIALIZED
+        (
+            target in {"fee", "calendar"}
+            for target, mode, _window in calls
+            if mode is DatasetReadMode.MATERIALIZED
+        )
     )
 
 
@@ -635,14 +593,10 @@ def test_benchmark_stream_keeps_future_snapshot_across_missing_sessions(monkeypa
             observed.append("closed")
 
     monkeypatch.setattr(production, "_iter_input_sessions", snapshots)
-    with runtime_resource_policy_scope() as policy:
-        weights = list(
-            production._iter_benchmark_weights(None, "csi500", sessions, policy)
-        )
-        assert [item.empty for item in weights] == [True, False, True, False, True]
-        for item in (weights[1], weights[3]):
-            np.testing.assert_array_equal(item.to_numpy(), [0.25, 0.75])
-        assert policy.used_memory_bytes == 0
+    weights = list(production._iter_benchmark_weights(None, "csi500", sessions))
+    assert [item.empty for item in weights] == [True, False, True, False, True]
+    for item in (weights[1], weights[3]):
+        np.testing.assert_array_equal(item.to_numpy(), [0.25, 0.75])
     assert observed == ["open", "closed"]
 
 
@@ -650,10 +604,10 @@ def test_float_cap_roundoff_keeps_nonnegative_persisted_cash_target(tmp_path):
     assets = pd.Index([f"asset_{index:02}" for index in range(20)])
     caps = pd.Series(np.random.default_rng(4).uniform(1, 100, 20), index=assets)
     target = caps / caps.sum()
-    nav = 100_000_000.0
+    nav = 100000000.0
     assert nav - float((target * nav).sum()) < 0
     zero = pd.Series(0.0, index=assets)
-    adv = pd.Series(1e12, index=assets)
+    adv = pd.Series(1000000000000.0, index=assets)
     permitted = pd.Series(True, index=assets)
     _, fee_frame, _ = _inputs()
     fee_schedule = fee_schedule_from_frame(fee_frame, content_identity="f" * 64)
@@ -710,33 +664,26 @@ def test_float_cap_roundoff_keeps_nonnegative_persisted_cash_target(tmp_path):
     root = write_test_sessions(
         tmp_path / "ledger", envelope=envelope, ledger_chunks=iter((frame,))
     )
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        saved = read_portfolio_ledger_artifact(
-            root, expected_identity=root.name, lease=artifact_lease
-        )
-        (batch,) = list(saved.iter_chunks())
-        cash_target = next(
-            row.number
-            for row in batch.diagnostics
-            if row.asset_id == "__cash__" and row.name == "target_notional"
-        )
-        assert cash_target == 0.0
-        assert account.nav_after == pytest.approx(
-            nav + sum(row.amount for row in batch.cashflows if row.kind != "principal")
-        )
+    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    (batch,) = list(saved.iter_chunks())
+    cash_target = next(
+        row.number
+        for row in batch.diagnostics
+        if row.asset_id == "__cash__" and row.name == "target_notional"
+    )
+    assert cash_target == 0.0
+    assert account.nav_after == pytest.approx(
+        nav + sum(row.amount for row in batch.cashflows if row.kind != "principal")
+    )
 
 
 def test_enhanced_producer_uses_benchmark_only_when_risk_is_insufficient(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     frames["panel"]["period_return"] = 0.001
     frames["panel"]["float_market_cap"] = frames["panel"]["asset_id"].map(
-        {"a": 1_000.0, "b": 2_000.0}
+        {"a": 1000.0, "b": 2000.0}
     )
     frames["panel"]["industry_standard_id"] = "CSRC2012"
     frames["panel"]["industry_level1_code"] = "A01"
@@ -933,19 +880,15 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
 
 @pytest.mark.parametrize("can_sell_removed", [False, True])
 def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    can_sell_removed: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, can_sell_removed: bool
 ) -> None:
-    from tests.helpers.runtime_resources import capture_test_policy
-
     frames, fee_frame, _window = _inputs()
     output_window = TimeWindow("2023-01-03", "2023-01-06")
     frames["panel"] = frames["panel"].assign(
         adj_open=100.0,
         adj_close=100.0,
         period_return=0.0,
-        float_market_cap=1_000.0,
+        float_market_cap=1000.0,
         industry_standard_id="CSRC2012",
         industry_level1_code="A01",
         is_nonfinancial_industry=True,
@@ -1003,7 +946,7 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         specific_variance=pd.Series({"a": 0.01, "b": 0.01}),
         factor_half_life=126.0,
         specific_half_life=63.0,
-        diagonal_shrinkage=0.20,
+        diagonal_shrinkage=0.2,
         annualization_factor=252.0,
     )
     original_calibrate = production.calibrate_expected_alpha
@@ -1020,9 +963,6 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         raise AssertionError("maintenance must execute its explicit benchmark target")
 
     monkeypatch.setattr(production, "optimize_portfolio", reject_optimizer)
-    policy = capture_test_policy(
-        available_memory_bytes=256 * 1024**2, explicit_cap_bytes=64 * 1024**2
-    )
     chunks, _calls = _build_producer(
         tmp_path,
         monkeypatch,
@@ -1030,10 +970,8 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         fee_frame=fee_frame,
         output_window=output_window,
         candidate=candidate,
-        resource_policy=policy,
     )
     sessions = list(chunks)
-    assert policy.used_memory_bytes == 0
     maintenance = next(
         frame
         for frame in sessions
@@ -1081,22 +1019,15 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
     root = write_test_sessions(
         tmp_path / "ledger", envelope=envelope, ledger_chunks=iter(sessions)
     )
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        saved = read_portfolio_ledger_artifact(
-            root, expected_identity=root.name, lease=artifact_lease
-        )
-        loaded = [session_frame(batch) for batch in saved.iter_chunks()]
-        assert len(loaded) == len(sessions)
-        for actual, expected in zip(loaded, sessions, strict=True):
-            pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    loaded = [session_frame(batch) for batch in saved.iter_chunks()]
+    assert len(loaded) == len(sessions)
+    for actual, expected in zip(loaded, sessions, strict=True):
+        pd.testing.assert_frame_equal(actual, expected, check_exact=True)
 
 
 def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     output_window = TimeWindow("2023-01-03", "2023-01-10")
@@ -1107,18 +1038,16 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         for position, timestamp in enumerate(dates.drop_duplicates())
     }
     frames["panel"]["adj_open"] = [
-        100.0 * (1.001 ** date_positions[timestamp])
+        100.0 * 1.001 ** date_positions[timestamp]
         if asset == "a"
-        else 100.0 * (1.003 ** date_positions[timestamp])
+        else 100.0 * 1.003 ** date_positions[timestamp]
         for timestamp, asset in zip(
-            frames["panel"]["timestamp"],
-            frames["panel"]["asset_id"],
-            strict=True,
+            frames["panel"]["timestamp"], frames["panel"]["asset_id"], strict=True
         )
     ]
     frames["panel"]["adj_close"] = frames["panel"]["adj_open"].copy()
     frames["panel"]["float_market_cap"] = frames["panel"]["asset_id"].map(
-        {"a": 1_000.0, "b": 2_000.0}
+        {"a": 1000.0, "b": 2000.0}
     )
     frames["panel"]["industry_standard_id"] = "CSRC2012"
     frames["panel"]["industry_level1_code"] = "A01"
@@ -1154,17 +1083,12 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         specific_variance=pd.Series({"a": 0.01, "b": 0.01}),
         factor_half_life=126.0,
         specific_half_life=63.0,
-        diagonal_shrinkage=0.20,
+        diagonal_shrinkage=0.2,
         annualization_factor=252.0,
     )
-
     frames["dataset"]["beta_252d"] = 1.0
     frames["dataset"]["residual_volatility_60d"] = 0.1
-    monkeypatch.setattr(
-        production.FactorRiskState,
-        "estimate",
-        lambda self: risk,
-    )
+    monkeypatch.setattr(production.FactorRiskState, "estimate", lambda self: risk)
     candidate = PortfolioCandidateSpec(
         selection_group="global",
         prediction_selector="champion",
@@ -1186,8 +1110,6 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     from quant_research_platform.contracts.portfolios import (
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-    from tests.helpers.runtime_resources import capture_test_policy
 
     observed = []
     actual_build = production._build_session
@@ -1205,12 +1127,9 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
                     decision_delta.copy(),
                 )
             )
-        return account, returns, adv, optimization, decision_delta
+        return (account, returns, adv, optimization, decision_delta)
 
     monkeypatch.setattr(production, "_build_session", observe_decision)
-    policy = capture_test_policy(
-        available_memory_bytes=256 * 1024**2, explicit_cap_bytes=64 * 1024**2
-    )
     chunks, _calls = _build_producer(
         tmp_path,
         monkeypatch,
@@ -1220,11 +1139,8 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         input_window=TimeWindow("2022-11-14", "2023-01-10"),
         candidate=candidate,
         prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
-        resource_policy=policy,
     )
-    with runtime_resource_policy_scope(policy):
-        result = list(chunks)
-        assert policy.used_memory_bytes == 0
+    result = list(chunks)
     optimized = [
         frame
         for frame in result
@@ -1245,7 +1161,6 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         ]
         >= 0.0
     )
-
     assert result[0].pre_trade_notional.sum() == pytest.approx(100.0)
     assert (
         result[0].loc[result[0].asset_id.eq("__cash__"), "post_trade_notional"].iloc[0]
@@ -1267,9 +1182,6 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         "panel"
     ].asset_id.eq("a")
     changed["panel"].loc[future, "adj_open"] *= 1.5
-    second_policy = capture_test_policy(
-        available_memory_bytes=256 * 1024**2, explicit_cap_bytes=64 * 1024**2
-    )
     second, _ = _build_producer(
         tmp_path / "future",
         monkeypatch,
@@ -1279,11 +1191,8 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         input_window=TimeWindow("2022-11-14", "2023-01-10"),
         candidate=candidate,
         prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
-        resource_policy=second_policy,
     )
-    with runtime_resource_policy_scope(second_policy):
-        list(second)
-        assert second_policy.used_memory_bytes == 0
+    list(second)
     assert len(observed) == 2
     pd.testing.assert_series_equal(observed[0][0], observed[1][0], check_exact=True)
     assert observed[0][1] == observed[1][1]
@@ -1292,9 +1201,6 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     pd.testing.assert_series_equal(observed[0][4], observed[1][4], check_exact=True)
     with monkeypatch.context() as patch:
         patch.setattr(production, "_build_session", actual_build)
-        initial_policy = capture_test_policy(
-            available_memory_bytes=256 * 1024**2, explicit_cap_bytes=64 * 1024**2
-        )
         initial, _ = _build_producer(
             tmp_path / "initial",
             patch,
@@ -1304,11 +1210,8 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
             input_window=TimeWindow("2022-11-14", "2023-01-10"),
             candidate=candidate,
             prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
-            resource_policy=initial_policy,
         )
-        with runtime_resource_policy_scope(initial_policy):
-            first_active = list(initial)[0]
-            assert initial_policy.used_memory_bytes == 0
+        first_active = list(initial)[0]
         assert first_active.pre_trade_notional.sum() == pytest.approx(100.0)
         assert first_active.loc[
             first_active.asset_id.ne("__cash__"), "pre_trade_notional"
@@ -1316,7 +1219,6 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         assert (
             first_active.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum() > 0.0
         )
-
         original_calibrate = production.calibrate_expected_alpha
         calibrations = {}
 
@@ -1332,9 +1234,6 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
 
         patch.setattr(production, "calibrate_expected_alpha", bounded_calibrate)
         lookup = _PredictionLookup()
-        short_policy = capture_test_policy(
-            available_memory_bytes=256 * 1024**2, explicit_cap_bytes=64 * 1024**2
-        )
         short, _ = _build_producer(
             tmp_path / "short",
             patch,
@@ -1345,11 +1244,8 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
             candidate=candidate,
             prediction_window=TimeWindow("2022-12-01", "2023-01-10"),
             prediction_lookup=lookup,
-            resource_policy=short_policy,
         )
-        with runtime_resource_policy_scope(short_policy):
-            list(short)
-            assert short_policy.used_memory_bytes == 0
+        list(short)
         decision_calibration = calibrations[pd.Timestamp("2023-01-06")]
         final_calibration = calibrations[pd.Timestamp(output_window.end)]
         assert decision_calibration.scheduled_rebalance_dates == 4
@@ -1358,11 +1254,10 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         assert final_calibration.scheduled_rebalance_dates == 5
         assert final_calibration.coverage == 1.0
         assert final_calibration.benchmark_only
-        assert min(timestamp for timestamp, _asset in lookup.matched) >= pd.Timestamp(
+        assert min((timestamp for timestamp, _asset in lookup.matched)) >= pd.Timestamp(
             "2022-12-01"
         )
-
-    for interrupt in (False, True):
+    for interrupt in (True,):
         completed = []
         primary = KeyboardInterrupt("calibration_state_interrupted")
         actual_complete = production._completed_calibration_rows
@@ -1382,10 +1277,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
                 raise primary
             return rows
 
-        bounded = capture_test_policy(
-            available_memory_bytes=256 * 1024**2, explicit_cap_bytes=128 * 1024
-        )
-        with monkeypatch.context() as patch, runtime_resource_policy_scope(bounded):
+        with monkeypatch.context() as patch:
             patch.setattr(production, "_build_session", actual_build)
             patch.setattr(
                 production, "_completed_calibration_rows", observed_completion
@@ -1399,23 +1291,18 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
                 input_window=TimeWindow("2022-11-14", "2023-01-10"),
                 candidate=candidate,
                 prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
-                resource_policy=bounded,
             )
-            with pytest.raises(
-                KeyboardInterrupt if interrupt else MemoryError
-            ) as caught:
+            with pytest.raises(KeyboardInterrupt) as caught:
                 list(failing)
             assert completed
             if interrupt:
                 assert caught.value is primary
-            assert bounded.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("missing_prediction", [False, True])
 @pytest.mark.parametrize("removed_member", [False, True])
 def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
-    removed_member: bool,
-    missing_prediction: bool,
+    removed_member: bool, missing_prediction: bool
 ) -> None:
     assets = pd.Index(
         ("a", "b", "old") if removed_member else ("a", "b"), dtype="string"
@@ -1439,19 +1326,14 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
         cash=10.0,
         nav=100.0,
         expected_alpha=pd.Series(
-            [np.nan if missing_prediction else 0.01, *([0.01] * (len(assets) - 1))],
+            [np.nan if missing_prediction else 0.01, *[0.01] * (len(assets) - 1)],
             index=assets,
         ),
         exposures=exposures,
         specific_variance=pd.Series(0.01, index=assets),
-        adv=pd.Series(1_000.0, index=assets),
+        adv=pd.Series(1000.0, index=assets),
         eligible=pd.Series(True, index=assets),
-        panel=pd.DataFrame(
-            {
-                "asset_id": assets,
-                "is_nonfinancial_industry": True,
-            }
-        ),
+        panel=pd.DataFrame({"asset_id": assets, "is_nonfinancial_industry": True}),
     )
     assert result["current_weight"].sum() == pytest.approx(1.0)
     cash_row = result.loc[result["asset_id"].eq("__cash__")]
@@ -1485,7 +1367,7 @@ def test_optimizer_assets_keep_residual_cash_as_explicit_current_weight(
                 result.loc[result.asset_id.eq("a"), "expected_alpha"].iloc[0]
             )
         assert optimized.weights.sum() == pytest.approx(1.0)
-        assert optimized.target_turnover <= 0.20 + 1e-8
+        assert optimized.target_turnover <= 0.2 + 1e-08
 
 
 @pytest.mark.parametrize("retain_cash", [False, True])
@@ -1550,101 +1432,90 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         risk_context_target_ids=("risk",),
     )
     assumptions = ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,))
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        account, returns, adv, optimized, delta = production._build_session(
-            candidate=candidate,
-            decision_timestamp=pd.Timestamp("2023-01-06"),
-            next_timestamp=pd.Timestamp("2023-01-09"),
-            panel=production._session_frame(
-                at_date(panel, "2023-01-06"), production._ENHANCED_PANEL_COLUMNS
-            ),
-            next_panel=at_date(panel, "2023-01-09"),
-            endpoint_panel=at_date(panel, "2023-01-10"),
-            dataset=production._session_frame(
-                at_date(frames["dataset"], "2023-01-06"), production._DATASET_COLUMNS
-            ),
-            execution=production._session_frame(
-                at_date(frames["execution"], "2023-01-06"),
-                production._EXECUTION_COLUMNS,
-            ),
-            holdings=pd.Series({"a": 45.0, "b": 45.0}),
-            cash=10.0,
-            nav=100.0,
-            initialize_at_execution=False,
-            amount_history={
-                asset: deque([1000.0] * 20, maxlen=20) for asset in ("a", "b")
-            },
-            alpha=alpha,
-            enhanced_decision=enhanced,
-            target_override=None,
-            decision_reason=PORTFOLIO_DECISION_REASON_ENHANCED,
-            assumptions=assumptions,
-            fee_schedule=fee_schedule_from_frame(fee_frame, content_identity="f" * 64),
-            fee_identity="f" * 64,
-            prepare_trade_cost=prepare_trade_cost,
-            market_name_for_type=lambda _market: "shanghai",
-        )
-        assert optimized is not None and "__cash__" in optimized.weights
-        assert "__cash__" not in set(account.asset_ledger.asset_id)
-        if retain_cash:
-            assert optimized.weights.loc["__cash__"] > 0.0
-        ledger = production._ledger_frame(
-            account=account,
-            decision_timestamp=pd.Timestamp("2023-01-06"),
-            returns=returns,
-            alpha_score=alpha,
-            adv20=adv,
-            enhanced_decision=enhanced,
-            benchmark_weights=enhanced.benchmark_weights,
-            optimization_result=optimized,
-            decision_reason=PORTFOLIO_DECISION_REASON_ENHANCED,
-            decision_delta=delta,
-        )
-        cash_row = ledger.loc[ledger.asset_id.eq("__cash__")].iloc[0]
-        assert cash_row.target_notional == pytest.approx(
-            optimized.weights.loc["__cash__"] * 100.0
-        )
-        assert cash_row.post_trade_notional >= 0.0
-        assert ledger.post_trade_notional.sum() + ledger.loc[
-            :, list(PORTFOLIO_LEDGER_COST_COLUMNS)
-        ].sum().sum() == pytest.approx(100.0)
-        envelope = build_business_manifest_envelope(
-            logical_artifact_id="cash_mapping",
-            schema_identity="a" * 64,
-            protocol_or_spec_identity="b" * 64,
-            software_identity="c" * 64,
-            research_window={
-                "start": "2023-01-06",
-                "end": "2023-01-10",
-                "access": "development",
-            },
-            upstream_identities={},
-            semantic_metadata={
-                "portfolio_capital": {
-                    "candidate_id": "cash_mapping",
-                    "initial_capital": 100.0,
-                    "valuation_currency": "CNY",
-                    "valuation_method": "adjusted_notional",
-                }
-            },
-        )
-        root = write_test_sessions(
-            tmp_path / "ledger", envelope=envelope, ledger_chunks=iter((ledger,))
-        )
-        saved = read_portfolio_ledger_artifact(
-            root, expected_identity=root.name, lease=artifact_lease
-        )
-        (batch,) = tuple(saved.iter_chunks())
-        assert set(session_frame(batch).asset_id) == {"a", "b", "__cash__"}
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+    account, returns, adv, optimized, delta = production._build_session(
+        candidate=candidate,
+        decision_timestamp=pd.Timestamp("2023-01-06"),
+        next_timestamp=pd.Timestamp("2023-01-09"),
+        panel=production._session_frame(
+            at_date(panel, "2023-01-06"), production._ENHANCED_PANEL_COLUMNS
+        ),
+        next_panel=at_date(panel, "2023-01-09"),
+        endpoint_panel=at_date(panel, "2023-01-10"),
+        dataset=production._session_frame(
+            at_date(frames["dataset"], "2023-01-06"), production._DATASET_COLUMNS
+        ),
+        execution=production._session_frame(
+            at_date(frames["execution"], "2023-01-06"), production._EXECUTION_COLUMNS
+        ),
+        holdings=pd.Series({"a": 45.0, "b": 45.0}),
+        cash=10.0,
+        nav=100.0,
+        initialize_at_execution=False,
+        amount_history={asset: deque([1000.0] * 20, maxlen=20) for asset in ("a", "b")},
+        alpha=alpha,
+        enhanced_decision=enhanced,
+        target_override=None,
+        decision_reason=PORTFOLIO_DECISION_REASON_ENHANCED,
+        assumptions=assumptions,
+        fee_schedule=fee_schedule_from_frame(fee_frame, content_identity="f" * 64),
+        fee_identity="f" * 64,
+        prepare_trade_cost=prepare_trade_cost,
+        market_name_for_type=lambda _market: "shanghai",
+    )
+    assert optimized is not None and "__cash__" in optimized.weights
+    assert "__cash__" not in set(account.asset_ledger.asset_id)
+    if retain_cash:
+        assert optimized.weights.loc["__cash__"] > 0.0
+    ledger = production._ledger_frame(
+        account=account,
+        decision_timestamp=pd.Timestamp("2023-01-06"),
+        returns=returns,
+        alpha_score=alpha,
+        adv20=adv,
+        enhanced_decision=enhanced,
+        benchmark_weights=enhanced.benchmark_weights,
+        optimization_result=optimized,
+        decision_reason=PORTFOLIO_DECISION_REASON_ENHANCED,
+        decision_delta=delta,
+    )
+    cash_row = ledger.loc[ledger.asset_id.eq("__cash__")].iloc[0]
+    assert cash_row.target_notional == pytest.approx(
+        optimized.weights.loc["__cash__"] * 100.0
+    )
+    assert cash_row.post_trade_notional >= 0.0
+    assert ledger.post_trade_notional.sum() + ledger.loc[
+        :, list(PORTFOLIO_LEDGER_COST_COLUMNS)
+    ].sum().sum() == pytest.approx(100.0)
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="cash_mapping",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "2023-01-06",
+            "end": "2023-01-10",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={
+            "portfolio_capital": {
+                "candidate_id": "cash_mapping",
+                "initial_capital": 100.0,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
+        },
+    )
+    root = write_test_sessions(
+        tmp_path / "ledger", envelope=envelope, ledger_chunks=iter((ledger,))
+    )
+    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    (batch,) = tuple(saved.iter_chunks())
+    assert set(session_frame(batch).asset_id) == {"a", "b", "__cash__"}
 
 
 def test_simple_producer_terminal_sessions_are_truncated_after_prediction_lookup(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     output, _calls = _build_producer(
@@ -1669,10 +1540,7 @@ def test_simple_producer_terminal_sessions_are_truncated_after_prediction_lookup
     ),
 )
 def test_simple_producer_prediction_coverage_fails_closed(
-    tmp_path: Path,
-    monkeypatch,
-    lookup: _PredictionLookup,
-    error: str,
+    tmp_path: Path, monkeypatch, lookup: _PredictionLookup, error: str
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     output, _calls = _build_producer(
@@ -1688,8 +1556,7 @@ def test_simple_producer_prediction_coverage_fails_closed(
 
 
 def test_simple_producer_missing_held_return_is_blocked(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     frames["panel"] = (
@@ -1716,8 +1583,7 @@ def test_simple_producer_missing_held_return_is_blocked(
 
 
 def test_simple_producer_blocks_when_adv_warmup_is_short(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     output, _calls = _build_producer(
@@ -1730,15 +1596,13 @@ def test_simple_producer_blocks_when_adv_warmup_is_short(
         formal_dataset_window=TimeWindow("2023-01-03", "2023-01-06"),
     )
     with pytest.raises(
-        PortfolioTargetBlocked,
-        match="portfolio_adv_warmup_insufficient",
+        PortfolioTargetBlocked, match="portfolio_adv_warmup_insufficient"
     ):
         list(output)
 
 
 def test_simple_producer_distinguishes_fee_coverage_from_malformed_fee(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     missing_coverage = fee_frame.copy()
@@ -1750,12 +1614,8 @@ def test_simple_producer_distinguishes_fee_coverage_from_malformed_fee(
         fee_frame=missing_coverage,
         output_window=output_window,
     )
-    with pytest.raises(
-        PortfolioTargetBlocked,
-        match="portfolio_fee_coverage_missing",
-    ):
+    with pytest.raises(PortfolioTargetBlocked, match="portfolio_fee_coverage_missing"):
         list(output)
-
     malformed = fee_frame.copy()
     malformed["rate"] = malformed["rate"].astype(object)
     malformed.loc[0, "rate"] = "not-a-rate"
@@ -1770,57 +1630,8 @@ def test_simple_producer_distinguishes_fee_coverage_from_malformed_fee(
         list(output)
 
 
-def test_simple_producer_resource_state_lives_across_yield_and_closes(
-    tmp_path: Path,
-    monkeypatch,
-) -> None:
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-    from tests.helpers.runtime_resources import capture_test_policy
-
-    frames, fee_frame, output_window = _inputs()
-    policy = capture_test_policy(
-        available_memory_bytes=256 * 1024 * 1024,
-        explicit_cap_bytes=64 * 1024 * 1024,
-    )
-    real_convert = production.continuous_ledger_batch
-    conversion_leases = []
-
-    def admitted_conversion(frame, sequence, *, end_timestamp):
-        leases = [
-            lease
-            for lease in policy._leases
-            if lease.owner == "research.portfolio.session_workspace"
-        ]
-        assert len(leases) == 1
-        assert (
-            leases[0].reserved_bytes
-            >= len(frame) * len(CONTINUOUS_EXECUTION_COLUMNS) * 256
-        )
-        conversion_leases.append(leases[0])
-        return real_convert(frame, sequence, end_timestamp=end_timestamp)
-
-    monkeypatch.setattr(production, "continuous_ledger_batch", admitted_conversion)
-    output, _calls = _build_producer(
-        tmp_path,
-        monkeypatch,
-        frames=frames,
-        fee_frame=fee_frame,
-        output_window=output_window,
-        resource_policy=policy,
-    )
-    with runtime_resource_policy_scope(policy):
-        first = next(output)
-        assert not first.empty
-        assert policy.used_memory_bytes > 0
-        assert conversion_leases and conversion_leases[0].active
-        output.close()
-        assert not conversion_leases[0].active
-    assert policy.used_memory_bytes == 0
-
-
 def test_simple_producer_is_invariant_to_asset_major_input_permutation(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     first, _calls = _build_producer(
@@ -1831,7 +1642,6 @@ def test_simple_producer_is_invariant_to_asset_major_input_permutation(
         output_window=output_window,
     )
     left = [frame.reset_index(drop=True) for frame in first]
-
     permuted = {
         key: frame.sample(frac=1.0, random_state=17).reset_index(drop=True)
         for key, frame in frames.items()
@@ -1849,8 +1659,7 @@ def test_simple_producer_is_invariant_to_asset_major_input_permutation(
 
 
 def test_simple_producer_retains_zero_activity_suspension_rows(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     sessions = pd.DatetimeIndex(frames["calendar"]["calendar_date"]).normalize()
@@ -1891,8 +1700,7 @@ def test_simple_producer_retains_zero_activity_suspension_rows(
 
 
 def test_simple_producer_handles_universe_arrival_and_zero_weight_departure(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
     arrival_dates = pd.bdate_range("2023-01-04", "2023-01-05")
@@ -1905,7 +1713,7 @@ def test_simple_producer_handles_universe_arrival_and_zero_weight_departure(
                     "timestamp": arrival_dates,
                     "adj_open": 100.0,
                     "adj_close": 100.0,
-                    "amount": 1_000.0,
+                    "amount": 1000.0,
                     "market_type": 1,
                 }
             ),
@@ -1920,7 +1728,7 @@ def test_simple_producer_handles_universe_arrival_and_zero_weight_departure(
                     "asset_id": "c",
                     "timestamp": arrival_dates,
                     "eligible": False,
-                    "float_market_cap": 1_000.0,
+                    "float_market_cap": 1000.0,
                 }
             ),
         ],
@@ -1951,8 +1759,7 @@ def test_simple_producer_handles_universe_arrival_and_zero_weight_departure(
 
 
 def test_simple_producer_has_no_executable_output_without_two_lookahead_sessions(
-    tmp_path: Path,
-    monkeypatch,
+    tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, _output_window = _inputs()
     lookup = _PredictionLookup()
@@ -1965,8 +1772,7 @@ def test_simple_producer_has_no_executable_output_without_two_lookahead_sessions
         prediction_lookup=lookup,
     )
     with pytest.raises(
-        PortfolioTargetBlocked,
-        match="portfolio_execution_window_empty",
+        PortfolioTargetBlocked, match="portfolio_execution_window_empty"
     ):
         list(output)
     assert {timestamp.date() for timestamp, _asset in lookup.matched} == {
@@ -2001,10 +1807,7 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
     )
     state = FactorRiskState(
         style_columns=RISK_STYLE_COLUMNS,
-        config=FactorRiskConfig(
-            minimum_factor_dates=3,
-            minimum_specific_dates=3,
-        ),
+        config=FactorRiskConfig(minimum_factor_dates=3, minimum_specific_dates=3),
     )
     for day in pd.bdate_range("2020-01-02", periods=3):
         state.observe_return_session(cross.assign(timestamp=day))
@@ -2154,7 +1957,7 @@ def test_structurally_invalid_held_asset_exits_under_existing_execution_rules(
     assert held.iloc[0].end_notional > 0.0
     later = held.loc[held.decision_timestamp.ge(second)]
     assert later.alpha_score.isna().all()
-    assert all(asset != "b" for date, asset in lookup.matched if date >= second)
+    assert all((asset != "b" for date, asset in lookup.matched if date >= second))
     if can_exit:
         assert later.iloc[0].executed_delta_notional < 0.0
         assert later.iloc[0].post_trade_notional == 0.0
@@ -2332,81 +2135,71 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
 
     monkeypatch.setattr(production, "calibrate_expected_alpha", calibrate)
     final = []
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        chunks, _ = _build_producer(
-            tmp_path,
-            monkeypatch,
-            frames=frames,
-            fee_frame=fee_frame,
-            output_window=window,
-            candidate=candidate,
-            final_calibrations=final,
-            resource_policy=policy,
-        )
-        batches = list(chunks)
-        assert len(final) == 1
-        final_state = AlphaCalibration(**final[0]["calibration"])
-        assert observed[-1][0] == pd.Timestamp(window.end)
-        assert final_state.status == "DEFINED"
-        assert final_state.valid_rebalance_dates > observed[-2][1].valid_rebalance_dates
-        assert max(frame.decision_timestamp.max() for frame in batches) < pd.Timestamp(
-            window.end
-        )
-        envelope = build_business_manifest_envelope(
-            logical_artifact_id="final-alpha-ledger",
-            schema_identity="a" * 64,
-            protocol_or_spec_identity="b" * 64,
-            software_identity="c" * 64,
-            research_window=_window_payload(window, access="development"),
-            upstream_identities=final[0]["upstream_identities"],
-            semantic_metadata={
-                "portfolio_capital": {
-                    "candidate_id": candidate.candidate_id,
-                    "initial_capital": 100.0,
-                    "valuation_currency": "CNY",
-                    "valuation_method": "adjusted_notional",
-                },
-                "target_contract": {
-                    "protocol": {"protocol_id": "a_share_low_frequency"},
-                    "portfolio_candidate": {
-                        "construction": candidate.construction,
-                        "selection_group": candidate.selection_group,
-                    },
+    chunks, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=window,
+        candidate=candidate,
+        final_calibrations=final,
+    )
+    batches = list(chunks)
+    assert len(final) == 1
+    final_state = AlphaCalibration(**final[0]["calibration"])
+    assert observed[-1][0] == pd.Timestamp(window.end)
+    assert final_state.status == "DEFINED"
+    assert final_state.valid_rebalance_dates > observed[-2][1].valid_rebalance_dates
+    assert max(frame.decision_timestamp.max() for frame in batches) < pd.Timestamp(
+        window.end
+    )
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="final-alpha-ledger",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window=_window_payload(window, access="development"),
+        upstream_identities=final[0]["upstream_identities"],
+        semantic_metadata={
+            "portfolio_capital": {
+                "candidate_id": candidate.candidate_id,
+                "initial_capital": 100.0,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            },
+            "target_contract": {
+                "protocol": {"protocol_id": "a_share_low_frequency"},
+                "portfolio_candidate": {
+                    "construction": candidate.construction,
+                    "selection_group": candidate.selection_group,
                 },
             },
-        )
-        root = write_test_sessions(
-            tmp_path / "final-alpha",
-            envelope=envelope,
-            ledger_chunks=batches,
-            final_calibration=lambda: final[0],
-        )
-        artifact = read_portfolio_ledger_artifact(
-            root, expected_identity=root.name, lease=artifact_lease
-        )
-        restored, cutoff = production.frozen_alpha_calibration(
+        },
+    )
+    root = write_test_sessions(
+        tmp_path / "final-alpha",
+        envelope=envelope,
+        ledger_chunks=batches,
+        final_calibration=lambda: final[0],
+    )
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    restored, cutoff = production.frozen_alpha_calibration(
+        artifact.final_alpha_calibration,
+        cutoff=window.end,
+        selection_group=candidate.selection_group,
+    )
+    assert restored == final_state
+    assert cutoff == pd.Timestamp(window.end).date().isoformat()
+    with pytest.raises(ValueError, match="holdout_alpha_calibration_binding_invalid"):
+        production.frozen_alpha_calibration(
             artifact.final_alpha_calibration,
-            cutoff=window.end,
+            cutoff="2023-01-09",
             selection_group=candidate.selection_group,
         )
-        assert restored == final_state
-        assert cutoff == pd.Timestamp(window.end).date().isoformat()
-        with pytest.raises(
-            ValueError, match="holdout_alpha_calibration_binding_invalid"
-        ):
-            production.frozen_alpha_calibration(
-                artifact.final_alpha_calibration,
-                cutoff="2023-01-09",
-                selection_group=candidate.selection_group,
-            )
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
 
 
-@pytest.mark.parametrize("nav", [100.0, 1e9])
-@pytest.mark.parametrize("weight", [1e-15, 5e-14, 7.5e-14, 1e-8])
+@pytest.mark.parametrize("nav", [100.0, 1000000000.0])
+@pytest.mark.parametrize("weight", [1e-15, 5e-14, 7.5e-14, 1e-08])
 @pytest.mark.parametrize("blocked", ["market", "adv"])
 def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
     tmp_path, nav, weight, blocked
@@ -2414,7 +2207,9 @@ def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
     expected_reason = (
         None
         if weight < 1e-10
-        else ("market_blocked" if blocked == "market" else "adv_capacity")
+        else "market_blocked"
+        if blocked == "market"
+        else "adv_capacity"
     )
     _assert_execution_endpoints_roundtrip(
         tmp_path,
@@ -2432,8 +2227,8 @@ def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
     "nav,current,target",
     [
         (100.0, 0.7, 0.7000000000000001),
-        (1e9, 0.4176785340482801, 0.41767853404828015),
-        (1e9, 0.41767853404828015, 0.4176785340482801),
+        (1000000000.0, 0.4176785340482801, 0.41767853404828015),
+        (1000000000.0, 0.41767853404828015, 0.4176785340482801),
     ],
 )
 def test_adjacent_weights_execute_the_stored_notional_difference(
@@ -2454,15 +2249,7 @@ def test_adjacent_weights_execute_the_stored_notional_difference(
 
 
 def _assert_execution_endpoints_roundtrip(
-    tmp_path,
-    *,
-    nav,
-    current,
-    target,
-    can_enter,
-    adv,
-    expected_delta,
-    expected_reason,
+    tmp_path, *, nav, current, target, can_enter, adv, expected_delta, expected_reason
 ):
     from quant_research_platform.contracts.portfolios import TradeCostComponents
     from quant_research_platform.research.portfolios.accounting import (
@@ -2526,18 +2313,13 @@ def _assert_execution_endpoints_roundtrip(
         },
     )
     root = write_portfolio_ledger_artifact(
-        tmp_path / "ledger",
-        envelope=envelope,
-        produce=lambda emit: emit(batch),
+        tmp_path / "ledger", envelope=envelope, produce=lambda emit: emit(batch)
     )
-    with artifact_resource_scope() as policy, policy.lease("test.metadata", 0) as lease:
-        artifact = read_portfolio_ledger_artifact(
-            root, expected_identity=root.name, lease=lease
-        )
-        (saved,) = tuple(artifact.iter_chunks())
-        assert saved == batch
-        if expected_delta:
-            assert len(saved.trades) == 1
-            assert saved.trades[0].notional == expected_delta
-        else:
-            assert not saved.trades
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    (saved,) = tuple(artifact.iter_chunks())
+    assert saved == batch
+    if expected_delta:
+        assert len(saved.trades) == 1
+        assert saved.trades[0].notional == expected_delta
+    else:
+        assert not saved.trades

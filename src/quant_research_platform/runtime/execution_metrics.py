@@ -15,7 +15,7 @@ from quant_research_platform.contracts.targets import unmeasured_operation_evide
 
 
 @contextmanager
-def record_run_observations(policy, sink):
+def record_run_observations(sink):
     process = psutil.Process()
     started = perf_counter()
     first = {}
@@ -59,13 +59,11 @@ def record_run_observations(policy, sink):
     def sample():
         nonlocal samples
         current = {
-            "rss": read("rss", lambda: process.memory_info().rss),
             "cpu": read("cpu", lambda: sum(process.cpu_times()[:2])),
             "read": read("read", lambda: process.io_counters().read_bytes),
             "write": read("write", lambda: process.io_counters().write_bytes),
             "threads": read("threads", process.num_threads),
             "children": read("children", lambda: len(process.children(recursive=True))),
-            "reserved": policy.used_memory_bytes,
         }
         if not samples:
             first.update(current)
@@ -94,9 +92,6 @@ def record_run_observations(policy, sink):
         metrics = {
             "wall_seconds": {"status": "DEFINED", "value": perf_counter() - started},
             "cpu_seconds": metric("cpu", delta("cpu")),
-            "rss0_bytes": metric("rss", first["rss"]),
-            "sampled_peak_rss_bytes": metric("rss", peaks.get("rss")),
-            "sampled_peak_reserved_bytes": metric("reserved", peaks["reserved"]),
             "read_bytes": metric("read", delta("read")),
             "write_bytes": metric("write", delta("write")),
             "sampled_peak_process_threads": metric("threads", peaks.get("threads")),
@@ -115,11 +110,6 @@ def record_run_observations(policy, sink):
             "reason": reason,
             "sampling": "target_boundaries_not_full_process_peaks",
             "sample_count": samples,
-            "planning": {
-                key: value
-                for key, value in policy.to_payload().items()
-                if value is not None
-            },
             "metrics": metrics,
             "environment": environment,
         }

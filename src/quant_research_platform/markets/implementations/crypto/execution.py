@@ -3,21 +3,14 @@
 from __future__ import annotations
 
 import json
-import struct
-import sys
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, replace
 from fractions import Fraction
 from itertools import groupby
 from types import SimpleNamespace
 from typing import Any
 
-from quant_research_platform.contracts.json_codec import (
-    json_record_working_set_bytes,
-    parse_qrp_json_object,
-)
 from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
@@ -36,7 +29,6 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.validation import (
-    clear_exception_frames,
     strict_finite_float,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -44,25 +36,9 @@ from quant_research_platform.research.portfolios.accounting import PortfolioEcon
 from quant_research_platform.research.protocols.crypto_hft import (
     CryptoMakerPlan,
 )
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    RuntimeResourcePolicy,
-    _close_lease_preserving_primary,
-)
-from quant_research_platform.storage._scratch_ownership import (
-    handle_preserving_primary,
-    reserved_temporary_file,
-)
-from quant_research_platform.storage.exact_keys import (
-    EXACT_KEY_SQLITE_CACHE_BYTES,
-    ExactPrimaryKeyIndex,
-)
 
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
 _UTC_DAY_NS = 86_400_000_000_000
-_PENDING_MARKOUT_LENGTH = struct.Struct(">Q")
-_PENDING_MARKOUT_JSON_OVERHEAD_BYTES = 64 * 1024
-_EXECUTION_WORKSPACE_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True)
@@ -158,26 +134,6 @@ def _funding_consumer(events: Iterable[FundingEvent], economics: PortfolioEconom
     return consume
 
 
-def _pending_markout_max_json_bytes(fill: Mapping[str, Any]) -> int:
-    total = 2
-    for index, (key, value) in enumerate(fill.items()):
-        total += (1 if index else 0) + 2 + 12 * len(key) + 1
-        if isinstance(value, str):
-            total += 2 + 12 * len(value)
-        elif value is None:
-            total += 4
-        elif isinstance(value, bool):
-            total += 5
-        elif type(value) is int:
-            digits = max(1, (abs(value).bit_length() * 30103) // 100000 + 1)
-            total += digits + (1 if value < 0 else 0)
-        elif type(value) is float:
-            total += 24
-        else:
-            raise TypeError("hft_pending_markout_value_invalid")
-    return total
-
-
 @dataclass
 class _Metrics:
     fill_events: int = 0
@@ -249,91 +205,22 @@ class _Metrics:
 
 
 class _PendingMarkouts:
-    """Disk-backed FIFO for exact markouts without retained fill history."""
+    """FIFO of fills awaiting their exact future markout."""
 
-    def __init__(
-        self,
-        metrics: _Metrics,
-        on_fill: Callable[[Mapping[str, Any]], None] | None,
-        resource_policy: RuntimeResourcePolicy,
-    ) -> None:
-        self._scratch = reserved_temporary_file(resource_policy=resource_policy)
-        self._file, self._reservation = self._scratch.__enter__()
-        self._read_offset = 0
-        self._next: tuple[OwnedValue[dict[str, Any]], int] | None = None
+    def __init__(self, metrics, on_fill):
+        self._pending = deque()
         self._metrics = metrics
         self._on_fill = on_fill
-        self._resource_policy = resource_policy
 
     def __enter__(self) -> _PendingMarkouts:
         return self
 
-    def __exit__(
-        self,
-        _exception_type: object,
-        primary: BaseException | None,
-        _traceback: object,
-    ) -> None:
-        cleanup_failure: BaseException | None = None
-        try:
-            if primary is None:
-                self.expire_all()
-        except BaseException as cleanup_error:
-            cleanup_failure = cleanup_error
-        try:
-            self._discard_next()
-        except BaseException as release_error:
-            note = (
-                "execution pending markout lease release also failed: "
-                f"{type(release_error).__name__}"
-            )
-            if primary is not None:
-                primary.add_note(note)
-            elif cleanup_failure is None:
-                cleanup_failure = release_error
-            else:
-                cleanup_failure.add_note(note)
-        try:
-            self._scratch.__exit__(None, None, None)
-        except BaseException as close_error:
-            if primary is not None:
-                primary.add_note(
-                    "execution pending markout handle close also failed: "
-                    f"{type(close_error).__name__}"
-                )
-            elif cleanup_failure is None:
-                cleanup_failure = close_error
-            else:
-                cleanup_failure.add_note(
-                    "execution pending markout handle close also failed: "
-                    f"{type(close_error).__name__}"
-                )
-        if cleanup_failure is not None:
-            raise cleanup_failure
+    def __exit__(self, _exception_type, primary, _traceback):
+        if primary is None:
+            self.expire_all()
 
-    def add(self, fill: dict[str, Any]) -> None:
-        max_payload_bytes = _pending_markout_max_json_bytes(fill)
-        working_set_bytes = (
-            json_record_working_set_bytes(max_payload_bytes)
-            + _PENDING_MARKOUT_JSON_OVERHEAD_BYTES
-        )
-        with self._resource_policy.lease(
-            "crypto.execution.pending_markout.encode",
-            working_set_bytes,
-        ):
-            payload = json.dumps(
-                fill,
-                separators=(",", ":"),
-                allow_nan=False,
-            ).encode("utf-8")
-            if len(payload) > max_payload_bytes:
-                raise AssertionError("hft_pending_markout_json_bound_invalid")
-            record_bytes = _PENDING_MARKOUT_LENGTH.size + len(payload)
-            self._reservation.resize(self._file.seek(0, 2) + record_bytes)
-            self._file.write(_PENDING_MARKOUT_LENGTH.pack(len(payload)))
-            self._file.write(payload)
-            self._file.flush()
-            del payload
+    def add(self, fill):
+        self._pending.append(dict(fill))
 
     def resolve(
         self,
@@ -406,88 +293,11 @@ class _PendingMarkouts:
                 del fill
                 self._pop()
 
-    def _peek(self) -> dict[str, Any] | None:
-        if self._next is not None:
-            return self._next[0].value
-        self._file.seek(self._read_offset)
-        header = self._file.read(_PENDING_MARKOUT_LENGTH.size)
-        if not header:
-            if self._read_offset:
-                self._file.seek(0)
-                self._file.truncate()
-                self._reservation.resize(0)
-                self._read_offset = 0
-            return None
-        if len(header) != _PENDING_MARKOUT_LENGTH.size:
-            raise RuntimeError("hft_pending_markout_record_invalid")
-        payload_bytes = _PENDING_MARKOUT_LENGTH.unpack(header)[0]
-        del header
-        if payload_bytes <= 0:
-            raise RuntimeError("hft_pending_markout_record_invalid")
-        working_set_bytes = (
-            json_record_working_set_bytes(payload_bytes)
-            + _PENDING_MARKOUT_JSON_OVERHEAD_BYTES
-        )
-        lease = self._resource_policy.lease(
-            "crypto.execution.pending_markout.decode",
-            working_set_bytes,
-        )
-        try:
-            payload = self._file.read(payload_bytes)
-            if len(payload) != payload_bytes:
-                raise RuntimeError("hft_pending_markout_record_invalid")
-            try:
-                fill = parse_qrp_json_object(payload)
-            except ValueError as error:
-                raise RuntimeError("hft_pending_markout_record_invalid") from error
-            lease.transfer("crypto.execution.pending_markout")
-            self._next = (OwnedValue(fill, lease), self._file.tell())
-            return fill
-        except BaseException as primary:
-            try:
-                lease.close()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "execution pending markout lease release also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-            raise
+    def _peek(self):
+        return self._pending[0] if self._pending else None
 
-    def _pop(self) -> None:
-        assert self._next is not None
-        owned, self._read_offset = self._next
-        self._next = None
-        owned.release(owner="crypto.execution.pending_markout")
-        if sys.exception() is not None:
-            return
-        end = self._file.seek(0, 2)
-        remaining = end - self._read_offset
-        if self._read_offset >= remaining:
-            block_bytes = min(64 * 1024, remaining)
-            with self._resource_policy.lease(
-                "crypto.execution.pending_markout.compact", block_bytes
-            ):
-                offset = 0
-                while offset < remaining:
-                    self._file.seek(self._read_offset + offset)
-                    block = self._file.read(min(block_bytes, remaining - offset))
-                    if not block:
-                        raise RuntimeError("hft_pending_markout_record_invalid")
-                    self._file.seek(offset)
-                    self._file.write(block)
-                    offset += len(block)
-                    block = None
-                self._file.truncate(remaining)
-                self._file.flush()
-            self._read_offset = 0
-            self._reservation.resize(remaining)
-
-    def _discard_next(self) -> None:
-        if self._next is None:
-            return
-        owned = self._next[0]
-        self._next = None
-        owned.release(owner="crypto.execution.pending_markout")
+    def _pop(self):
+        self._pending.popleft()
 
     def _finalize(
         self,
@@ -517,44 +327,38 @@ class _PendingMarkouts:
             self._on_fill(fill)
 
 
-def _book_value(event: BookState | OwnedValue[BookState]) -> BookState:
-    value = event.value if isinstance(event, OwnedValue) else event
+def _book_value(event: BookState) -> BookState:
+    value = event
     if not isinstance(value, BookState):
         raise TypeError("hft_execution_book_event_invalid")
     return value
 
 
 def _book_key(
-    event: BookState | OwnedValue[BookState] | BookBoundary,
+    event: BookState | BookBoundary,
 ) -> tuple[int, ...]:
-    value = event.value if isinstance(event, OwnedValue) else event
+    value = event
     return observation_order_key(value)
 
 
 def _checked_book_events(
-    events: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
-) -> Iterator[BookState | OwnedValue[BookState] | BookBoundary]:
+    events: Iterable[BookState | BookBoundary],
+) -> Iterator[BookState | BookBoundary]:
     previous: tuple[int, ...] | None = None
     active = iter(events)
     with closing_iterator(active):
         for event in active:
-            if isinstance(event, OwnedValue):
-                value = event.value
-            else:
-                value = event
-            try:
-                if not isinstance(value, BookState | BookBoundary):
-                    raise TypeError("hft_execution_book_event_invalid")
-                key = observation_order_key(value)
-                if previous is not None and key < previous:
-                    raise ValueError("hft_execution_time_non_monotonic")
-            except BaseException:
-                value = None
-                if isinstance(event, OwnedValue):
-                    event.release(owner="crypto.execution.book_validation")
-                raise
+            value = event
+            if not isinstance(value, BookState | BookBoundary):
+                raise TypeError("hft_execution_book_event_invalid")
+            key = observation_order_key(value)
+            if previous is not None and key < previous:
+                raise ValueError("hft_execution_time_non_monotonic")
             previous = key
-            yield event
+            try:
+                yield event
+            except GeneratorExit:
+                return
 
 
 def _checked_decisions(
@@ -571,7 +375,10 @@ def _checked_decisions(
             if previous is not None and timestamp <= previous:
                 raise ValueError("hft_execution_decision_time_non_monotonic")
             previous = timestamp
-            yield row
+            try:
+                yield row
+            except GeneratorExit:
+                return
 
 
 def _mid(state: BookState) -> float:
@@ -698,14 +505,13 @@ def _advance_utc_boundaries(
 
 
 def simulate_taker(
-    book_events: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
+    book_events: Iterable[BookState | BookBoundary],
     decisions: Iterable[Mapping[str, Any]],
     *,
     prediction_column: str,
     prediction_horizon_ms: int,
     config: TakerConfig,
     observed_coverage: Mapping[str, tuple[int, int]],
-    resource_policy: RuntimeResourcePolicy,
     capital: PortfolioCapital,
     asset_id: str,
     funding_events: Iterable[FundingEvent],
@@ -753,7 +559,6 @@ def simulate_taker(
     forecast_timestamp = -1
     next_event = None
     latest_state: BookState | None = None
-    latest_owned: OwnedValue[BookState] | None = None
     terminal_mid: float | None = None
     terminal_timestamp = 0
     action_timestamp = 0
@@ -797,42 +602,32 @@ def simulate_taker(
     )
 
     with (
-        resource_policy.lease(
-            "crypto.execution.taker.workspace",
-            _EXECUTION_WORKSPACE_BYTES,
-        ),
-        resource_policy.lease("crypto.execution.taker.orders", 1) as order_lease,
         closing_iterator(events),
         closing_iterator(active_decisions),
         closing_iterator(forecasts),
-        _PendingMarkouts(metrics, resolved_fill, resource_policy) as pending,
+        _PendingMarkouts(metrics, resolved_fill) as pending,
     ):
         try:
             next_event = next(events, None)
             next_forecast = next(forecasts, None)
 
             def consume_event(
-                event: BookState | OwnedValue[BookState] | BookBoundary,
+                event: BookState | BookBoundary,
             ) -> None:
-                nonlocal latest_state, latest_owned, terminal_mid, terminal_timestamp
+                nonlocal latest_state, terminal_mid, terminal_timestamp
                 terminal_timestamp = _book_key(event)[0]
                 apply_funding(terminal_timestamp)
                 if isinstance(event, BookBoundary):
                     pending.advance(
                         event.observed_time_ns - 1, latest_state, observed_coverage
                     )
-                    if latest_owned is not None:
-                        latest_owned.release(owner="crypto.execution.book")
-                    latest_owned = None
                     latest_state = None
                     if economics.quantity != 0.0:
                         terminal_mid = None
                     pending.expire_all()
                     return
                 previous_state = latest_state
-                previous_owned = latest_owned
                 state = _book_value(event)
-                latest_owned = event if isinstance(event, OwnedValue) else None
                 latest_state = state
                 try:
                     if _covered(
@@ -849,8 +644,6 @@ def simulate_taker(
                     )
                 finally:
                     previous_state = None
-                    if previous_owned is not None:
-                        previous_owned.release(owner="crypto.execution.book")
                 if (
                     decision_windows_ns is not None
                     and max(decision_windows_ns[0][0], observation_start or 0)
@@ -982,7 +775,6 @@ def simulate_taker(
                         execute_order(order)
                     finally:
                         order = None
-                    order_lease.shrink_to(max(1, len(orders) * 2048))
                 consume_until(target_ns)
                 apply_funding(target_ns)
                 action_timestamp = target_ns
@@ -1011,7 +803,6 @@ def simulate_taker(
                     unfilled_quantity += cancelled_quantity
                     orders.clear()
                     reserved_buy = reserved_sell = 0.0
-                    order_lease.shrink_to(1)
                 mark = (
                     _mid(latest_state)
                     if latest_state is not None
@@ -1247,9 +1038,6 @@ def simulate_taker(
                     )
                 equity_rows += 1
                 if selected:
-                    required = (len(orders) + 1) * 2048
-                    if required > order_lease.reserved_bytes:
-                        order_lease.grow(required - order_lease.reserved_bytes)
                     created_orders += 1
                     orders.append(
                         (
@@ -1318,20 +1106,10 @@ def simulate_taker(
                 )
                 last_gross, last_net = marked["gross_pnl"], marked["net_pnl"]
             if on_terminal_book is not None and latest_state is not None:
-                on_terminal_book(
-                    latest_owned if latest_owned is not None else latest_state
-                )
-                latest_owned = None
-        except BaseException as error:
-            clear_exception_frames(error)
-            raise
+                on_terminal_book(latest_state)
         finally:
             orders.clear()
             latest_state = None
-            if latest_owned is not None:
-                latest_owned.release(owner="crypto.execution.book")
-            if isinstance(next_event, OwnedValue):
-                next_event.release(owner="crypto.execution.book")
     result = {
         "simulation": "decision_time_net_gain_taker",
         "created_orders": created_orders,
@@ -1502,183 +1280,38 @@ def _maker_new_order(order_id, side, quantity, state, row, latency_ms):
 
 
 class MakerCalibration:
-    """Own one bounded fold history; recompute each decision's economic response."""
+    """Reuse one fold history while recomputing each decision's economic response."""
 
-    def __init__(self, samples, events, *, price_unit, resource_policy):
+    def __init__(self, samples, events, *, price_unit):
         self.price_unit = Fraction(price_unit)
         self._source_samples = samples
         self._source_events = events
-        self.policy = resource_policy
         self._native = None
-        self._native_resources = ExitStack()
-        self._maximum = {}
-        self._lengths = {}
-        self._event_count = 0
-
-    def close(self):
-        self._source_samples = self._source_events = self._native = None
-        self._native_resources.close()
 
     def _load(self):
         if self._native is not None:
             return
-        with handle_preserving_primary(ExitStack()) as resources:
-            resources.enter_context(
-                self.policy.lease("crypto.calibration.history.buffers", 65536)
-            )
-            files = {
-                name: resources.enter_context(
-                    reserved_temporary_file(resource_policy=self.policy)
-                )
-                for name in ("buy", "sell", "events", "offsets")
-            }
-            maximum = dict.fromkeys(("buy", "sell", "events"), 0)
-
-            def append(name, payload):
-                spool, reservation = files[name]
-                reservation.resize(spool.tell() + len(payload))
-                spool.write(payload)
-
-            for kind, source in (
-                ("samples", self._source_samples),
-                ("events", self._source_events),
-            ):
-                with closing_iterator(source()) as rows:
-                    for row in rows:
-                        values = row if kind == "samples" else vars(row)
-                        name = row["side"] if kind == "samples" else "events"
-                        bound = (
-                            65536
-                            + 256
-                            * (
-                                len(values.get("bids", ()))
-                                + len(values.get("asks", ()))
-                            )
-                            + 32
-                            * sum(
-                                len(value)
-                                for value in values.values()
-                                if isinstance(value, str)
-                            )
-                        )
-                        with self.policy.lease(
-                            "crypto.calibration.history.encode", bound
-                        ):
-                            payload = (
-                                json.dumps(
-                                    values, separators=(",", ":"), allow_nan=False
-                                ).encode()
-                                + b"\n"
-                            )
-                            if kind == "events":
-                                if row.event_id != self._event_count:
-                                    raise ValueError(
-                                        "crypto_calibration_event_order_invalid"
-                                    )
-                                append(
-                                    "offsets",
-                                    struct.pack(">Q", files["events"][0].tell()),
-                                )
-                                self._event_count += 1
-                            append(name, payload)
-                            maximum[name] = max(maximum[name], len(payload))
-                            payload = None
-                        row = values = None
-            append("offsets", struct.pack(">Q", files["events"][0].tell()))
-            for spool, _reservation in files.values():
-                spool.flush()
-            self._maximum = maximum
-            self._lengths = {name: spool.tell() for name, (spool, _) in files.items()}
-            self._native = files
-            self._source_samples = self._source_events = None
-            self._native_resources = resources.pop_all()
+        history = {"buy": [], "sell": [], "events": []}
+        with closing_iterator(self._source_samples()) as samples:
+            for sample in samples:
+                history[sample["side"]].append(dict(sample))
+        with closing_iterator(self._source_events()) as events:
+            for event in events:
+                if event.event_id != len(history["events"]):
+                    raise ValueError("crypto_calibration_event_order_invalid")
+                history["events"].append(event)
+        self._native = history
 
     def samples(self, side):
         self._load()
-        spool, _reservation = self._native[side]
-        maximum = self._maximum[side]
-        position = 0
-        while position < self._lengths[side]:
-            with self.policy.lease(
-                "crypto.calibration.sample_decode",
-                json_record_working_set_bytes(maximum),
-            ):
-                spool.seek(position)
-                payload = spool.readline(maximum + 1)
-                if (
-                    not payload
-                    or len(payload) > maximum
-                    or not payload.endswith(b"\n")
-                    or position + len(payload) > self._lengths[side]
-                ):
-                    raise ValueError("crypto_calibration_history_invalid")
-                position += len(payload)
-                sample = parse_qrp_json_object(payload)
-                payload = None
-                try:
-                    yield sample
-                finally:
-                    sample = None
+        yield from self._native[side]
 
     def events(self, start, stop):
         self._load()
-        if not 0 <= start <= stop <= self._event_count:
+        if not 0 <= start <= stop <= len(self._native["events"]):
             raise ValueError("crypto_calibration_event_coordinates_invalid")
-        spool, _reservation = self._native["events"]
-        offsets, _reservation = self._native["offsets"]
-        offsets.seek(start * 8)
-        encoded = offsets.read(8)
-        if len(encoded) != 8:
-            raise ValueError("crypto_calibration_history_invalid")
-        position = struct.unpack(">Q", encoded)[0]
-        maximum = self._maximum["events"]
-        active = None
-        try:
-            for event_id in range(start, stop):
-                lease = self.policy.lease(
-                    "crypto.calibration.event_decode",
-                    json_record_working_set_bytes(maximum),
-                )
-                try:
-                    spool.seek(position)
-                    payload = spool.readline(maximum + 1)
-                    if (
-                        not payload
-                        or len(payload) > maximum
-                        or not payload.endswith(b"\n")
-                    ):
-                        raise ValueError("crypto_calibration_history_invalid")
-                    position += len(payload)
-                    lease.shrink_to(json_record_working_set_bytes(len(payload)))
-                    event = SimpleNamespace(**parse_qrp_json_object(payload))
-                    payload = None
-                    if event.event_id != event_id:
-                        raise ValueError("crypto_calibration_history_invalid")
-                    if event.kind == "book":
-                        previous = active
-                        active = OwnedValue(event, lease)
-                        lease = None
-                        try:
-                            yield event
-                        finally:
-                            if previous is not None:
-                                previous.release(owner="crypto.calibration.event")
-                    else:
-                        yield event
-                    event = None
-                finally:
-                    if lease is not None:
-                        _close_lease_preserving_primary(
-                            lease, owner="crypto.calibration.event_decode"
-                        )
-        finally:
-            if active is not None:
-                active.release(owner="crypto.calibration.event")
-
-    @contextmanager
-    def _book(self, event_id):
-        with closing_iterator(self.events(event_id, event_id + 1)) as events:
-            yield next(events)
+        for index in range(start, stop):
+            yield self._native["events"][index]
 
     def _response(
         self,
@@ -1820,12 +1453,16 @@ class MakerCalibration:
                                         current_origin + order.price_index - origin,
                                         new_order.price_unit,
                                     )
-                                    yield (
+                                    _yield_value = (
                                         stamp - start,
                                         quantity,
                                         price,
                                         order is candidate,
                                     )
+                                    try:
+                                        yield _yield_value
+                                    except GeneratorExit:
+                                        return
                                     order.remaining -= quantity
                                     if order.remaining <= 0:
                                         active.pop(side)
@@ -1857,205 +1494,135 @@ class MakerCalibration:
         fee_bps,
         funding,
     ):
-        try:
-            with (
-                self.policy.lease(
-                    "crypto.maker.calibration.query",
-                    max(
-                        65536,
-                        512 * (len(state.bids) + len(state.asks))
-                        + 2048 * (len(commands) + len(funding) + 1),
-                    ),
-                ),
-                self.policy.lease("storage.exact_keys", EXACT_KEY_SQLITE_CACHE_BYTES),
-                ExactPrimaryKeyIndex(
-                    primary_key=(),
-                ) as spill,
-            ):
-                sign = 1.0 if new_order.side == "buy" else -1.0
-                mid = _mid(state)
-                forecast = _positive(
-                    mid * (1.0 + prediction), "hft_prediction_price_invalid"
-                )
-                limit = new_order.remaining
-                keep_gain = cancel_gain = 0.0
-                sample_count = 0
+        choices = set()
+        curves = {}
+        sign = 1.0 if new_order.side == "buy" else -1.0
+        mid = _mid(state)
+        forecast = _positive(mid * (1.0 + prediction), "hft_prediction_price_invalid")
+        limit = new_order.remaining
+        keep_gain = cancel_gain = 0.0
+        sample_count = 0
 
-                def records():
-                    nonlocal keep_gain, cancel_gain, sample_count
-                    for quantity in (0.0, limit):
-                        payload = struct.pack(">d", quantity)
-                        yield "choices", payload, payload
-                    with closing_iterator(self.samples(new_order.side)) as samples:
-                        for sample in samples:
-                            sample_id = sample_count
-                            sample_count += 1
-                            error = sample["forecast_error"]
-                            funded = [0.0] * len(funding)
-                            for replacement in (None, limit):
-                                cumulative = 0.0
-                                with closing_iterator(
-                                    self._response(
-                                        sample,
-                                        state=state,
-                                        decision_ns=decision_ns,
-                                        new_order=new_order,
-                                        active_order=active_order,
-                                        commands=commands,
-                                        lifetime_ns=lifetime_ns,
-                                        replace_quantity=replacement,
-                                        events=self.events(
-                                            int(sample["event_start"]),
-                                            int(sample["event_end"]),
-                                        ),
-                                    )
-                                ) as response:
-                                    for (
-                                        elapsed,
-                                        quantity,
-                                        price,
-                                        is_new,
-                                    ) in response:
-                                        if is_new:
-                                            cumulative += quantity
-                                            if 0.0 <= cumulative <= limit:
-                                                payload = struct.pack(">d", cumulative)
-                                                yield "choices", payload, payload
-                                            for index, (stamp, _cash) in enumerate(
-                                                funding
-                                            ):
-                                                if elapsed < stamp:
-                                                    funded[index] = max(
-                                                        funded[index], cumulative
-                                                    )
-                                        else:
-                                            gain = quantity * (
-                                                sign * (forecast - price)
-                                                - price * fee_bps / 10000.0
-                                                + sign * mid * error
-                                            )
-                                            gain += (
-                                                quantity
-                                                * sign
-                                                * sum(
-                                                    cash
-                                                    for stamp, cash in funding
-                                                    if elapsed < stamp
-                                                )
-                                            )
-                                            if replacement is None:
-                                                keep_gain += gain
-                                            else:
-                                                cancel_gain += gain
-                                if replacement is not None:
-                                    yield (
-                                        "response",
-                                        struct.pack(">dQ", cumulative, sample_id),
-                                        struct.pack(">dd", cumulative, error),
-                                    )
-                            for index, quantity in enumerate(funded):
-                                yield (
-                                    f"funding_{index}",
-                                    struct.pack(">dQ", quantity, sample_id),
-                                    struct.pack(">dd", quantity, 0.0),
-                                )
-
-                with closing_iterator(records()) as rows:
-                    spill.add_identity_payload_rows(rows=rows)
-
-                def curve(namespace):
-                    with closing_iterator(
-                        spill.identity_payload_values(namespace=namespace)
-                    ) as payloads:
-                        rows = (struct.unpack(">dd", payload) for payload in payloads)
-                        for quantity, group in groupby(rows, key=lambda row: row[0]):
-                            count, error_sum = 0, 0.0
-                            for _quantity, error in group:
-                                count += 1
-                                error_sum += error
-                            yield quantity, count, error_sum
-
-                price = index_to_price(new_order.price_index, new_order.price_unit)
-                edge = sign * (forecast - price) - price * fee_bps / 10000.0
-
-                def responses(namespace, *, with_error):
-                    def weight(count, error):
-                        return (
-                            count * edge + sign * mid * error if with_error else count
-                        )
-
-                    total = 0.0 if with_error else 0
-                    with closing_iterator(curve(namespace)) as groups:
-                        for _quantity, count, error in groups:
-                            # Preserve the original ordered cumsum, not compensated sum.
-                            total += weight(count, error)
-                    weighted = 0.0
-                    prefix = 0.0 if with_error else 0
-                    with (
-                        closing_iterator(curve(namespace)) as groups,
-                        closing_iterator(
-                            spill.identity_payload_values(namespace="choices")
-                        ) as choices,
-                    ):
-                        current = next(groups, None)
-                        for payload in choices:
-                            choice = struct.unpack(">d", payload)[0]
-                            while current is not None and current[0] <= choice:
-                                quantity, count, error = current
-                                value = weight(count, error)
-                                weighted += quantity * value
-                                prefix += value
-                                current = next(groups, None)
-                            yield weighted + choice * (total - prefix)
-
-                with handle_preserving_primary(ExitStack()) as reads:
-                    choices = reads.enter_context(
-                        closing_iterator(
-                            spill.identity_payload_values(namespace="choices")
-                        )
-                    )
-                    streams = [
-                        reads.enter_context(
-                            closing_iterator(responses("response", with_error=True))
+        def records():
+            nonlocal keep_gain, cancel_gain, sample_count
+            for quantity in (0.0, limit):
+                choices.add(quantity)
+            samples = self.samples(new_order.side)
+            for sample in samples:
+                sample_id = sample_count
+                sample_count += 1
+                error = sample["forecast_error"]
+                funded = [0.0] * len(funding)
+                for replacement in (None, limit):
+                    cumulative = 0.0
+                    response = self._response(
+                        sample,
+                        state=state,
+                        decision_ns=decision_ns,
+                        new_order=new_order,
+                        active_order=active_order,
+                        commands=commands,
+                        lifetime_ns=lifetime_ns,
+                        replace_quantity=replacement,
+                        events=self.events(
+                            int(sample["event_start"]), int(sample["event_end"])
                         ),
-                        *(
-                            reads.enter_context(
-                                closing_iterator(
-                                    responses(f"funding_{index}", with_error=False)
+                    )
+                    for elapsed, quantity, price, is_new in response:
+                        if is_new:
+                            cumulative += quantity
+                            if 0.0 <= cumulative <= limit:
+                                choices.add(cumulative)
+                            for index, (stamp, _cash) in enumerate(funding):
+                                if elapsed < stamp:
+                                    funded[index] = max(funded[index], cumulative)
+                        else:
+                            gain = quantity * (
+                                sign * (forecast - price)
+                                - price * fee_bps / 10000.0
+                                + sign * mid * error
+                            )
+                            gain += (
+                                quantity
+                                * sign
+                                * sum(
+                                    (cash for stamp, cash in funding if elapsed < stamp)
                                 )
                             )
-                            for index in range(len(funding))
-                        ),
-                    ]
-                    best_gain = -float("inf")
-                    best_quantity = 0.0
-                    for payload, base, *funded in zip(choices, *streams, strict=True):
-                        gain = base
-                        for (_stamp, cash), value in zip(funding, funded, strict=True):
-                            gain += sign * cash * value
-                        gain = (gain + cancel_gain) / sample_count
-                        if gain > best_gain:
-                            best_gain = gain
-                            best_quantity = struct.unpack(">d", payload)[0]
-                keep_gain /= sample_count
-                keep = (
-                    bool(active_order is not None or commands)
-                    and keep_gain >= best_gain
-                )
-                return (
-                    keep,
-                    0.0 if keep else float(best_quantity),
-                    float(keep_gain) if keep else float(best_gain),
-                )
+                            if replacement is None:
+                                keep_gain += gain
+                            else:
+                                cancel_gain += gain
+                    if replacement is not None:
+                        curves.setdefault("response", []).append(
+                            (cumulative, sample_id, error)
+                        )
+                for index, quantity in enumerate(funded):
+                    curves.setdefault(f"funding_{index}", []).append(
+                        (quantity, sample_id, 0.0)
+                    )
 
-        except BaseException as primary:
-            try:
-                self.close()
-            except BaseException as close_error:
-                primary.add_note(
-                    "Maker calibration close also failed: " + type(close_error).__name__
-                )
-            raise
+        records()
+        choices = sorted(choices)
+
+        def curve(namespace):
+            rows = sorted(curves.get(namespace, ()), key=lambda row: (row[0], row[1]))
+            for quantity, group in groupby(rows, key=lambda row: row[0]):
+                count, error_sum = (0, 0.0)
+                for _quantity, _sample_id, error in group:
+                    count += 1
+                    error_sum += error
+                yield (quantity, count, error_sum)
+
+        price = index_to_price(new_order.price_index, new_order.price_unit)
+        edge = sign * (forecast - price) - price * fee_bps / 10000.0
+
+        def responses(namespace, *, with_error):
+
+            def weight(count, error):
+                return count * edge + sign * mid * error if with_error else count
+
+            total = 0.0 if with_error else 0
+            groups = curve(namespace)
+            for _quantity, count, error in groups:
+                total += weight(count, error)
+            weighted = 0.0
+            prefix = 0.0 if with_error else 0
+            groups = curve(namespace)
+            current = next(groups, None)
+            for choice in choices:
+                while current is not None and current[0] <= choice:
+                    quantity, count, error = current
+                    value = weight(count, error)
+                    weighted += quantity * value
+                    prefix += value
+                    current = next(groups, None)
+                yield (weighted + choice * (total - prefix))
+
+        streams = [
+            responses("response", with_error=True),
+            *(
+                responses(f"funding_{index}", with_error=False)
+                for index in range(len(funding))
+            ),
+        ]
+        best_gain = -float("inf")
+        best_quantity = 0.0
+        for choice, base, *funded in zip(choices, *streams, strict=True):
+            gain = base
+            for (_stamp, cash), value in zip(funding, funded, strict=True):
+                gain += sign * cash * value
+            gain = (gain + cancel_gain) / sample_count
+            if gain > best_gain:
+                best_gain = gain
+                best_quantity = choice
+        keep_gain /= sample_count
+        keep = bool(active_order is not None or commands) and keep_gain >= best_gain
+        return (
+            keep,
+            0.0 if keep else float(best_quantity),
+            float(keep_gain) if keep else float(best_gain),
+        )
 
 
 def replay_maker_calibration(
@@ -2068,7 +1635,6 @@ def replay_maker_calibration(
     observed_coverage,
     trade_coverage,
     cutoff_ns,
-    resource_policy,
     on_sample,
     on_event,
 ):
@@ -2077,24 +1643,11 @@ def replay_maker_calibration(
     _nonnegative_integer(latency_ms, "hft_maker_latency_invalid")
     events = iter(_market_events(book_events, trades))
     rows = iter(_checked_quote_schedule(decisions))
-    latest_state = latest_owned = next_event = latest_book_id = None
+    latest_state = next_event = latest_book_id = None
     samples = []
     counts = {"buy": 0, "sell": 0}
     excluded = event_count = 0
-    with (
-        closing_iterator(events),
-        closing_iterator(rows),
-        resource_policy.lease("crypto.maker.calibration.pending", 1) as lease,
-        ExitStack() as cleanup,
-    ):
-
-        def cleanup_books():
-            if latest_owned is not None:
-                latest_owned.release(owner="crypto.maker.calibration.book")
-            if next_event is not None and isinstance(next_event[1], OwnedValue):
-                next_event[1].release(owner="crypto.maker.calibration.book")
-
-        cleanup.callback(cleanup_books)
+    with closing_iterator(events), closing_iterator(rows):
         next_event = next(events, None)
 
         def record(event):
@@ -2133,7 +1686,7 @@ def replay_maker_calibration(
                     sample["terminal_reason"] = "book_boundary"
 
         def process_until(target):
-            nonlocal latest_state, latest_owned, latest_book_id, next_event
+            nonlocal latest_state, latest_book_id, next_event
             while True:
                 timers = [
                     min(
@@ -2160,9 +1713,7 @@ def replay_maker_calibration(
                         if samples:
                             record(event)
                         invalidate_references()
-                        if latest_owned is not None:
-                            latest_owned.release(owner="crypto.maker.calibration.book")
-                        latest_owned = latest_state = latest_book_id = None
+                        latest_state = latest_book_id = None
                     elif isinstance(event, TradeEvent):
                         if samples:
                             record(event)
@@ -2186,9 +1737,6 @@ def replay_maker_calibration(
                             and state.segment_id != latest_state.segment_id
                         ):
                             invalidate_references()
-                        if latest_owned is not None:
-                            latest_owned.release(owner="crypto.maker.calibration.book")
-                        latest_owned = event if isinstance(event, OwnedValue) else None
                         latest_state = state
                         latest_book_id = record(state) if samples else None
                     next_event = next(events, None)
@@ -2206,7 +1754,6 @@ def replay_maker_calibration(
                             )
                             sample["activated"] = reason is None
                             sample["terminal_reason"] = reason
-                lease.shrink_to(max(1, len(samples) * 2048))
 
         try:
             for row in rows:
@@ -2232,7 +1779,6 @@ def replay_maker_calibration(
                 if latest_book_id is None:
                     latest_book_id = record(latest_state)
                 for side in ("buy", "sell"):
-                    lease.grow(2048)
                     order = _maker_new_order(
                         counts[side],
                         side,
@@ -2262,9 +1808,6 @@ def replay_maker_calibration(
             process_until(cutoff_ns)
             if samples:
                 raise ValueError("maker_calibration_outcome_not_mature")
-        except BaseException as error:
-            clear_exception_frames(error)
-            raise
         finally:
             samples.clear()
     return {"samples": counts, "excluded_decisions": excluded}
@@ -2293,43 +1836,44 @@ def _checked_trades(
                     raise ValueError("hft_execution_trade_visible_quantity_invalid")
             if not isinstance(trade.buyer_is_maker, bool):
                 raise ValueError("hft_execution_trade_side_invalid")
-            yield trade
+            try:
+                yield trade
+            except GeneratorExit:
+                return
 
 
 def _market_events(
-    books: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
+    books: Iterable[BookState | BookBoundary],
     trades: Iterable[TradeEvent],
 ) -> Iterator[tuple[tuple[int, ...], object]]:
     book_events = iter(_checked_book_events(books))
     trade_events = iter(_checked_trades(trades))
-    book_next: BookState | OwnedValue[BookState] | BookBoundary | None = None
+    book_next: BookState | BookBoundary | None = None
     trade_next: TradeEvent | None = None
     pending_event: object | None = None
     with closing_iterator(book_events), closing_iterator(trade_events):
-        try:
-            book_next = next(book_events, None)
-            trade_next = next(trade_events, None)
-            while book_next is not None or trade_next is not None:
-                if trade_next is None or (
-                    book_next is not None
-                    and _book_key(book_next) <= observation_order_key(trade_next)
-                ):
-                    pending_event = book_next
-                    assert book_next is not None
-                    key = _book_key(book_next)
-                    book_next = next(book_events, None)
-                else:
-                    pending_event = trade_next
-                    assert trade_next is not None
-                    key = observation_order_key(trade_next)
-                    trade_next = next(trade_events, None)
-                yield key, pending_event
-                pending_event = None
-        finally:
-            if isinstance(pending_event, OwnedValue):
-                pending_event.release(owner="crypto.execution.market_event")
-            if isinstance(book_next, OwnedValue):
-                book_next.release(owner="crypto.execution.market_event")
+        book_next = next(book_events, None)
+        trade_next = next(trade_events, None)
+        while book_next is not None or trade_next is not None:
+            if trade_next is None or (
+                book_next is not None
+                and _book_key(book_next) <= observation_order_key(trade_next)
+            ):
+                pending_event = book_next
+                assert book_next is not None
+                key = _book_key(book_next)
+                book_next = next(book_events, None)
+            else:
+                pending_event = trade_next
+                assert trade_next is not None
+                key = observation_order_key(trade_next)
+                trade_next = next(trade_events, None)
+            _yield_value = key, pending_event
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
+            pending_event = None
 
 
 def _checked_quote_schedule(
@@ -2355,7 +1899,10 @@ def _checked_quote_schedule(
             if previous is not None and timestamp <= previous:
                 raise ValueError("hft_maker_quote_schedule_time_non_monotonic")
             previous = timestamp
-            yield row
+            try:
+                yield row
+            except GeneratorExit:
+                return
 
 
 def simulate_maker(
@@ -2366,7 +1913,6 @@ def simulate_maker(
     config: MakerConfig,
     observed_coverage,
     trade_coverage,
-    resource_policy,
     capital,
     asset_id,
     funding_events,
@@ -2399,7 +1945,7 @@ def simulate_maker(
     metrics = _Metrics()
     economics = PortfolioEconomics(capital, asset_id, on_ledger)
     apply_funding = _funding_consumer(funding_events, economics)
-    latest_state = latest_owned = next_event = None
+    latest_state = next_event = None
     trade_observation_id = None
     active_forecast = next_forecast = None
     forecast_timestamp = -1
@@ -2455,29 +2001,13 @@ def simulate_maker(
             cancelled_orders += 1
 
     with (
-        resource_policy.lease(
-            "crypto.execution.maker.workspace", _EXECUTION_WORKSPACE_BYTES
-        ),
-        resource_policy.lease("crypto.execution.maker.commands", 1) as command_lease,
         closing_iterator(events),
         closing_iterator(decisions),
         closing_iterator(forecasts),
-        _PendingMarkouts(metrics, resolved_fill, resource_policy) as pending,
-        ExitStack() as cleanup,
+        _PendingMarkouts(metrics, resolved_fill) as pending,
     ):
-
-        def cleanup_books():
-            if latest_owned is not None:
-                latest_owned.release(owner="crypto.execution.book")
-            if next_event is not None and isinstance(next_event[1], OwnedValue):
-                next_event[1].release(owner="crypto.execution.book")
-
-        cleanup.callback(cleanup_books)
         next_event = next(events, None)
         next_forecast = next(forecasts, None)
-
-        def update_command_lease():
-            command_lease.shrink_to(max(1, (len(commands) + len(active)) * 1024))
 
         def cancel_all(timestamp):
             for order in active.values():
@@ -2491,7 +2021,6 @@ def simulate_maker(
                         order, min(timestamp, order.valid_until_ns), cancelled=True
                     )
             commands.clear()
-            update_command_lease()
 
         def observe_trade_connection(identity, timestamp):
             nonlocal trade_observation_id
@@ -2512,7 +2041,6 @@ def simulate_maker(
                     finish_order(order, timestamp, cancelled=True)
                 else:
                     commands.append(command)
-            update_command_lease()
 
         def observed_mark(timestamp):
             return (
@@ -2523,23 +2051,19 @@ def simulate_maker(
             )
 
         def process_book(event):
-            nonlocal latest_state, latest_owned
+            nonlocal latest_state
             if isinstance(event, BookBoundary):
                 pending.advance(
                     event.observed_time_ns - 1, latest_state, observed_coverage
                 )
                 cancel_all(event.observed_time_ns)
-                if latest_owned is not None:
-                    latest_owned.release(owner="crypto.execution.book")
-                latest_owned = latest_state = None
+                latest_state = None
                 pending.expire_all()
                 return
             previous = latest_state
             state = _book_value(event)
             if previous is not None and previous.segment_id != state.segment_id:
                 cancel_all(state.observed_time_ns)
-            previous_owned = latest_owned
-            latest_owned = event if isinstance(event, OwnedValue) else None
             latest_state = state
             try:
                 _resolve_observed_markouts(
@@ -2547,8 +2071,6 @@ def simulate_maker(
                 )
             finally:
                 previous = None
-                if previous_owned is not None:
-                    previous_owned.release(owner="crypto.execution.book")
             if (
                 decision_windows_ns is None
                 or max(decision_windows_ns[0][0], observation_start or 0)
@@ -2687,7 +2209,6 @@ def simulate_maker(
                                     ),
                                 ),
                             )
-                update_command_lease()
             apply_funding(target)
             expire_orders(target)
 
@@ -2973,7 +2494,6 @@ def simulate_maker(
                                 decision_time_ns
                                 + config.latency_ms * _NANOSECONDS_PER_MILLISECOND
                             )
-                            command_lease.grow(1024)
                             commands.append((effective, side, order))
                     reason = (
                         "decision_book_or_trade_unavailable"
@@ -3096,13 +2616,7 @@ def simulate_maker(
             last_gross = None if marked is None else marked["gross_pnl"]
             last_net = None if marked is None else marked["net_pnl"]
             if on_terminal_book is not None and latest_state is not None:
-                on_terminal_book(
-                    latest_owned if latest_owned is not None else latest_state
-                )
-                latest_owned = None
-        except BaseException as error:
-            clear_exception_frames(error)
-            raise
+                on_terminal_book(latest_state)
         finally:
             active.clear()
             commands.clear()

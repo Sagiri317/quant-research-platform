@@ -29,7 +29,6 @@ def test_latest_declaration_keeps_same_day_median_and_next_session_gate():
         records, observations, trading_sessions=sessions
     )
     assert actual.iloc[0, 2:].isna().all()
-    # Latest institution estimates are A=10, B=9, C=11; consensus is 10.
     assert actual.loc[1, "forward_earnings_yield_fy1"] == 1.0
     assert actual.loc[1, "forecast_dispersion_fy1"] == 1.0
     assert actual.loc[1, "log_analyst_coverage"] == pytest.approx(np.log(3.0))
@@ -155,7 +154,6 @@ def test_expectations_processed_producer_persists_latest_declaration(
         producer,
     )
     from quant_research_platform.profiles.research import research_profile
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
 
@@ -186,28 +184,22 @@ def test_expectations_processed_producer_persists_latest_declaration(
             "close": [10.0, 10.0, None, 0.0, 10.0],
         }
     )
-    with runtime_resource_policy_scope() as policy:
-        actual = producer._compute_processed_frame(
-            spec,
-            source={"analyst_forecast": records},
-            dependencies={"market_panel_1d": panel},
-            trading_sessions=tuple(sessions),
-        )
-        root = tmp_path / "data/processed/a_share/factor/expectations_factors"
-        write_dataset(
-            root, actual, spec=spec, resource_policy=policy, borrowed_input=True
-        )
-        saved = read_dataset(root, resource_policy=policy)
-        pd.testing.assert_frame_equal(saved, actual, check_exact=True)
-        for position in (1, 4):
-            assert saved.loc[position, "forward_earnings_yield_fy1"] == 1.0
-            assert saved.loc[position, "forecast_dispersion_fy1"] == 1.0
-            assert saved.loc[position, "log_analyst_coverage"] == pytest.approx(
-                np.log(3.0)
-            )
-        assert saved.iloc[0, 3:].isna().all()
-        assert saved.iloc[2:4, 3:].isna().all().all()
-        assert policy.used_memory_bytes == 0
+    actual = producer._compute_processed_frame(
+        spec,
+        source={"analyst_forecast": records},
+        dependencies={"market_panel_1d": panel},
+        trading_sessions=tuple(sessions),
+    )
+    root = tmp_path / "data/processed/a_share/factor/expectations_factors"
+    write_dataset(root, actual, spec=spec)
+    saved = read_dataset(root)
+    pd.testing.assert_frame_equal(saved, actual, check_exact=True)
+    for position in (1, 4):
+        assert saved.loc[position, "forward_earnings_yield_fy1"] == 1.0
+        assert saved.loc[position, "forecast_dispersion_fy1"] == 1.0
+        assert saved.loc[position, "log_analyst_coverage"] == pytest.approx(np.log(3.0))
+    assert saved.iloc[0, 3:].isna().all()
+    assert saved.iloc[2:4, 3:].isna().all().all()
 
 
 def test_asset_candidate_scan_preserves_interleaved_observation_positions(monkeypatch):
@@ -287,7 +279,6 @@ def test_fiscal_year_coverage_is_independent_in_persisted_producer(
         producer,
     )
     from quant_research_platform.profiles.research import research_profile
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
 
@@ -317,35 +308,31 @@ def test_fiscal_year_coverage_is_independent_in_persisted_producer(
         }
     )
     spec = research_profile().processed.get("expectations_factors")
-    with runtime_resource_policy_scope() as policy:
-        actual = producer._compute_processed_frame(
-            spec,
-            source={"analyst_forecast": records},
-            dependencies={"market_panel_1d": panel},
-            trading_sessions=tuple(sessions),
+    actual = producer._compute_processed_frame(
+        spec,
+        source={"analyst_forecast": records},
+        dependencies={"market_panel_1d": panel},
+        trading_sessions=tuple(sessions),
+    )
+    root = tmp_path / "data/processed/a_share/factor/expectations_factors"
+    write_dataset(root, actual, spec=spec)
+    saved = read_dataset(root)
+    assert saved.iloc[0, 3:].isna().all()
+    fy1_columns = [
+        "forward_earnings_yield_fy1",
+        "forecast_dispersion_fy1",
+        "log_analyst_coverage",
+    ]
+    if fy1_count < 3:
+        assert saved.loc[1, fy1_columns].isna().all()
+    else:
+        assert saved.loc[1, fy1_columns].tolist() == pytest.approx(
+            [0.2, 1.0, np.log(3.0)]
         )
-        root = tmp_path / "data/processed/a_share/factor/expectations_factors"
-        write_dataset(
-            root, actual, spec=spec, resource_policy=policy, borrowed_input=True
-        )
-        saved = read_dataset(root, resource_policy=policy)
-        assert saved.iloc[0, 3:].isna().all()
-        fy1_columns = [
-            "forward_earnings_yield_fy1",
-            "forecast_dispersion_fy1",
-            "log_analyst_coverage",
-        ]
-        if fy1_count < 3:
-            assert saved.loc[1, fy1_columns].isna().all()
-        else:
-            assert saved.loc[1, fy1_columns].tolist() == pytest.approx(
-                [0.2, 1.0, np.log(3.0)]
-            )
-        if fy2_count >= 3 and fy2_year == 2026:
-            assert saved.loc[1, "forward_earnings_yield_fy2"] == 0.4
-        else:
-            assert pd.isna(saved.loc[1, "forward_earnings_yield_fy2"])
-        assert policy.used_memory_bytes == 0
+    if fy2_count >= 3 and fy2_year == 2026:
+        assert saved.loc[1, "forward_earnings_yield_fy2"] == 0.4
+    else:
+        assert pd.isna(saved.loc[1, "forward_earnings_yield_fy2"])
 
 
 @pytest.mark.parametrize("scale", (1e308, np.nextafter(0.0, 1.0)))

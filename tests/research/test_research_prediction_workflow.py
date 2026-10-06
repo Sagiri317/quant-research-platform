@@ -18,16 +18,9 @@ from quant_research_platform.research.models.supervised import (
     preflight_model_specs,
 )
 from quant_research_platform.research.predictions.outputs import prediction_callable
-from quant_research_platform.runtime.resources import (
-    runtime_resource_policy_scope,
-)
 from tests.helpers.research_configuration import configured_models
-from tests.research.prediction_output_helpers import (
-    write_prediction_output_and_read,
-)
-from tests.research.workflow_test_support import (
-    _research_rows,
-)
+from tests.research.prediction_output_helpers import write_prediction_output_and_read
+from tests.research.workflow_test_support import _research_rows
 
 
 def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
@@ -51,38 +44,29 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         test_end="2014-01-03",
     )
     estimator = build_estimator_from_model_spec(model_spec)
-
-    with runtime_resource_policy_scope():
-        model_result_owned = model_fitting._fit_model_result_owned_from_frames(
-            (frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],),
-            model_spec,
-            estimator=estimator,
-            fitting_cutoff=prediction_spec.train_end,
-        )
-        try:
-            model_result = model_result_owned.value
-            prediction, output_bundle, _ = write_prediction_output_and_read(
-                tmp_path,
-                (frame,),
-                prediction_spec,
-                model_spec.input_columns,
-                prediction_model=model_result.prediction_model,
-                model_metadata=model_result.metadata,
-            )
-
-            assert prediction_spec.prediction_column in prediction.columns
-            assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
-            assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
-            assert output_bundle.as_posix().endswith("outputs/pred_demo")
-        finally:
-            model_result = None
-            model_result_owned.release(owner="test.prediction_model")
+    model_result = model_fitting._fit_model_result_from_frames(
+        (frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],),
+        model_spec,
+        estimator=estimator,
+        fitting_cutoff=prediction_spec.train_end,
+    )
+    prediction, output_bundle, _ = write_prediction_output_and_read(
+        tmp_path,
+        (frame,),
+        prediction_spec,
+        model_spec.input_columns,
+        prediction_model=model_result.prediction_model,
+        model_metadata=model_result.metadata,
+    )
+    assert prediction_spec.prediction_column in prediction.columns
+    assert prediction["timestamp"].min() >= pd.Timestamp("2014-01-03")
+    assert prediction["timestamp"].max() <= pd.Timestamp("2014-01-03")
+    assert output_bundle.as_posix().endswith("outputs/pred_demo")
 
 
 def test_a_share_prediction_requires_persisted_quarter_lineage() -> None:
     with pytest.raises(
-        ValueError,
-        match="a_share_persisted_prediction_requires_quarter_lineage",
+        ValueError, match="a_share_persisted_prediction_requires_quarter_lineage"
     ):
         PredictionSpec(
             prediction_id="a_share_prediction",
@@ -112,7 +96,6 @@ def test_forest_prediction_keeps_tree_order_without_mutating_fitted_state(monkey
     forest = RandomForestRegressor(
         n_estimators=3, n_jobs=3, bootstrap=False, random_state=0
     ).fit(frame, [0.0, 0.0])
-    # Real fitted one-leaf trees make the floating-point counterexample exact.
     for tree, value in zip(forest.estimators_, (1e16, -1e16, 1.0), strict=True):
         tree.tree_.value.fill(value)
     fitted = ScaledPredictor(forest, ModelMatrixScaler.fit(frame))
@@ -134,8 +117,6 @@ def test_forest_prediction_keeps_tree_order_without_mutating_fitted_state(monkey
 
     monkeypatch.setattr(_forest, "_accumulate_prediction", accumulate)
     predict = prediction_callable(("x",), fitted)
-    # Parallel completion is 0,2,1: (1e16 + 1) - 1e16 == 0.
-    # Persisted tree order is 0,1,2: (1e16 - 1e16) + 1 == 1.
     with parallel_config(backend="threading", n_jobs=3):
         outer_backend, outer_jobs = get_active_backend()
         first = predict(frame)
@@ -174,27 +155,19 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
                 for asset_index in range(3)
             ]
     preflight_model_specs(specs)
-
-    with runtime_resource_policy_scope():
-        for spec in specs:
-            owned = model_fitting._fit_model_result_owned_from_frames(
-                (frame,),
-                spec,
-                estimator=build_estimator_from_model_spec(spec),
-                fitting_cutoff="2020-02-12",
-            )
-            try:
-                result = owned.value
-                columns = tuple(dict.fromkeys((*spec.input_columns, "timestamp")))
-                prediction = prediction_callable(
-                    spec.input_columns,
-                    result.prediction_model,
-                )(frame.loc[:, list(columns)])
-                assert len(prediction) == len(frame)
-                assert pd.Series(prediction).notna().all()
-            finally:
-                result = prediction = None
-                owned.release(owner="test.model_ladder")
+    for spec in specs:
+        result = model_fitting._fit_model_result_from_frames(
+            (frame,),
+            spec,
+            estimator=build_estimator_from_model_spec(spec),
+            fitting_cutoff="2020-02-12",
+        )
+        columns = tuple(dict.fromkeys((*spec.input_columns, "timestamp")))
+        prediction = prediction_callable(spec.input_columns, result.prediction_model)(
+            frame.loc[:, list(columns)]
+        )
+        assert len(prediction) == len(frame)
+        assert pd.Series(prediction).notna().all()
 
 
 @pytest.mark.parametrize(
@@ -205,9 +178,7 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
     ),
 )
 def test_prediction_builder_binds_backend_package_to_actual_model_owner(
-    model_algorithm: str,
-    expected_package: str,
-    wrong_package: str,
+    model_algorithm: str, expected_package: str, wrong_package: str
 ) -> None:
     frame = _research_rows().assign(
         instant_target=lambda value: value["momentum_20d"] * 0.01,
@@ -221,50 +192,37 @@ def test_prediction_builder_binds_backend_package_to_actual_model_owner(
         max_train_rows=len(frame),
     )
     estimator = build_estimator_from_model_spec(model_spec)
-    with runtime_resource_policy_scope():
-        model_result_owned = model_fitting._fit_model_result_owned_from_frames(
+    model_result = model_fitting._fit_model_result_from_frames(
+        (frame,), model_spec, estimator=estimator, fitting_cutoff="2014-01-02"
+    )
+    prediction_spec = PredictionSpec(
+        prediction_id=f"{model_algorithm}_prediction",
+        model_id=model_spec.model_id,
+        research_dataset_id="demo",
+        train_end="2014-01-02",
+        test_start="2014-01-03",
+        test_end="2014-01-03",
+    )
+    result = prediction_runner_module.build_prediction_result_from_frames(
+        (frame,),
+        prediction_spec,
+        model_spec.input_columns,
+        prediction_model=model_result.prediction_model,
+        model_metadata=model_result.metadata,
+    )
+    assert result.model_metadata["dependency_status"]["package"] == expected_package
+    wrong_metadata = {
+        **model_result.metadata,
+        "dependency_status": {
+            **model_result.metadata["dependency_status"],
+            "package": wrong_package,
+        },
+    }
+    with pytest.raises(ValueError, match="invalid_model_metadata"):
+        prediction_runner_module.build_prediction_result_from_frames(
             (frame,),
-            model_spec,
-            estimator=estimator,
-            fitting_cutoff="2014-01-02",
+            prediction_spec,
+            model_spec.input_columns,
+            prediction_model=model_result.prediction_model,
+            model_metadata=wrong_metadata,
         )
-        try:
-            model_result = model_result_owned.value
-            prediction_spec = PredictionSpec(
-                prediction_id=f"{model_algorithm}_prediction",
-                model_id=model_spec.model_id,
-                research_dataset_id="demo",
-                train_end="2014-01-02",
-                test_start="2014-01-03",
-                test_end="2014-01-03",
-            )
-            result = prediction_runner_module.build_prediction_result_from_frames(
-                (frame,),
-                prediction_spec,
-                model_spec.input_columns,
-                prediction_model=model_result.prediction_model,
-                model_metadata=model_result.metadata,
-            )
-
-            assert (
-                result.model_metadata["dependency_status"]["package"]
-                == expected_package
-            )
-            wrong_metadata = {
-                **model_result.metadata,
-                "dependency_status": {
-                    **model_result.metadata["dependency_status"],
-                    "package": wrong_package,
-                },
-            }
-            with pytest.raises(ValueError, match="invalid_model_metadata"):
-                prediction_runner_module.build_prediction_result_from_frames(
-                    (frame,),
-                    prediction_spec,
-                    model_spec.input_columns,
-                    prediction_model=model_result.prediction_model,
-                    model_metadata=wrong_metadata,
-                )
-        finally:
-            model_result = None
-            model_result_owned.release(owner="test.prediction_model")

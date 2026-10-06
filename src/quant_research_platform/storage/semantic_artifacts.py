@@ -21,22 +21,14 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.json_codec import (
     MAX_QRP_JSON_BYTES,
     bounded_qrp_json_object_snapshot,
-    bounded_rendered_qrp_json_object_size,
-    json_record_working_set_bytes,
     render_qrp_json_object,
 )
 from quant_research_platform.contracts.targets import _operation_evidence
-from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
 )
-from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    current_runtime_resource_policy,
-    runtime_resource_policy_scope,
-)
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
+from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.experiments import read_trial_ledger_reference
@@ -74,118 +66,85 @@ class SemanticArtifactComparison:
 
 
 def compare_semantic_artifacts(
-    old_root: Path,
-    candidate_root: Path,
-    *,
-    trial_layout: StorageLayout | None = None,
+    old_root: Path, candidate_root: Path, *, trial_layout: StorageLayout | None = None
 ) -> SemanticArtifactComparison:
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("storage.semantic.comparison.metadata", 0) as metadata_lease,
-    ):
-        try:
-            identities = {
-                root / "manifest.json": _member_identity(root / "manifest.json")
-                for root in (old_root, candidate_root)
-            }
-            old_operational = {}
-            candidate_operational = {}
-            member_identities = {}
-            old_envelope, old_members = read_semantic_artifact_record(
-                old_root,
-                lease=metadata_lease,
-                operational_metadata=old_operational,
-                member_identities=member_identities,
-            )
-            identities.update(
+    try:
+        identities = {
+            root / "manifest.json": _member_identity(root / "manifest.json")
+            for root in (old_root, candidate_root)
+        }
+        old_operational = {}
+        candidate_operational = {}
+        member_identities = {}
+        old_envelope, old_members = read_semantic_artifact_record(
+            old_root,
+            operational_metadata=old_operational,
+            member_identities=member_identities,
+        )
+        identities.update(
+            (
                 (old_root / name, identity)
                 for name, identity in member_identities.items()
                 if name != "manifest.json"
             )
-            member_identities.clear()
-            candidate_envelope, candidate_members = read_semantic_artifact_record(
-                candidate_root,
-                lease=metadata_lease,
-                operational_metadata=candidate_operational,
-                member_identities=member_identities,
-            )
-            identities.update(
+        )
+        member_identities.clear()
+        candidate_envelope, candidate_members = read_semantic_artifact_record(
+            candidate_root,
+            operational_metadata=candidate_operational,
+            member_identities=member_identities,
+        )
+        identities.update(
+            (
                 (candidate_root / name, identity)
                 for name, identity in member_identities.items()
                 if name != "manifest.json"
             )
-            member_identities.clear()
-            if old_envelope != candidate_envelope:
+        )
+        member_identities.clear()
+        if old_envelope != candidate_envelope:
+            return SemanticArtifactComparison("CONTENT_MISMATCH")
+        old_paths = tuple(member["path"] for member in old_members)
+        candidate_paths = tuple(member["path"] for member in candidate_members)
+        if old_paths != candidate_paths:
+            return SemanticArtifactComparison("LAYOUT_MISMATCH")
+        old_trials = old_operational.get("model_trial_ledgers", [])
+        candidate_trials = candidate_operational.get("model_trial_ledgers", [])
+        if len(old_trials) != len(candidate_trials):
+            return SemanticArtifactComparison("CONTENT_MISMATCH")
+        for old_ref, candidate_ref in zip(old_trials, candidate_trials, strict=True):
+            if trial_layout is None:
+                raise ValueError("trial_layout_required")
+            old_plan, old_records = read_trial_ledger_reference(trial_layout, old_ref)
+            candidate_plan, candidate_records = read_trial_ledger_reference(
+                trial_layout, candidate_ref
+            )
+            if trial_ledger_semantic_payload(
+                old_plan, old_records
+            ) != trial_ledger_semantic_payload(candidate_plan, candidate_records):
                 return SemanticArtifactComparison("CONTENT_MISMATCH")
-            old_paths = tuple(member["path"] for member in old_members)
-            candidate_paths = tuple(member["path"] for member in candidate_members)
-            if old_paths != candidate_paths:
-                return SemanticArtifactComparison("LAYOUT_MISMATCH")
-            old_trials = old_operational.get("model_trial_ledgers", [])
-            candidate_trials = candidate_operational.get("model_trial_ledgers", [])
-            if len(old_trials) != len(candidate_trials):
-                return SemanticArtifactComparison("CONTENT_MISMATCH")
-            for old_ref, candidate_ref in zip(
-                old_trials, candidate_trials, strict=True
+        for member, candidate_member in zip(
+            old_members, candidate_members, strict=True
+        ):
+            old_path, candidate_path = (
+                old_root / member["path"],
+                candidate_root / member["path"],
+            )
+            old_identity, candidate_identity = (
+                identities[old_path],
+                identities[candidate_path],
+            )
+            if (
+                _member_identity(old_path) != old_identity
+                or _member_identity(candidate_path) != candidate_identity
             ):
-                if trial_layout is None:
-                    raise ValueError("trial_layout_required")
-                with read_trial_ledger_reference(trial_layout, old_ref) as (
-                    old_plan,
-                    old_records,
-                ):
-                    try:
-                        with read_trial_ledger_reference(
-                            trial_layout, candidate_ref
-                        ) as (candidate_plan, candidate_records):
-                            try:
-                                if trial_ledger_semantic_payload(
-                                    old_plan, old_records
-                                ) != trial_ledger_semantic_payload(
-                                    candidate_plan, candidate_records
-                                ):
-                                    return SemanticArtifactComparison(
-                                        "CONTENT_MISMATCH"
-                                    )
-                            finally:
-                                candidate_plan = candidate_records = None
-                    finally:
-                        old_plan = old_records = None
-            for member, candidate_member in zip(
-                old_members, candidate_members, strict=True
-            ):
-                old_path, candidate_path = (
-                    old_root / member["path"],
-                    candidate_root / member["path"],
-                )
-                old_identity, candidate_identity = (
-                    identities[old_path],
-                    identities[candidate_path],
-                )
-                if (
-                    _member_identity(old_path) != old_identity
-                    or _member_identity(candidate_path) != candidate_identity
-                ):
-                    raise ValueError("semantic_artifact_member_identity_changed")
-                same_bytes = False
-                if member == candidate_member:
-                    with (
-                        runtime_resource_policy_scope(
-                            current_runtime_resource_policy()
-                        ) as policy,
-                        policy.lease(
-                            "storage.semantic.comparison.bytes",
-                            min(
-                                2 * _HASH_BUFFER_BYTES, policy.operation_headroom_bytes
-                            ),
-                        ) as lease,
-                        handle_preserving_primary(
-                            open_filesystem_file(old_path)
-                        ) as old,
-                        handle_preserving_primary(
-                            open_filesystem_file(candidate_path)
-                        ) as candidate,
-                    ):
+                raise ValueError("semantic_artifact_member_identity_changed")
+            same_bytes = False
+            if member == candidate_member:
+                with closing_iterator(open_filesystem_file(old_path)) as old:
+                    with closing_iterator(
+                        open_filesystem_file(candidate_path)
+                    ) as candidate:
                         if (
                             dataset_file_identity_from_stat(os.fstat(old.fileno()))
                             != old_identity
@@ -198,11 +157,7 @@ def compare_semantic_artifacts(
                                 "semantic_artifact_member_identity_changed"
                             )
                         same_bytes = True
-                        chunk_size = lease.reserved_bytes // 2
-                        if chunk_size == 0:
-                            raise ValueError(
-                                "semantic_artifact_comparison_memory_insufficient"
-                            )
+                        chunk_size = _HASH_BUFFER_BYTES
                         while left := old.read(chunk_size):
                             if left != candidate.read(chunk_size):
                                 same_bytes = False
@@ -222,97 +177,71 @@ def compare_semantic_artifacts(
                             raise ValueError(
                                 "semantic_artifact_member_identity_changed"
                             )
-                if not same_bytes and (
-                    old_path.suffix != ".parquet"
-                    or not _parquet_members_match(
-                        old_path, candidate_path, old_identity, candidate_identity
-                    )
-                ):
-                    return SemanticArtifactComparison("CONTENT_MISMATCH")
-                if (
-                    _member_identity(old_path) != old_identity
-                    or _member_identity(candidate_path) != candidate_identity
-                ):
-                    raise ValueError("semantic_artifact_member_identity_changed")
-            for root in (old_root, candidate_root):
-                remaining = set(old_paths)
+            if not same_bytes and (
+                old_path.suffix != ".parquet"
+                or not _parquet_members_match(
+                    old_path, candidate_path, old_identity, candidate_identity
+                )
+            ):
+                return SemanticArtifactComparison("CONTENT_MISMATCH")
+            if (
+                _member_identity(old_path) != old_identity
+                or _member_identity(candidate_path) != candidate_identity
+            ):
+                raise ValueError("semantic_artifact_member_identity_changed")
+        for root in (old_root, candidate_root):
+            remaining = set(old_paths)
 
-                def verify(relative: str, _path: Path, remaining=remaining) -> None:
-                    if relative not in remaining:
-                        raise ValueError("semantic_artifact_member_set_changed")
-                    remaining.remove(relative)
-
-                _visit_member_paths(root, verify)
-                if remaining:
+            def verify(relative: str, _path: Path, remaining=remaining) -> None:
+                if relative not in remaining:
                     raise ValueError("semantic_artifact_member_set_changed")
-            for path, expected_identity in identities.items():
-                if _member_identity(path) != expected_identity:
-                    raise ValueError("semantic_artifact_member_identity_changed")
-        except (OSError, ValueError):
-            return SemanticArtifactComparison("INSPECTION_FAILED")
-        finally:
-            old_envelope = candidate_envelope = None
-            old_members = candidate_members = member = candidate_member = None
-            old_operational = candidate_operational = None
-            member_identities = None
-            old_trials = candidate_trials = old_ref = candidate_ref = None
-            old_paths = candidate_paths = identities = remaining = verify = left = None
-        return SemanticArtifactComparison("MATCH")
+                remaining.remove(relative)
+
+            _visit_member_paths(root, verify)
+            if remaining:
+                raise ValueError("semantic_artifact_member_set_changed")
+        for path, expected_identity in identities.items():
+            if _member_identity(path) != expected_identity:
+                raise ValueError("semantic_artifact_member_identity_changed")
+    except (OSError, ValueError):
+        return SemanticArtifactComparison("INSPECTION_FAILED")
+    return SemanticArtifactComparison("MATCH")
 
 
 def _parquet_members_match(old_path, candidate_path, old_identity, candidate_identity):
-    # Physical encoding is not semantic identity; reuse the exact row codec.
-    with runtime_resource_policy_scope(current_runtime_resource_policy()) as policy:
-        schemas = []
-        for path, identity in (
-            (old_path, old_identity),
-            (candidate_path, candidate_identity),
-        ):
-            with _opened_parquet(path, expected_identity=identity) as opened:
-                schema = opened[0].schema_arrow
-                metadata = {
-                    key: value
-                    for key, value in (schema.metadata or {}).items()
-                    if key not in {b"qrp.decoded-row-bounds", b"qrp.parquet-page-rows"}
-                }
-                schemas.append(schema.with_metadata(metadata))
-        if not schemas[0].equals(schemas[1], check_metadata=True):
-            return False
-        payload_target = max(1, policy.operation_headroom_bytes // 8)
-        batch_target = max(1, policy.planning_headroom_bytes // 8)
-        codec = ExactPrimaryKeyIndex(
-            primary_key=(),
-        )
+    schemas = []
+    for path, identity in (
+        (old_path, old_identity),
+        (candidate_path, candidate_identity),
+    ):
+        with _opened_parquet(path, expected_identity=identity) as opened:
+            schema = opened[0].schema_arrow
+            schemas.append(schema)
+    if not schemas[0].equals(schemas[1], check_metadata=True):
+        return False
+    batch_target = DEFAULT_BATCH_ROWS
+    codec = ExactPrimaryKeyIndex(primary_key=())
 
-        def rows(path, identity):
-            with (
-                policy.lease("storage.semantic.comparison.payload", 0) as payload_lease,
-                closing_iterator(
-                    iter_dataset_part_batches(
-                        path,
-                        expected_identity=identity,
-                        target_chunk_bytes=batch_target,
-                    )
-                ) as batches,
-            ):
-                for batch in batches:
-                    table = pa.Table.from_batches([batch])
-                    for _, _, payload in codec._comparison_payload_rows(
-                        table,
-                        table,
-                        namespace="comparison",
-                        payload_target_bytes=payload_target,
-                        payload_lease=payload_lease,
-                    ):
+    def rows(path, identity):
+        with closing_iterator(
+            iter_dataset_part_batches(
+                path, expected_identity=identity, batch_rows=batch_target
+            )
+        ) as batches:
+            for batch in batches:
+                table = pa.Table.from_batches([batch])
+                for _, _, payload in codec._comparison_payload_rows(
+                    table, table, namespace="comparison"
+                ):
+                    try:
                         yield payload
-                        payload = None
-                    del batch, table
+                    except GeneratorExit:
+                        return
+                del batch, table
 
-        missing = object()
-        with (
-            closing_iterator(rows(old_path, old_identity)) as old,
-            closing_iterator(rows(candidate_path, candidate_identity)) as candidate,
-        ):
+    missing = object()
+    with closing_iterator(rows(old_path, old_identity)) as old:
+        with closing_iterator(rows(candidate_path, candidate_identity)) as candidate:
             while True:
                 left = next(old, missing)
                 right = next(candidate, missing)
@@ -333,77 +262,43 @@ def write_semantic_artifact(
     | None = None,
 ) -> Path:
     final_root = Path(logical_root) / "instances" / envelope.instance_identity
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("storage.semantic.write.metadata", 0) as metadata_lease,
-    ):
 
-        def admit(size: int) -> None:
-            cap = policy.explicit_memory_cap_bytes
-            if cap is None or policy.used_memory_bytes + size <= cap:
-                policy.require_working_set(
-                    size, error="semantic_artifact_metadata_exceeds_memory_capacity"
-                )
-            metadata_lease.grow(size)
+    def write(staging: Path) -> None:
+        writer(staging)
+        members = _member_inventory(staging)
+        if not members:
+            raise ValueError("semantic_artifact_member_manifest_invalid")
+        if staged_validator is not None:
+            staged_validator(staging, members)
+        payload = {
+            "schema_id": SEMANTIC_ARTIFACT_SCHEMA_ID,
+            "common_manifest": envelope.payload(),
+            "members": list(members),
+            "operational_metadata": _operational_metadata(
+                dict(operational_metadata or {})
+            ),
+        }
+        write_manifest(staging / "manifest.json", payload)
 
-        def write(staging: Path) -> None:
-            try:
-                writer(staging)
-                members = _member_inventory(staging, _admit=admit)
-                if not members:
-                    raise ValueError("semantic_artifact_member_manifest_invalid")
-                if staged_validator is not None:
-                    staged_validator(staging, members)
-                admit(
-                    json_record_working_set_bytes(
-                        2 + 2 * len(operational_metadata or {})
-                    )
-                )
-                payload = {
-                    "schema_id": SEMANTIC_ARTIFACT_SCHEMA_ID,
-                    "common_manifest": envelope.payload(_admit=admit),
-                    "members": list(members),
-                    "operational_metadata": _operational_metadata(
-                        dict(operational_metadata or {}),
-                        _admit=admit,
-                    ),
-                }
-                write_manifest(staging / "manifest.json", payload, _admit=admit)
-            finally:
-                members = payload = None
-                del members, payload
-
-        try:
-            atomic_write_directory(final_root, write)
-        except BaseException as error:
-            clear_exception_frames(error)
-            raise
+    atomic_write_directory(final_root, write)
     return final_root
 
 
 def read_semantic_artifact(
-    instance_root: Path,
-    *,
-    lease: MemoryLease,
-    expected_identity: str | None = None,
+    instance_root: Path, *, expected_identity: str | None = None
 ) -> dict[str, object]:
     envelope, _members = read_semantic_artifact_record(
-        instance_root, lease=lease, expected_identity=expected_identity
+        instance_root, expected_identity=expected_identity
     )
     return envelope
 
 
 def verify_semantic_artifact_member(
-    instance_root: Path,
-    *,
-    relative_path: str,
-    expected: dict[str, object],
+    instance_root: Path, *, relative_path: str, expected: dict[str, object]
 ) -> DatasetFileIdentity:
     """Verify one already-published member without rescanning its siblings."""
-
     root = require_unaliased_path(
-        Path(instance_root),
-        error="semantic_artifact_root_invalid",
+        Path(instance_root), error="semantic_artifact_root_invalid"
     )
     candidate = Path(relative_path)
     if (
@@ -427,15 +322,13 @@ def verify_semantic_artifact_member(
 def read_semantic_artifact_record(
     instance_root: Path,
     *,
-    lease: MemoryLease,
     expected_identity: str | None = None,
     member_identities: dict[str, DatasetFileIdentity] | None = None,
     expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
     operational_metadata: dict[str, object] | None = None,
 ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
     root = require_unaliased_path(
-        Path(instance_root),
-        error="semantic_artifact_root_invalid",
+        Path(instance_root), error="semantic_artifact_root_invalid"
     )
     try:
         _directory_identity(root)
@@ -446,81 +339,59 @@ def read_semantic_artifact_record(
         if expected_member_identities is None
         else expected_member_identities["manifest.json"]
     )
-    # Decode, validated projections and member inventory overlap until consumption.
-    additional = 2 * json_record_working_set_bytes(manifest_identity.size)
-    policy = current_runtime_resource_policy()
-    cap = policy.explicit_memory_cap_bytes
-    if cap is None or policy.used_memory_bytes + additional <= cap:
-        policy.require_working_set(
-            additional, error="semantic_artifact_metadata_exceeds_memory_capacity"
-        )
-    lease.grow(additional)
-    try:
-        payload = read_bounded_qrp_json(
-            root / "manifest.json", expected_identity=manifest_identity
-        )[1]
-        if set(payload) != {
-            "schema_id",
-            "common_manifest",
-            "members",
-            "operational_metadata",
-        }:
-            raise ValueError("semantic_artifact_manifest_invalid")
-        if payload["schema_id"] != SEMANTIC_ARTIFACT_SCHEMA_ID:
-            raise ValueError("semantic_artifact_manifest_invalid")
-        operational = _operational_metadata(payload["operational_metadata"])
-        envelope = validate_business_manifest_envelope(payload["common_manifest"])
-        if root.name != envelope["instance_identity"]:
-            raise ValueError("semantic_artifact_identity_mismatch")
-        if (
-            expected_identity is not None
-            and envelope["instance_identity"] != expected_identity
-        ):
-            raise ValueError("semantic_artifact_identity_mismatch")
-        members = _validate_member_payload(payload["members"])
-        if expected_member_identities is not None and set(
-            expected_member_identities
-        ) != {
-            "manifest.json",
-            *(str(member["path"]) for member in members),
-        }:
-            raise ValueError("semantic_artifact_member_set_changed")
-        if members != _member_inventory(
-            root,
-            expected_paths={str(member["path"]) for member in members},
-            verified_identities=member_identities,
-            expected_identities=expected_member_identities,
-        ):
-            raise ValueError("semantic_artifact_member_integrity_invalid")
-        if _member_identity(root / "manifest.json") != manifest_identity:
-            raise ValueError("semantic_artifact_member_identity_changed")
-        if member_identities is not None:
-            member_identities["manifest.json"] = manifest_identity
-        if operational_metadata is not None:
-            operational_metadata.update(operational)
-        return envelope, members
-    finally:
-        payload = operational = envelope = members = None
+    payload = read_bounded_qrp_json(
+        root / "manifest.json", expected_identity=manifest_identity
+    )[1]
+    if set(payload) != {
+        "schema_id",
+        "common_manifest",
+        "members",
+        "operational_metadata",
+    }:
+        raise ValueError("semantic_artifact_manifest_invalid")
+    if payload["schema_id"] != SEMANTIC_ARTIFACT_SCHEMA_ID:
+        raise ValueError("semantic_artifact_manifest_invalid")
+    operational = _operational_metadata(payload["operational_metadata"])
+    envelope = validate_business_manifest_envelope(payload["common_manifest"])
+    if root.name != envelope["instance_identity"]:
+        raise ValueError("semantic_artifact_identity_mismatch")
+    if (
+        expected_identity is not None
+        and envelope["instance_identity"] != expected_identity
+    ):
+        raise ValueError("semantic_artifact_identity_mismatch")
+    members = _validate_member_payload(payload["members"])
+    if expected_member_identities is not None and set(expected_member_identities) != {
+        "manifest.json",
+        *(str(member["path"]) for member in members),
+    }:
+        raise ValueError("semantic_artifact_member_set_changed")
+    if members != _member_inventory(
+        root,
+        expected_paths={str(member["path"]) for member in members},
+        verified_identities=member_identities,
+        expected_identities=expected_member_identities,
+    ):
+        raise ValueError("semantic_artifact_member_integrity_invalid")
+    if _member_identity(root / "manifest.json") != manifest_identity:
+        raise ValueError("semantic_artifact_member_identity_changed")
+    if member_identities is not None:
+        member_identities["manifest.json"] = manifest_identity
+    if operational_metadata is not None:
+        operational_metadata.update(operational)
+    return (envelope, members)
 
 
 def read_semantic_artifact_operational_metadata(
     instance_root: Path,
-    *,
-    lease: MemoryLease,
 ) -> dict[str, object]:
     metadata: dict[str, object] = {}
-    read_semantic_artifact_record(
-        instance_root, lease=lease, operational_metadata=metadata
-    )
+    read_semantic_artifact_record(instance_root, operational_metadata=metadata)
     return metadata
 
 
-def _operational_metadata(
-    value: object, *, _admit: Callable[[int], None] | None = None
-) -> dict[str, object]:
-    snapshot = bounded_qrp_json_object_snapshot(
-        value, max_bytes=MAX_QRP_JSON_BYTES, _admit=_admit
-    )
+def _operational_metadata(value: object) -> dict[str, object]:
+    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=MAX_QRP_JSON_BYTES)
     if set(snapshot) - {
         "model_trial_ledgers",
         "model_phase_observations",
@@ -538,8 +409,8 @@ def _operational_metadata(
             type(costs) is not dict
             or set(costs) != {"environments", "phases"}
             or type(costs["environments"]) is not list
-            or type(costs["phases"]) is not list
-            or not costs["phases"]
+            or (type(costs["phases"]) is not list)
+            or (not costs["phases"])
         ):
             raise ValueError("semantic_artifact_operational_metadata_invalid")
         for context in costs["environments"]:
@@ -564,10 +435,10 @@ def _operational_metadata(
                 }
                 or phase["phase"]
                 not in {"shared_candidate_fit", "group_scoring", "final_refit"}
-                or phase["selection_group"] not in {None, "global", "quarterly"}
-                or type(phase["fit_count"]) is not int
-                or phase["fit_count"] < 0
-                or type(phase["observations"]) is not dict
+                or (phase["selection_group"] not in {None, "global", "quarterly"})
+                or (type(phase["fit_count"]) is not int)
+                or (phase["fit_count"] < 0)
+                or (type(phase["observations"]) is not dict)
             ):
                 raise ValueError("semantic_artifact_operational_metadata_invalid")
             for key in ("family_id", "quarter_id"):
@@ -581,7 +452,7 @@ def _operational_metadata(
                 type(environment) is not dict
                 or set(environment) != {"context", "created_at_utc"}
                 or type(environment["context"]) is not int
-                or not 0 <= environment["context"] < len(costs["environments"])
+                or (not 0 <= environment["context"] < len(costs["environments"]))
             ):
                 raise ValueError("semantic_artifact_operational_metadata_invalid")
             used_contexts.add(environment["context"])
@@ -599,15 +470,12 @@ def _operational_metadata(
 
 
 def discover_semantic_artifact_instances(
-    logical_root: Path,
-    *,
-    max_instances: int = MAX_SEMANTIC_ARTIFACT_INSTANCES,
+    logical_root: Path, *, max_instances: int = MAX_SEMANTIC_ARTIFACT_INSTANCES
 ) -> tuple[Path, ...]:
     if type(max_instances) is not int or max_instances <= 0:
         raise ValueError("semantic_artifact_instance_limit_invalid")
     root = require_unaliased_path(
-        Path(logical_root),
-        error="semantic_artifact_root_invalid",
+        Path(logical_root), error="semantic_artifact_root_invalid"
     )
     if not filesystem_exists(root):
         return ()
@@ -632,7 +500,6 @@ def discover_semantic_artifact_instances(
         return tuple(sorted(names))
 
     names = instance_names()
-
     result: list[Path] = []
     for name in names:
         try:
@@ -642,11 +509,7 @@ def discover_semantic_artifact_instances(
         entry = instances_root / name
         if path_is_filesystem_alias(entry) or not filesystem_is_dir(entry):
             raise ValueError("semantic_artifact_instance_child_invalid")
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease("storage.semantic.discovery.metadata", 0) as lease,
-        ):
-            read_semantic_artifact(entry, lease=lease, expected_identity=name)
+        read_semantic_artifact(entry, expected_identity=name)
         result.append(entry)
     if instance_names() != names:
         raise ValueError("semantic_artifact_instance_identity_changed")
@@ -669,11 +532,9 @@ def _member_inventory(
     expected_paths: set[str] | None = None,
     verified_identities: dict[str, DatasetFileIdentity] | None = None,
     expected_identities: Mapping[str, DatasetFileIdentity] | None = None,
-    _admit: Callable[[int], None] | None = None,
 ) -> tuple[dict[str, object], ...]:
     members: list[dict[str, object]] = []
     identities: dict[str, DatasetFileIdentity] = {}
-
     encoded_bytes = 0
 
     def record(relative: str, child: Path) -> None:
@@ -685,13 +546,6 @@ def _member_inventory(
             if expected_identities is None
             else expected_identities[relative]
         )
-        if _admit is not None:
-            size = bounded_rendered_qrp_json_object_size(
-                {"path": relative, "size": identity.size, "sha256": "0" * 64},
-                lazy_arrays={},
-                max_bytes=MAX_QRP_JSON_BYTES,
-            )
-            _admit(json_record_working_set_bytes(size))
         identities[relative] = identity
         member = _member_record(relative, child, identity=identity)
         encoded_bytes += len(render_qrp_json_object(member).encode("utf-8"))
@@ -718,10 +572,7 @@ def _member_inventory(
 
 
 def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
-    root = require_unaliased_path(
-        Path(root),
-        error="semantic_artifact_root_invalid",
-    )
+    root = require_unaliased_path(Path(root), error="semantic_artifact_root_invalid")
     try:
         root_identity = _directory_identity(root)
     except ValueError as exc:
@@ -789,17 +640,12 @@ def _member_record(
     if identity is None:
         identity = _member_identity(path)
     try:
-        with runtime_resource_policy_scope(current_runtime_resource_policy()) as policy:
-            with policy.lease(
-                "storage.semantic.member_hash",
-                min(_HASH_BUFFER_BYTES, policy.operation_headroom_bytes),
-            ) as lease:
-                digest = _hash_file_content(
-                    path,
-                    identity,
-                    "semantic_artifact_member_identity_changed",
-                    chunk_size=lease.reserved_bytes,
-                )
+        digest = _hash_file_content(
+            path,
+            identity,
+            "semantic_artifact_member_identity_changed",
+            chunk_size=_HASH_BUFFER_BYTES,
+        )
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("semantic_artifact_member_invalid") from exc
     return {"path": relative, "size": identity.size, "sha256": digest}
@@ -821,14 +667,14 @@ def _validate_member_payload(value: object) -> tuple[dict[str, object], ...]:
             candidate is None
             or not relative
             or candidate.anchor
-            or candidate.as_posix() != relative
+            or (candidate.as_posix() != relative)
             or any(part in {"", ".", ".."} for part in candidate.parts)
-            or type(size) is not int
-            or size < 0
-            or type(digest) is not str
-            or len(digest) != 64
+            or (type(size) is not int)
+            or (size < 0)
+            or (type(digest) is not str)
+            or (len(digest) != 64)
             or any(char not in "0123456789abcdef" for char in digest)
-            or relative in seen
+            or (relative in seen)
         ):
             raise ValueError("semantic_artifact_member_manifest_invalid")
         seen.add(relative)

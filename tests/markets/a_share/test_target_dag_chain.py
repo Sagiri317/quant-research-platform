@@ -25,8 +25,7 @@ from quant_research_platform.workflows import research
 
 @pytest.mark.parametrize("scenario", ["pv_all", "pv_expanded"])
 def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
-    tmp_path: Path,
-    scenario: str,
+    tmp_path: Path, scenario: str
 ) -> None:
     sessions = pd.bdate_range(
         "2020-01-02", periods=600 if scenario == "pv_expanded" else 400
@@ -46,16 +45,13 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
         data_id = data_ids[0]
         spec = base.interim.get(data_id)
         output_root = kwargs["layout"].target_root(
-            data_id,
-            kwargs["layout"].interim_data_root(spec.source_id, data_id),
+            data_id, kwargs["layout"].interim_data_root(spec.source_id, data_id)
         )
         write_dataset(
             output_root,
             frames[data_id],
             spec=spec,
             instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
         )
         return InterimImportResult(
             artifact_roots={data_id: output_root},
@@ -65,16 +61,11 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
 
     bindings = {
         data_id: ProducerBinding(
-            ProducerKind.INTERIM,
-            producer,
-            source_identity=source_identity,
+            ProducerKind.INTERIM, producer, source_identity=source_identity
         )
         for data_id in frames
     }
-    profile = replace(
-        base,
-        producer_bindings={**base.producer_bindings, **bindings},
-    )
+    profile = replace(base, producer_bindings={**base.producer_bindings, **bindings})
     layout = StorageLayout(project_root=tmp_path)
     result = research.dataset_build(
         profile=profile,
@@ -84,7 +75,6 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
         end_date=sessions[-1].date().isoformat(),
         raw_root=tmp_path / "synthetic-raw",
     )
-
     assert result["status"] == "COMPLETE"
     target_results = {item["target_id"]: item for item in result["target_results"]}
     assert target_results["market_panel_1d"]["status"] == "BUILT"
@@ -95,13 +85,12 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
     output = read_dataset(
         layout.instance_root(
             logical_root, target_results[scenario]["instance_identity"]
-        ),
+        )
     )
     assert {"eligible", "model_target"}.issubset(output.columns)
     assert {"scenario_universe", "can_enter", "can_exit"}.isdisjoint(output)
     assert output["eligible"].any()
     assert output.loc[output["eligible"], "model_target"].notna().any()
-
     if scenario == "pv_expanded":
         assert "fundamental_pit" not in target_results
         assert "market_model_factors" in target_results
@@ -115,9 +104,7 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
             assert output[name].notna().any(), name
 
 
-def test_fundamental_pit_and_factors_reach_the_same_target_dag(
-    tmp_path: Path,
-) -> None:
+def test_fundamental_pit_and_factors_reach_the_same_target_dag(tmp_path: Path) -> None:
     sessions = pd.bdate_range("2020-01-02", periods=400)
     frames = _synthetic_interim_frames(sessions)
     frames.update(_synthetic_financial_frames())
@@ -135,16 +122,13 @@ def test_fundamental_pit_and_factors_reach_the_same_target_dag(
         data_id = kwargs["data_ids"][0]
         spec = base.interim.get(data_id)
         output_root = kwargs["layout"].target_root(
-            data_id,
-            kwargs["layout"].interim_data_root(spec.source_id, data_id),
+            data_id, kwargs["layout"].interim_data_root(spec.source_id, data_id)
         )
         write_dataset(
             output_root,
             frames[data_id],
             spec=spec,
             instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
         )
         return InterimImportResult(
             artifact_roots={data_id: output_root},
@@ -154,16 +138,11 @@ def test_fundamental_pit_and_factors_reach_the_same_target_dag(
 
     bindings = {
         data_id: ProducerBinding(
-            ProducerKind.INTERIM,
-            producer,
-            source_identity=source_identity,
+            ProducerKind.INTERIM, producer, source_identity=source_identity
         )
         for data_id in frames
     }
-    profile = replace(
-        base,
-        producer_bindings={**base.producer_bindings, **bindings},
-    )
+    profile = replace(base, producer_bindings={**base.producer_bindings, **bindings})
     result = research.dataset_build(
         profile=profile,
         layout=StorageLayout(project_root=tmp_path),
@@ -172,7 +151,6 @@ def test_fundamental_pit_and_factors_reach_the_same_target_dag(
         end_date=sessions[-1].date().isoformat(),
         raw_root=raw_root,
     )
-
     assert result["status"] == "COMPLETE"
     target_results = {item["target_id"]: item for item in result["target_results"]}
     assert target_results["fundamental_pit"]["status"] == "BUILT"
@@ -269,8 +247,8 @@ def _synthetic_interim_frames(sessions: pd.DatetimeIndex) -> dict[str, pd.DataFr
             "period_return": 0.01,
             "adj_close": price,
             "adj_open": price + 0.1,
-            "float_market_cap": 1_000_000.0,
-            "total_market_cap": 1_200_000.0,
+            "float_market_cap": 1000000.0,
+            "total_market_cap": 1200000.0,
             "turnover": np.nan,
         }
     )
@@ -292,8 +270,8 @@ def _synthetic_interim_frames(sessions: pd.DatetimeIndex) -> dict[str, pd.DataFr
             "source_asset_id": assets,
             "timestamp": sessions[0] - pd.Timedelta(days=400),
             "share_change_date": sessions[0] - pd.Timedelta(days=400),
-            "total_shares": 120_000.0,
-            "a_float_shares": 100_000.0,
+            "total_shares": 120000.0,
+            "a_float_shares": 100000.0,
         }
     )
     calendar = pd.DataFrame(
@@ -444,7 +422,8 @@ def _windowed_source_profile(frames, calls, *, reject_before=None, reject_at=Non
         )
         calls.append((data_id, start, end))
         if data_id == "market_bars_1d" and (
-            (reject_before is not None and start < reject_before)
+            reject_before is not None
+            and start < reject_before
             or (reject_at is not None and start == reject_at)
         ):
             raise ValueError("synthetic_history_unavailable")
@@ -457,12 +436,7 @@ def _windowed_source_profile(frames, calls, *, reject_before=None, reject_at=Non
             data_id, kwargs["layout"].interim_data_root(spec.source_id, data_id)
         )
         write_dataset(
-            root,
-            frame,
-            spec=spec,
-            instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
+            root, frame, spec=spec, instance_metadata=kwargs["instance_metadata"]
         )
         return InterimImportResult(
             artifact_roots={data_id: root},
@@ -512,7 +486,7 @@ def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(tmp_
     assert len({entry["target_id"] for entry in plan["targets"]}) == len(
         plan["targets"]
     )
-    assert not calls and not tuple(tmp_path.rglob("manifest.json"))
+    assert not calls and (not tuple(tmp_path.rglob("manifest.json")))
     first = research.data_materialize(**arguments)
     assert first["status"] == "COMPLETE", first["blockers"]
     result = {entry["target_id"]: entry for entry in first["target_results"]}
@@ -608,8 +582,7 @@ def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(tmp_
 
 @pytest.mark.parametrize("failed_window", ("history", "core"))
 def test_internal_history_failure_blocks_exact_dependent_without_hiding_failure(
-    tmp_path,
-    failed_window,
+    tmp_path, failed_window
 ):
     dates = pd.bdate_range("2020-01-02", periods=40).as_unit("ns")
     requested = dates[-10:]
@@ -737,10 +710,7 @@ def test_mixed_window_rebuild_reports_each_instance_and_preserves_old_good(
     assert len(evidence) == 2
     assert {
         entry["instance_identity"]: entry["comparison_status"] for entry in evidence
-    } == {
-        core_identity: "CONTENT_MISMATCH",
-        history_identity: "MATCH",
-    }
+    } == {core_identity: "CONTENT_MISMATCH", history_identity: "MATCH"}
     assert originals() == before
     public = {entry["target_id"]: entry for entry in rebuilt["target_results"]}
     assert public["market_panel_1d"]["status"] == "FAILED"
@@ -750,20 +720,14 @@ def test_mixed_window_rebuild_reports_each_instance_and_preserves_old_good(
 def test_mixed_window_interruption_preserves_completed_public_result_sink(
     tmp_path, monkeypatch
 ):
-    from quant_research_platform.runtime.resources import (
-        current_runtime_resource_policy,
-    )
-
     dates = pd.bdate_range("2020-01-02", periods=40).as_unit("ns")
     requested = dates[-10:]
     profile = _windowed_source_profile(_synthetic_interim_frames(dates), [])
     build = research._build_target
     primary = KeyboardInterrupt("synthetic_factor_interruption")
-    policies = []
 
     def interrupt_factor(**kwargs):
         if kwargs["spec"].target_id == "price_volume_facts":
-            policies.append(current_runtime_resource_policy())
             raise primary
         return build(**kwargs)
 
@@ -782,7 +746,6 @@ def test_mixed_window_interruption_preserves_completed_public_result_sink(
             result_sink=sink,
         )
     assert caught.value is primary
-    assert len(policies) == 1 and policies[0].used_memory_bytes == 0
     assert sink["market_panel_1d"].status.value == "BUILT"
     assert "price_volume_facts" not in sink
     spec = profile.processed.get("market_panel_1d")

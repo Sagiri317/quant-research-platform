@@ -20,18 +20,13 @@ def test_canonical_crypto_asset_id_requires_strict_string_input(
     source_asset_id: object,
 ) -> None:
     with pytest.raises(ValueError, match="unsupported_crypto_source_asset_id"):
-        canonical_crypto_asset_id(source_asset_id)  # type: ignore[arg-type]
+        canonical_crypto_asset_id(source_asset_id)
 
 
 @pytest.mark.parametrize(
-    ("source_asset_id", "expected"),
-    [
-        ("BTCUSDT", "btc_usdt"),
-        ("ethusdc", "eth_usdc"),
-    ],
+    ("source_asset_id", "expected"), [("BTCUSDT", "btc_usdt"), ("ethusdc", "eth_usdc")]
 )
 def test_canonical_crypto_asset_id_preserves_supported_symbol_semantics(
-    source_asset_id: str,
-    expected: str,
+    source_asset_id: str, expected: str
 ) -> None:
     assert canonical_crypto_asset_id(source_asset_id) == expected

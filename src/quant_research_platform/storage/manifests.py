@@ -3,30 +3,21 @@
 from __future__ import annotations
 
 import os
-import sys
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from pathlib import Path
 from typing import Any
 
-import quant_research_platform.storage._scratch_ownership as scratch_owner
 from quant_research_platform.contracts.json_codec import (
     MAX_QRP_JSON_BYTES,
     bounded_qrp_json_object_snapshot,
-    json_record_working_set_bytes,
     parse_qrp_json_object,
     render_qrp_json_object,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
     assert_internal_artifact_metadata_safe,
 )
-from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    current_runtime_resource_policy,
-)
 from quant_research_platform.storage.atomic import atomic_write_text
-from quant_research_platform.storage.datasets.schema import (
-    validate_dataset_manifest_payload,
-)
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
@@ -64,7 +55,7 @@ def read_bounded_qrp_json(
         raise ValueError("dataset_metadata_file_too_large")
     try:
         handle = open_filesystem_file(candidate)
-        with scratch_owner.handle_preserving_primary(handle):
+        with closing_iterator(handle):
             with verified_file_handle(
                 candidate,
                 handle,
@@ -78,17 +69,13 @@ def read_bounded_qrp_json(
         raise ValueError("dataset_metadata_file_identity_changed") from exc
     if len(raw) > max_bytes:
         raise ValueError("dataset_metadata_file_too_large")
-    return raw, parse_qrp_json_object(raw)
+    return (raw, parse_qrp_json_object(raw))
 
 
 def read_bounded_qrp_json_directory(
-    root: Path,
-    *,
-    max_members: int,
-    lease: MemoryLease,
+    root: Path, *, max_members: int
 ) -> tuple[tuple[str, dict[str, Any]], ...]:
     """Read one bounded directory containing only QRP JSON object files."""
-
     if type(max_members) is not int or max_members < 0:
         raise ValueError("dataset_metadata_member_limit_invalid")
     candidate = require_unaliased_path(
@@ -96,8 +83,6 @@ def read_bounded_qrp_json_directory(
     )
     if not filesystem_is_dir(candidate):
         raise ValueError("dataset_metadata_directory_invalid")
-
-    policy = current_runtime_resource_policy()
 
     def member_names() -> tuple[str, ...]:
         names: list[str] = []
@@ -112,12 +97,6 @@ def read_bounded_qrp_json_directory(
                         or Path(entry.name).name != entry.name
                     ):
                         raise ValueError("dataset_metadata_directory_member_invalid")
-                    additional = 3 * sys.getsizeof(entry.name) + 256
-                    policy.require_working_set(
-                        additional,
-                        error="trial_ledger_working_set_exceeds_memory_capacity",
-                    )
-                    lease.grow(additional)
                     names.append(entry.name)
             after = filesystem_stat(candidate, follow_symlinks=False)
         except (FileNotFoundError, NotADirectoryError) as exc:
@@ -134,12 +113,6 @@ def read_bounded_qrp_json_directory(
     result = []
     for name in names:
         identity = _qrp_json_file_identity(candidate / name)
-        # Keep decoded JSON and its typed/semantic projection alive in one scope.
-        additional = 2 * json_record_working_set_bytes(identity.size)
-        policy.require_working_set(
-            additional, error="trial_ledger_working_set_exceeds_memory_capacity"
-        )
-        lease.grow(additional)
         result.append(
             (
                 name,
@@ -208,10 +181,16 @@ def read_dataset_manifest_evidence(
         expected_schema_id="qrp-dataset-manifest",
         error="dataset_manifest_schema_id_invalid",
     )
+    from quant_research_platform.storage.datasets.schema import (
+        validate_dataset_manifest_payload,
+    )
+
     validate_dataset_manifest_payload(payload, spec=spec)
     if any(
-        _qrp_json_file_identity(path) != identities[name]
-        for name, path in paths.items()
+        (
+            _qrp_json_file_identity(path) != identities[name]
+            for name, path in paths.items()
+        )
     ):
         raise ValueError("dataset_metadata_file_identity_changed")
     if member_identities is not None:
@@ -219,32 +198,24 @@ def read_dataset_manifest_evidence(
     return payload
 
 
-def write_manifest(
-    path: Path, payload: dict[str, Any], *, _admit: Callable[[int], None] | None = None
-) -> Path:
+def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
     snapshot = bounded_qrp_json_object_snapshot(
-        payload, max_bytes=MAX_QRP_JSON_BYTES - 1, _admit=_admit
+        payload, max_bytes=MAX_QRP_JSON_BYTES - 1
     )
     _require_schema_id(snapshot)
     text = render_qrp_json_object(snapshot) + "\n"
     return atomic_write_text(path, text, encoding="utf-8")
 
 
-def write_internal_artifact_manifest(
-    path: Path,
-    payload: dict[str, Any],
-    *,
-    _admit: Callable[[int], None] | None = None,
-) -> Path:
+def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Path:
     """Write private artifact metadata without corrupting schema keys.
 
     Internal manifests are private artifacts, so schema fields such as
     ``source_id`` must remain round-trippable. We still reject path, credential,
     and row-sample payloads that do not belong in schema metadata.
     """
-
     snapshot = bounded_qrp_json_object_snapshot(
-        payload, max_bytes=MAX_QRP_JSON_BYTES - 1, _admit=_admit
+        payload, max_bytes=MAX_QRP_JSON_BYTES - 1
     )
     _require_schema_id(snapshot)
     assert_internal_artifact_metadata_safe(snapshot)

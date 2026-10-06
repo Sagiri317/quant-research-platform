@@ -37,7 +37,6 @@ from quant_research_platform.profiles.research import (
     research_profile,
 )
 from quant_research_platform.research.protocols import a_share
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.types import DatasetComparison
 from quant_research_platform.storage.datasets.writing import write_dataset
@@ -91,458 +90,432 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with (
-        runtime_resource_policy_scope() as artifact_policy,
-        artifact_policy.lease("tests.artifact_metadata", 0) as artifact_lease,
-    ):
-        from quant_research_platform.research.models import (
-            production as model_production,
-        )
+    from quant_research_platform.research.models import (
+        production as model_production,
+    )
 
-        model_read_windows: list[TimeWindow] = []
-        real_iter_dataset_chunks = model_production.iter_dataset_chunks
+    model_read_windows: list[TimeWindow] = []
+    real_iter_dataset_chunks = model_production.iter_dataset_chunks
 
-        def observed_iter_dataset_chunks(session, **kwargs):
-            model_read_windows.append(session.time_window)
-            return real_iter_dataset_chunks(session, **kwargs)
+    def observed_iter_dataset_chunks(session, **kwargs):
+        model_read_windows.append(session.time_window)
+        return real_iter_dataset_chunks(session, **kwargs)
 
-        monkeypatch.setattr(
-            model_production, "iter_dataset_chunks", observed_iter_dataset_chunks
-        )
-        base = research_profile()
-        source_id = "formal_source"
-        dataset_spec = make_demo_research_dataset_spec(
-            data_id="pv_all",
-            input_data_ids=(source_id,),
-            base_input_data_id=source_id,
-            factor_columns=("factor_a",),
-            label_columns=("label",),
-            filter_columns=("eligible",),
-            context_columns=("label_available_at",),
-        )
-        source_spec = InterimDataSpec(
-            data_id=source_id,
-            source_id=SourceId("csmar"),
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            column_roles={
-                "source_asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "value": ColumnRole.CONTEXT,
-            },
-            primary_key=("source_asset_id", "timestamp"),
-            partition_columns=("year",),
-        )
-        evaluation_spec = EvaluationSpec(
-            evaluation_id="pv_all_evaluation",
-            market_id=MarketId("a_share"),
-            research_dataset_id="pv_all",
-            signals=(
-                SignalSpec(
-                    signal_id="factor_a",
-                    source_kind="factor",
-                    source_column="factor_a",
-                ),
+    monkeypatch.setattr(
+        model_production, "iter_dataset_chunks", observed_iter_dataset_chunks
+    )
+    base = research_profile()
+    source_id = "formal_source"
+    dataset_spec = make_demo_research_dataset_spec(
+        data_id="pv_all",
+        input_data_ids=(source_id,),
+        base_input_data_id=source_id,
+        factor_columns=("factor_a",),
+        label_columns=("label",),
+        filter_columns=("eligible",),
+        context_columns=("label_available_at",),
+    )
+    source_spec = InterimDataSpec(
+        data_id=source_id,
+        source_id=SourceId("csmar"),
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles={
+            "source_asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "value": ColumnRole.CONTEXT,
+        },
+        primary_key=("source_asset_id", "timestamp"),
+        partition_columns=("year",),
+    )
+    evaluation_spec = EvaluationSpec(
+        evaluation_id="pv_all_evaluation",
+        market_id=MarketId("a_share"),
+        research_dataset_id="pv_all",
+        signals=(
+            SignalSpec(
+                signal_id="factor_a",
+                source_kind="factor",
+                source_column="factor_a",
             ),
-            label_columns=("label",),
-            n_groups=2,
-        )
-        small_configuration = compact_a_share_configuration()
-        model_catalog = ModelCatalog(
-            tuple(
-                ModelSpec(
-                    model_id=f"pv_all_{algorithm}",
-                    model_algorithm=algorithm,
-                    input_factor_columns=("factor_a",),
-                    label_column="label",
-                    random_seed=42,
-                    hyperparameters=next(
-                        item["hyperparameters"]
-                        for item in small_configuration["models"]
-                        if item["model_algorithm"] == algorithm
-                    ),
-                )
-                for algorithm in A_SHARE_MODEL_ALGORITHMS
-            )
-        )
-        sessions = pd.date_range("2017-10-01", "2019-06-30", freq="B")
-        label_calendar = pd.bdate_range(sessions[0], periods=len(sessions) + 21)
-        dataset_frame = pd.DataFrame(
-            {
-                "market_id": "a_share",
-                "asset_id": [
-                    asset for timestamp in sessions for asset in ("a", "b", "c")
-                ],
-                "timestamp": [timestamp for timestamp in sessions for _ in range(3)],
-                "label_available_at": [
-                    label_calendar[index + 21]
-                    for index in range(len(sessions))
-                    for _ in range(3)
-                ],
-                "factor_a": [
-                    float(asset_index + (date_index % 5))
-                    for date_index in range(len(sessions))
-                    for asset_index in range(1, 4)
-                ],
-                "label": [
-                    float(asset_index + (date_index % 5)) / 10.0
-                    for date_index in range(len(sessions))
-                    for asset_index in range(1, 4)
-                ],
-                "eligible": True,
-            }
-        )
-        # Development fixtures cannot expose labels requiring holdout facts.
-        unavailable = dataset_frame.label_available_at > pd.Timestamp(
-            a_share.DEVELOPMENT_END
-        )
-        dataset_frame.loc[unavailable, "label"] = float("nan")
-        dataset_frame.loc[unavailable, "label_available_at"] = pd.NaT
-        dataset_frame = pd.concat(
-            [
-                dataset_frame,
-                pd.DataFrame(
-                    {
-                        "market_id": ["a_share"],
-                        "asset_id": ["holdout"],
-                        "timestamp": pd.to_datetime(["2019-07-02"]),
-                        "label_available_at": pd.to_datetime(["2019-07-31"]),
-                        "factor_a": [float("nan")],
-                        "label": [float("nan")],
-                        "eligible": [True],
-                    }
+        ),
+        label_columns=("label",),
+        n_groups=2,
+    )
+    small_configuration = compact_a_share_configuration()
+    model_catalog = ModelCatalog(
+        tuple(
+            ModelSpec(
+                model_id=f"pv_all_{algorithm}",
+                model_algorithm=algorithm,
+                input_factor_columns=("factor_a",),
+                label_column="label",
+                random_seed=42,
+                hyperparameters=next(
+                    item["hyperparameters"]
+                    for item in small_configuration["models"]
+                    if item["model_algorithm"] == algorithm
                 ),
+            )
+            for algorithm in A_SHARE_MODEL_ALGORITHMS
+        )
+    )
+    sessions = pd.date_range("2017-10-01", "2019-06-30", freq="B")
+    label_calendar = pd.bdate_range(sessions[0], periods=len(sessions) + 21)
+    dataset_frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": [asset for timestamp in sessions for asset in ("a", "b", "c")],
+            "timestamp": [timestamp for timestamp in sessions for _ in range(3)],
+            "label_available_at": [
+                label_calendar[index + 21]
+                for index in range(len(sessions))
+                for _ in range(3)
             ],
-            ignore_index=True,
-        )
-        source_frame = pd.DataFrame(
-            {
-                "source_asset_id": ["a"],
-                "timestamp": [sessions[0]],
-                "value": [1.0],
-            }
-        )
-
-        def source_producer(**kwargs: object) -> InterimImportResult:
-            output_layout = kwargs["layout"]
-            output_root = output_layout.target_root(
-                source_id,
-                output_layout.interim_data_root(source_spec.source_id, source_id),
-            )
-            write_dataset(
-                output_root,
-                source_frame,
-                spec=source_spec,
-                instance_metadata=kwargs["instance_metadata"],
-                resource_policy=kwargs["resource_policy"],
-                borrowed_input=True,
-            )
-            return InterimImportResult(
-                artifact_roots={source_id: output_root},
-                skipped=(),
-                pruning_report_text="formal synthetic source",
-            )
-
-        def dataset_producer(**kwargs: object) -> object:
-            output_layout = kwargs["layout"]
-            output_root = output_layout.target_root(
-                "pv_all",
-                output_layout.research_dataset_root(dataset_spec.market_id, "pv_all"),
-            )
-            return write_dataset(
-                output_root,
-                dataset_frame.loc[
-                    dataset_frame.timestamp.between(
-                        pd.Timestamp(kwargs["time_window"].start),
-                        pd.Timestamp(kwargs["time_window"].end),
-                    )
-                ],
-                spec=dataset_spec,
-                instance_metadata=kwargs["instance_metadata"],
-                resource_policy=kwargs["resource_policy"],
-                borrowed_input=True,
-            )
-
-        raw_root = StorageLayout(project_root=tmp_path).raw_source_root(
-            source_spec.source_id
-        )
-        filesystem_mkdir(raw_root, parents=True)
-        filesystem_write_bytes(raw_root / "formal_source.raw", b"formal")
-        profile = replace(
-            base,
-            protocol=a_share.protocol,
-            interim=InterimDataCatalog((*base.interim.list(), source_spec)),
-            processed=base.processed,
-            research_datasets=ResearchDatasetCatalog((dataset_spec,)),
-            evaluations=EvaluationCatalog((evaluation_spec,)),
-            models=model_catalog,
-            producer_bindings={
-                **base.producer_bindings,
-                source_id: ProducerBinding(
-                    ProducerKind.INTERIM,
-                    source_producer,
-                    source_identity=lambda raw, data_id: content_hash_for_files(
-                        ((data_id, raw / "formal_source.raw"),),
-                        error="formal_source_identity_invalid",
-                    ),
-                ),
-                "pv_all": ProducerBinding(ProducerKind.DATASET, dataset_producer),
-            },
-        )
-        from functools import partial
-
-        from quant_research_platform.profiles import research as profile_module
-
-        configuration = small_configuration
-        configuration["portfolios"] = []
-        configuration["primary_portfolio_id"] = None
-        # Keep registered labels; the synthetic dataset deliberately lacks them.
-        for model in configuration["models"]:
-            spec = model_catalog.get(model["model_id"])
-            model.update(
-                input_factor_columns=list(spec.input_factor_columns),
-                input_feature_columns=list(spec.input_feature_columns),
-                label_column=spec.label_column,
-                hyperparameters=dict(spec.hyperparameters),
-                random_seed=spec.random_seed,
-            )
-            model.pop("parameter_candidates", None)
-        profile = replace(
-            profile,
-            protocol=partial(
-                a_share.AShareProtocol,
-                configuration_json=json.dumps(configuration, sort_keys=True),
-            ),
-        )
-        # Isolate DAG persistence over the deliberately incomplete synthetic catalog;
-        # configuration binding is covered separately with the real market catalog.
-        monkeypatch.setattr(
-            profile_module,
-            "bind_research_configuration",
-            lambda selected, configuration, **kwargs: selected,
-        )
-        result = research.research_run(
-            profile=profile,
-            layout=StorageLayout(project_root=tmp_path),
-            research_plan=configuration,
-        )
-        targets = {item["target_id"]: item for item in result["target_results"]}
-        assert result["status"] == "FAILED"
-        assert targets["pv_all_global_statistics"] == {
-            "target_id": "pv_all_global_statistics",
-            "status": "FAILED",
-            "reason": "statistics_build_failed:dataset_column_not_found",
-            "instance_identity": None,
+            "factor_a": [
+                float(asset_index + (date_index % 5))
+                for date_index in range(len(sessions))
+                for asset_index in range(1, 4)
+            ],
+            "label": [
+                float(asset_index + (date_index % 5)) / 10.0
+                for date_index in range(len(sessions))
+                for asset_index in range(1, 4)
+            ],
+            "eligible": True,
         }
-        assert targets["pv_all_quarterly_statistics"]["status"] == "BLOCKED"
-        assert targets["pv_all_evaluation"]["status"] == "BUILT"
-        assert targets["pv_all_model_selection_refit"]["status"] == "BUILT"
-        assert "pv_all_ew_rank_model" not in targets
-        assert all(
-            targets[f"pv_all_{group}_persisted_predictions"]["status"] == "BUILT"
-            for group in ("global", "quarterly")
+    )
+    # Development fixtures cannot expose labels requiring holdout facts.
+    unavailable = dataset_frame.label_available_at > pd.Timestamp(
+        a_share.DEVELOPMENT_END
+    )
+    dataset_frame.loc[unavailable, "label"] = float("nan")
+    dataset_frame.loc[unavailable, "label_available_at"] = pd.NaT
+    dataset_frame = pd.concat(
+        [
+            dataset_frame,
+            pd.DataFrame(
+                {
+                    "market_id": ["a_share"],
+                    "asset_id": ["holdout"],
+                    "timestamp": pd.to_datetime(["2019-07-02"]),
+                    "label_available_at": pd.to_datetime(["2019-07-31"]),
+                    "factor_a": [float("nan")],
+                    "label": [float("nan")],
+                    "eligible": [True],
+                }
+            ),
+        ],
+        ignore_index=True,
+    )
+    source_frame = pd.DataFrame(
+        {
+            "source_asset_id": ["a"],
+            "timestamp": [sessions[0]],
+            "value": [1.0],
+        }
+    )
+
+    def source_producer(**kwargs: object) -> InterimImportResult:
+        output_layout = kwargs["layout"]
+        output_root = output_layout.target_root(
+            source_id,
+            output_layout.interim_data_root(source_spec.source_id, source_id),
         )
-        assert "pv_all_ew_rank_predictions" not in targets
-        model_root = (
+        write_dataset(
+            output_root,
+            source_frame,
+            spec=source_spec,
+            instance_metadata=kwargs["instance_metadata"],
+        )
+        return InterimImportResult(
+            artifact_roots={source_id: output_root},
+            skipped=(),
+            pruning_report_text="formal synthetic source",
+        )
+
+    def dataset_producer(**kwargs: object) -> object:
+        output_layout = kwargs["layout"]
+        output_root = output_layout.target_root(
+            "pv_all",
+            output_layout.research_dataset_root(dataset_spec.market_id, "pv_all"),
+        )
+        return write_dataset(
+            output_root,
+            dataset_frame.loc[
+                dataset_frame.timestamp.between(
+                    pd.Timestamp(kwargs["time_window"].start),
+                    pd.Timestamp(kwargs["time_window"].end),
+                )
+            ],
+            spec=dataset_spec,
+            instance_metadata=kwargs["instance_metadata"],
+        )
+
+    raw_root = StorageLayout(project_root=tmp_path).raw_source_root(
+        source_spec.source_id
+    )
+    filesystem_mkdir(raw_root, parents=True)
+    filesystem_write_bytes(raw_root / "formal_source.raw", b"formal")
+    profile = replace(
+        base,
+        protocol=a_share.protocol,
+        interim=InterimDataCatalog((*base.interim.list(), source_spec)),
+        processed=base.processed,
+        research_datasets=ResearchDatasetCatalog((dataset_spec,)),
+        evaluations=EvaluationCatalog((evaluation_spec,)),
+        models=model_catalog,
+        producer_bindings={
+            **base.producer_bindings,
+            source_id: ProducerBinding(
+                ProducerKind.INTERIM,
+                source_producer,
+                source_identity=lambda raw, data_id: content_hash_for_files(
+                    ((data_id, raw / "formal_source.raw"),),
+                    error="formal_source_identity_invalid",
+                ),
+            ),
+            "pv_all": ProducerBinding(ProducerKind.DATASET, dataset_producer),
+        },
+    )
+    from functools import partial
+
+    from quant_research_platform.profiles import research as profile_module
+
+    configuration = small_configuration
+    configuration["portfolios"] = []
+    configuration["primary_portfolio_id"] = None
+    # Keep registered labels; the synthetic dataset deliberately lacks them.
+    for model in configuration["models"]:
+        spec = model_catalog.get(model["model_id"])
+        model.update(
+            input_factor_columns=list(spec.input_factor_columns),
+            input_feature_columns=list(spec.input_feature_columns),
+            label_column=spec.label_column,
+            hyperparameters=dict(spec.hyperparameters),
+            random_seed=spec.random_seed,
+        )
+        model.pop("parameter_candidates", None)
+    profile = replace(
+        profile,
+        protocol=partial(
+            a_share.AShareProtocol,
+            configuration_json=json.dumps(configuration, sort_keys=True),
+        ),
+    )
+    # Isolate DAG persistence over the deliberately incomplete synthetic catalog;
+    # configuration binding is covered separately with the real market catalog.
+    monkeypatch.setattr(
+        profile_module,
+        "bind_research_configuration",
+        lambda selected, configuration, **kwargs: selected,
+    )
+    result = research.research_run(
+        profile=profile,
+        layout=StorageLayout(project_root=tmp_path),
+        research_plan=configuration,
+    )
+    targets = {item["target_id"]: item for item in result["target_results"]}
+    assert result["status"] == "FAILED"
+    assert targets["pv_all_global_statistics"] == {
+        "target_id": "pv_all_global_statistics",
+        "status": "FAILED",
+        "reason": "statistics_build_failed:dataset_column_not_found",
+        "instance_identity": None,
+    }
+    assert targets["pv_all_quarterly_statistics"]["status"] == "BLOCKED"
+    assert targets["pv_all_evaluation"]["status"] == "BUILT"
+    assert targets["pv_all_model_selection_refit"]["status"] == "BUILT"
+    assert "pv_all_ew_rank_model" not in targets
+    assert all(
+        targets[f"pv_all_{group}_persisted_predictions"]["status"] == "BUILT"
+        for group in ("global", "quarterly")
+    )
+    assert "pv_all_ew_rank_predictions" not in targets
+    model_root = (
+        StorageLayout(project_root=tmp_path).semantic_artifact_root(
+            "a_share", "pv_all_model_selection_refit"
+        )
+        / "instances"
+        / targets["pv_all_model_selection_refit"]["instance_identity"]
+    )
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        read_prediction_output_bundle,
+    )
+    from quant_research_platform.research.models.persisted import (
+        read_quarterly_model_artifact,
+    )
+
+    model_payload = json.loads(
+        filesystem_read_text(model_root / "model.json", encoding="utf-8")
+    )
+    assert set(model_payload) == {
+        "schema_id",
+        "model_id",
+        "validation_quarters",
+        "selection_decisions",
+        "final_groups",
+    }
+    quarters = [str(period) for period in pd.period_range("2018Q1", "2019Q2", freq="Q")]
+    assert model_payload["validation_quarters"] == quarters
+    artifact = read_quarterly_model_artifact(
+        model_root, trial_layout=StorageLayout(tmp_path)
+    )
+    assert len(artifact.candidate_models) == len(quarters) * len(model_catalog.list())
+    assert len(artifact.final_models) == 2 * len(model_catalog.list())
+    protocol_family_ids = tuple(
+        f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS
+    )
+    assert {item["family_id"] for item in artifact.candidate_models} == set(
+        protocol_family_ids
+    )
+    assert {item["selection_group"] for item in artifact.final_models} == {
+        "global",
+        "quarterly",
+    }
+    for item in artifact.candidate_models:
+        metadata = item["model_metadata"]
+        assert type(metadata["random_seed"]) is int
+        assert "model_selection" not in metadata
+        assert not {"test_start", "test_end", "oos_start", "oos_end"}.intersection(
+            metadata
+        )
+    assert set(artifact.selections["global"]) == {"final"}
+    assert set(artifact.selections["quarterly"]) == {
+        *(str(period) for period in pd.period_range("2019Q1", "2019Q2", freq="Q")),
+        "final",
+    }
+    assert model_read_windows
+    assert any(
+        pd.Timestamp(window.start) == pd.Timestamp("2017-10-01")
+        for window in model_read_windows
+    )
+    observed_windows = {
+        (pd.Timestamp(window.start), pd.Timestamp(window.end))
+        for window in model_read_windows
+    }
+    assert {
+        (
+            pd.Timestamp(item["validation_window"]["start"]),
+            pd.Timestamp(item["validation_window"]["end"]),
+        )
+        for item in artifact.candidate_models
+    }.issubset(observed_windows)
+    assert all(
+        pd.Timestamp(window.end) <= pd.Timestamp(a_share.DEVELOPMENT_END)
+        for window in model_read_windows
+    )
+    for group in ("global", "quarterly"):
+        prediction_id = f"pv_all_{group}_persisted_predictions"
+        prediction_root = (
             StorageLayout(project_root=tmp_path).semantic_artifact_root(
-                "a_share", "pv_all_model_selection_refit"
+                "a_share", prediction_id
             )
             / "instances"
-            / targets["pv_all_model_selection_refit"]["instance_identity"]
+            / targets[prediction_id]["instance_identity"]
+            / "outputs"
+            / prediction_id
         )
-        from quant_research_platform.artifacts.outputs.bundle_validation import (
-            read_prediction_output_bundle,
+        prediction_manifest = read_manifest(prediction_root / "manifest.json")
+        import pyarrow.parquet as pq
+
+        from quant_research_platform.contracts.predictions import (
+            A_SHARE_PREDICTION_PRIMARY_KEY,
+            RAW_PREDICTION_COLUMN,
+            prediction_output_columns,
         )
-        from quant_research_platform.research.models.persisted import (
-            read_quarterly_model_artifact,
+        from quant_research_platform.storage.semantic_artifacts import (
+            read_semantic_artifact,
         )
 
-        model_payload = json.loads(
-            filesystem_read_text(model_root / "model.json", encoding="utf-8")
+        declared = read_semantic_artifact(prediction_root.parent.parent)[
+            "semantic_metadata"
+        ]["target_contract"]["prediction_schema"]
+        assert declared["columns"] == list(
+            prediction_output_columns("a_share_oos", RAW_PREDICTION_COLUMN)
         )
-        assert set(model_payload) == {
-            "schema_id",
-            "model_id",
-            "validation_quarters",
-            "selection_decisions",
-            "final_groups",
-        }
-        quarters = [
-            str(period) for period in pd.period_range("2018Q1", "2019Q2", freq="Q")
+        assert (
+            declared["columns"]
+            == pq.read_schema(
+                native_filesystem_path(prediction_root / "prediction.parquet")
+            ).names
+        )
+        assert declared["primary_key"] == list(A_SHARE_PREDICTION_PRIMARY_KEY)
+        assert declared["primary_key"] == prediction_manifest["metadata"]["primary_key"]
+        assert prediction_manifest["metadata"]["prediction_mode"] == "a_share_oos"
+        assert prediction_manifest["metadata"]["prediction_column"] == "raw_prediction"
+        keys = dataset_frame.loc[
+            dataset_frame.timestamp.between("2019-01-01", "2019-06-30"),
+            ["timestamp", "asset_id"],
         ]
-        assert model_payload["validation_quarters"] == quarters
-        artifact = read_quarterly_model_artifact(
-            model_root, trial_layout=StorageLayout(tmp_path), lease=artifact_lease
-        )
-        assert len(artifact.candidate_models) == len(quarters) * len(
-            model_catalog.list()
-        )
-        assert len(artifact.final_models) == 2 * len(model_catalog.list())
-        protocol_family_ids = tuple(
-            f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS
-        )
-        assert {item["family_id"] for item in artifact.candidate_models} == set(
-            protocol_family_ids
-        )
-        assert {item["selection_group"] for item in artifact.final_models} == {
-            "global",
-            "quarterly",
-        }
-        for item in artifact.candidate_models:
-            metadata = item["model_metadata"]
-            assert type(metadata["random_seed"]) is int
-            assert "model_selection" not in metadata
-            assert not {"test_start", "test_end", "oos_start", "oos_end"}.intersection(
-                metadata
-            )
-        assert set(artifact.selections["global"]) == {"final"}
-        assert set(artifact.selections["quarterly"]) == {
-            *(str(period) for period in pd.period_range("2019Q1", "2019Q2", freq="Q")),
-            "final",
-        }
-        assert model_read_windows
-        assert any(
-            pd.Timestamp(window.start) == pd.Timestamp("2017-10-01")
-            for window in model_read_windows
-        )
-        observed_windows = {
-            (pd.Timestamp(window.start), pd.Timestamp(window.end))
-            for window in model_read_windows
-        }
-        assert {
-            (
-                pd.Timestamp(item["validation_window"]["start"]),
-                pd.Timestamp(item["validation_window"]["end"]),
-            )
-            for item in artifact.candidate_models
-        }.issubset(observed_windows)
-        assert all(
-            pd.Timestamp(window.end) <= pd.Timestamp(a_share.DEVELOPMENT_END)
-            for window in model_read_windows
-        )
-        for group in ("global", "quarterly"):
-            prediction_id = f"pv_all_{group}_persisted_predictions"
-            prediction_root = (
-                StorageLayout(project_root=tmp_path).semantic_artifact_root(
-                    "a_share", prediction_id
-                )
-                / "instances"
-                / targets[prediction_id]["instance_identity"]
-                / "outputs"
-                / prediction_id
-            )
-            prediction_manifest = read_manifest(prediction_root / "manifest.json")
-            import pyarrow.parquet as pq
-
-            from quant_research_platform.contracts.predictions import (
-                A_SHARE_PREDICTION_PRIMARY_KEY,
-                RAW_PREDICTION_COLUMN,
-                prediction_output_columns,
-            )
-            from quant_research_platform.storage.semantic_artifacts import (
-                read_semantic_artifact,
-            )
-
-            declared = read_semantic_artifact(
-                prediction_root.parent.parent, lease=artifact_lease
-            )["semantic_metadata"]["target_contract"]["prediction_schema"]
-            assert declared["columns"] == list(
-                prediction_output_columns("a_share_oos", RAW_PREDICTION_COLUMN)
-            )
-            assert (
-                declared["columns"]
-                == pq.read_schema(
-                    native_filesystem_path(prediction_root / "prediction.parquet")
-                ).names
-            )
-            assert declared["primary_key"] == list(A_SHARE_PREDICTION_PRIMARY_KEY)
-            assert (
-                declared["primary_key"]
-                == prediction_manifest["metadata"]["primary_key"]
-            )
-            assert prediction_manifest["metadata"]["prediction_mode"] == "a_share_oos"
-            assert (
-                prediction_manifest["metadata"]["prediction_column"] == "raw_prediction"
-            )
-            keys = dataset_frame.loc[
-                dataset_frame.timestamp.between("2019-01-01", "2019-06-30"),
-                ["timestamp", "asset_id"],
-            ]
-            for selector in ("champion", "pv_all_equal_weight_rank_ensemble"):
-                with read_prediction_output_bundle(
-                    prediction_root,
-                    expected_output_id=prediction_id,
-                    family_selection=selector,
-                ) as (_manifest, lookup):
-                    with lookup.values_for_frame(keys, mark_matched=True) as (
-                        values,
-                        found,
-                    ):
-                        assert all(found)
-                        assert len(values) == len(keys)
-                    assert lookup.coverage_counts() == (0, 0)
-            assert prediction_manifest["metadata"]["primary_key"] == [
-                "timestamp",
-                "asset_id",
-                "family_id",
-            ]
-            assert prediction_manifest["metadata"]["prediction_metadata"][
-                "prediction_rows"
-            ] == 8 * len(keys)
-        layout = StorageLayout(tmp_path)
-        first_record = read_research_run_record(
-            layout.research_run_path(result["run_id"])
-        )
-        assert first_record.trial_ledgers
-        model_before = filesystem_read_bytes(model_root / "manifest.json")
-        reused = research.research_run(
-            profile=profile,
-            layout=layout,
-            research_plan=configuration,
-        )
-        reused_record = read_research_run_record(
-            layout.research_run_path(reused["run_id"])
-        )
-        assert not reused_record.trial_ledgers
-        assert (
-            next(
-                item
-                for item in reused["target_results"]
-                if item["target_id"] == "pv_all_model_selection_refit"
-            )["status"]
-            == "REUSED"
-        )
-        rebuilt = research.research_run(
-            profile=profile,
-            layout=layout,
-            rebuild=True,
-            research_plan=configuration,
-        )
-        rebuild_record = read_research_run_record(
-            layout.research_run_path(rebuilt["run_id"])
-        )
-        assert rebuild_record.trial_ledgers
-        assert {item["run_id"] for item in rebuild_record.trial_ledgers} == {
-            rebuilt["run_id"]
-        }
-        assert filesystem_read_bytes(model_root / "manifest.json") == model_before
-        comparisons = {
-            item["target_id"]: item["comparison_status"]
-            for item in rebuilt["rebuild_evidence"]
-        }
-        assert comparisons["pv_all_model_selection_refit"] == "MATCH"
-        assert all(
-            comparisons[f"pv_all_{group}_persisted_predictions"] == "MATCH"
-            for group in ("global", "quarterly")
-        )
-        assert (
-            next(
-                item
-                for item in rebuilt["target_results"]
-                if item["target_id"] == "pv_all_global_statistics"
-            )["reason"]
-            == "statistics_build_failed:dataset_column_not_found"
-        )
+        for selector in ("champion", "pv_all_equal_weight_rank_ensemble"):
+            with read_prediction_output_bundle(
+                prediction_root,
+                expected_output_id=prediction_id,
+                family_selection=selector,
+            ) as (_manifest, lookup):
+                values, found = lookup.values_for_frame(keys, mark_matched=True)
+                assert all(found)
+                assert len(values) == len(keys)
+                assert lookup.coverage_counts() == (0, 0)
+        assert prediction_manifest["metadata"]["primary_key"] == [
+            "timestamp",
+            "asset_id",
+            "family_id",
+        ]
+        assert prediction_manifest["metadata"]["prediction_metadata"][
+            "prediction_rows"
+        ] == 8 * len(keys)
+    layout = StorageLayout(tmp_path)
+    first_record = read_research_run_record(layout.research_run_path(result["run_id"]))
+    assert first_record.trial_ledgers
+    model_before = filesystem_read_bytes(model_root / "manifest.json")
+    reused = research.research_run(
+        profile=profile,
+        layout=layout,
+        research_plan=configuration,
+    )
+    reused_record = read_research_run_record(layout.research_run_path(reused["run_id"]))
+    assert not reused_record.trial_ledgers
+    assert (
+        next(
+            item
+            for item in reused["target_results"]
+            if item["target_id"] == "pv_all_model_selection_refit"
+        )["status"]
+        == "REUSED"
+    )
+    rebuilt = research.research_run(
+        profile=profile,
+        layout=layout,
+        rebuild=True,
+        research_plan=configuration,
+    )
+    rebuild_record = read_research_run_record(
+        layout.research_run_path(rebuilt["run_id"])
+    )
+    assert rebuild_record.trial_ledgers
+    assert {item["run_id"] for item in rebuild_record.trial_ledgers} == {
+        rebuilt["run_id"]
+    }
+    assert filesystem_read_bytes(model_root / "manifest.json") == model_before
+    comparisons = {
+        item["target_id"]: item["comparison_status"]
+        for item in rebuilt["rebuild_evidence"]
+    }
+    assert comparisons["pv_all_model_selection_refit"] == "MATCH"
+    assert all(
+        comparisons[f"pv_all_{group}_persisted_predictions"] == "MATCH"
+        for group in ("global", "quarterly")
+    )
+    assert (
+        next(
+            item
+            for item in rebuilt["target_results"]
+            if item["target_id"] == "pv_all_global_statistics"
+        )["reason"]
+        == "statistics_build_failed:dataset_column_not_found"
+    )
 
 
 def test_model_failure_blocks_real_semantic_descendant(
@@ -574,8 +547,6 @@ def test_model_failure_blocks_real_semantic_descendant(
             }
         ),
         spec=dataset_spec,
-        resource_policy=None,
-        borrowed_input=True,
     )
     base = replace(base, research_datasets=ResearchDatasetCatalog((dataset_spec,)))
     model_calls = 0
@@ -959,12 +930,7 @@ def test_interim_binding_receives_one_requested_target(
             producer_layout.interim_data_root(spec.source_id, data_id),
         )
         write_dataset(
-            output_root,
-            frame,
-            spec=spec,
-            instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
+            output_root, frame, spec=spec, instance_metadata=kwargs["instance_metadata"]
         )
         return InterimImportResult(
             artifact_roots={data_id: output_root},
@@ -1042,12 +1008,7 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
             }
         )
         write_dataset(
-            output_root,
-            frame,
-            spec=spec,
-            instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
+            output_root, frame, spec=spec, instance_metadata=kwargs["instance_metadata"]
         )
         return InterimImportResult(
             artifact_roots={data_id: output_root},
@@ -1204,12 +1165,7 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
             }
         )
         write_dataset(
-            output_root,
-            frame,
-            spec=spec,
-            instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
+            output_root, frame, spec=spec, instance_metadata=kwargs["instance_metadata"]
         )
         return InterimImportResult(
             artifact_roots={data_id: output_root},
@@ -1360,12 +1316,7 @@ def _calendar_rebuild_profile(
         if variant == "key" and calls["count"] > 1:
             frame["source_state"] = ["O"] * count
         write_dataset(
-            output_root,
-            frame,
-            spec=spec,
-            instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
+            output_root, frame, spec=spec, instance_metadata=kwargs["instance_metadata"]
         )
         return InterimImportResult(
             artifact_roots={data_id: output_root},
@@ -1867,12 +1818,7 @@ def test_rebuild_mismatch_blocks_real_descendant_before_producer_call(
             producer_layout.interim_data_root(spec.source_id, descendant_id),
         )
         write_dataset(
-            output_root,
-            frame,
-            spec=spec,
-            instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
+            output_root, frame, spec=spec, instance_metadata=kwargs["instance_metadata"]
         )
         return InterimImportResult(
             artifact_roots={descendant_id: output_root},
@@ -2349,12 +2295,7 @@ def test_target_local_validation_preserves_independent_production(
         layout = kwargs["layout"]
         root = layout.target_root(name, tmp_path / "unused")
         write_dataset(
-            root,
-            frame(name),
-            spec=spec,
-            instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
+            root, frame(name), spec=spec, instance_metadata=kwargs["instance_metadata"]
         )
         return root
 
@@ -2368,11 +2309,9 @@ def test_target_local_validation_preserves_independent_production(
 
     @contextmanager
     def processed(spec, **kwargs):
-        from quant_research_platform.runtime.resources import OwnedValue
 
         def frames():
-            lease = yield 65536
-            yield OwnedValue(frame(spec.data_id), lease)
+            yield frame(spec.data_id)
 
         yield frames(), {}, None
 
@@ -2729,170 +2668,153 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    with (
-        runtime_resource_policy_scope() as artifact_policy,
-        artifact_policy.lease("tests.artifact_metadata", 0) as artifact_lease,
+    from contextlib import contextmanager
+    from types import SimpleNamespace
+
+    from quant_research_platform.contracts.models import (
+        A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
+    )
+
+    model_identity = "a" * 64
+    profile = SimpleNamespace(
+        producer_bindings={
+            "prediction": ProducerBinding(ProducerKind.PREDICTION, lambda: None),
+            "model": ProducerBinding(ProducerKind.MODEL, lambda: None),
+        }
+    )
+    target = TargetSpec(
+        target_id="prediction",
+        dependencies=("model",),
+        producer_id="prediction",
+    )
+    protocol = SimpleNamespace(
+        protocol_id="a_share_low_frequency",
+        selection_group_for_target=lambda _target: "synthetic",
+        access_window=TimeWindow("2024-01-01", "2024-01-02"),
+    )
+    layout = StorageLayout(project_root=tmp_path)
+    envelope = {
+        "logical_artifact_id": "prediction",
+        "upstream_identities": {"model": model_identity},
+    }
+    manifest = {
+        "metadata": {
+            "test_start": "2024-01-01",
+            "test_end": "2024-01-02",
+            "model_metadata": {
+                "model_artifact_id": "model",
+                "model_artifact_identity": "b" * 64,
+                "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
+            },
+        }
+    }
+
+    monkeypatch.setattr(
+        research,
+        "read_semantic_artifact_record",
+        lambda *_args, **_kwargs: (envelope, {}),
+    )
+    monkeypatch.setattr(
+        research,
+        "validate_prediction_output_metadata_shape",
+        lambda _metadata: None,
+    )
+
+    @contextmanager
+    def bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003
+        yield manifest, object()
+
+    monkeypatch.setattr(research, "read_prediction_output_bundle", bundle)
+    monkeypatch.setattr(
+        research, "_target_instance_root", lambda *_args: tmp_path / "model"
+    )
+    monkeypatch.setattr(
+        research,
+        "read_quarterly_model_artifact",
+        lambda *_args, **_kwargs: SimpleNamespace(
+            prediction_lineage=lambda *_args, **_kwargs: manifest["metadata"][
+                "model_metadata"
+            ]
+        ),
+    )
+    with pytest.raises(
+        ValueError,
+        match="^prediction_inner_artifact_invalid:prediction_model_lineage_mismatch$",
     ):
-        from contextlib import contextmanager
-        from types import SimpleNamespace
-
-        from quant_research_platform.contracts.models import (
-            A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-        )
-
-        model_identity = "a" * 64
-        profile = SimpleNamespace(
-            producer_bindings={
-                "prediction": ProducerBinding(ProducerKind.PREDICTION, lambda: None),
-                "model": ProducerBinding(ProducerKind.MODEL, lambda: None),
-            }
-        )
-        target = TargetSpec(
-            target_id="prediction",
-            dependencies=("model",),
-            producer_id="prediction",
-        )
-        protocol = SimpleNamespace(
-            protocol_id="a_share_low_frequency",
-            selection_group_for_target=lambda _target: "synthetic",
-            access_window=TimeWindow("2024-01-01", "2024-01-02"),
-        )
-        layout = StorageLayout(project_root=tmp_path)
-        envelope = {
-            "logical_artifact_id": "prediction",
-            "upstream_identities": {"model": model_identity},
-        }
-        manifest = {
-            "metadata": {
-                "test_start": "2024-01-01",
-                "test_end": "2024-01-02",
-                "model_metadata": {
-                    "model_artifact_id": "model",
-                    "model_artifact_identity": "b" * 64,
-                    "model_artifact_schema": A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
-                },
-            }
-        }
-
-        monkeypatch.setattr(
-            research,
-            "read_semantic_artifact_record",
-            lambda *_args, **_kwargs: (envelope, {}),
-        )
-        monkeypatch.setattr(
-            research,
-            "validate_prediction_output_metadata_shape",
-            lambda _metadata: None,
-        )
-
-        @contextmanager
-        def bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003
-            yield manifest, object()
-
-        monkeypatch.setattr(research, "read_prediction_output_bundle", bundle)
-        monkeypatch.setattr(
-            research, "_target_instance_root", lambda *_args: tmp_path / "model"
-        )
-        monkeypatch.setattr(
-            research,
-            "read_quarterly_model_artifact",
-            lambda *_args, **_kwargs: SimpleNamespace(
-                prediction_lineage=lambda *_args, **_kwargs: manifest["metadata"][
-                    "model_metadata"
-                ]
-            ),
-        )
-        with pytest.raises(
-            ValueError,
-            match="^prediction_inner_artifact_invalid:prediction_model_lineage_mismatch$",
-        ):
-            research._validate_semantic_target_root(  # noqa: SLF001
-                profile,
-                protocol,
-                target,
-                Path("prediction-root"),
-                "c" * 64,
-                artifact_lease=artifact_lease,
-                trial_layout=layout,
-            )
-        manifest["metadata"]["model_metadata"]["model_artifact_identity"] = (
-            model_identity
-        )
-        research._validate_semantic_target_root(  # noqa: SLF001
+        research._validate_semantic_target_root(
             profile,
             protocol,
             target,
             Path("prediction-root"),
             "c" * 64,
-            artifact_lease=artifact_lease,
             trial_layout=layout,
         )
+    manifest["metadata"]["model_metadata"]["model_artifact_identity"] = model_identity
+    research._validate_semantic_target_root(
+        profile,
+        protocol,
+        target,
+        Path("prediction-root"),
+        "c" * 64,
+        trial_layout=layout,
+    )
 
 
 def test_model_selection_rejects_protocol_family_mismatch(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    with (
-        runtime_resource_policy_scope() as artifact_policy,
-        artifact_policy.lease("tests.artifact_metadata", 0) as artifact_lease,
-    ):
-        from types import SimpleNamespace
+    from types import SimpleNamespace
 
-        model_target = "model-target"
-        expected_model_id = "scenario_linear_regression"
-        profile = SimpleNamespace(
-            producer_bindings={
-                model_target: ProducerBinding(ProducerKind.MODEL, lambda: None),
-            },
-            models=SimpleNamespace(
-                get=lambda _model_id: SimpleNamespace(input_columns=()),
-            ),
-        )
-        protocol = SimpleNamespace(
-            protocol_id="a_share_low_frequency",
-            scenario_id="scenario",
-            manifest=lambda: {"selection_tie_break": ["linear_regression"]},
-            model_ids_for_target=lambda _target_id: (expected_model_id,),
-        )
-        target = TargetSpec(model_target, producer_id=model_target)
-        selection = {
-            "candidate_family_ids": [expected_model_id],
-            "tie_break_order": [expected_model_id],
-            "selected_family_id": "different_family",
-        }
-        persisted = SimpleNamespace(
-            selections={"global": {"final": selection}},
-            candidate_models=(
-                {
-                    "quarter_id": "2019Q1",
-                    "family_id": "different_family",
-                    "model_metadata": {
-                        "model_algorithm": "linear_regression",
-                        "input_columns": [],
-                    },
+    model_target = "model-target"
+    expected_model_id = "scenario_linear_regression"
+    profile = SimpleNamespace(
+        producer_bindings={
+            model_target: ProducerBinding(ProducerKind.MODEL, lambda: None),
+        },
+        models=SimpleNamespace(
+            get=lambda _model_id: SimpleNamespace(input_columns=()),
+        ),
+    )
+    protocol = SimpleNamespace(
+        protocol_id="a_share_low_frequency",
+        scenario_id="scenario",
+        manifest=lambda: {"selection_tie_break": ["linear_regression"]},
+        model_ids_for_target=lambda _target_id: (expected_model_id,),
+    )
+    target = TargetSpec(model_target, producer_id=model_target)
+    selection = {
+        "candidate_family_ids": [expected_model_id],
+        "tie_break_order": [expected_model_id],
+        "selected_family_id": "different_family",
+    }
+    persisted = SimpleNamespace(
+        selections={"global": {"final": selection}},
+        candidate_models=(
+            {
+                "quarter_id": "2019Q1",
+                "family_id": "different_family",
+                "model_metadata": {
+                    "model_algorithm": "linear_regression",
+                    "input_columns": [],
                 },
-            ),
-            final_models=(),
+            },
+        ),
+        final_models=(),
+    )
+    monkeypatch.setattr(
+        research,
+        "read_semantic_artifact_record",
+        lambda *_args, **_kwargs: ({"logical_artifact_id": model_target}, {}),
+    )
+    monkeypatch.setattr(
+        research,
+        "read_quarterly_model_artifact",
+        lambda *_args, **_kwargs: persisted,
+    )
+    with pytest.raises(ValueError, match="model_selection_family_mismatch"):
+        research._validate_semantic_target_root(
+            profile, protocol, target, Path("model-root"), "a" * 64
         )
-        monkeypatch.setattr(
-            research,
-            "read_semantic_artifact_record",
-            lambda *_args, **_kwargs: ({"logical_artifact_id": model_target}, {}),
-        )
-        monkeypatch.setattr(
-            research,
-            "read_quarterly_model_artifact",
-            lambda *_args, **_kwargs: persisted,
-        )
-        with pytest.raises(ValueError, match="model_selection_family_mismatch"):
-            research._validate_semantic_target_root(  # noqa: SLF001
-                profile,
-                protocol,
-                target,
-                Path("model-root"),
-                "a" * 64,
-                artifact_lease=artifact_lease,
-            )
 
 
 def test_evaluation_result_is_owned_before_atomic_publication_callback(
@@ -2940,7 +2862,6 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
     observed = []
 
     def publish(*args, **kwargs):
-        assert policy.used_memory_bytes > 0
         try:
             return actual_write(*args, **kwargs)
         except ValueError as error:
@@ -2948,24 +2869,21 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
             raise
 
     monkeypatch.setattr(research, "write_semantic_artifact", publish)
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(ValueError, match="evaluation_write_failed") as raised:
-            research._build_semantic_target(
-                profile=profile,
-                protocol=protocol,
-                layout=layout,
-                spec=target,
-                planned={
-                    "requested_identity": envelope.instance_identity,
-                    "upstream_identities": {},
-                },
-                target_layout=layout,
-                policy=policy,
-                time_window=window,
-                research_window=window_payload,
-                software_identity=software,
-                raw_root=tmp_path / "raw",
-            )
-        assert len(observed) == 1 and raised.value.__cause__ is observed[0]
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(ValueError, match="evaluation_write_failed") as raised:
+        research._build_semantic_target(
+            profile=profile,
+            protocol=protocol,
+            layout=layout,
+            spec=target,
+            planned={
+                "requested_identity": envelope.instance_identity,
+                "upstream_identities": {},
+            },
+            target_layout=layout,
+            time_window=window,
+            research_window=window_payload,
+            software_identity=software,
+            raw_root=tmp_path / "raw",
+        )
+    assert len(observed) == 1 and raised.value.__cause__ is observed[0]
     assert filesystem_read_bytes(marker) == b"unchanged"

@@ -3,7 +3,6 @@
 from datetime import date
 from types import SimpleNamespace
 
-from quant_research_platform.runtime.resources import current_runtime_resource_policy
 from quant_research_platform.sources.choice.raw_exports import ChoiceRequest
 
 
@@ -42,7 +41,6 @@ class SDK:
         return response(ErrorCode=self.stop_error)
 
     def css(self, *args):
-        assert current_runtime_resource_policy().used_memory_bytes > 0
         self.calls += 1
         self.last_arguments = args
         return self.response

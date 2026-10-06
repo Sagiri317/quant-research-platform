@@ -8,7 +8,6 @@ from typing import Annotated
 import typer
 
 from quant_research_platform.policy.share_safety import sanitize_shared_text
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.identity import (
     filesystem_exists,
 )
@@ -37,8 +36,7 @@ def schema_inventory(
         typer.echo("output_already_exists", err=True)
         raise typer.Exit(code=2)
     try:
-        with runtime_resource_policy_scope(None) as policy:
-            write_schema_inventory(project_root, output, resource_policy=policy)
+        write_schema_inventory(project_root, output)
     except Exception as exc:
         typer.echo(sanitize_shared_text(str(exc)), err=True)
         raise typer.Exit(code=2) from exc

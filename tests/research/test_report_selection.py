@@ -57,7 +57,6 @@ def test_a_share_factor_only_report_uses_evaluation_without_model_blockers():
     assert result["sections"]["factor diagnostics"] == evaluation
     for key in ("model selection", "OOS prediction", "portfolio", "risk", "robustness"):
         assert result["sections"][key] == unavailable
-
     _check_notebook_unrequested_diagnostics(
         result, is_crypto=False, sections=("cost", "risk")
     )
@@ -91,7 +90,6 @@ def test_crypto_factor_only_report_does_not_claim_missing_unrequested_models():
             "status": "UNDEFINED",
             "reason": "not_requested",
         }
-
     _check_notebook_unrequested_diagnostics(
         result, is_crypto=True, sections=("daily statistics",)
     )
@@ -138,16 +136,18 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
 
     run = record()
     run.target_results = tuple(
-        SimpleNamespace(
-            target_id=key,
-            producer_kind=kind,
-            status=TargetStatus.BUILT,
-            instance_identity="a" * 64,
-            artifact_root=key,
-        )
-        for key, kind in (
-            ("factors_only", ProducerKind.DATASET),
-            ("factors_only_evaluation", ProducerKind.EVALUATION),
+        (
+            SimpleNamespace(
+                target_id=key,
+                producer_kind=kind,
+                status=TargetStatus.BUILT,
+                instance_identity="a" * 64,
+                artifact_root=key,
+            )
+            for key, kind in (
+                ("factors_only", ProducerKind.DATASET),
+                ("factors_only_evaluation", ProducerKind.EVALUATION),
+            )
         )
     )
     checked = []
@@ -181,10 +181,7 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
         },
     )
     evidence = research.load_a_share_run_evidence(
-        layout=StorageLayout(tmp_path),
-        record=run,
-        report_lease=None,
-        selections={},
+        layout=StorageLayout(tmp_path), record=run, selections={}
     )
     assert checked == ["factors_only", "factors_only_evaluation"]
     assert evidence["issues"] == []
@@ -253,11 +250,7 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(
     )
     with pytest.raises(RuntimeError, match="frozen_report_selection_verified"):
         _build_report_from_run(
-            profile=profile,
-            layout=StorageLayout(tmp_path),
-            record=record,
-            plan=True,
-            report_lease=None,
+            profile=profile, layout=StorageLayout(tmp_path), record=record, plan=True
         )
     assert len(calls) == 1
 

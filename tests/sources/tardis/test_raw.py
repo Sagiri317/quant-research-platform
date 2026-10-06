@@ -7,9 +7,7 @@ from pathlib import Path
 
 import pytest
 
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.tardis.raw import import_slices, iter_native_slice
-from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _slices(root: Path, first: bytes = b"", *, count=144):
@@ -34,38 +32,30 @@ def _snapshot(timestamp="2026-09-01T00:00:01.000000Z"):
 def test_import_preserves_native_compressed_bytes_and_disconnect_line(tmp_path):
     slices = _slices(tmp_path / "source", _snapshot() + b"\n")
     destination = tmp_path / "published"
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2)
-    ) as policy:
-        result = import_slices(
-            destination,
-            date="2026-09-01",
-            slices=slices,
-            byte_budget=1024**2,
-            resource_policy=policy,
-        )
-        assert len(result["files"]) == 144
-        for source, member in zip(slices, result["files"], strict=True):
-            assert member["path"].endswith(".txt.gz")
-            actual = (destination / member["path"]).read_bytes()
-            assert actual == source.read_bytes()
-            assert hashlib.sha256(actual).hexdigest() == member["sha256"]
-        gap = result["gaps"]
-        with gzip.open(destination / gap["path"], "rt") as stream:
-            rows = [json.loads(line) for line in stream]
-        assert rows == [
-            {
-                "reason": "vendor_disconnect",
-                "offset_minutes": 0,
-                "line": 2,
-                "observed_utc": None,
-            }
-        ]
-        assert result["observation_clock"] == "vendor_utc"
-        assert result["ordering"] == "slice_offset_then_native_line"
-        assert "capture" not in result
-        assert "market_metadata" not in result
-        assert policy.used_memory_bytes == 0
+    result = import_slices(
+        destination, date="2026-09-01", slices=slices, byte_budget=1024**2
+    )
+    assert len(result["files"]) == 144
+    for source, member in zip(slices, result["files"], strict=True):
+        assert member["path"].endswith(".txt.gz")
+        actual = (destination / member["path"]).read_bytes()
+        assert actual == source.read_bytes()
+        assert hashlib.sha256(actual).hexdigest() == member["sha256"]
+    gap = result["gaps"]
+    with gzip.open(destination / gap["path"], "rt") as stream:
+        rows = [json.loads(line) for line in stream]
+    assert rows == [
+        {
+            "reason": "vendor_disconnect",
+            "offset_minutes": 0,
+            "line": 2,
+            "observed_utc": None,
+        }
+    ]
+    assert result["observation_clock"] == "vendor_utc"
+    assert result["ordering"] == "slice_offset_then_native_line"
+    assert "capture" not in result
+    assert "market_metadata" not in result
 
 
 @pytest.mark.parametrize(
@@ -75,88 +65,34 @@ def test_import_preserves_native_compressed_bytes_and_disconnect_line(tmp_path):
 def test_bad_native_input_is_not_published(tmp_path, first):
     slices = _slices(tmp_path / "source", first)
     destination = tmp_path / "published"
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2)
-    ) as policy:
-        with pytest.raises(ValueError):
-            import_slices(
-                destination,
-                date="2026-09-01",
-                slices=slices,
-                byte_budget=1024**2,
-                resource_policy=policy,
-            )
-        assert not destination.exists()
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(ValueError):
+        import_slices(
+            destination, date="2026-09-01", slices=slices, byte_budget=1024**2
+        )
+    assert not destination.exists()
 
 
 def test_byte_budget_failure_preserves_input_and_removes_staging(tmp_path):
     slices = _slices(tmp_path / "source", _snapshot())
     before = slices[0].read_bytes()
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2)
-    ) as policy:
-        with pytest.raises(ValueError, match="tardis_download_budget_exceeded"):
-            import_slices(
-                tmp_path / "published",
-                date="2026-09-01",
-                slices=slices,
-                byte_budget=1,
-                resource_policy=policy,
-            )
-        assert slices[0].read_bytes() == before
-        assert not (tmp_path / "published").exists()
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(ValueError, match="tardis_download_budget_exceeded"):
+        import_slices(
+            tmp_path / "published", date="2026-09-01", slices=slices, byte_budget=1
+        )
+    assert slices[0].read_bytes() == before
+    assert not (tmp_path / "published").exists()
 
 
 def test_native_line_order_is_preserved_without_a_fabricated_clock(tmp_path):
     path = tmp_path / "native.gz"
     path.write_bytes(gzip.compress(_snapshot() + b"\n" + _snapshot(), mtime=0))
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2)
-    ) as policy:
-        records = iter_native_slice(
-            path, date="2026-09-01", offset_minutes=0, resource_policy=policy
-        )
-        rows = [(number, timestamp) for number, timestamp, _ in records]
-        assert rows == [
-            (1, "2026-09-01T00:00:01.000000Z"),
-            (2, None),
-            (3, "2026-09-01T00:00:01.000000Z"),
-        ]
-        assert policy.used_memory_bytes == 0
-
-
-def test_bad_native_decode_releases_payload_inside_record_lease(tmp_path, monkeypatch):
-    import weakref
-
-    from quant_research_platform.sources.tardis import raw
-
-    path = tmp_path / "invalid.gz"
-    path.write_bytes(gzip.compress(_snapshot().replace(b"depthSnapshot", b"unknown")))
-    decoder = raw.parse_qrp_json_object
-    released = []
-
-    class Tracked(dict):
-        pass
-
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2)
-    ) as policy:
-
-        def parse(value):
-            result = Tracked(decoder(value))
-            weakref.finalize(result, lambda: released.append(policy.used_memory_bytes))
-            return result
-
-        monkeypatch.setattr(raw, "parse_qrp_json_object", parse)
-        records = raw.iter_native_slice(
-            path, date="2026-09-01", offset_minutes=0, resource_policy=policy
-        )
-        with pytest.raises(ValueError, match="tardis_native_channel_invalid"):
-            next(records)
-        assert released and released[0] > 0
-        assert policy.used_memory_bytes == 0
+    records = iter_native_slice(path, date="2026-09-01", offset_minutes=0)
+    rows = [(number, timestamp) for number, timestamp, _ in records]
+    assert rows == [
+        (1, "2026-09-01T00:00:01.000000Z"),
+        (2, None),
+        (3, "2026-09-01T00:00:01.000000Z"),
+    ]
 
 
 @pytest.mark.parametrize("changed", [False, True])
@@ -172,29 +108,23 @@ def test_native_consumed_digest_is_verified_on_every_exit(
         if changed
         else original
     )
-    with runtime_resource_policy_scope() as policy:
-        rows = iter_native_slice(
-            path,
-            date="2026-09-01",
-            offset_minutes=0,
-            resource_policy=policy,
-            expected_sha256=expected,
-        )
-        next(rows)
-        if termination == "primary":
-            primary = KeyboardInterrupt("body_primary")
-            with pytest.raises(KeyboardInterrupt) as caught:
-                rows.throw(primary)
-            assert caught.value is primary
-            assert bool(getattr(primary, "__notes__", [])) == changed
-        elif changed:
-            with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
-                list(rows) if termination == "exhaust" else rows.close()
-        elif termination == "exhaust":
-            list(rows)
-        else:
-            rows.close()
-        assert policy.used_memory_bytes == 0
+    rows = iter_native_slice(
+        path, date="2026-09-01", offset_minutes=0, expected_sha256=expected
+    )
+    next(rows)
+    if termination == "primary":
+        primary = KeyboardInterrupt("body_primary")
+        with pytest.raises(KeyboardInterrupt) as caught:
+            rows.throw(primary)
+        assert caught.value is primary
+        assert bool(getattr(primary, "__notes__", [])) == changed
+    elif changed:
+        with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
+            list(rows) if termination == "exhaust" else rows.close()
+    elif termination == "exhaust":
+        list(rows)
+    else:
+        rows.close()
 
 
 @pytest.mark.parametrize("count", [1, 2, 289])
@@ -204,20 +134,17 @@ def test_archive_duration_and_source_identity_are_not_limited_to_one_day(
     from quant_research_platform.sources import open_market_source
 
     slices = _slices(tmp_path / "native", count=count)
-    with runtime_resource_policy_scope() as policy:
-        manifest = import_slices(
-            tmp_path / "published",
-            date="2026-12-31",
-            offset_minutes=1430,
-            slices=slices,
-            byte_budget=1024**2,
-            resource_policy=policy,
-        )
-        assert len(manifest["files"]) == count
-        assert manifest["files"][-1]["offset_minutes"] == 1430 + (count - 1) * 10
-        with open_market_source(tmp_path / "published", policy) as source:
-            assert source.hft_source_info()["source_file_count"] == count
-        assert policy.used_memory_bytes == 0
+    manifest = import_slices(
+        tmp_path / "published",
+        date="2026-12-31",
+        offset_minutes=1430,
+        slices=slices,
+        byte_budget=1024**2,
+    )
+    assert len(manifest["files"]) == count
+    assert manifest["files"][-1]["offset_minutes"] == 1430 + (count - 1) * 10
+    with open_market_source(tmp_path / "published") as source:
+        assert source.hft_source_info()["source_file_count"] == count
 
 
 def test_download_crosses_midnight_using_native_calendar_addresses(
@@ -240,16 +167,13 @@ def test_download_crosses_midnight_using_native_calendar_addresses(
         return Response(gzip.compress(b"", mtime=0))
 
     monkeypatch.setattr("urllib.request.urlopen", receive)
-    with runtime_resource_policy_scope() as policy:
-        download_slices(
-            tmp_path / "published",
-            date="2026-12-31",
-            offset_minutes=1430,
-            slice_count=3,
-            byte_budget=1024**2,
-            resource_policy=policy,
-        )
-        assert policy.used_memory_bytes == 0
+    download_slices(
+        tmp_path / "published",
+        date="2026-12-31",
+        offset_minutes=1430,
+        slice_count=3,
+        byte_budget=1024**2,
+    )
     assert [(r["from"][0], r["offset"][0]) for r in requests] == [
         ("2026-12-31", "1430"),
         ("2027-01-01", "0"),
@@ -308,30 +232,25 @@ def test_approved_native_scopes_publish_and_reopen(
         native = _snapshot().replace(b"btcusdt", symbol.encode())
     slices = _slices(tmp_path / "input", native, count=1)
     root = tmp_path / "archive"
-    with runtime_resource_policy_scope(
-        capture_test_policy(available_memory_bytes=64 * 1024**2)
-    ) as policy:
-        result = import_slices(
-            root,
-            date="2026-09-01",
-            slices=slices,
-            exchange=exchange,
-            symbols=(symbol,),
-            channels=channels,
-            byte_budget=1024**2,
-            resource_policy=policy,
-        )
-        assert result["exchange"] == exchange
-        assert result["symbols"] == [symbol]
-        assert result["requested_channels"] == list(channels)
-        with open_tardis_archive(root, resource_policy=policy) as source:
-            (archive,) = source.archives
-            assert archive.manifest == result
-            assert archive.source_identity["manifest_hash"]
-            assert source.source_identity["archives"] == [
-                {"date": result["date"], **archive.source_identity}
-            ]
-        assert policy.used_memory_bytes == 0
+    result = import_slices(
+        root,
+        date="2026-09-01",
+        slices=slices,
+        exchange=exchange,
+        symbols=(symbol,),
+        channels=channels,
+        byte_budget=1024**2,
+    )
+    assert result["exchange"] == exchange
+    assert result["symbols"] == [symbol]
+    assert result["requested_channels"] == list(channels)
+    with open_tardis_archive(root) as source:
+        (archive,) = source.archives
+        assert archive.manifest == result
+        assert archive.source_identity["manifest_hash"]
+        assert source.source_identity["archives"] == [
+            {"date": result["date"], **archive.source_identity}
+        ]
 
 
 @pytest.mark.parametrize(
@@ -364,12 +283,7 @@ def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
     from quant_research_platform.sources.binance.replay import native_trade_identities
     from quant_research_platform.sources.tardis.raw import _ObservedStreams
 
-    with (
-        runtime_resource_policy_scope(
-            capture_test_policy(available_memory_bytes=64 * 1024**2)
-        ) as policy,
-        native_trade_identities(policy) as observe_trade,
-    ):
+    with native_trade_identities() as observe_trade:
         tracker = _ObservedStreams(exchange="binance", observe_trade=observe_trade)
 
         def depth(last, first=None):
@@ -384,8 +298,8 @@ def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
             identity, closed, gap = tracker.observe(
                 0, number, f"2026-07-01T00:00:0{number}Z", depth(last)
             )
-            assert identity == first and closed == [] and gap is None
-            assert tracker.previous[("btcusdt", "depth")][0] == 10
+            assert identity == first and closed == [] and (gap is None)
+            assert tracker.previous["btcusdt", "depth"][0] == 10
         identity, _, gap = tracker.observe(0, 4, "2026-07-01T00:00:04Z", depth(11))
         assert identity == first and gap is None
         _, closed, gap = tracker.observe(0, 5, "2026-07-01T00:00:05Z", None)
@@ -402,107 +316,26 @@ def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
         with pytest.raises(ValueError, match="sequence_non_monotonic"):
             tracker.observe(0, 9, "2026-07-01T00:00:09Z", trade)
 
-    assert policy.used_memory_bytes == 0
 
-
-@pytest.mark.parametrize("count", (512, 1024))
-def test_native_trade_batches_keep_spilled_and_pending_exact_identities(
-    monkeypatch, count
-):
+def test_native_trade_history_preserves_exact_identities():
     from quant_research_platform.sources.binance import replay
 
-    batches = []
-    indexes = []
-    original = replay.ExactPrimaryKeyIndex
-
-    def assert_index_covered():
-        assert any(
-            lease.active
-            and lease.owner == "binance.native_trade_identities"
-            and lease.reserved_bytes >= 1024 * 1024
-            for lease in policy._leases
-        )
-
-    class ObservedIndex(original):
-        def __enter__(self):
-            assert_index_covered()
-            result = super().__enter__()
-            indexes.append((self, self.database_path.parent))
-            return result
-
-        def close(self):
-            assert_index_covered()
-            return super().close()
-
-        def add_identity_payload_rows(self, *, rows):
-            batches.append(len(rows))
-            return super().add_identity_payload_rows(rows=rows)
-
-    monkeypatch.setattr(replay, "ExactPrimaryKeyIndex", ObservedIndex)
-    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
-        with replay.native_trade_identities(policy) as observe:
-            for trade_id in range(count):
-                assert observe("future", "SYNTHETIC", {"a": trade_id, "q": "1"}) == (
-                    True,
-                    None if trade_id == 0 else trade_id - 1,
-                )
-            assert batches and max(batches) > 1 and len(batches) < count // 10
-            for trade_id in (0, count - 1):
-                assert observe(
-                    "future", "SYNTHETIC", {"a": trade_id, "q": "1", "E": 99}
-                ) == (
-                    False,
-                    count - 1,
-                )
-                with pytest.raises(
-                    ValueError, match="binance_native_sequence_non_monotonic"
-                ):
-                    observe("future", "SYNTHETIC", {"a": trade_id, "q": "2"})
-            # One large identity bypasses the bounded pending tuple and remains exact.
-            large = {"a": count, "q": "1", "source_note": "x" * (70 * 1024)}
-            assert observe("future", "SYNTHETIC", large) == (True, count - 1)
-            assert batches[-1] == 1
-            assert observe("future", "SYNTHETIC", large) == (False, count)
-            assert observe("future", "SYNTHETIC", {"a": count + 1}) == (True, count)
-            batch_count = len(batches)
-        assert len(batches) == batch_count
-        assert policy.used_memory_bytes == 0
-    assert all(
-        index._connection is None and not path.exists() for index, path in indexes
-    )
-
-
-def test_native_trade_batch_failure_closes_index_and_preserves_primary(monkeypatch):
-    from quant_research_platform.sources.binance import replay
-
-    primary = KeyboardInterrupt("synthetic_native_batch_failure")
-    indexes = []
-    original = replay.ExactPrimaryKeyIndex
-
-    class FailingIndex(original):
-        def __enter__(self):
-            result = super().__enter__()
-            indexes.append((self, self.database_path.parent))
-            return result
-
-        def add_identity_payload_rows(self, *, rows):
-            def interrupted():
-                yield rows[0]
-                raise primary
-
-            return super().add_identity_payload_rows(rows=interrupted())
-
-    monkeypatch.setattr(replay, "ExactPrimaryKeyIndex", FailingIndex)
-    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024**2) as policy:
-        with pytest.raises(KeyboardInterrupt) as caught:
-            with replay.native_trade_identities(policy) as observe:
-                for trade_id in range(1024):
-                    observe("future", "SYNTHETIC", {"a": trade_id})
-        assert caught.value is primary
-        assert policy.used_memory_bytes == 0
-    assert all(
-        index._connection is None and not path.exists() for index, path in indexes
-    )
+    count = 512
+    with replay.native_trade_identities() as observe:
+        for trade_id in range(count):
+            assert observe("future", "SYNTHETIC", {"a": trade_id, "q": "1"}) == (
+                True,
+                None if trade_id == 0 else trade_id - 1,
+            )
+        for trade_id in (0, count - 1):
+            assert observe(
+                "future", "SYNTHETIC", {"a": trade_id, "q": "1", "E": 99}
+            ) == (False, count - 1)
+            with pytest.raises(
+                ValueError, match="binance_native_sequence_non_monotonic"
+            ):
+                observe("future", "SYNTHETIC", {"a": trade_id, "q": "2"})
+        assert observe("future", "SYNTHETIC", {"a": count}) == (True, count - 1)
 
 
 def test_trade_order_failure_retains_safe_source_coordinates(tmp_path):
@@ -528,31 +361,28 @@ def test_trade_order_failure_retains_safe_source_coordinates(tmp_path):
             },
         )
 
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(
-            ValueError, match="binance_native_sequence_non_monotonic"
-        ) as caught:
-            import_slices(
-                tmp_path / "published",
-                date="2026-09-01",
-                slices=_slices(tmp_path / "native", trade(10) + trade(9), count=1),
-                byte_budget=1024**2,
-                resource_policy=policy,
-            )
-        note = " ".join(caught.value.__notes__)
-        assert all(
-            value in note
-            for value in (
-                "channel=aggTrade",
-                "slice_offset=0",
-                "line=2",
-                "previous_id=10",
-                "current_id=9",
-            )
+    with pytest.raises(
+        ValueError, match="binance_native_sequence_non_monotonic"
+    ) as caught:
+        import_slices(
+            tmp_path / "published",
+            date="2026-09-01",
+            slices=_slices(tmp_path / "native", trade(10) + trade(9), count=1),
+            byte_budget=1024**2,
         )
-        assert "payload" not in note and "price" not in note
-        assert not (tmp_path / "published").exists()
-        assert policy.used_memory_bytes == 0
+    note = " ".join(caught.value.__notes__)
+    assert all(
+        value in note
+        for value in (
+            "channel=aggTrade",
+            "slice_offset=0",
+            "line=2",
+            "previous_id=10",
+            "current_id=9",
+        )
+    )
+    assert "payload" not in note and "price" not in note
+    assert not (tmp_path / "published").exists()
 
 
 @pytest.mark.parametrize("body_fails", [False, True])
@@ -578,17 +408,14 @@ def test_import_iterator_close_preserves_first_failure(
     monkeypatch.setattr(raw, "iter_native_slice", records)
     if body_fails:
         monkeypatch.setattr(raw._ObservedStreams, "observe", observe)
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(ValueError if body_fails else OSError) as caught:
-            import_slices(
-                tmp_path / "published",
-                date="2026-09-01",
-                slices=_slices(tmp_path / "native", _snapshot(), count=1),
-                byte_budget=1024**2,
-                resource_policy=policy,
-            )
-        assert caught.value is (primary if body_fails else secondary)
-        if body_fails:
-            assert any("OSError" in note for note in primary.__notes__)
-        assert not (tmp_path / "published").exists()
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(ValueError if body_fails else OSError) as caught:
+        import_slices(
+            tmp_path / "published",
+            date="2026-09-01",
+            slices=_slices(tmp_path / "native", _snapshot(), count=1),
+            byte_budget=1024**2,
+        )
+    assert caught.value is (primary if body_fails else secondary)
+    if body_fails:
+        assert any("OSError" in note for note in primary.__notes__)
+    assert not (tmp_path / "published").exists()

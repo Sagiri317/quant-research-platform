@@ -3,16 +3,13 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from contextlib import ExitStack
 from copy import deepcopy
 from pathlib import Path
-from types import SimpleNamespace
 
 import pandas as pd
 import pytest
 from typer.testing import CliRunner
 
-import quant_research_platform.runtime.resources as runtime_resources
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
@@ -28,25 +25,17 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.interfaces import private_cli
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    RuntimeResourcePolicy,
-    current_runtime_resource_policy,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.schema import data_spec_payload
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
     filesystem_read_text,
     filesystem_rename,
-    filesystem_stat,
     filesystem_write_text,
     native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows.diagnostics import schema_inventory
-from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _collect_inventory(
@@ -151,14 +140,9 @@ def test_schema_inventory_keeps_all_current_roots_and_instances(
             )
             expected[root.relative_to(tmp_path).as_posix()] = (layer, kind, rows)
     output = tmp_path / "inventory.json"
-    with runtime_resource_policy_scope() as policy:
-        schema_inventory.write_schema_inventory(
-            tmp_path,
-            output,
-            important_null_count_columns=("value",),
-            resource_policy=policy,
-        )
-        assert policy.used_memory_bytes == 0
+    schema_inventory.write_schema_inventory(
+        tmp_path, output, important_null_count_columns=("value",)
+    )
     items = json.loads(filesystem_read_text(output, encoding="utf-8"))["datasets"]
     assert len(items) == 9
     assert sum(item["row_count"] for item in items) == 18
@@ -323,197 +307,6 @@ def test_schema_inventory_uses_storage_exact_duplicate_fact(
     payload = _collect_inventory(tmp_path)
 
     assert payload["datasets"][0]["duplicate_primary_key_count"] == 0
-
-
-def test_schema_inventory_captures_one_policy_for_all_datasets(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-    )
-    captures = {"count": 0}
-    observed_policies: list[RuntimeResourcePolicy] = []
-    observed_reserved_bytes: list[int] = []
-
-    def capture_policy() -> RuntimeResourcePolicy:
-        captures["count"] += 1
-        return policy
-
-    def inventory_item(
-        _project_root: Path,
-        artifact_root: Path,
-        *,
-        important_null_count_columns: frozenset[str],
-        resource_policy: RuntimeResourcePolicy,
-        retained_items,
-    ) -> tuple[dict[str, object], int]:
-        assert important_null_count_columns == frozenset()
-        assert current_runtime_resource_policy() is resource_policy
-        observed_policies.append(resource_policy)
-        observed_reserved_bytes.append(resource_policy.used_memory_bytes)
-        retained_items.enter_context(
-            resource_policy.lease("schema.inventory.items", 64)
-        )
-        return {"logical_relative_root": artifact_root.name}, 64
-
-    monkeypatch.setattr(
-        runtime_resources,
-        "_capture_runtime_resource_policy",
-        lambda **_kwargs: capture_policy(),
-    )
-    monkeypatch.setattr(
-        schema_inventory,
-        "_iter_dataset_artifact_roots",
-        lambda _root: (tmp_path / "dataset-a", tmp_path / "dataset-b"),
-    )
-    monkeypatch.setattr(schema_inventory, "_inventory_item", inventory_item)
-
-    payload = _collect_inventory(tmp_path)
-
-    assert captures["count"] == 1
-    assert observed_policies == [policy, policy]
-    assert observed_reserved_bytes[0] == 0
-    assert observed_reserved_bytes[1] == 0
-    assert policy.used_memory_bytes == 0
-    assert [item["logical_relative_root"] for item in payload["datasets"]] == [
-        "dataset-a",
-        "dataset-b",
-    ]
-
-
-def test_schema_inventory_cli_keeps_one_policy_through_stream_write(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
-    observed: list[RuntimeResourcePolicy] = []
-    observed_reserved: list[int] = []
-    cleanup_states: list[str] = []
-    monkeypatch.setattr(
-        runtime_resources,
-        "_capture_runtime_resource_policy",
-        lambda **_kwargs: policy,
-    )
-
-    def write(_root: Path, _output: Path, *, resource_policy=None) -> Path:
-        assert resource_policy is policy
-        with policy.lease("test.schema.inventory", 64):
-            observed.append(resource_policy)
-            observed_reserved.append(policy.used_memory_bytes)
-            cleanup_states.append(policy.state)
-            filesystem_write_text(_output, "{}", encoding="utf-8")
-        return _output
-
-    monkeypatch.setattr(private_cli, "write_schema_inventory", write)
-    private_cli.schema_inventory(tmp_path, tmp_path / "inventory.json")
-
-    assert observed == [policy]
-    assert observed_reserved == [64]
-    assert cleanup_states == ["ACTIVE"]
-    assert policy.used_memory_bytes == 0
-
-
-def test_schema_inventory_streams_accumulated_items_over_budget(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 750,
-    )
-    monkeypatch.setattr(
-        runtime_resources,
-        "_capture_runtime_resource_policy",
-        lambda **_kwargs: policy,
-    )
-    base_item = _valid_inventory_payload()["datasets"][0]
-    artifact_roots = tuple(tmp_path / f"dataset-{index:03d}" for index in range(100))
-    monkeypatch.setattr(
-        schema_inventory,
-        "_iter_dataset_artifact_roots",
-        lambda _root: artifact_roots,
-    )
-
-    def inventory_item(_project_root, artifact_root, **kwargs):  # noqa: ANN001, ANN202
-        item = deepcopy(base_item)
-        artifact_id = artifact_root.name
-        item["artifact_id"] = artifact_id
-        item["logical_relative_root"] = f"data/processed/a_share/factor/{artifact_id}"
-        item["warnings"] = ["w" * 1000]
-        kwargs["retained_items"].enter_context(
-            kwargs["resource_policy"].lease("schema.inventory.items", 500)
-        )
-        return item, 500
-
-    monkeypatch.setattr(schema_inventory, "_inventory_item", inventory_item)
-
-    output = tmp_path / "inventory.json"
-    schema_inventory.write_schema_inventory(
-        tmp_path,
-        output,
-        resource_policy=policy,
-    )
-
-    payload = json.loads(filesystem_read_text(output, encoding="utf-8"))
-    assert len(payload["datasets"]) == len(artifact_roots)
-    assert filesystem_stat(output).st_size > policy.memory_budget_bytes
-    assert policy.used_memory_bytes == 0
-
-
-def test_schema_inventory_item_state_is_admitted_before_aggregation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=16 * 1024 * 1024,
-        explicit_cap_bytes=16 * 1024,
-    )
-    artifact_root = tmp_path / "data" / "processed" / "a_share" / "market_bars" / "demo"
-    inspection = SimpleNamespace(
-        spec={"primary_key": ["timestamp"], "partition_columns": []},
-        columns=("timestamp", "value"),
-        manifest={"duplicate_primary_key_count": 0},
-        file_count=1,
-        partitions=(),
-        row_count=1,
-        date_min="2026-01-01",
-        date_max="2026-01-01",
-    )
-
-    def owned_inspection(*_args, resource_policy, **_kwargs):  # noqa: ANN001, ANN003
-        return OwnedValue(
-            inspection,
-            resource_policy.lease("test.schema.inspection", 0),
-        )
-
-    monkeypatch.setattr(
-        schema_inventory,
-        "_inspect_dataset_session_owned",
-        owned_inspection,
-    )
-    monkeypatch.setattr(
-        schema_inventory,
-        "_aggregate_dataset_stats",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("inventory aggregation entered before state admission")
-        ),
-    )
-    session = SimpleNamespace(verify=lambda: None)
-
-    with runtime_resource_policy_scope(policy), ExitStack() as retained:
-        with pytest.raises(
-            ValueError,
-            match="schema_inventory_payload_exceeds_task_memory_budget",
-        ):
-            schema_inventory._inventory_item_from_session(
-                tmp_path,
-                artifact_root,
-                session=session,
-                important_null_count_columns=frozenset(),
-                resource_policy=policy,
-                retained_items=retained,
-            )
 
 
 def test_schema_inventory_rejects_replacement_between_open_and_stats(
@@ -750,153 +543,18 @@ def test_inventory_uses_declared_time_and_closes_early_context(
     )
     write_dataset(layout.interim_data_root("fixture", spec.data_id), frame, spec=spec)
     primary = KeyboardInterrupt("inventory_consumer_primary")
-    with runtime_resource_policy_scope() as policy:
-        items = None
+    items = None
+    try:
         try:
-            try:
-                with schema_inventory.iter_schema_inventory_items(
-                    tmp_path, resource_policy=policy
-                ) as items:
-                    item = next(items)
-                    assert item["row_count_by_year"] == {"2022": 1, "2023": 2}
-                    assert (
-                        schema_inventory._validate_schema_inventory_item(item) is item
-                    )
-                    assert policy.used_memory_bytes > 0
-                    if cancel:
-                        raise primary
-            except KeyboardInterrupt as error:
-                assert cancel and error is primary
-            assert policy.used_memory_bytes == 0
-            assert next(items, None) is None
-        finally:
-            if items is not None:
-                items.close()
-
-
-@pytest.mark.parametrize("exit_mode", ("complete", "early_close", "write_failure"))
-def test_real_inventory_payload_lifetime_at_release(tmp_path, monkeypatch, exit_mode):
-    import sys
-
-    import quant_research_platform.storage.atomic as atomic
-
-    layout = StorageLayout(tmp_path)
-    frame = pd.DataFrame(
-        {
-            "market_id": ["a_share", "a_share"],
-            "asset_id": ["asset_a", "asset_b"],
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            **{f"value_{number}": [1.0, 2.0] for number in range(8)},
-        }
-    )
-    for name in ("inventory_a", "inventory_b"):
-        spec = InterimDataSpec(
-            source_id="fixture",
-            data_id=name,
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                **{f"value_{number}": ColumnRole.FACTOR for number in range(8)},
-            },
-            primary_key=("market_id", "asset_id", "timestamp"),
-            partition_columns=("year",),
-        )
-        write_dataset(layout.interim_data_root("fixture", name), frame, spec=spec)
-    output = tmp_path / "inventory.json"
-    old_good = tmp_path / "old_good.json"
-    old_good.write_bytes(b"previous successful output")
-    observations = []
-    calls = 0
-    primary = KeyboardInterrupt("inventory_write_primary")
-    open_file = atomic.open_owned_scratch_file
-
-    class FailingHandle:
-        def __init__(self, handle):
-            self.handle = handle
-            self.calls = 0
-
-        def write(self, text):
-            self.calls += 1
-            if self.calls == 2:
-                text = None
-                raise primary
-            return self.handle.write(text)
-
-        def close(self):
-            self.handle.close()
-
-    if exit_mode == "write_failure":
-        monkeypatch.setattr(
-            atomic,
-            "open_owned_scratch_file",
-            lambda *args, **kwargs: FailingHandle(open_file(*args, **kwargs)),
-        )
-
-    def observe(call_frame, event, _arg):
-        nonlocal calls
-        if (
-            event != "call"
-            or call_frame.f_code is not schema_inventory._inventory_item.__code__
-        ):
-            return
-        calls += 1
-        if calls != 2:
-            return
-        cursor = call_frame.f_back
-        retained = []
-        while cursor is not None:
-            if cursor.f_code.co_filename.endswith(("schema_inventory.py", "atomic.py")):
-                retained.extend(
-                    (cursor.f_code.co_name, name)
-                    for name in ("item", "rendered", "chunk")
-                    if type(cursor.f_locals.get(name)) in (dict, str)
-                )
-            cursor = cursor.f_back
-        observations.append(retained)
-
-    with runtime_resource_policy_scope(explicit_cap_bytes=128 * 1024**2) as policy:
-        previous_profile = sys.getprofile()
-        sys.setprofile(observe)
-        try:
-            if exit_mode == "early_close":
-                with schema_inventory.iter_schema_inventory_items(
-                    tmp_path, resource_policy=policy
-                ) as items:
-                    item = next(items)
-                    assert item["artifact_id"] == "inventory_a"
-                    item = None
-                    items.close()
-                    assert items.gi_frame is None
-            elif exit_mode == "write_failure":
-                with pytest.raises(KeyboardInterrupt) as caught:
-                    schema_inventory.write_schema_inventory(
-                        tmp_path, output, resource_policy=policy
-                    )
-                assert caught.value is primary
-                trace = primary.__traceback__
-                observed_atomic = False
-                while trace is not None:
-                    if trace.tb_frame.f_code.co_name == "atomic_write_chunks":
-                        state = trace.tb_frame.f_locals
-                        assert state["chunk"] is None
-                        assert state["source"].gi_frame is None
-                        observed_atomic = True
-                    trace = trace.tb_next
-                assert observed_atomic
-            else:
-                schema_inventory.write_schema_inventory(
-                    tmp_path, output, resource_policy=policy
-                )
-        finally:
-            sys.setprofile(previous_profile)
-        assert policy.used_memory_bytes == 0
-    if exit_mode == "complete":
-        assert calls == 2 and observations == [[]]
-        assert len(json.loads(output.read_text())["datasets"]) == 2
-    else:
-        assert calls == 1 and not output.exists()
-    assert old_good.read_bytes() == b"previous successful output"
-    assert not list(tmp_path.glob(".f-*"))
+            with schema_inventory.iter_schema_inventory_items(tmp_path) as items:
+                item = next(items)
+                assert item["row_count_by_year"] == {"2022": 1, "2023": 2}
+                assert schema_inventory._validate_schema_inventory_item(item) is item
+                if cancel:
+                    raise primary
+        except KeyboardInterrupt as error:
+            assert cancel and error is primary
+        assert next(items, None) is None
+    finally:
+        if items is not None:
+            items.close()

@@ -12,8 +12,8 @@ from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import canonical_identity_bytes
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import require_free_disk_headroom
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
@@ -50,7 +50,6 @@ def encode_raw_cell(value: object, *, _depth: int = 0) -> str:
     if value is not None and type(value) not in (str, int, float, bool, list):
         raise ValueError("raw_csv_value_type_invalid")
     if type(value) is list:
-        # SDK date lists must remain lists, including lists containing nulls.
         parts = []
         size = 2
         for item in value:
@@ -97,11 +96,11 @@ def write_csv_snapshot(
     max_bytes: int,
     validate: Callable[[Path], object],
 ) -> None:
-    """Caller owns admission and borrowed rows through atomic publication."""
+    """Publish caller-provided rows atomically."""
     if (
         not columns
         or any(
-            type(value) is not str or not value or "\n" in value or "\r" in value
+            type(value) is not str or not value or "\n" in value or ("\r" in value)
             for value in columns
         )
         or len(set(columns)) != len(columns)
@@ -115,7 +114,7 @@ def write_csv_snapshot(
         digest = hashlib.sha256()
         size = count = 0
         handle = open_filesystem_file(staging / "response.csv", "xb")
-        with handle_preserving_primary(handle):
+        with closing_iterator(handle):
             header = _record(columns)
             if len(header) > max_bytes:
                 raise ValueError("raw_csv_byte_bound_exceeded")
@@ -146,19 +145,15 @@ def write_csv_snapshot(
                 "metadata": metadata,
             },
         )
-        # The source validator fully consumes the persisted table before publish.
         validate(staging)
 
     atomic_write_directory(root, write)
 
 
 def iter_csv_snapshot(
-    root: Path,
-    *,
-    expected_manifest: dict[str, object],
-    max_bytes: int,
+    root: Path, *, expected_manifest: dict[str, object], max_bytes: int
 ) -> Iterator[tuple[object, ...]]:
-    """Consume fully before exposing results; borrowed rows verify at exhaustion."""
+    """Stream rows and verify complete consumed content on every exit."""
     root = require_unaliased_path(root, error="raw_csv_path_invalid")
     if set(path.name for path in filesystem_iterdir(root)) != {
         "response.csv",
@@ -181,12 +176,14 @@ def iter_csv_snapshot(
         }
         or manifest["schema_id"] != SCHEMA_ID
         or manifest["encoding"] != "utf-8-json-cells"
-        or canonical_identity_bytes(manifest)
-        != canonical_identity_bytes(expected_manifest)
-        or type(manifest["byte_count"]) is not int
-        or manifest["byte_count"] < 0
-        or type(manifest["row_count"]) is not int
-        or manifest["row_count"] < 0
+        or (
+            canonical_identity_bytes(manifest)
+            != canonical_identity_bytes(expected_manifest)
+        )
+        or (type(manifest["byte_count"]) is not int)
+        or (manifest["byte_count"] < 0)
+        or (type(manifest["row_count"]) is not int)
+        or (manifest["row_count"] < 0)
     ):
         raise ValueError("raw_csv_metadata_invalid")
     path = root / "response.csv"
@@ -196,11 +193,10 @@ def iter_csv_snapshot(
     handle = open_filesystem_file(path)
     digest = hashlib.sha256()
     count = 0
-    with handle_preserving_primary(handle):
+    with closing_iterator(handle):
         if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != identity:
             raise ValueError("raw_csv_identity_changed")
 
-        # JSON escapes embedded newlines; every CSV record is one physical line.
         def records() -> Iterator[list[str]]:
             while line := handle.readline(MAX_RECORD_BYTES + 1):
                 if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
@@ -229,9 +225,12 @@ def iter_csv_snapshot(
 
         rows = decoded_rows()
         try:
-            # Keep the inner iterator open on GeneratorExit so verification drains it.
-            for row in rows:  # noqa: UP028
-                yield row
+            # Keep rows resumable so the finally block can verify unread content.
+            for row in rows:
+                try:
+                    yield row
+                except GeneratorExit:
+                    return
         finally:
             primary = sys.exception()
             try:
@@ -242,12 +241,12 @@ def iter_csv_snapshot(
                     or digest.hexdigest() != manifest["sha256"]
                     or dataset_file_identity_from_stat(os.fstat(handle.fileno()))
                     != identity
-                    or dataset_file_identity(path) != identity
-                    or dataset_file_identity(sidecar) != sidecar_identity
+                    or (dataset_file_identity(path) != identity)
+                    or (dataset_file_identity(sidecar) != sidecar_identity)
                 ):
                     raise ValueError("raw_csv_content_invalid")
             except BaseException as error:
-                if primary is None or isinstance(primary, GeneratorExit):
+                if primary is None:
                     raise
                 primary.add_note(
                     "Raw CSV consumed-content verification also failed: "

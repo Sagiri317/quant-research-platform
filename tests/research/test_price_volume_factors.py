@@ -65,8 +65,8 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs():
             "amount": x * 10.0,
             "volume": x + 10.0,
             "turnover": (x + 10.0) / 1000.0,
-            "float_market_cap": x * 1_000.0,
-            "total_market_cap": x * 2_000.0,
+            "float_market_cap": x * 1000.0,
+            "total_market_cap": x * 2000.0,
         }
     )
     names = (*PV25_FACTORS, *UNIQUE_FACTORS)
@@ -111,14 +111,14 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
             "amount": x,
             "volume": 2.0 * x,
             "turnover": 2.0 * x / 100.0,
-            "float_market_cap": 1_000.0,
+            "float_market_cap": 1000.0,
             "close": 10.0,
-            "total_market_cap": 10_000.0,
+            "total_market_cap": 10000.0,
         }
     )
     result = calculate_price_volume_factors(panel, factor_columns=UNIQUE_FACTORS)
     last = result.iloc[-1]
-    flow, ret = x[-20:], returns[-20:]
+    flow, ret = (x[-20:], returns[-20:])
     centered = returns[-60:] - returns[-60:].mean()
     variance = np.mean(centered**2)
     kurtosis = (
@@ -142,7 +142,7 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
         / np.sqrt(np.sum((ret - ret.mean()) ** 2) * np.sum((flow - flow.mean()) ** 2)),
         "return_amount_imbalance_20d": np.sum(ret * flow) / np.sum(np.abs(ret) * flow),
         "zero_amount_ratio_20d": 0.0,
-        "log_total_market_cap": np.log(10_000.0),
+        "log_total_market_cap": np.log(10000.0),
     }
     for name, value in expected.items():
         assert last[name] == pytest.approx(value), name
@@ -249,7 +249,7 @@ def test_price_volume_rejects_removed_names_before_calculation():
 
 
 @pytest.mark.parametrize("size", [20, 60])
-@pytest.mark.parametrize("scale", [1.0, 1e-10, 1e10, 1e-200, 1e200])
+@pytest.mark.parametrize("scale", [1.0, 1e-10, 10000000000.0, 1e-200, 1e200])
 def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
     values = np.random.default_rng(20260910).normal(size=320) * scale
     values[200] = np.nan
@@ -283,8 +283,6 @@ def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
             m3 = sum(value**3 for value in centered) / n
             correction = (n * (n - 1)).sqrt() / (n - 2)
             expected.append(float(correction * m3 / (m2 * m2.sqrt())))
-            # Absolute third moments bound cancellation; gamma accounts for
-            # centering, powers, reductions, and the final normalized ratio.
             absolute_m3 = sum(abs(value) ** 3 for value in centered) / n
             unit = np.finfo("float64").eps
             gamma = 32 * size * unit / (1 - 32 * size * unit)
@@ -292,8 +290,7 @@ def test_price_volume_skew_matches_independent_decimal_oracle(size, scale):
                 gamma * float(correction * absolute_m3 / (m2 * m2.sqrt()))
             )
         single = calculate_price_volume_factors(
-            panel.iloc[start : start + size],
-            factor_columns=(f"skewness_{size}d",),
+            panel.iloc[start : start + size], factor_columns=(f"skewness_{size}d",)
         )
         assert (
             single.iloc[-1][f"skewness_{size}d"]
@@ -389,7 +386,6 @@ def test_standardized_moments_require_nonzero_variance(value, count, tmp_path):
     )
     names = ("skewness_60d", "kurtosis_60d", "volatility_60d")
     result = calculate_price_volume_factors(panel, factor_columns=names)
-    # Both standardized moments divide by a power of the zero second moment.
     assert result.skewness_60d.isna().all()
     assert result.kurtosis_60d.isna().all()
     assert result.volatility_60d.iloc[:59].isna().all()
@@ -402,7 +398,7 @@ def test_standardized_moments_require_nonzero_variance(value, count, tmp_path):
 
 
 @pytest.mark.parametrize("missing", [None, 0, "all"])
-@pytest.mark.parametrize("scale", [1.0, 1e-10, 1e10, 1e-200, 1e200])
+@pytest.mark.parametrize("scale", [1.0, 1e-10, 10000000000.0, 1e-200, 1e200])
 def test_skewness_independent_central_moment_oracle(missing, scale):
     from fractions import Fraction
 
@@ -422,7 +418,6 @@ def test_skewness_independent_central_moment_oracle(missing, scale):
     if missing is not None:
         assert result.skewness_60d.isna().all()
     else:
-        # Exact mean=0, m2=2, m3=2; adjusted Fisher-Pearson sample skew.
         expected = (60 * 59) ** 0.5 / 58 * float(Fraction(2)) / 2**1.5
         assert result.skewness_60d.iloc[-1] == pytest.approx(expected, rel=1e-14)
 
@@ -438,11 +433,11 @@ def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
         context.prec = 90
         left = [Decimal.from_float(float(value)) for value in x]
         right = [Decimal.from_float(float(value)) for value in y]
-        left_mean, right_mean = sum(left) / 20, sum(right) / 20
+        left_mean, right_mean = (sum(left) / 20, sum(right) / 20)
         dx = [value - left_mean for value in left]
         dy = [value - right_mean for value in right]
         expected = float(
-            sum(u * v for u, v in zip(dx, dy, strict=True))
+            sum((u * v for u, v in zip(dx, dy, strict=True)))
             / (sum(v * v for v in dx) * sum(v * v for v in dy)).sqrt()
         )
     name = f"return_{kind}_corr_20d"
@@ -496,8 +491,6 @@ def test_volatility_representable_result_with_extreme_units(name, scale, tmp_pat
 
     count = 60 if name.endswith("60d") else 20
     values = np.array([-scale, 0, scale, scale] * (count // 4))
-    # Each four-value block has mean 1/4 and centered sum of squares 11/4.
-    # Negative and positive squared sums per observation are 1/4 and 1/2.
     oracle = scale * (
         0.5
         if name.startswith("downside")
@@ -527,9 +520,7 @@ def test_volatility_representable_result_with_extreme_units(name, scale, tmp_pat
     assert result[name].iloc[-1] == pytest.approx(oracle, rel=2e-15, abs=0)
     root = make_dataset_artifact_root(tmp_path, "volatility")
     write_dataset(
-        root,
-        result,
-        spec=make_processed_dataset_spec("volatility", value_column=name),
+        root, result, spec=make_processed_dataset_spec("volatility", value_column=name)
     )
     persisted = read_dataset(root)
     pd.testing.assert_frame_equal(persisted, result, check_exact=True)
@@ -559,8 +550,6 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
         }
     )
     result = calculate_price_volume_factors(panel, factor_columns=names)
-    # Last 126 integers are 125..250, mean=187.5; sample variance=n(n+1)/12.
-    # Last 20 returns contain five copies of each of the four values.
     ret = [-0.02, 0.0, 0.01, 0.03]
     mu = sum(ret) / 4
     m2 = sum((r - mu) ** 2 for r in ret) / 4
@@ -591,7 +580,6 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
     path = tmp_path / "expanded.parquet"
     result.to_parquet(path, index=False)
     pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)
-    # A suspended market session stays in the window; absent facts cannot compress it.
     missing = panel.copy()
     missing.loc[240, ["amount", "volume", "turnover", "period_return"]] = np.nan
     observed = calculate_price_volume_factors(missing, factor_columns=names)
@@ -614,7 +602,6 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
         .isna()
         .all()
     )
-    # Suffix changes cannot affect earlier outputs.
     future = panel.copy()
     future.loc[249, ["amount", "volume", "turnover", "period_return"]] *= 2
     changed = calculate_price_volume_factors(future, factor_columns=names)
@@ -631,7 +618,7 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
             market_id="a_share",
             asset_id=asset,
             timestamp=date,
-            period_return=multiplier * ((i % 11) - 5) / 1000,
+            period_return=multiplier * (i % 11 - 5) / 1000,
             float_market_cap=1000.0,
             is_a_share_scope=True,
             is_trading=True,
@@ -668,7 +655,6 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
     last = result.loc[result.timestamp == dates[-1]].set_index("asset_id")
     assert np.array_equal(last.beta_252d, expected.beta)
     assert np.array_equal(last.residual_volatility_60d, expected.residual_volatility)
-    # The producer's bounded warmup must equal full-history output.
     bounded = calculate_factors_for_panel(
         panel.loc[panel.timestamp >= dates[350 - 312]],
         definitions=definitions,
@@ -756,7 +742,7 @@ def test_rolling_means_match_exact_scalar_windows(extreme):
         ("volume_shock_20d", 20, 1),
     )
     result = calculate_price_volume_factors(
-        panel, factor_columns=tuple(name for name, _, _ in cases)
+        panel, factor_columns=tuple((name for name, _, _ in cases))
     )
     for name, size, shift in cases:
         expected = np.full(len(values), np.nan)
@@ -895,14 +881,16 @@ def test_market_model_residual_volatility_matches_decimal_oracle(scale):
         market = [(x + y) / 2 for x, y in zip(a, b, strict=True)]
         residuals = []
         for stop in range(len(a) - 60, len(a)):
-            xs, ys = market[stop - 251 : stop + 1], a[stop - 251 : stop + 1]
-            mx, my = sum(xs) / 252, sum(ys) / 252
-            beta = sum((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True)) / sum(
-                (x - mx) ** 2 for x in xs
-            )
+            xs, ys = (market[stop - 251 : stop + 1], a[stop - 251 : stop + 1])
+            mx, my = (sum(xs) / 252, sum(ys) / 252)
+            beta = sum(
+                ((x - mx) * (y - my) for x, y in zip(xs, ys, strict=True))
+            ) / sum((x - mx) ** 2 for x in xs)
             residuals.append(ys[-1] - my - beta * (xs[-1] - mx))
         mean = sum(residuals) / 60
-        expected = float((sum((value - mean) ** 2 for value in residuals) / 60).sqrt())
+        expected = float(
+            (sum(((value - mean) ** 2 for value in residuals)) / 60).sqrt()
+        )
     state = MarketModelRiskState()
     for left_value, right_value in zip(left, right, strict=True):
         observed = state.observe(

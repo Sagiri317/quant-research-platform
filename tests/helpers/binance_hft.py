@@ -5,7 +5,6 @@ import gzip
 import hashlib
 import io
 import json
-from functools import wraps
 from pathlib import Path
 
 import pandas as pd
@@ -14,7 +13,6 @@ from quant_research_platform.contracts.portfolios import FundingForecast
 from quant_research_platform.markets.implementations.crypto.hft import (
     iter_panel_frames,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
@@ -26,7 +24,6 @@ from quant_research_platform.storage.identity import (
     filesystem_write_text,
     native_filesystem_path,
 )
-from tests.helpers.runtime_resources import capture_test_policy
 
 # Synthetic event fixtures explicitly declare this known no-funding interval.
 KNOWN_NO_FUNDING = (FundingForecast(0, 1_000_000_000_000, ()),)
@@ -91,75 +88,60 @@ def write_hft_funding_fixture(
         write_csv_snapshot,
     )
 
-    with runtime_resource_policy_scope():
-        for symbol, mark in (("BTCUSDT", 100.0), ("ETHUSDT", 200.0)):
-            metadata = {
-                "schema_id": FUNDING_SCHEMA_ID,
-                "symbol": symbol,
-                "market_type": FUTURES_MARKET_TYPE,
-                "valuation_currency": "USDT",
-                "coverage": {
-                    "start_ns": 0,
-                    "end_ns": 10_000_000_000,
-                    "status": "COMPLETE",
-                },
-                "provenance": "synthetic_explicit_calendar_and_known_forecasts",
-                "settlement_source": None,
-            }
-            settlements = [
-                (4_800_000_000, -0.02),
-                (5_700_000_000, 0.001),
-                (7_400_000_000, 0.02),
-            ]
-            if test_settlement_ns is not None:
-                settlements.append((test_settlement_ns, -0.02))
-            rows = (
-                *(
-                    ("settlement", timestamp, None, rate, mark, None)
-                    for timestamp, rate in settlements
-                ),
-                (
-                    "forecast",
-                    0,
-                    12_000_000_000,
-                    None,
-                    None,
-                    [[timestamp, -mark * rate] for timestamp, rate in settlements],
-                ),
-            )
+    for symbol, mark in (("BTCUSDT", 100.0), ("ETHUSDT", 200.0)):
+        metadata = {
+            "schema_id": FUNDING_SCHEMA_ID,
+            "symbol": symbol,
+            "market_type": FUTURES_MARKET_TYPE,
+            "valuation_currency": "USDT",
+            "coverage": {
+                "start_ns": 0,
+                "end_ns": 10_000_000_000,
+                "status": "COMPLETE",
+            },
+            "provenance": "synthetic_explicit_calendar_and_known_forecasts",
+            "settlement_source": None,
+        }
+        settlements = [
+            (4_800_000_000, -0.02),
+            (5_700_000_000, 0.001),
+            (7_400_000_000, 0.02),
+        ]
+        if test_settlement_ns is not None:
+            settlements.append((test_settlement_ns, -0.02))
+        rows = (
+            *(
+                ("settlement", timestamp, None, rate, mark, None)
+                for timestamp, rate in settlements
+            ),
+            (
+                "forecast",
+                0,
+                12_000_000_000,
+                None,
+                None,
+                [[timestamp, -mark * rate] for timestamp, rate in settlements],
+            ),
+        )
 
-            def validate(root, metadata=metadata):
-                manifest = read_manifest(root / "response.metadata.json")
-                assert manifest["metadata"] == metadata
-                for _row in iter_csv_snapshot(
-                    root,
-                    expected_manifest=manifest,
-                    max_bytes=1024 * 1024,
-                ):
-                    pass
-
-            write_csv_snapshot(
-                raw_root.parent / "funding" / symbol,
-                columns=FUNDING_COLUMNS,
-                rows=rows,
-                metadata=metadata,
+        def validate(root, metadata=metadata):
+            manifest = read_manifest(root / "response.metadata.json")
+            assert manifest["metadata"] == metadata
+            for _row in iter_csv_snapshot(
+                root,
+                expected_manifest=manifest,
                 max_bytes=1024 * 1024,
-                validate=validate,
-            )
+            ):
+                pass
 
-
-def with_test_resource_policy(function):  # noqa: ANN001, ANN201
-    @wraps(function)
-    def invoke(*args, **kwargs):  # noqa: ANN002, ANN003, ANN202
-        policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-        for name in ("on_fill", "on_equity"):
-            observer = kwargs.get(name)
-            if observer is not None:
-                kwargs[name] = lambda value, sink=observer: sink(dict(value))
-        with runtime_resource_policy_scope(policy):
-            return function(*args, resource_policy=policy, **kwargs)
-
-    return invoke
+        write_csv_snapshot(
+            raw_root.parent / "funding" / symbol,
+            columns=FUNDING_COLUMNS,
+            rows=rows,
+            metadata=metadata,
+            max_bytes=1024 * 1024,
+            validate=validate,
+        )
 
 
 def _coverage(start_ms: int, end_ms: int) -> tuple[int, int]:

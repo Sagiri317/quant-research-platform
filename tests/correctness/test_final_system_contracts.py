@@ -475,7 +475,6 @@ def test_training_count_failure_closes_borrowed_dataset_source(tmp_path, monkeyp
     )
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.research.models import fitting, production
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.datasets.reading import open_dataset_session
     from tests.storage.low_level_fixtures import write_low_level_parquet_artifact
 
@@ -511,39 +510,33 @@ def test_training_count_failure_closes_borrowed_dataset_source(tmp_path, monkeyp
         raise primary
 
     monkeypatch.setattr(fitting, "legal_training_rows", fail_filter)
-    with runtime_resource_policy_scope() as policy:
-        with open_dataset_session(
-            root, columns=None, time_window=None, resource_policy=policy
-        ) as session:
-            retained = policy.used_memory_bytes
+    session = open_dataset_session(root, columns=None, time_window=None)
 
-            def chunks(columns, **kwargs):
-                source = production._model_input_chunks(
-                    session,
-                    dataset_spec=dataset,
-                    columns=columns,
-                    time_window=TimeWindow("2020-01-01", "2020-01-02"),
-                )
-                sources.append(source)
-                return source
+    def chunks(columns, **kwargs):
+        source = production._model_input_chunks(
+            session,
+            dataset_spec=dataset,
+            columns=columns,
+            time_window=TimeWindow("2020-01-01", "2020-01-02"),
+        )
+        sources.append(source)
+        return source
 
-            try:
-                with pytest.raises(MemoryError) as raised:
-                    production._count_training_rows(
-                        dataset,
-                        model,
-                        chunks=chunks,
-                        train_end="2020-01-02",
-                        cache=cache,
-                    )
-                assert raised.value is primary
-                assert not cache
-                assert sources and all(source.gi_frame is None for source in sources)
-                assert policy.used_memory_bytes == retained
-            finally:
-                for source in sources:
-                    source.close()
-        assert policy.used_memory_bytes == 0
+    try:
+        with pytest.raises(MemoryError) as raised:
+            production._count_training_rows(
+                dataset,
+                model,
+                chunks=chunks,
+                train_end="2020-01-02",
+                cache=cache,
+            )
+        assert raised.value is primary
+        assert not cache
+        assert sources and all(source.gi_frame is None for source in sources)
+    finally:
+        for source in sources:
+            source.close()
 
 
 def test_risk_manifest_serializes_the_same_runtime_config():

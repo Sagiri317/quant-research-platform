@@ -16,13 +16,9 @@ from typing import Any
 from uuid import uuid4
 
 from quant_research_platform.contracts.json_codec import render_qrp_json_object
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import evidence_text_unsafe_reason
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.sources.choice.ids import SOURCE_ID
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.identity import (
     filesystem_exists,
 )
@@ -32,7 +28,6 @@ from quant_research_platform.storage.manifests import (
     read_manifest,
 )
 from quant_research_platform.storage.raw_snapshots import (
-    MAX_RECORD_BYTES,
     iter_csv_snapshot,
     write_csv_snapshot,
 )
@@ -143,44 +138,38 @@ class ChoiceRequest:
 
 
 @contextmanager
-def choice_session(
-    sdk: Any, *, resource_policy: RuntimeResourcePolicy | None = None
-) -> Iterator[ChoiceRawSession]:
+def choice_session(sdk: Any) -> Iterator[ChoiceRawSession]:
     """Use the caller's locally loaded SDK; never persist login material."""
     if not _SESSION_LOCK.acquire(blocking=False):
         raise RuntimeError("choice_session_busy")
     try:
-        with runtime_resource_policy_scope(resource_policy) as policy:
-            started = sdk.start(
-                "RecordLoginInfo=0,ForceLogin=0,HTTPTimeout=15",
-                logcallback=lambda _message: 1,
-            )
-            if started.ErrorCode != 0:
-                raise RuntimeError(f"choice_login_failed:{started.ErrorCode}")
-            session = ChoiceRawSession(sdk, policy)
+        started = sdk.start(
+            "RecordLoginInfo=0,ForceLogin=0,HTTPTimeout=15",
+            logcallback=lambda _message: 1,
+        )
+        if started.ErrorCode != 0:
+            raise RuntimeError(f"choice_login_failed:{started.ErrorCode}")
+        session = ChoiceRawSession(sdk)
+        try:
+            yield session
+        finally:
+            session.active = False
+            primary = sys.exception()
             try:
-                yield session
-            finally:
-                session.active = False
-                primary = sys.exception()
-                try:
-                    stopped = sdk.stop()
-                    if stopped.ErrorCode != 0:
-                        raise RuntimeError(f"choice_logout_failed:{stopped.ErrorCode}")
-                except BaseException as cleanup:
-                    if primary is None:
-                        raise
-                    primary.add_note(
-                        f"choice logout also failed: {type(cleanup).__name__}"
-                    )
+                stopped = sdk.stop()
+                if stopped.ErrorCode != 0:
+                    raise RuntimeError(f"choice_logout_failed:{stopped.ErrorCode}")
+            except BaseException as cleanup:
+                if primary is None:
+                    raise
+                primary.add_note(f"choice logout also failed: {type(cleanup).__name__}")
     finally:
         _SESSION_LOCK.release()
 
 
 class ChoiceRawSession:
-    def __init__(self, sdk: Any, policy: RuntimeResourcePolicy) -> None:
+    def __init__(self, sdk: Any) -> None:
         self.sdk = sdk
-        self.policy = policy
         self.active = True
         self._request_lock = threading.Lock()
 
@@ -194,73 +183,68 @@ class ChoiceRawSession:
             raise RuntimeError("choice_request_busy")
         try:
             # SDK has no streaming response: caller sizes each request beforehand.
-            # Native/Python response and JSON/CSV expansion coexist in this lease.
-            bound = 64 * (request.max_response_bytes + MAX_RECORD_BYTES)
-            if bound > self.policy.working_set_headroom_bytes:
-                raise MemoryError("choice_request_exceeds_memory_plan")
-            with self.policy.lease("choice.raw.request", bound):
-                if filesystem_exists(root):
-                    manifest = read_manifest(root / "response.metadata.json")
-                    metadata = manifest["metadata"]
-                    try:
-                        deque(
-                            _validated_rows(root, request, metadata, manifest=manifest),
-                            maxlen=0,
-                        )
-                        return root
-                    finally:
-                        metadata = None
-                response = response_metadata = metadata = None
+            if filesystem_exists(root):
+                manifest = read_manifest(root / "response.metadata.json")
+                metadata = manifest["metadata"]
                 try:
-                    response = getattr(self.sdk, request.endpoint)(*request.arguments)
-                    response_metadata = {
-                        name: getattr(response, name) for name in _RESPONSE_FIELDS
-                    }
-                    _validate_response_metadata(response_metadata)
-                    metadata = {
-                        "request": payload,
-                        "response": response_metadata,
-                        "collected_at": datetime.now(UTC).isoformat(),
-                        "status": "COMPLETE" if response.ErrorCode == 0 else "FAILED",
-                        "scope": _empty_scope(),
-                        "units": "provider_native_no_conversion",
-                        "types": "JSON_cell_types; SDK_null=None; bytes_hex_for_char",
-                        "data_container": type(response.Data).__name__,
-                    }
-                    target = (
-                        root
-                        if response.ErrorCode == 0
-                        else root.parent / "failed" / identity / uuid4().hex
+                    deque(
+                        _validated_rows(root, request, metadata, manifest=manifest),
+                        maxlen=0,
                     )
-
-                    def observed_rows() -> Iterator[tuple[object, ...]]:
-                        for row in _response_rows(request.endpoint, response):
-                            _observe_scope(
-                                metadata["scope"],
-                                response.Indicators,
-                                row[2:],
-                                request.cutoff,
-                            )
-                            yield row
-
-                    write_csv_snapshot(
-                        target,
-                        columns=(*_PREFIX, *response.Indicators),
-                        rows=observed_rows(),
-                        metadata=metadata,
-                        max_bytes=request.max_response_bytes,
-                        validate=lambda staging: deque(
-                            _validated_rows(
-                                staging, request, metadata, require_complete=False
-                            ),
-                            maxlen=0,
-                        ),
-                    )
-                    if response.ErrorCode != 0:
-                        raise RuntimeError(f"choice_query_failed:{response.ErrorCode}")
                     return root
                 finally:
-                    response = response_metadata = metadata = None
+                    metadata = None
+            response = response_metadata = metadata = None
+            try:
+                response = getattr(self.sdk, request.endpoint)(*request.arguments)
+                response_metadata = {
+                    name: getattr(response, name) for name in _RESPONSE_FIELDS
+                }
+                _validate_response_metadata(response_metadata)
+                metadata = {
+                    "request": payload,
+                    "response": response_metadata,
+                    "collected_at": datetime.now(UTC).isoformat(),
+                    "status": "COMPLETE" if response.ErrorCode == 0 else "FAILED",
+                    "scope": _empty_scope(),
+                    "units": "provider_native_no_conversion",
+                    "types": "JSON_cell_types; SDK_null=None; bytes_hex_for_char",
+                    "data_container": type(response.Data).__name__,
+                }
+                target = (
+                    root
+                    if response.ErrorCode == 0
+                    else root.parent / "failed" / identity / uuid4().hex
+                )
+
+                def observed_rows() -> Iterator[tuple[object, ...]]:
+                    for row in _response_rows(request.endpoint, response):
+                        _observe_scope(
+                            metadata["scope"],
+                            response.Indicators,
+                            row[2:],
+                            request.cutoff,
+                        )
+                        yield row
+
+                write_csv_snapshot(
+                    target,
+                    columns=(*_PREFIX, *response.Indicators),
+                    rows=observed_rows(),
+                    metadata=metadata,
+                    max_bytes=request.max_response_bytes,
+                    validate=lambda staging: deque(
+                        _validated_rows(
+                            staging, request, metadata, require_complete=False
+                        ),
+                        maxlen=0,
+                    ),
+                )
+                if response.ErrorCode != 0:
+                    raise RuntimeError(f"choice_query_failed:{response.ErrorCode}")
+                return root
+            finally:
+                response = response_metadata = metadata = None
 
         finally:
             self._request_lock.release()
@@ -268,61 +252,52 @@ class ChoiceRawSession:
 
 @contextmanager
 def read_choice_response(
-    root: Path,
-    request: ChoiceRequest,
-    *,
-    resource_policy: RuntimeResourcePolicy | None = None,
-    expected_metadata_identity=None,
+    root: Path, request: ChoiceRequest, *, expected_metadata_identity=None
 ) -> Iterator[dict[str, object]]:
     """Restore a fully verified SDK response; payload is borrowed in this scope."""
     request.payload()
-    with runtime_resource_policy_scope(resource_policy) as policy:
-        bound = 64 * (request.max_response_bytes + MAX_RECORD_BYTES)
-        if bound > policy.working_set_headroom_bytes:
-            raise MemoryError("choice_request_exceeds_memory_plan")
-        with policy.lease("choice.raw.read", bound):
-            metadata = response = header = {}
-            data = [] if request.endpoint == "sector" else {}
-            row = value = None
-            try:
-                manifest = read_bounded_qrp_json(
-                    root / "response.metadata.json",
-                    expected_identity=expected_metadata_identity,
-                )[1]
-                metadata = manifest["metadata"]
-                with handle_preserving_primary(
-                    _validated_rows(root, request, metadata, manifest=manifest)
-                ) as rows:
-                    for count, row in enumerate(rows):
-                        header = metadata["response"]
-                        dates, width = len(header["Dates"]), len(header["Indicators"])
-                        if request.endpoint == "ctr":
-                            data[row[0]] = list(row[2:])
+    metadata = response = header = {}
+    data = [] if request.endpoint == "sector" else {}
+    row = value = None
+    try:
+        manifest = read_bounded_qrp_json(
+            root / "response.metadata.json",
+            expected_identity=expected_metadata_identity,
+        )[1]
+        metadata = manifest["metadata"]
+        with closing_iterator(
+            _validated_rows(root, request, metadata, manifest=manifest)
+        ) as rows:
+            for count, row in enumerate(rows):
+                header = metadata["response"]
+                dates, width = len(header["Dates"]), len(header["Indicators"])
+                if request.endpoint == "ctr":
+                    data[row[0]] = list(row[2:])
+                else:
+                    if request.endpoint == "css" and row[1] == 0:
+                        data[row[0]] = [None] * (width * dates)
+                    elif request.endpoint == "sector" and count == 0:
+                        data = [None] * (len(header["Codes"]) * width * dates)
+                    for field, value in enumerate(row[2:]):
+                        if request.endpoint == "css":
+                            data[row[0]][field * dates + row[1]] = value
                         else:
-                            if request.endpoint == "css" and row[1] == 0:
-                                data[row[0]] = [None] * (width * dates)
-                            elif request.endpoint == "sector" and count == 0:
-                                data = [None] * (len(header["Codes"]) * width * dates)
-                            for field, value in enumerate(row[2:]):
-                                if request.endpoint == "css":
-                                    data[row[0]][field * dates + row[1]] = value
-                                else:
-                                    data[
-                                        (count // dates) * width * dates
-                                        + field * dates
-                                        + row[1]
-                                    ] = value
-                response = dict(metadata["response"])
-                if request.endpoint == "css" and not response["Dates"]:
-                    data.update((code, []) for code in response["Codes"])
-                response["Data"] = data
-                yield response
-            finally:
-                row = value = None
-                data.clear()
-                response.clear()
-                header.clear()
-                metadata = None
+                            data[
+                                (count // dates) * width * dates
+                                + field * dates
+                                + row[1]
+                            ] = value
+        response = dict(metadata["response"])
+        if request.endpoint == "css" and not response["Dates"]:
+            data.update((code, []) for code in response["Codes"])
+        response["Data"] = data
+        yield response
+    finally:
+        row = value = None
+        data.clear()
+        response.clear()
+        header.clear()
+        metadata = None
 
 
 def _validate_response_metadata(value: dict[str, object]) -> None:
@@ -496,7 +471,7 @@ def _validated_rows(
         raise ValueError("choice_saved_shape_invalid")
     scope = _empty_scope()
     count = 0
-    with handle_preserving_primary(
+    with closing_iterator(
         iter_csv_snapshot(
             root, expected_manifest=manifest, max_bytes=request.max_response_bytes
         )
@@ -517,7 +492,10 @@ def _validated_rows(
                     raise ValueError("choice_saved_coordinates_invalid")
             _observe_scope(scope, response["Indicators"], row[2:], request.cutoff)
             count += 1
-            yield row
+            try:
+                yield row
+            except GeneratorExit:
+                return
     if request.endpoint != "ctr" and count != len(response["Codes"]) * len(
         response["Dates"]
     ):

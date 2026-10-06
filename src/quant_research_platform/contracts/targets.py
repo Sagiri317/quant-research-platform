@@ -35,7 +35,6 @@ def unmeasured_operation_evidence(reason):
         "reason": reason,
         "sampling": "target_boundaries_not_full_process_peaks",
         "sample_count": 0,
-        "planning": {},
         "metrics": {},
         "environment": {"status": "UNDEFINED", "reason": reason},
     }
@@ -51,7 +50,6 @@ def _operation_evidence(value):
             "reason",
             "sampling",
             "sample_count",
-            "planning",
             "metrics",
             "environment",
         }
@@ -61,7 +59,6 @@ def _operation_evidence(value):
         or type(result["reason"]) is not str
         or type(result["sample_count"]) is not int
         or result["sample_count"] < 0
-        or type(result["planning"]) is not dict
         or type(result["metrics"]) is not dict
         or type(result["environment"]) is not dict
     ):
@@ -71,7 +68,6 @@ def _operation_evidence(value):
             result["status"] != "UNDEFINED"
             or not result["reason"]
             or result["metrics"]
-            or result["planning"]
             or result["environment"]
             != {"status": "UNDEFINED", "reason": result["reason"]}
         ):
@@ -125,9 +121,6 @@ def _operation_evidence(value):
     if set(result["metrics"]) != {
         "wall_seconds",
         "cpu_seconds",
-        "rss0_bytes",
-        "sampled_peak_rss_bytes",
-        "sampled_peak_reserved_bytes",
         "read_bytes",
         "write_bytes",
         "sampled_peak_process_threads",

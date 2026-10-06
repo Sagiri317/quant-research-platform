@@ -50,7 +50,6 @@ def test_research_and_profile_owners_have_no_provider_traversal(import_edges) ->
     profile = (SOURCE_ROOT / "profiles" / "research.py").read_text(encoding="utf-8")
     assert "write_dataset" not in profile
     assert "pandas" not in profile
-    assert "memory_budget_bytes" not in profile
 
 
 def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
@@ -72,7 +71,6 @@ def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
     )
     assert {
         "StorageLayout",
-        "RuntimeResourcePolicy",
         "InterimMaterializer",
         "ProcessedMaterializer",
     }.isdisjoint(_defined_symbols(profile_tree))

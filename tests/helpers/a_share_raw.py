@@ -15,7 +15,6 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     FORMAL_BENCHMARKS,
 )
 from quant_research_platform.research.protocols import a_share
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import choice_session
 from quant_research_platform.sources.csmar.field_mappings import RAW_TABLE_CONTRACTS
@@ -50,12 +49,10 @@ def write_a_share_raw_fixture(
     benchmark_total_return_indices: Mapping[str, str],
 ) -> None:
     """Keep real source, processed, dataset, model, and portfolio bindings intact."""
-    with runtime_resource_policy_scope() as policy:
-        with policy.lease("tests.a_share.raw_fixture", 64 * 1024**2):
-            _write_raw(layout, policy, benchmark_total_return_indices)
+    _write_raw(layout, benchmark_total_return_indices)
 
 
-def _write_raw(layout, policy, benchmark_total_return_indices):
+def _write_raw(layout, benchmark_total_return_indices):
     raw_root = layout.raw_source_root("csmar").parent
     root = Path(raw_root) / "csmar"
     filesystem_mkdir(root, parents=True)
@@ -372,7 +369,7 @@ def _write_raw(layout, policy, benchmark_total_return_indices):
         name for mapping in FINANCIAL_FIELDS.values() for name in mapping.values()
     )
     profitability = np.random.default_rng(563).uniform(0.03, 0.08, len(assets))
-    with choice_session(SDK(response()), resource_policy=policy) as session:
+    with choice_session(SDK(response())) as session:
         for period in pd.period_range(
             "2010Q1", pd.Timestamp(history_end).to_period("Q") - 1, freq="Q"
         ):

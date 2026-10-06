@@ -20,9 +20,7 @@ from quant_research_platform.artifacts.outputs.manifest import (
     output_manifest_payload,
     prediction_output_metadata,
 )
-from quant_research_platform.artifacts.outputs.parquet import (
-    write_parquet_chunks,
-)
+from quant_research_platform.artifacts.outputs.parquet import write_parquet_chunks
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     model_metadata_with_effective_prediction_end,
     validate_crypto_prediction_frame,
@@ -41,12 +39,7 @@ from quant_research_platform.contracts.predictions import (
 from quant_research_platform.contracts.time import is_datetime_value
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-    require_free_disk_headroom,
-)
+from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     remove_owned_scratch,
@@ -66,7 +59,7 @@ def write_prediction_outputs(
     spec: PredictionSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
-    output_chunks: Iterable[pd.DataFrame | OwnedValue[pd.DataFrame]],
+    output_chunks: Iterable[pd.DataFrame],
     model_metadata: Mapping[str, object],
     prediction_metadata_factory: Callable[[], Mapping[str, object]],
 ) -> Path:
@@ -76,9 +69,7 @@ def write_prediction_outputs(
         expected_definition_id="prediction_outputs",
     )
     required = prediction_output_columns(
-        spec.prediction_mode,
-        spec.prediction_column,
-        spec.primary_key,
+        spec.prediction_mode, spec.prediction_column, spec.primary_key
     )
     model_metadata_payload = validate_model_metadata_shape(dict(model_metadata))
     validate_model_metadata_consistency(model_metadata_payload, spec=spec)
@@ -95,8 +86,10 @@ def write_prediction_outputs(
                     temp_root,
                     reserve_bytes=2
                     * sum(
-                        filesystem_stat(path).st_size
-                        for _quarter, _family, path in paths
+                        (
+                            filesystem_stat(path).st_size
+                            for _quarter, _family, path in paths
+                        )
                     ),
                 )
                 active_frames = _merge_family_predictions(paths, required)
@@ -107,7 +100,6 @@ def write_prediction_outputs(
                 key_columns=tuple(spec.primary_key),
                 compression="zstd",
                 date_only=not is_datetime_value(spec.test_start),
-                borrowed_input=spec.prediction_mode == "a_share_oos",
                 validate_frame=(
                     lambda frame: validate_crypto_prediction_frame(
                         frame, model_metadata_payload
@@ -138,13 +130,11 @@ def write_prediction_outputs(
             effective_test_end=write_summary.effective_test_end,
         )
         effective_model_metadata = model_metadata_with_effective_prediction_end(
-            model_metadata_payload,
-            prediction_metadata,
+            model_metadata_payload, prediction_metadata
         )
         validate_model_metadata_consistency(effective_model_metadata, spec=spec)
         validate_model_prediction_metadata_consistency(
-            effective_model_metadata,
-            prediction_metadata,
+            effective_model_metadata, prediction_metadata
         )
         write_manifest(
             temp_root / "manifest.json",
@@ -170,20 +160,15 @@ def _stage_family_predictions(frames, root, required, spec, metadata):
         for index, item in enumerate(metadata["quarterly_models"])
     }
     seen = set()
-    policy = current_runtime_resource_policy()
 
     def group_key(item):
-        frame = item.value if isinstance(item, OwnedValue) else item
+        frame = item
         if frame.empty:
             raise ValueError("empty_family_prediction_stream")
-        with policy.lease(
-            "artifacts.prediction.lineage",
-            max(1, 2 * pandas_frame_payload_bytes(frame) + 128 * len(frame)),
-        ):
-            validate_family_prediction_frame(frame, metadata)
-            if len(frame[["quarter_id", "family_id"]].drop_duplicates()) != 1:
-                raise ValueError("prediction_family_chunk_mixed")
-        return frame["quarter_id"].iloc[0], frame["family_id"].iloc[0]
+        validate_family_prediction_frame(frame, metadata)
+        if len(frame[["quarter_id", "family_id"]].drop_duplicates()) != 1:
+            raise ValueError("prediction_family_chunk_mixed")
+        return (frame["quarter_id"].iloc[0], frame["family_id"].iloc[0])
 
     with closing_iterator(iter(frames)) as source:
         for coordinate, group in groupby(source, key=group_key):
@@ -206,81 +191,55 @@ def _stage_family_predictions(frames, root, required, spec, metadata):
 
 
 def _merge_family_predictions(paths, columns):
-    policy = current_runtime_resource_policy()
     for _quarter, group in groupby(paths, key=lambda item: item[0]):
         members = list(group)
-        target_bytes = max(
-            64 * 1024,
-            min(
-                16 * 1024 * 1024, policy.planning_headroom_bytes // (64 * len(members))
-            ),
-        )
 
-        def frames(path, *, target_bytes=target_bytes):
+        def frames(path):
             batches = iter_dataset_part_batches(
-                path,
-                expected_identity=dataset_file_identity(path),
-                target_chunk_bytes=target_bytes,
-                columns=columns,
-                _operation_headroom=lambda: policy.operation_headroom_bytes,
+                path, expected_identity=dataset_file_identity(path), columns=columns
             )
             with closing_iterator(batches):
                 for batch in batches:
-                    with policy.lease(
-                        "artifacts.prediction.merge.decode",
-                        max(1, 16 * batch.nbytes + 128 * batch.num_rows),
-                    ):
-                        frame = batch.to_pandas()
-                        try:
-                            yield frame
-                        except GeneratorExit:
-                            return
-                        finally:
-                            frame = None
-
-        with ExitStack() as readers:
-            heap = []
-            frame = following = first = None
-            try:
-                for _qid, family, path in members:
-                    source = readers.enter_context(
-                        closing_iterator(
-                            iter_complete_session_frames(
-                                iter(frames(path)),
-                                timestamp_column="timestamp",
-                                resource_policy=policy,
-                            )
-                        )
-                    )
-                    first = next(source, None)
-                    if first is None:
-                        raise ValueError("empty_family_prediction_stream")
-                    heapq.heappush(
-                        heap,
-                        (
-                            pd.Timestamp(first["timestamp"].iloc[0]),
-                            family,
-                            first,
-                            source,
-                        ),
-                    )
-                    first = None
-                while heap:
-                    timestamp, family, frame, source = heapq.heappop(heap)
+                    frame = batch.to_pandas()
                     try:
                         yield frame
                     except GeneratorExit:
                         return
-                    frame = None
-                    following = next(source, None)
-                    if following is not None:
-                        next_timestamp = pd.Timestamp(following["timestamp"].iloc[0])
-                        if next_timestamp <= timestamp:
-                            raise ValueError("prediction_family_time_order_invalid")
-                        heapq.heappush(
-                            heap, (next_timestamp, family, following, source)
+
+        with ExitStack() as readers:
+            heap = []
+
+            for _qid, family, path in members:
+                source = readers.enter_context(
+                    closing_iterator(
+                        iter_complete_session_frames(
+                            iter(frames(path)), timestamp_column="timestamp"
                         )
-                        following = None
-            finally:
-                heap.clear()
-                frame = following = first = None
+                    )
+                )
+                first = next(source, None)
+                if first is None:
+                    raise ValueError("empty_family_prediction_stream")
+                heapq.heappush(
+                    heap,
+                    (
+                        pd.Timestamp(first["timestamp"].iloc[0]),
+                        family,
+                        first,
+                        source,
+                    ),
+                )
+
+            while heap:
+                timestamp, family, frame, source = heapq.heappop(heap)
+                try:
+                    yield frame
+                except GeneratorExit:
+                    return
+
+                following = next(source, None)
+                if following is not None:
+                    next_timestamp = pd.Timestamp(following["timestamp"].iloc[0])
+                    if next_timestamp <= timestamp:
+                        raise ValueError("prediction_family_time_order_invalid")
+                    heapq.heappush(heap, (next_timestamp, family, following, source))

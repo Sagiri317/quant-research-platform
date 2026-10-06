@@ -25,7 +25,6 @@ from quant_research_platform.storage.datasets import (
     write_dataset,
 )
 from quant_research_platform.storage.datasets.reading import (
-    DatasetSession,
     open_dataset_session,
 )
 from quant_research_platform.storage.identity import (
@@ -89,21 +88,17 @@ def test_nanosecond_closed_windows_roundtrip_and_keep_date_window_semantics(
     assert time_value_isoformat(pd.Timestamp(timestamps[0])) == "2020-01-01"
 
 
-def capture_file_batch_paths(
-    monkeypatch: pytest.MonkeyPatch,
-) -> list[Path]:
+def capture_file_batch_paths(monkeypatch: pytest.MonkeyPatch) -> list[Path]:
     original = dataset_fingerprinting.iter_dataset_file_batches
     read_paths: list[Path] = []
 
     def record_file_batches(*args, **kwargs):
         for path, frame in original(*args, **kwargs):
             read_paths.append(Path(path))
-            yield path, frame
+            yield (path, frame)
 
     monkeypatch.setattr(
-        dataset_fingerprinting,
-        "iter_dataset_file_batches",
-        record_file_batches,
+        dataset_fingerprinting, "iter_dataset_file_batches", record_file_batches
     )
     return read_paths
 
@@ -115,13 +110,11 @@ def test_read_dataset_time_window_uses_closed_interval(tmp_path: Path) -> None:
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("windowed"),
     )
-
     result = read_dataset(
         root,
         columns=["asset_id", "value"],
         time_window=TimeWindow("2014-01-02", "2015-01-05"),
     )
-
     assert list(result["asset_id"]) == ["000001", "000001"]
     assert list(result["value"]) == [1.0, 2.0]
 
@@ -132,15 +125,12 @@ def test_partitioned_empty_dataset_keeps_root_sentinel_for_windowed_reads(
     root = make_dataset_artifact_root(tmp_path, "windowed_empty_partition")
     empty = make_time_window_dataset_frame().iloc[:0].copy()
     write_dataset(
-        root,
-        empty,
-        spec=make_processed_dataset_spec("windowed_empty_partition"),
+        root, empty, spec=make_processed_dataset_spec("windowed_empty_partition")
     )
-
     assert filesystem_is_file(root / "data" / "part-000.parquet")
     window = TimeWindow("2015-01-01", "2015-12-31")
-    with open_dataset_session(root, columns=None, time_window=window) as session:
-        assert tuple(session.read_paths) == (root / "data" / "part-000.parquet",)
+    session = open_dataset_session(root, columns=None, time_window=window)
+    assert tuple(session.read_paths) == (root / "data" / "part-000.parquet",)
     materialized = read_dataset(root, time_window=window)
     chunks = list(read_dataset(root, time_window=window, mode=DatasetReadMode.CHUNKED))
     assert materialized.empty
@@ -159,99 +149,35 @@ def test_read_dataset_time_window_prunes_year_partitions_and_keeps_output_column
     )
     full = read_dataset(root)
     window = TimeWindow("2015-01-01", "2015-01-05")
-    result = read_dataset(
-        root,
-        columns=["asset_id", "value"],
-        time_window=window,
-    )
+    result = read_dataset(root, columns=["asset_id", "value"], time_window=window)
     manual = full.loc[
         (full["timestamp"].dt.date >= pd.Timestamp("2015-01-01").date())
         & (full["timestamp"].dt.date <= pd.Timestamp("2015-01-05").date()),
         ["asset_id", "value"],
     ].reset_index(drop=True)
-
     assert list(result.columns) == ["asset_id", "value"]
     pd.testing.assert_frame_equal(result, manual)
-    with open_dataset_session(
-        root,
-        columns=["asset_id", "value"],
-        time_window=window,
-    ) as context:
-        assert {path.parent.name for path in context.read_paths} == {"year=2015"}
+    context = open_dataset_session(
+        root, columns=["asset_id", "value"], time_window=window
+    )
+    assert {path.parent.name for path in context.read_paths} == {"year=2015"}
 
 
-def test_dataset_session_filtered_view_owns_path_selection(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_dataset_session_filtered_view_keeps_parent_paths(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path, "filtered_view")
     write_dataset(
         root,
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("filtered_view"),
     )
-
-    verified: list[int | None] = []
-    real_verify = DatasetSession.verify
-
-    def verify(session: DatasetSession) -> None:
-        verified.append(session.path_selection)
-        real_verify(session)
-
-    monkeypatch.setattr(DatasetSession, "verify", verify)
-    with open_dataset_session(root, columns=None, time_window=None) as session:
-        policy = session.resource_policy
-        retained_before = policy.used_memory_bytes
-        parent_lease = session._lease
-        with session.filtered_view(TimeWindow("2015-01-01", "2015-12-31")) as view:
-            assert view.path_selection is not None
-            assert {path.parent.name for path in view.read_paths} == {"year=2015"}
-            view.close()
-            assert parent_lease.active is True
-            assert policy.used_memory_bytes == retained_before
-        assert tuple(view.read_paths) == ()
-        assert parent_lease.active is True
-        assert policy.used_memory_bytes == retained_before
-        session.verify()
-    assert policy.used_memory_bytes == 0
-    assert view.path_selection in verified
-
-
-def test_dataset_session_filtered_view_preserves_body_primary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "filtered_view_primary")
-    write_dataset(
-        root,
-        make_time_window_dataset_frame(),
-        spec=make_processed_dataset_spec("filtered_view_primary"),
-    )
-    primary = KeyboardInterrupt("body_primary")
-
-    with open_dataset_session(root, columns=None, time_window=None) as session:
-        inventory_type = type(session.inventory)
-        real_release = inventory_type.release_path_selection
-
-        def fail_release(_inventory, _selection: int) -> None:
-            raise OSError("release_secondary")
-
-        monkeypatch.setattr(inventory_type, "release_path_selection", fail_release)
-        try:
-            with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
-                with session.filtered_view(TimeWindow("2015-01-01", "2015-12-31")):
-                    raise primary
-        finally:
-            monkeypatch.setattr(
-                inventory_type,
-                "release_path_selection",
-                real_release,
-            )
-
-    assert raised.value is primary
-    assert primary.__notes__ == [
-        "dataset filtered-view path cleanup also failed: OSError"
-    ]
+    session = open_dataset_session(root, columns=None, time_window=None)
+    original_paths = session.read_paths
+    view = session.filtered_view(TimeWindow("2015-01-01", "2015-12-31"))
+    assert {path.parent.name for path in view.read_paths} == {"year=2015"}
+    assert session.read_paths == original_paths
+    assert view.all_paths == session.all_paths
+    assert isinstance(view.read_paths, tuple)
+    session.verify()
 
 
 def test_read_dataset_datetime_time_window_filters_intraday_precisely(
@@ -274,13 +200,11 @@ def test_read_dataset_datetime_time_window_filters_intraday_precisely(
         }
     )
     write_dataset(root, frame, spec=make_processed_dataset_spec("intraday_window"))
-
     result = read_dataset(
         root,
         columns=["timestamp", "value"],
         time_window=TimeWindow("2026-07-06T00:01:00", "2026-07-06T00:02:00"),
     )
-
     assert result["value"].tolist() == [1.0, 2.0]
 
 
@@ -291,20 +215,17 @@ def test_date_window_includes_subsecond_end_of_day(tmp_path: Path) -> None:
             "market_id": ["crypto", "crypto"],
             "asset_id": ["btc_usdt", "btc_usdt"],
             "timestamp": pd.to_datetime(
-                ["2026-07-06 23:59:59.999999", "2026-07-07 00:00:00"],
-                format="mixed",
+                ["2026-07-06 23:59:59.999999", "2026-07-07 00:00:00"], format="mixed"
             ),
             "value": [1.0, 2.0],
         }
     )
     write_dataset(root, frame, spec=make_processed_dataset_spec("subsecond_end"))
-
     result = read_dataset(
         root,
         columns=["timestamp", "value"],
         time_window=TimeWindow("2026-07-06", "2026-07-06"),
     )
-
     assert result["value"].tolist() == [1.0]
 
 
@@ -321,16 +242,13 @@ def test_time_window_normalizes_timezone_aware_bounds_to_naive_utc(
         }
     )
     write_dataset(root, frame, spec=make_processed_dataset_spec("timezone_window"))
-
     result = read_dataset(
         root,
         columns=["timestamp", "value"],
         time_window=TimeWindow(
-            "2026-07-06T07:59:00+08:00",
-            "2026-07-06T08:00:00+08:00",
+            "2026-07-06T07:59:00+08:00", "2026-07-06T08:00:00+08:00"
         ),
     )
-
     assert result["value"].tolist() == [1.0, 2.0]
 
 
@@ -341,19 +259,14 @@ def test_chunked_datetime_window_preserves_empty_schema(tmp_path: Path) -> None:
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("empty_datetime_chunked"),
     )
-
     chunks = list(
         read_dataset(
             root,
             columns=["asset_id", "value"],
-            time_window=TimeWindow(
-                "2017-01-01T00:00:00",
-                "2017-01-01T00:01:00",
-            ),
+            time_window=TimeWindow("2017-01-01T00:00:00", "2017-01-01T00:01:00"),
             mode=DatasetReadMode.CHUNKED,
         )
     )
-
     assert len(chunks) == 1
     assert list(chunks[0].columns) == ["asset_id", "value"]
     assert chunks[0].empty
@@ -368,12 +281,9 @@ def test_inspect_dataset_time_window_reports_window_scoped_counts(
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("inspect"),
     )
-
     inspection = inspect_dataset(
-        root,
-        time_window=TimeWindow("2015-01-01", "2015-12-31"),
+        root, time_window=TimeWindow("2015-01-01", "2015-12-31")
     )
-
     assert inspection.row_count == 1
     assert inspection.date_min == "2015-01-05"
     assert inspection.date_max == "2015-01-05"
@@ -397,7 +307,6 @@ def test_selected_operations_reject_structurally_forged_full_history_summary(
     manifest["date_max"] = "2099-12-31"
     filesystem_write_text(manifest_path, json.dumps(manifest), encoding="utf-8")
     window = TimeWindow("2015-01-01", "2015-12-31")
-
     for operation in (inspect_dataset, fingerprint_dataset):
         with pytest.raises(ValueError, match="manifest_partition_date_mismatch"):
             operation(root, time_window=window)
@@ -410,14 +319,12 @@ def test_fingerprint_dataset_time_window_hashes_window_only(tmp_path: Path) -> N
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("fingerprint"),
     )
-
     full = fingerprint_dataset(root)
     windowed = fingerprint_dataset(
         root,
         columns=["asset_id", "value"],
         time_window=TimeWindow("2015-01-01", "2015-12-31"),
     )
-
     assert full.row_count == 3
     assert windowed.row_count == 1
     assert windowed.column_names == ("asset_id", "value")
@@ -433,11 +340,9 @@ def test_fingerprint_and_inspect_time_window_file_count_match_contributing_files
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("empty_window"),
     )
-
     window = TimeWindow("2015-02-01", "2015-02-02")
     inspection = inspect_dataset(root, time_window=window)
     fingerprint = fingerprint_dataset(root, time_window=window)
-
     assert inspection.row_count == 0
     assert fingerprint.row_count == 0
     assert inspection.file_count == 0
@@ -453,7 +358,6 @@ def test_chunked_read_time_window_without_matching_partitions_yields_empty_schem
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("empty_chunked"),
     )
-
     chunks = list(
         read_dataset(
             root,
@@ -462,15 +366,13 @@ def test_chunked_read_time_window_without_matching_partitions_yields_empty_schem
             mode=DatasetReadMode.CHUNKED,
         )
     )
-
     assert len(chunks) == 1
     assert list(chunks[0].columns) == ["asset_id", "value"]
     assert chunks[0].empty
 
 
 def test_fingerprint_dataset_time_window_prunes_year_partitions(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "fingerprint_pruned")
     write_dataset(
@@ -479,13 +381,11 @@ def test_fingerprint_dataset_time_window_prunes_year_partitions(
         spec=make_processed_dataset_spec("fingerprint_pruned"),
     )
     read_paths = capture_file_batch_paths(monkeypatch)
-
     fingerprint = fingerprint_dataset(
         root,
         columns=["asset_id", "value"],
         time_window=TimeWindow("2015-01-01", "2015-01-05"),
     )
-
     assert fingerprint.row_count == 1
     assert fingerprint.partition_fingerprints[0]["partition"] == "year=2015"
     assert {path.parent.name for path in read_paths} == {"year=2015"}
@@ -495,21 +395,17 @@ def test_compare_datasets_time_window_compares_window_only(tmp_path: Path) -> No
     left = make_dataset_artifact_root(tmp_path, "left")
     right = make_dataset_artifact_root(tmp_path, "right")
     write_dataset(
-        left,
-        make_time_window_dataset_frame(),
-        spec=make_processed_dataset_spec("left"),
+        left, make_time_window_dataset_frame(), spec=make_processed_dataset_spec("left")
     )
     changed = make_time_window_dataset_frame()
     changed.loc[changed["timestamp"] == pd.Timestamp("2016-01-04"), "value"] = 99.0
     write_dataset(right, changed, spec=make_processed_dataset_spec("right"))
-
     comparison = compare_datasets(
         left,
         right,
         columns=["asset_id", "timestamp", "value"],
         time_window=TimeWindow("2014-01-01", "2015-12-31"),
     )
-
     assert comparison.matches is True
     assert comparison.status == "MATCH"
 
@@ -526,19 +422,13 @@ def test_compare_datasets_time_window_detects_window_differences(
     )
     changed = make_time_window_dataset_frame()
     changed.loc[changed["timestamp"] == pd.Timestamp("2015-01-05"), "value"] = 99.0
-    write_dataset(
-        right,
-        changed,
-        spec=make_processed_dataset_spec("right_window_diff"),
-    )
-
+    write_dataset(right, changed, spec=make_processed_dataset_spec("right_window_diff"))
     comparison = compare_datasets(
         left,
         right,
         columns=["asset_id", "timestamp", "value"],
         time_window=TimeWindow("2015-01-01", "2015-01-05"),
     )
-
     assert comparison.matches is False
     assert comparison.status == "CONTENT_MISMATCH"
 
@@ -562,15 +452,10 @@ def test_time_window_without_timestamp_role_raises(tmp_path: Path) -> None:
     write_dataset(
         root,
         pd.DataFrame(
-            {
-                "market_id": ["a_share"],
-                "asset_id": ["000001"],
-                "name": ["demo"],
-            }
+            {"market_id": ["a_share"], "asset_id": ["000001"], "name": ["demo"]}
         ),
         spec=spec,
     )
-
     with pytest.raises(ValueError, match="time_window_not_supported"):
         read_dataset(root, time_window=TimeWindow("2014-01-01", "2014-12-31"))
 
@@ -582,7 +467,6 @@ def test_write_dataset_existing_root_raises_dataset_exists(tmp_path: Path) -> No
         make_time_window_dataset_frame(),
         spec=make_processed_dataset_spec("exists"),
     )
-
     with pytest.raises(ValueError, match="dataset_exists"):
         write_dataset(
             root,

@@ -10,7 +10,6 @@ from quant_research_platform.contracts.targets import ProducerBinding, ProducerK
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.research.protocols.a_share import DATA_START
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import choice_session
 from quant_research_platform.sources.csmar.interim import InterimImportResult
@@ -63,7 +62,6 @@ def test_public_financial_windows_keep_choice_history_and_output_identity(
             ("2019-12-31", "2020-04-20", 4.0),
             ("2020-03-31", "2020-04-30", 5.0),
         ):
-            # Asset 2 has genuinely missing prior-year Q1; it must retain null TTM.
             codes = (
                 ("000001.SZ",) if period == "2019-03-31" else ("000001.SZ", "000002.SZ")
             )
@@ -93,7 +91,6 @@ def test_public_financial_windows_keep_choice_history_and_output_identity(
                         },
                         branch=branch,
                     )
-
     sessions = pd.bdate_range("2019-01-02", "2020-05-08")
     frames = _synthetic_interim_frames(sessions)
 
@@ -109,8 +106,6 @@ def test_public_financial_windows_keep_choice_history_and_output_identity(
             frames[data_id],
             spec=spec,
             instance_metadata=kwargs["instance_metadata"],
-            resource_policy=kwargs["resource_policy"],
-            borrowed_input=True,
         )
         return InterimImportResult({data_id: root}, (), "synthetic market source")
 
@@ -144,65 +139,54 @@ def test_public_financial_windows_keep_choice_history_and_output_identity(
         assert result["status"] == "COMPLETE", result["status"]
         targets = {item["target_id"]: item for item in result["target_results"]}
         source_identities.append(targets["financial_income"]["instance_identity"])
-        with runtime_resource_policy_scope() as policy:
-            for data_id, expected_start in (
-                ("financial_income", "2011-01-01"),
-                ("fundamental_pit", start),
-            ):
-                spec = (
-                    profile.interim
-                    if data_id == "financial_income"
-                    else profile.processed
-                ).get(data_id)
-                logical = (
-                    layout.interim_data_root(spec.source_id, data_id)
-                    if data_id == "financial_income"
-                    else layout.processed_data_root(spec.market_id, spec.kind, data_id)
+        for data_id, expected_start in (
+            ("financial_income", "2011-01-01"),
+            ("fundamental_pit", start),
+        ):
+            spec = (
+                profile.interim if data_id == "financial_income" else profile.processed
+            ).get(data_id)
+            logical = (
+                layout.interim_data_root(spec.source_id, data_id)
+                if data_id == "financial_income"
+                else layout.processed_data_root(spec.market_id, spec.kind, data_id)
+            )
+            root = layout.instance_root(logical, targets[data_id]["instance_identity"])
+            persisted = open_dataset_session(root, columns=None, time_window=None)
+            envelope = persisted.manifest["common_manifest"]
+            assert (
+                envelope["instance_identity"] == targets[data_id]["instance_identity"]
+            )
+            assert envelope["research_window"]["start"] == expected_start
+            assert envelope["research_window"]["end"] == "2020-05-08"
+            saved = read_dataset(root)
+            if data_id == "financial_income":
+                assert saved.report_period.min() == pd.Timestamp("2019-03-31")
+                assert saved.is_corrected.any()
+            else:
+                assert saved.timestamp.ge(start).all()
+                assert saved.timestamp.le("2020-05-08").all()
+                selected = saved.loc[saved.asset_id.eq("000001")].set_index("timestamp")
+                observations.append(
+                    selected.loc[
+                        pd.to_datetime(["2020-05-04", "2020-05-05", "2020-05-06"]),
+                        "operating_revenue_ttm",
+                    ].tolist()
                 )
-                root = layout.instance_root(
-                    logical, targets[data_id]["instance_identity"]
-                )
-                with open_dataset_session(
-                    root, columns=None, time_window=None, resource_policy=policy
-                ) as persisted:
-                    envelope = persisted.manifest["common_manifest"]
-                    assert (
-                        envelope["instance_identity"]
-                        == targets[data_id]["instance_identity"]
-                    )
-                    assert envelope["research_window"]["start"] == expected_start
-                    assert envelope["research_window"]["end"] == "2020-05-08"
-                saved = read_dataset(root, resource_policy=policy)
-                if data_id == "financial_income":
-                    assert saved.report_period.min() == pd.Timestamp("2019-03-31")
-                    assert saved.is_corrected.any()
-                else:
-                    assert saved.timestamp.ge(start).all()
-                    assert saved.timestamp.le("2020-05-08").all()
-                    selected = saved.loc[saved.asset_id.eq("000001")].set_index(
-                        "timestamp"
-                    )
-                    observations.append(
-                        selected.loc[
-                            pd.to_datetime(["2020-05-04", "2020-05-05", "2020-05-06"]),
-                            "operating_revenue_ttm",
-                        ].tolist()
-                    )
-                    incomplete = saved.loc[
-                        saved.asset_id.eq("000002") & saved.timestamp.ge("2020-05-04")
-                    ]
-                    assert not incomplete.empty
-                    assert incomplete.operating_revenue_ttm.isna().all()
-            if action == "dataset build":
-                root = layout.instance_root(
-                    layout.research_dataset_root("a_share", "fusion_nf_core"),
-                    targets["fusion_nf_core"]["instance_identity"],
-                )
-                dataset = read_dataset(root, resource_policy=policy)
-                assert (
-                    dataset.timestamp.ge(start).all()
-                    and dataset.timestamp.le("2020-05-08").all()
-                )
-            assert policy.used_memory_bytes == 0
+                incomplete = saved.loc[
+                    saved.asset_id.eq("000002") & saved.timestamp.ge("2020-05-04")
+                ]
+                assert not incomplete.empty
+                assert incomplete.operating_revenue_ttm.isna().all()
+        if action == "dataset build":
+            root = layout.instance_root(
+                layout.research_dataset_root("a_share", "fusion_nf_core"),
+                targets["fusion_nf_core"]["instance_identity"],
+            )
+            dataset = read_dataset(root)
+            assert (
+                dataset.timestamp.ge(start).all()
+                and dataset.timestamp.le("2020-05-08").all()
+            )
     assert observations == [[8.0, 8.0, 10.0], [8.0, 8.0, 10.0]]
     assert source_identities[0] == source_identities[1]

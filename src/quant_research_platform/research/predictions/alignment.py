@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from contextlib import ExitStack
 
 import numpy as np
 import pandas as pd
@@ -13,14 +12,7 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
-from quant_research_platform.research.filtering import (
-    _filter_working_set_bound,
-    apply_filter_mode,
-)
-from quant_research_platform.runtime.resources import (
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-)
+from quant_research_platform.research.filtering import apply_filter_mode
 
 
 def _required_prediction_rows(
@@ -33,16 +25,13 @@ def _required_prediction_rows(
     test_end: str | None,
 ) -> pd.DataFrame:
     eligible, _metadata = apply_filter_mode(
-        chunk,
-        mode=sample_filter_mode,
-        metadata_key="sample_filter_mode",
+        chunk, mode=sample_filter_mode, metadata_key="sample_filter_mode"
     )
     eligible = eligible.dropna(
         subset=list(model_input_validity_columns(input_columns, model_algorithm))
     )
     timestamps = strict_timestamp_series(
-        eligible["timestamp"],
-        error="invalid_prediction_timestamp_values",
+        eligible["timestamp"], error="invalid_prediction_timestamp_values"
     )
     required_mask = timestamps >= pd.Timestamp(test_start)
     if test_end is not None:
@@ -63,61 +52,28 @@ def _iter_prediction_joined_chunks(
     missing_required = False
     with closing_iterator(iter(chunks)) as active_chunks:
         for chunk in active_chunks:
-            row_count = len(chunk)
-            frame_bytes = pandas_frame_payload_bytes(chunk)
-            index_bytes = int(chunk.index.memory_usage(deep=True))
-            timestamp_bytes = index_bytes + 8 * row_count
-            required_mask_bytes = index_bytes + row_count
-            required_output_bytes = frame_bytes
-            output_frame_bytes = frame_bytes + index_bytes + 8 * row_count
-            output_frame_bytes = max(
-                output_frame_bytes,
-                _filter_working_set_bound(
-                    chunk,
-                    mode=sample_filter_mode,
-                ),
+            values, _found = prediction_lookup.values_for_frame(
+                chunk, mark_matched=False
             )
-            policy = current_runtime_resource_policy()
-            with ExitStack() as chunk_state:
-                if policy is not None:
-                    chunk_state.enter_context(
-                        policy.lease(
-                            "research.prediction.alignment",
-                            timestamp_bytes
-                            + required_mask_bytes
-                            + required_output_bytes
-                            + output_frame_bytes,
-                        )
-                    )
-                try:
-                    values, _found = chunk_state.enter_context(
-                        prediction_lookup.values_for_frame(
-                            chunk,
-                            mark_matched=False,
-                        )
-                    )
-                    required = _required_prediction_rows(
-                        chunk,
-                        input_columns=input_columns,
-                        model_algorithm=model_algorithm,
-                        sample_filter_mode=sample_filter_mode,
-                        test_start=test_start,
-                        test_end=test_end,
-                    )
-                    if not required.empty:
-                        _required_values, required_found = chunk_state.enter_context(
-                            prediction_lookup.values_for_frame(
-                                required,
-                                mark_matched=True,
-                            )
-                        )
-                        missing_required |= 0 in required_found
-                    output = chunk.copy()
-                    output[prediction_lookup.prediction_column] = values
-                    yield output
-                finally:
-                    chunk = values = _found = required = output = None
-                    _required_values = required_found = None
+            required = _required_prediction_rows(
+                chunk,
+                input_columns=input_columns,
+                model_algorithm=model_algorithm,
+                sample_filter_mode=sample_filter_mode,
+                test_start=test_start,
+                test_end=test_end,
+            )
+            if not required.empty:
+                _required_values, required_found = prediction_lookup.values_for_frame(
+                    required, mark_matched=True
+                )
+                missing_required |= 0 in required_found
+            output = chunk.copy()
+            output[prediction_lookup.prediction_column] = values
+            try:
+                yield output
+            except GeneratorExit:
+                return
     unexpected, extra = prediction_lookup.coverage_counts()
     if extra:
         raise RuntimeError("persisted_prediction_match_state_invalid")
@@ -133,25 +89,14 @@ def _iter_common_prediction_chunks(chunks, *, prediction_lookups):
     """Select exact-key finite intersections without altering persisted outputs."""
     with closing_iterator(iter(chunks)) as source:
         for chunk in source:
-            policy = current_runtime_resource_policy()
-            with ExitStack() as state:
-                if policy is not None:
-                    state.enter_context(
-                        policy.lease(
-                            "research.prediction.common_sample",
-                            3 * pandas_frame_payload_bytes(chunk)
-                            + len(chunk) * (16 * len(prediction_lookups) + 32),
-                        )
-                    )
-                try:
-                    common = np.ones(len(chunk), dtype=bool)
-                    output = chunk.copy()
-                    for column, lookup in prediction_lookups.items():
-                        values, found = state.enter_context(
-                            lookup.values_for_frame(chunk, mark_matched=False)
-                        )
-                        common &= np.asarray(found, dtype=bool) & np.isfinite(values)
-                        output[column] = values
-                    yield output.loc[common]
-                finally:
-                    chunk = common = output = values = found = None
+            common = np.ones(len(chunk), dtype=bool)
+            output = chunk.copy()
+            for column, lookup in prediction_lookups.items():
+                values, found = lookup.values_for_frame(chunk, mark_matched=False)
+                common &= np.asarray(found, dtype=bool) & np.isfinite(values)
+                output[column] = values
+            yielded_value = output.loc[common]
+            try:
+                yield yielded_value
+            except GeneratorExit:
+                return

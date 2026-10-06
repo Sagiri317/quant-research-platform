@@ -10,14 +10,14 @@ import shutil
 import stat
 import sys
 from collections.abc import Iterable, Iterator
-from contextlib import contextmanager, nullcontext
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 from typing import BinaryIO
 
 from quant_research_platform.policy.lifecycle import closing_iterator
 
-_INSTANCE_IDENTITY_RE = re.compile(r"^[0-9a-f]{64}$")
+_INSTANCE_IDENTITY_RE = re.compile("^[0-9a-f]{64}$")
 
 
 @dataclass(frozen=True, slots=True)
@@ -62,7 +62,7 @@ def dataset_file_identity_from_stat(value: os.stat_result) -> DatasetFileIdentit
 
 
 def _file_identity_bytes(identity: DatasetFileIdentity) -> bytes:
-    return b"\0".join(
+    return b"\x00".join(
         str(value).encode("ascii")
         for value in (
             identity.device,
@@ -74,10 +74,7 @@ def _file_identity_bytes(identity: DatasetFileIdentity) -> bytes:
 
 
 def dataset_file_identity(path: Path) -> DatasetFileIdentity:
-    candidate = require_unaliased_path(
-        Path(path),
-        error="invalid_dataset_part_files",
-    )
+    candidate = require_unaliased_path(Path(path), error="invalid_dataset_part_files")
     try:
         before = filesystem_stat(candidate, follow_symlinks=False)
     except (FileNotFoundError, NotADirectoryError) as exc:
@@ -91,112 +88,46 @@ def content_hash_for_files(
     files: Iterable[tuple[str, Path] | tuple[str, Path, DatasetFileIdentity]],
     *,
     error: str,
-    resource_policy: object | None = None,
 ) -> str:
-    """Hash logical member ids and bytes without using paths as identity."""
-
-    with (
-        resource_policy.lease("storage.content.identity.members", 0)
-        if resource_policy is not None
-        else nullcontext() as metadata,
-        closing_iterator(iter(files)) as members,
-    ):
-        if metadata is not None:
-            if 4096 > resource_policy.operation_headroom_bytes:
-                raise MemoryError("runtime_memory_budget_exceeded")
-            metadata.grow(4096)
-        entries: list[tuple[str, Path, DatasetFileIdentity | None]] = []
-        member_hashes: list[tuple[str, str]] = []
+    """Hash logical member ids and bytes with exact before/after identities."""
+    entries = []
+    hashes = []
+    with closing_iterator(iter(files)) as members:
         try:
             for item in members:
-                if not isinstance(item, tuple):
+                if not isinstance(item, tuple) or len(item) not in (2, 3):
                     raise ValueError(error)
-                if len(item) == 2:
-                    logical_id, path = item
-                    expected = None
-                elif len(item) == 3:
-                    logical_id, path, expected = item
-                else:
-                    raise ValueError(error)
+                logical_id, path = item[:2]
+                expected = item[2] if len(item) == 3 else None
                 if (
                     type(logical_id) is not str
                     or not logical_id
-                    or not isinstance(path, Path)
-                    or expected is not None
-                    and not isinstance(expected, DatasetFileIdentity)
+                    or (not isinstance(path, Path))
+                    or (
+                        expected is not None
+                        and (not isinstance(expected, DatasetFileIdentity))
+                    )
                 ):
                     raise ValueError(error)
-                if metadata is not None:
-                    # Borrow one input while sizing; admit before retaining it.
-                    # Include Unicode/UTF-8, Path caches/components, identities,
-                    # both lists/tuples, hex digests and in-place sort workspace.
-                    additional = (
-                        1024
-                        + 4 * sys.getsizeof(logical_id)
-                        + 4
-                        * (
-                            sys.getsizeof(path)
-                            + sys.getsizeof(str(path))
-                            + sum(sys.getsizeof(part) + 8 for part in path.parts)
-                        )
-                    )
-                    if expected is not None:
-                        additional += sys.getsizeof(expected) + sum(
-                            sys.getsizeof(value)
-                            for value in (
-                                expected.device,
-                                expected.inode,
-                                expected.size,
-                                expected.modified_ns,
-                            )
-                        )
-                    if additional > resource_policy.operation_headroom_bytes:
-                        raise MemoryError("runtime_memory_budget_exceeded")
-                    metadata.grow(additional)
-                entries.append((logical_id, path, expected))
+                identity = dataset_file_identity(path)
+                if expected is not None and identity != expected:
+                    raise ValueError(error)
+                entries.append((path, identity))
+                hashes.append((logical_id, _hash_file_content(path, identity, error)))
             if not entries:
                 raise ValueError(error)
-            for index, (logical_id, path, expected) in enumerate(entries):
-                before = dataset_file_identity(path)
-                if expected is not None and before != expected:
-                    raise ValueError(error)
-                entries[index] = (logical_id, path, before)
-                if resource_policy is None:
-                    member_hash = _hash_file_content(path, before, error)
-                else:
-                    headroom = resource_policy.operation_headroom_bytes
-                    if headroom <= 0:
-                        raise MemoryError("runtime_memory_budget_exceeded")
-                    with resource_policy.lease(
-                        "storage.content.identity",
-                        min(1024 * 1024, headroom),
-                    ) as lease:
-                        member_hash = _hash_file_content(
-                            path,
-                            before,
-                            error,
-                            chunk_size=lease.reserved_bytes,
-                        )
-                member_hashes.append((logical_id, member_hash))
             digest = hashlib.sha256()
-            member_hashes.sort()
-            for logical_id, member_hash in member_hashes:
+            for logical_id, member_hash in sorted(hashes):
                 for value in (logical_id, member_hash):
                     encoded = value.encode("utf-8")
                     digest.update(len(encoded).to_bytes(8, "big"))
                     digest.update(encoded)
-            for _logical_id, path, expected in entries:
-                if dataset_file_identity(path) != expected:
+            for path, identity in entries:
+                if dataset_file_identity(path) != identity:
                     raise ValueError(error)
             return digest.hexdigest()
         except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
             raise ValueError(error) from exc
-        finally:
-            # Tracebacks must not retain the inventory beyond its lease.
-            entries.clear()
-            member_hashes.clear()
-            files = item = logical_id = _logical_id = path = expected = before = None
-            member_hash = encoded = value = None
 
 
 @contextmanager
@@ -258,7 +189,6 @@ def _hash_file_content(
 
 def native_filesystem_path(path: Path) -> str | Path:
     """Return a Windows extended path when native APIs need long-path support."""
-
     if os.name != "nt":
         return Path(path)
     absolute = os.path.abspath(path)
@@ -288,14 +218,14 @@ def filesystem_is_dir(path: Path) -> bool:
 def filesystem_iterdir(path: Path):
     logical_root = Path(path)
     for child in Path(native_filesystem_path(logical_root)).iterdir():
-        yield logical_root / child.name
+        yield (logical_root / child.name)
 
 
 def filesystem_glob(path: Path, pattern: str):
     logical_root = Path(path)
     native_root = Path(native_filesystem_path(logical_root))
     for child in native_root.glob(pattern):
-        yield logical_root / child.relative_to(native_root)
+        yield (logical_root / child.relative_to(native_root))
 
 
 def filesystem_scandir(path: Path):
@@ -308,11 +238,11 @@ def filesystem_walk(path: Path, *, follow_symlinks: bool = False, on_error=None)
     for parent, directories, files in native_root.walk(
         follow_symlinks=follow_symlinks, on_error=on_error
     ):
-        yield logical_root / parent.relative_to(native_root), directories, files
+        yield (logical_root / parent.relative_to(native_root), directories, files)
 
 
 def filesystem_mkdir(
-    path: Path, *, mode: int = 0o777, parents: bool = False, exist_ok: bool = False
+    path: Path, *, mode: int = 511, parents: bool = False, exist_ok: bool = False
 ) -> None:
     Path(native_filesystem_path(path)).mkdir(
         mode=mode, parents=parents, exist_ok=exist_ok
@@ -368,7 +298,7 @@ def filesystem_unlink(path: Path, *, missing_ok: bool = False) -> None:
             raise
 
 
-def filesystem_open_descriptor(path: Path, flags: int, mode: int = 0o777) -> int:
+def filesystem_open_descriptor(path: Path, flags: int, mode: int = 511) -> int:
     return os.open(native_filesystem_path(path), flags, mode)
 
 

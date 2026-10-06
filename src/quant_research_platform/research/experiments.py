@@ -93,7 +93,7 @@ class TrialRecorder:
             selection_group=selection_group,
         )
         recorder = TrialRecorder(self.layout, self.run_id, plan)
-        return recorder, recorder.begin(spec, common_coverage_id=common_coverage_id)
+        return (recorder, recorder.begin(spec, common_coverage_id=common_coverage_id))
 
     def finish(
         self,
@@ -116,7 +116,7 @@ class TrialRecorder:
                 value = metrics[key]
                 if hasattr(value, "item"):
                     value = value.item()
-                if type(value) is float and not isfinite(value):
+                if type(value) is float and (not isfinite(value)):
                     value = None
                 values[key] = value
         threads = dict(record.thread_settings)
@@ -145,10 +145,10 @@ class TrialRecorder:
         append_trial_record(self.root, self.plan, terminal)
 
     def reference(self) -> dict[str, str]:
-        with read_trial_ledger(self.root, self.plan) as (plan, records):
-            return {
-                "run_id": self.run_id,
-                "experiment_id": self.plan.experiment_id,
-                "protocol_hash": self.plan.protocol_hash,
-                "semantic_identity": trial_ledger_semantic_identity(self.plan, records),
-            }
+        plan, records = read_trial_ledger(self.root, self.plan)
+        return {
+            "run_id": self.run_id,
+            "experiment_id": self.plan.experiment_id,
+            "protocol_hash": self.plan.protocol_hash,
+            "semantic_identity": trial_ledger_semantic_identity(self.plan, records),
+        }

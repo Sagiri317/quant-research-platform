@@ -24,9 +24,7 @@ from quant_research_platform.research.statistics import (
 
 def test_common_candidate_coverage_is_intersection_without_imputation() -> None:
     frame = pd.DataFrame({"a": [0.1, np.nan, 0.3, 0.4], "b": [0.2, 0.2, np.nan, 0.5]})
-
     aligned = aligned_candidate_matrix(frame, minimum_observations=2)
-
     assert aligned.status == "DEFINED"
     assert aligned.observation_count == 2
     np.testing.assert_allclose(aligned.values, [[0.1, 0.2], [0.4, 0.5]])
@@ -52,11 +50,9 @@ def test_hac_and_fdr_delegate_to_statsmodels(method: str, owner_method: str) -> 
     expected_fit = OLS(values, np.ones((len(values), 1))).fit(
         cov_type="HAC", cov_kwds={"maxlags": 1}
     )
-
     result = hac_mean(values, max_lags=1)
     adjusted = fdr_adjust([0.01, 0.04, 0.2], method=method, alpha=0.05)
     expected = multipletests([0.01, 0.04, 0.2], alpha=0.05, method=owner_method)
-
     assert result.mean == pytest.approx(expected_fit.params[0])
     assert result.standard_error == pytest.approx(expected_fit.bse[0])
     assert result.p_value == pytest.approx(expected_fit.pvalues[0])
@@ -74,7 +70,6 @@ def test_fdr_uses_fixed_family_size_without_persisting_missing_hypotheses() -> N
             "missing": [np.nan, np.nan, np.nan],
         }
     )
-
     result = time_series_inference_summary(
         frame,
         identity_column="timestamp",
@@ -85,13 +80,10 @@ def test_fdr_uses_fixed_family_size_without_persisting_missing_hypotheses() -> N
     )
     observed = result.loc[result["timestamp"].eq("observed")].iloc[0]
     missing = result.loc[result["timestamp"].eq("missing")].iloc[0]
-
     assert observed["fdr_adjusted_p_value"] == pytest.approx(
-        multipletests(
-            [observed["p_value"], *([1.0] * 24)],
-            alpha=0.05,
-            method="fdr_bh",
-        )[1][0]
+        multipletests([observed["p_value"], *[1.0] * 24], alpha=0.05, method="fdr_bh")[
+            1
+        ][0]
     )
     assert missing["status"] == "UNDEFINED"
     assert pd.isna(missing["p_value"])
@@ -106,7 +98,7 @@ def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
         [
             [1.101262, 0.338431, -0.539972],
             [-1.260242, -1.894621, 0.018638],
-            [-0.810567, -0.872156, -0.221970],
+            [-0.810567, -0.872156, -0.22197],
             [-0.051846, -2.276783, 0.925147],
             [-2.026846, 1.859624, 0.590568],
             [-0.471845, 1.342997, 0.020786],
@@ -114,7 +106,6 @@ def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
             [1.061422, -0.907334, -0.612492],
         ]
     )
-
     assert first == second
     assert first.mean == pytest.approx(0.1125)
     assert (first.lower, first.upper) == pytest.approx((0.0125, 0.219375))
@@ -144,22 +135,16 @@ def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
 
 
 def test_psr_dsr_fixed_oracle() -> None:
-    returns = np.array([0.02, -0.01, 0.03, 0.01, 0.00, 0.04, -0.02, 0.01])
-
+    returns = np.array([0.02, -0.01, 0.03, 0.01, 0.0, 0.04, -0.02, 0.01])
     result = probabilistic_and_deflated_sharpe(
-        returns,
-        benchmark_sharpe=0.0,
-        trial_sharpes=[0.1, 0.2, 0.3, 0.4, 0.5],
+        returns, benchmark_sharpe=0.0, trial_sharpes=[0.1, 0.2, 0.3, 0.4, 0.5]
     )
-
     assert result.observed_sharpe == pytest.approx(0.5)
     assert result.psr == pytest.approx(0.8983492642265651)
     assert result.deflated_reference_sharpe == pytest.approx(0.18856566835299468)
     assert result.dsr == pytest.approx(0.7859405033926591)
     more_dispersed = probabilistic_and_deflated_sharpe(
-        returns,
-        benchmark_sharpe=0.0,
-        trial_sharpes=[-0.5, 0.0, 0.5, 1.0, 1.5],
+        returns, benchmark_sharpe=0.0, trial_sharpes=[-0.5, 0.0, 0.5, 1.0, 1.5]
     )
     assert more_dispersed.deflated_reference_sharpe > result.deflated_reference_sharpe
     assert more_dispersed.dsr < result.dsr
@@ -174,7 +159,6 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
             "b": benchmark + rng.normal(-0.001, 0.004, 64),
         }
     )
-
     spa = spa_reality_check(
         benchmark, models, block_size=20, repetitions=10000, seed=17
     )
@@ -188,7 +172,6 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
     direct_stepm.compute()
     direct_mcs = MCS(models, size=0.05, block_size=20, reps=10000, seed=17)
     direct_mcs.compute()
-
     assert (
         0.0 <= spa.lower_p_value <= spa.consistent_p_value <= spa.upper_p_value <= 1.0
     )
@@ -200,13 +183,11 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
     assert mcs.included == tuple(direct_mcs.included)
     assert mcs.excluded == tuple(direct_mcs.excluded)
     pd.testing.assert_frame_equal(mcs.p_values, direct_mcs.pvalues)
-
     scaled = spa_reality_check(
         benchmark * 1e-20, models * 1e-20, block_size=20, repetitions=10000, seed=17
     )
     assert scaled.status == "DEFINED"
     assert scaled.consistent_p_value == pytest.approx(spa.consistent_p_value)
-
     baseline = np.sin(np.arange(64)) / 100.0
     for candidates in (
         pd.DataFrame({"identical_a": baseline, "identical_b": baseline}),
@@ -256,22 +237,16 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
 def test_multiple_comparison_rejects_disjoint_time_indexes() -> None:
     benchmark = pd.Series([0.1, 0.2, 0.3], index=pd.date_range("2020-01-01", periods=3))
     models = pd.DataFrame(
-        {"candidate": [0.0, 0.1, 0.2]},
-        index=pd.date_range("2030-01-01", periods=3),
+        {"candidate": [0.0, 0.1, 0.2]}, index=pd.date_range("2030-01-01", periods=3)
     )
-
     spa = spa_reality_check(benchmark, models, block_size=1, repetitions=9, seed=1)
     stepm = stepm_superior_models(
         benchmark, models, block_size=1, repetitions=9, seed=1
     )
-
     assert spa.status == "UNDEFINED"
     assert spa.reason == "insufficient_common_coverage"
     assert stepm.status == "UNDEFINED"
-    duplicate_non_string_ids = pd.DataFrame(
-        [[0.1, 0.2]] * 8,
-        columns=[1, 1],
-    )
+    duplicate_non_string_ids = pd.DataFrame([[0.1, 0.2]] * 8, columns=[1, 1])
     with pytest.raises(ValueError, match="^loss_matrix_candidate_id_invalid$"):
         spa_reality_check(
             pd.Series([0.3] * 8),
@@ -295,7 +270,6 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
                     "weight": float(asset),
                 }
             )
-
     from quant_research_platform.research.statistics_production import (
         _fama_macbeth_period_records,
         _fama_macbeth_summary,
@@ -341,7 +315,6 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
     assert slope["mean"] == pytest.approx(np.mean(expected_slopes))
     from scipy.stats import norm
 
-    # Bartlett lag-one variance of four slopes spaced by 0.1 is 1/256.
     se = 1 / 16
     expected_mean = 0.549
     assert slope.standard_error == pytest.approx(se)
@@ -364,39 +337,6 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
         _fama_macbeth_period_records(
             duplicate, return_column="return", factors=("factor",), core_factors=()
         )
-
-
-@pytest.mark.parametrize("kind", ["aligned", "finite"])
-def test_matrix_cap_includes_conversion_and_live_temporaries(monkeypatch, kind):
-    from quant_research_platform.research import statistics
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-    from tests.helpers.runtime_resources import capture_test_policy
-
-    rows, columns = 20000, 32
-    values = np.arange(rows * columns, dtype="int32").reshape(rows, columns)
-    frame = pd.DataFrame(values, columns=[f"c{i}" for i in range(columns)])
-    cap = rows * (8 * columns + (2 if kind == "aligned" else 0)) + 65537
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024**2, explicit_cap_bytes=cap
-    )
-
-    def forbidden(*args, **kwargs):
-        raise AssertionError("conversion occurred before resource admission")
-
-    with runtime_resource_policy_scope(policy):
-        with monkeypatch.context() as patch:
-            if kind == "aligned":
-                patch.setattr(pd.DataFrame, "astype", forbidden)
-            else:
-                patch.setattr(np, "asarray", forbidden)
-            with pytest.raises(
-                MemoryError, match="statistical_matrix_exceeds_runtime_headroom"
-            ):
-                if kind == "aligned":
-                    aligned_candidate_matrix(frame)
-                else:
-                    statistics._finite_matrix(values, minimum_rows=4, minimum_columns=2)
-        assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("count", (40, 80, 100))
@@ -431,7 +371,6 @@ def test_nav_roundoff_is_explicit_and_retains_resolvable_variation():
     direct = np.array([0.1, np.nextafter(0.1, 1.0)] * 40)
     assert return_standard_deviation(direct) > 0
     matrix = np.column_stack((varied, np.linspace(-0.01, 0.02, len(values))))
-    # The full candidate varies, but a legal half-sample is constant to NAV resolution.
     matrix[:40, 0] = values[:40]
     errors = np.column_stack((error, np.zeros(len(values))))
     result = cscv_pbo(
@@ -497,7 +436,6 @@ def test_sample_risk_and_sharpe_are_invariant_to_binary_units(exponent):
     scale = 2.0**exponent
     with warnings.catch_warnings():
         warnings.simplefilter("error")
-        # Sample variance of [-a, 0, a] is a squared, hence sample risk is a.
         assert return_standard_deviation([-scale, 0.0, scale]) == scale
         matrix = np.array([[-1.0, 0.0], [0.0, 2.0], [1.0, 4.0]]) * scale
         np.testing.assert_array_equal(
@@ -774,7 +712,7 @@ def test_fama_macbeth_preserves_small_factor_units_and_rejects_collinearity():
     )
 
     x = np.linspace(5e-14, 2e-13, 1000)
-    y = 0.01 + 1e11 * x + 0.001 * np.sin(np.arange(len(x)))
+    y = 0.01 + 100000000000.0 * x + 0.001 * np.sin(np.arange(len(x)))
     frame = pd.DataFrame(
         {
             "timestamp": pd.Timestamp("2020-01-01"),
@@ -787,12 +725,12 @@ def test_fama_macbeth_preserves_small_factor_units_and_rejects_collinearity():
         context.prec = 80
         xx = [Decimal.from_float(value) for value in x]
         yy = [Decimal.from_float(value) for value in y]
-        mx, my = sum(xx) / len(xx), sum(yy) / len(yy)
-        slope = sum((a - mx) * (b - my) for a, b in zip(xx, yy, strict=True)) / sum(
+        mx, my = (sum(xx) / len(xx), sum(yy) / len(yy))
+        slope = sum(((a - mx) * (b - my) for a, b in zip(xx, yy, strict=True))) / sum(
             (a - mx) ** 2 for a in xx
         )
         intercept = my - slope * mx
-    for scale in (1.0, 1e12):
+    for scale in (1.0, 1000000000000.0):
         result = fama_macbeth_period(
             frame.assign(x=x * scale), return_column="y", factor_columns=("x",)
         )

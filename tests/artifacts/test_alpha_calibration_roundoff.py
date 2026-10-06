@@ -19,7 +19,6 @@ from quant_research_platform.research.portfolios.production import (
     frozen_alpha_calibration,
 )
 from quant_research_platform.research.predictions.outputs import _add_a_share_scores
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.identity import filesystem_read_bytes
 from tests.artifacts.test_portfolio_ledger_artifact import (
     _alpha_envelope,
@@ -89,7 +88,6 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         assert calibration.weighted_r2 == 1.0
     else:
         assert calibration.slope_standard_error > 0.0
-
     frame = _session(
         "2023-09-01",
         "2023-09-04",
@@ -116,22 +114,15 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
         saved["calibration"]["slope_standard_error"] == calibration.slope_standard_error
     )
     assert saved["calibration"]["slope_t_statistic"] == calibration.slope_t_statistic
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.alpha", 0) as lease,
-    ):
-        artifact = read_portfolio_ledger_artifact(
-            root, expected_identity=root.name, lease=lease
-        )
-        frozen, _ = frozen_alpha_calibration(
-            artifact.final_alpha_calibration,
-            cutoff=pd.Timestamp("2023-12-31"),
-            selection_group="global",
-        )
-        assert frozen == calibration
-        summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
-        assert (
-            summary["alpha_calibration"]["inference_status"]
-            == calibration.inference_status
-        )
-        assert filesystem_read_bytes(root / "final_alpha_calibration.json") == before
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    frozen, _ = frozen_alpha_calibration(
+        artifact.final_alpha_calibration,
+        cutoff=pd.Timestamp("2023-12-31"),
+        selection_group="global",
+    )
+    assert frozen == calibration
+    summary = summarize_portfolio_ledger(artifact.capital, artifact.iter_chunks())
+    assert (
+        summary["alpha_calibration"]["inference_status"] == calibration.inference_status
+    )
+    assert filesystem_read_bytes(root / "final_alpha_calibration.json") == before

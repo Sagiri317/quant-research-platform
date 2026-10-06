@@ -36,12 +36,6 @@ from quant_research_platform.research.statistics import (
     time_series_inference_summary,
 )
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    RuntimeResourcePolicy,
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-)
 from quant_research_platform.storage.layout import StorageLayout
 
 _PREDICTION_COLUMN = "__prediction_alpha__"
@@ -73,9 +67,8 @@ def build_a_share_statistics_tables(
     protocol_manifest: Mapping[str, object],
     time_window: TimeWindow,
     prediction_lookup: object,
-    resource_policy: RuntimeResourcePolicy,
     global_statistics: object | None,
-) -> OwnedValue[dict[str, pd.DataFrame]]:
+) -> dict[str, pd.DataFrame]:
     dataset_spec = dataset_catalog.get(dataset_id)
     selection_group = protocol_manifest["selection_group"]
     inference_blocker = _model_inference_blocker(
@@ -92,7 +85,7 @@ def build_a_share_statistics_tables(
         type(primary_label) is not str
         or type(availability) is not str
         or type(statistics) is not dict
-        or type(root_seed) is not int
+        or (type(root_seed) is not int)
     ):
         raise ValueError("statistics_protocol_invalid")
     max_lags = statistics.get("hac_lag")
@@ -104,11 +97,11 @@ def build_a_share_statistics_tables(
         type(max_lags) is not int
         or max_lags < 0
         or type(block_size) is not int
-        or block_size <= 0
-        or type(repetitions) is not int
-        or repetitions <= 0
-        or type(family_specs) is not dict
-        or type(core_factors) is not list
+        or (block_size <= 0)
+        or (type(repetitions) is not int)
+        or (repetitions <= 0)
+        or (type(family_specs) is not dict)
+        or (type(core_factors) is not list)
         or any(type(value) is not str for value in core_factors)
     ):
         raise ValueError("statistics_protocol_invalid")
@@ -135,7 +128,6 @@ def build_a_share_statistics_tables(
     family_ids = tuple(
         dict.fromkeys(item["family_id"] for item in model_entries.values())
     )
-    # Dataset columns are strings; ordinal keys keep business IDs out of this namespace.
     family_columns = {family: index for index, family in enumerate(family_ids)}
     prediction_columns = tuple(family_columns.values())
     benchmark_id = protocol_manifest["research_configuration"]["comparison_model_id"]
@@ -160,23 +152,11 @@ def build_a_share_statistics_tables(
             )
         )
     )
-    calendar_days = (
-        pd.Timestamp(factor_window.end) - pd.Timestamp(factor_window.start)
-    ).days + 1
-    accumulator_bound = max(
-        1,
-        calendar_days
-        * max(1, 3 * len(factors) + len(core) + 8 * len(family_ids) + 8)
-        * 1024,
-    )
     rank_records: list[dict[str, object]] = []
     comparison_records: list[dict[str, object]] = []
     loss_records: list[dict[str, object]] = []
     fmb_period_records: list[dict[str, object]] = []
     with ExitStack() as ownership:
-        accumulator_lease = ownership.enter_context(
-            resource_policy.lease("research.statistics.accumulators", accumulator_bound)
-        )
         chunks = iter_complete_session_frames(
             iter_research_dataset_chunks(
                 layout,
@@ -187,163 +167,129 @@ def build_a_share_statistics_tables(
                 access_window=protocol_manifest["access_window"],
             ),
             timestamp_column="timestamp",
-            resource_policy=resource_policy,
         )
         with closing_iterator(chunks):
             for session in chunks:
-                with resource_policy.lease(
-                    "research.statistics.session",
-                    max(
-                        1,
-                        5 * pandas_frame_payload_bytes(session)
-                        + len(session) * (256 + 48 * len(family_ids)),
-                    ),
+                mature = legal_training_rows(
+                    session,
+                    fitting_cutoff=factor_window.end,
+                    availability_column=availability,
+                    target_column=primary_label,
+                )
+                timestamp = pd.Timestamp(session["timestamp"].iloc[0])
+                if (
+                    pd.Timestamp(model_window.start)
+                    <= timestamp
+                    <= pd.Timestamp(model_window.end)
                 ):
-                    mature = keys = scores = values = found = rank = daily = (
-                        eligible
-                    ) = None
-                    try:
-                        mature = legal_training_rows(
-                            session,
-                            fitting_cutoff=factor_window.end,
-                            availability_column=availability,
-                            target_column=primary_label,
+                    quarter_id = str(timestamp.to_period("Q"))
+                    selection = persisted_model.selection(
+                        selection_group,
+                        quarter_id,
+                        access_window=protocol_manifest["access_window"],
+                    )
+                    for family_id in family_ids:
+                        entry = model_entries[quarter_id, family_id]
+                        metadata = entry["model_metadata"]
+                        inputs = model_input_validity_columns(
+                            metadata["input_columns"], metadata["model_algorithm"]
                         )
-                        timestamp = pd.Timestamp(session["timestamp"].iloc[0])
-                        if (
-                            pd.Timestamp(model_window.start)
-                            <= timestamp
-                            <= pd.Timestamp(model_window.end)
-                        ):
-                            quarter_id = str(timestamp.to_period("Q"))
-                            selection = persisted_model.selection(
-                                selection_group,
-                                quarter_id,
-                                access_window=protocol_manifest["access_window"],
+                        eligible = session["eligible"].eq(True) & session.loc[
+                            :, list(inputs)
+                        ].notna().all(axis=1)
+                        keys = session.loc[eligible, ["timestamp", "asset_id"]].copy()
+                        keys["family_id"] = family_id
+                        values, found = prediction_lookup.values_for_frame(
+                            keys, mark_matched=True
+                        )
+                        if not all(found):
+                            raise ValueError("missing_required_prediction_keys")
+                        scores = pd.Series(
+                            np.asarray(values, dtype="float64"), index=keys.index
+                        )
+                        mature[family_columns[family_id]] = scores.reindex(mature.index)
+                    if mature.empty:
+                        continue
+                    mature[_PREDICTION_COLUMN] = mature[
+                        family_columns[selection["selected_family_id"]]
+                    ]
+                    rank = cross_sectional_rank_ic(
+                        mature,
+                        value_columns=(
+                            *factors,
+                            _PREDICTION_COLUMN,
+                            *prediction_columns,
+                        ),
+                        label_column=primary_label,
+                    )
+                    rank_records.extend(rank.to_dict("records"))
+                    daily = rank.iloc[0]
+                    paired_rank, paired_count = _common_model_rank_ic(
+                        mature,
+                        family_ids=prediction_columns,
+                        label_column=primary_label,
+                    )
+                    comparison_records.extend(paired_rank.to_dict("records"))
+                    common = bool(
+                        np.isfinite(
+                            paired_rank.loc[:, list(prediction_columns)].to_numpy(
+                                dtype="float64"
                             )
-                            for family_id in family_ids:
-                                entry = model_entries[(quarter_id, family_id)]
-                                metadata = entry["model_metadata"]
-                                inputs = model_input_validity_columns(
-                                    metadata["input_columns"],
-                                    metadata["model_algorithm"],
-                                )
-                                eligible = session["eligible"].eq(True) & session.loc[
-                                    :, list(inputs)
-                                ].notna().all(axis=1)
-                                keys = session.loc[
-                                    eligible, ["timestamp", "asset_id"]
-                                ].copy()
-                                keys["family_id"] = family_id
-                                with prediction_lookup.values_for_frame(
-                                    keys, mark_matched=True
-                                ) as (values, found):
-                                    if not all(found):
-                                        raise ValueError(
-                                            "missing_required_prediction_keys"
-                                        )
-                                    scores = pd.Series(
-                                        np.asarray(values, dtype="float64"),
-                                        index=keys.index,
-                                    )
-                                mature[family_columns[family_id]] = scores.reindex(
-                                    mature.index
-                                )
-                            if mature.empty:
-                                continue
-                            mature[_PREDICTION_COLUMN] = mature[
-                                family_columns[selection["selected_family_id"]]
+                        ).all()
+                    )
+                    for family_id in family_ids:
+                        column = family_columns[family_id]
+                        value = daily[column]
+                        defined = bool(np.isfinite(value))
+                        paired_assets = (
+                            mature.loc[
+                                mature[[column, primary_label]].notna().all(axis=1),
+                                "asset_id",
                             ]
-                            rank = cross_sectional_rank_ic(
-                                mature,
-                                value_columns=(
-                                    *factors,
-                                    _PREDICTION_COLUMN,
-                                    *prediction_columns,
-                                ),
-                                label_column=primary_label,
-                            )
-                            rank_records.extend(rank.to_dict("records"))
-                            daily = rank.iloc[0]
-                            paired_rank, paired_count = _common_model_rank_ic(
-                                mature,
-                                family_ids=prediction_columns,
-                                label_column=primary_label,
-                            )
-                            comparison_records.extend(paired_rank.to_dict("records"))
-                            common = bool(
-                                np.isfinite(
-                                    paired_rank.loc[
-                                        :, list(prediction_columns)
-                                    ].to_numpy(dtype="float64")
-                                ).all()
-                            )
-                            for family_id in family_ids:
-                                column = family_columns[family_id]
-                                value = daily[column]
-                                defined = bool(np.isfinite(value))
-                                paired_assets = (
-                                    mature.loc[
-                                        mature[[column, primary_label]]
-                                        .notna()
-                                        .all(axis=1),
-                                        "asset_id",
-                                    ]
-                                    .astype(str)
-                                    .sort_values()
-                                )
-                                loss_records.append(
-                                    {
-                                        "timestamp": timestamp,
-                                        "access_window": protocol_manifest[
-                                            "access_window"
-                                        ],
-                                        "quarter_id": quarter_id,
-                                        "family_id": family_id,
-                                        "config_id": model_entries[
-                                            (quarter_id, family_id)
-                                        ]["model_id"],
-                                        "loss": -float(value) if defined else np.nan,
-                                        "observation_count": len(paired_assets),
-                                        "asset_coverage_id": canonical_json_hash(
-                                            paired_assets.tolist()
-                                        ),
-                                        "status": "DEFINED" if defined else "UNDEFINED",
-                                        "reason": None
-                                        if defined
-                                        else "cross_sectional_rankic_undefined",
-                                        "common_date": int(common),
-                                        "common_observation_count": paired_count,
-                                    }
-                                )
-                        else:
-                            if mature.empty:
-                                continue
-                            rank = cross_sectional_rank_ic(
-                                mature,
-                                value_columns=factors,
-                                label_column=primary_label,
-                            )
-                            rank_records.extend(rank.to_dict("records"))
-                        fmb_period_records.extend(
-                            _fama_macbeth_period_records(
-                                mature,
-                                return_column=primary_label,
-                                factors=factors,
-                                core_factors=core,
-                            )
+                            .astype(str)
+                            .sort_values()
                         )
-                    finally:
-                        mature = keys = scores = values = found = rank = daily = (
-                            eligible
-                        ) = session = None
-
+                        loss_records.append(
+                            {
+                                "timestamp": timestamp,
+                                "access_window": protocol_manifest["access_window"],
+                                "quarter_id": quarter_id,
+                                "family_id": family_id,
+                                "config_id": model_entries[quarter_id, family_id][
+                                    "model_id"
+                                ],
+                                "loss": -float(value) if defined else np.nan,
+                                "observation_count": len(paired_assets),
+                                "asset_coverage_id": canonical_json_hash(
+                                    paired_assets.tolist()
+                                ),
+                                "status": "DEFINED" if defined else "UNDEFINED",
+                                "reason": None
+                                if defined
+                                else "cross_sectional_rankic_undefined",
+                                "common_date": int(common),
+                                "common_observation_count": paired_count,
+                            }
+                        )
+                else:
+                    if mature.empty:
+                        continue
+                    rank = cross_sectional_rank_ic(
+                        mature, value_columns=factors, label_column=primary_label
+                    )
+                    rank_records.extend(rank.to_dict("records"))
+                fmb_period_records.extend(
+                    _fama_macbeth_period_records(
+                        mature,
+                        return_column=primary_label,
+                        factors=factors,
+                        core_factors=core,
+                    )
+                )
         if prediction_lookup.coverage_counts() != (0, 0):
             raise ValueError("prediction_dataset_coverage_mismatch")
-
         rank_by_date = pd.DataFrame.from_records(
-            rank_records,
-            columns=["timestamp", *factors, _PREDICTION_COLUMN],
+            rank_records, columns=["timestamp", *factors, _PREDICTION_COLUMN]
         )
         factor_summary = _factor_summary(
             rank_by_date,
@@ -368,9 +314,7 @@ def build_a_share_statistics_tables(
                 prediction_id,
             ),
         )
-        model_trials = _model_trials(
-            persisted_model, selection_group, output_lease=accumulator_lease
-        )
+        model_trials = _model_trials(persisted_model, selection_group)
         model_losses = pd.DataFrame.from_records(
             loss_records,
             columns=(
@@ -397,49 +341,32 @@ def build_a_share_statistics_tables(
                 columns={column: family for family, column in family_columns.items()}
             )
         )
-        common_count = int(
-            comparison_by_date.loc[:, list(family_ids)].notna().all(axis=1).sum()
+        int(comparison_by_date.loc[:, list(family_ids)].notna().all(axis=1).sum())
+        comparison, tests, robustness = _model_comparison(
+            comparison_by_date,
+            family_ids=family_ids,
+            benchmark_id=benchmark_id,
+            access_window=protocol_manifest["access_window"],
+            inference_blocker=inference_blocker,
+            max_lags=max_lags,
+            block_size=block_size,
+            repetitions=repetitions,
+            root_seed=root_seed,
+            dataset_id=dataset_id,
         )
-        bootstrap_workspace = (
-            64 * repetitions * len(family_ids) ** 2
-            + 256 * len(rank_by_date) * len(family_ids)
-            if inference_blocker is None and common_count > block_size
-            else 65536
+        group_comparison = _paired_group_rankic(
+            model_losses,
+            global_statistics=global_statistics,
+            selection_group=selection_group,
+            family_ids=family_ids,
+            protocol_manifest=protocol_manifest,
         )
-        resource_policy.require_working_set(
-            bootstrap_workspace, error="statistics_bootstrap_capacity_exceeded"
-        )
-        with resource_policy.lease(
-            "research.statistics.bootstrap_workspace", bootstrap_workspace
-        ):
-            comparison, tests, robustness = _model_comparison(
-                comparison_by_date,
-                family_ids=family_ids,
-                benchmark_id=benchmark_id,
-                access_window=protocol_manifest["access_window"],
-                inference_blocker=inference_blocker,
-                max_lags=max_lags,
-                block_size=block_size,
-                repetitions=repetitions,
-                root_seed=root_seed,
-                dataset_id=dataset_id,
-            )
-            group_comparison = _paired_group_rankic(
-                model_losses,
-                global_statistics=global_statistics,
-                selection_group=selection_group,
-                family_ids=family_ids,
-                protocol_manifest=protocol_manifest,
-            )
         fmb_periods = pd.DataFrame.from_records(
             fmb_period_records, columns=_FAMA_MACBETH_PERIOD_COLUMNS
         )
-        del rank_records, comparison_records, fmb_period_records, loss_records
+
         fmb_summary = _fama_macbeth_summary(
-            fmb_periods,
-            factors=factors,
-            core_factors=core,
-            max_lags=max_lags,
+            fmb_periods, factors=factors, core_factors=core, max_lags=max_lags
         )
         tables = {
             "factor_diagnostics": factor_summary,
@@ -453,15 +380,8 @@ def build_a_share_statistics_tables(
             "model_group_comparison": group_comparison,
             "model_reality_checks": tests,
         }
-        output_bytes = sum(
-            pandas_frame_payload_bytes(table) for table in tables.values()
-        )
-        if output_bytes > accumulator_lease.reserved_bytes:
-            raise ValueError("statistics_accumulator_bound_invalid")
-        accumulator_lease.shrink_to(max(1, output_bytes))
-        accumulator_lease.transfer("research.statistics.output")
         ownership.pop_all()
-        return OwnedValue(tables, accumulator_lease)
+        return tables
 
 
 def _paired_group_rankic(
@@ -513,8 +433,10 @@ def _paired_group_rankic(
                 and (
                     not left.index.equals(right.index)
                     or not left["asset_coverage_id"].equals(right["asset_coverage_id"])
-                    or not left["observation_count"].equals(right["observation_count"])
-                    or not left["access_window"].equals(right["access_window"])
+                    or (
+                        not left["observation_count"].equals(right["observation_count"])
+                    )
+                    or (not left["access_window"].equals(right["access_window"]))
                 )
             )
         ):
@@ -546,7 +468,7 @@ def _paired_group_rankic(
             fdr_alpha=declaration["alpha"],
             fdr_family_size=len(family_ids),
         ).set_index("timestamp")
-        if inference_blocker is None and not differences.empty
+        if inference_blocker is None and (not differences.empty)
         else None
     )
     rows = []
@@ -630,9 +552,9 @@ def _factor_families(
         if (
             type(family_id) is not str
             or type(raw_factors) is not list
-            or not raw_factors
+            or (not raw_factors)
             or any(type(factor) is not str for factor in raw_factors)
-            or len(set(raw_factors)) != len(raw_factors)
+            or (len(set(raw_factors)) != len(raw_factors))
         ):
             raise ValueError("statistics_protocol_invalid")
         if any(factor not in factors for factor in raw_factors):
@@ -731,10 +653,7 @@ def _prediction_summary(
     try:
         inference = hac_mean(values, max_lags=max_lags)
         bootstrap = stationary_bootstrap_mean_ci(
-            values,
-            block_size=block_size,
-            repetitions=repetitions,
-            seed=seed,
+            values, block_size=block_size, repetitions=repetitions, seed=seed
         )
     except ValueError as exc:
         if str(exc) not in {"hac_inference_undefined", "bootstrap_inference_undefined"}:
@@ -756,7 +675,7 @@ def _prediction_summary(
     return pd.DataFrame([row])
 
 
-def _model_trials(persisted_model, selection_group, *, output_lease) -> pd.DataFrame:
+def _model_trials(persisted_model, selection_group) -> pd.DataFrame:
     rows = []
     for decision_id, selection in persisted_model.selections[selection_group].items():
         for family in selection["families"]:
@@ -765,13 +684,6 @@ def _model_trials(persisted_model, selection_group, *, output_lease) -> pd.DataF
                 config_id = metrics["model_id"]
                 value = metrics["validation_rankic"]
                 defined = type(value) in {int, float} and np.isfinite(value)
-                row_bytes = 4096 + 4 * sum(
-                    len(value) for value in (decision_id, family_id, config_id)
-                )
-                current_runtime_resource_policy().require_working_set(
-                    row_bytes, error="statistics_accumulator_bound_invalid"
-                )
-                output_lease.grow(row_bytes)
                 rows.append(
                     {
                         "selection_group": selection_group,
@@ -785,14 +697,12 @@ def _model_trials(persisted_model, selection_group, *, output_lease) -> pd.DataF
                         "reason": None
                         if defined
                         else metrics["validation_rankic_reason"],
-                        "selection_status": (
-                            "CHAMPION"
-                            if family_id == selection["selected_family_id"]
-                            and config_id == family["selected_config_id"]
-                            else "FAMILY_WINNER"
-                            if config_id == family["selected_config_id"]
-                            else "TRIAL"
-                        ),
+                        "selection_status": "CHAMPION"
+                        if family_id == selection["selected_family_id"]
+                        and config_id == family["selected_config_id"]
+                        else "FAMILY_WINNER"
+                        if config_id == family["selected_config_id"]
+                        else "TRIAL",
                     }
                 )
     if not rows:
@@ -806,17 +716,23 @@ def _common_model_rank_ic(frame, *, family_ids, label_column):
     valid = np.isfinite(frame.loc[:, columns].to_numpy(dtype="float64")).all(axis=1)
     shared = frame.loc[valid]
     if shared.empty:
-        return pd.DataFrame(
-            [
-                {
-                    "timestamp": frame["timestamp"].iloc[0],
-                    **dict.fromkeys(family_ids, np.nan),
-                }
-            ]
-        ), 0
-    return cross_sectional_rank_ic(
-        shared, value_columns=family_ids, label_column=label_column
-    ), len(shared)
+        return (
+            pd.DataFrame(
+                [
+                    {
+                        "timestamp": frame["timestamp"].iloc[0],
+                        **dict.fromkeys(family_ids, np.nan),
+                    }
+                ]
+            ),
+            0,
+        )
+    return (
+        cross_sectional_rank_ic(
+            shared, value_columns=family_ids, label_column=label_column
+        ),
+        len(shared),
+    )
 
 
 def _model_comparison(
@@ -867,7 +783,7 @@ def _model_comparison(
             inference_blocker is None
             and access_window == "development"
             and challengers
-            and len(common) > block_size
+            and (len(common) > block_size)
         ):
             options = dict(block_size=block_size, repetitions=repetitions, seed=seed)
             if test_id == "spa_reality_check":
@@ -940,21 +856,23 @@ def _model_comparison(
                 for name in ("p_value", "included")
             ]
         test_rows.extend(
-            dict(
-                test_id=test_id,
-                access_window=access_window,
-                family_id=family,
-                statistic_id=name,
-                value=value,
-                status=status,
-                reason=reason,
-                observation_count=len(common),
-                block_size=block_size,
-                repetitions=repetitions,
-                alpha=0.05,
-                seed=seed,
+            (
+                dict(
+                    test_id=test_id,
+                    access_window=access_window,
+                    family_id=family,
+                    statistic_id=name,
+                    value=value,
+                    status=status,
+                    reason=reason,
+                    observation_count=len(common),
+                    block_size=block_size,
+                    repetitions=repetitions,
+                    alpha=0.05,
+                    seed=seed,
+                )
+                for family, name, value in values
             )
-            for family, name, value in values
         )
     if comparisons:
         comparison_table = pd.concat(comparisons, ignore_index=True)
@@ -970,11 +888,7 @@ def _model_comparison(
         ).iloc[:0]
         comparison_table.insert(0, "access_window", pd.Series(dtype="str"))
         comparison_table.insert(1, "benchmark_id", pd.Series(dtype="str"))
-    return (
-        comparison_table,
-        pd.DataFrame(test_rows),
-        pd.DataFrame(robustness_rows),
-    )
+    return (comparison_table, pd.DataFrame(test_rows), pd.DataFrame(robustness_rows))
 
 
 def _fama_macbeth_period_records(
@@ -996,9 +910,7 @@ def _fama_macbeth_period_records(
         )
         try:
             result = fama_macbeth_period(
-                frame,
-                return_column=return_column,
-                factor_columns=regression_factors,
+                frame, return_column=return_column, factor_columns=regression_factors
             )
         except ValueError as exc:
             if str(exc) != "fama_macbeth_period_insufficient":
@@ -1028,9 +940,9 @@ def _fama_macbeth_period_records(
                 "reason": None,
                 "observation_count": result.observation_count,
                 "value": float(coefficients[coefficient_id]),
-                "white_p_value": (
-                    result.white_p_value if result.white_p_value is not None else np.nan
-                ),
+                "white_p_value": result.white_p_value
+                if result.white_p_value is not None
+                else np.nan,
                 "white_reason": result.white_reason,
             }
             for coefficient_id in coefficient_ids

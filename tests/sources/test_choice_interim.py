@@ -15,7 +15,6 @@ from quant_research_platform.markets.implementations.a_share.fundamentals import
     materialize_pit_fundamentals,
 )
 from quant_research_platform.profiles.research import research_profile
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.choice import interim
 from quant_research_platform.sources.choice.fields import FINANCIAL_FIELDS
 from quant_research_platform.sources.choice.raw_exports import choice_session
@@ -25,7 +24,6 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_is_dir,
     filesystem_read_bytes,
     filesystem_read_text,
     filesystem_unlink,
@@ -81,11 +79,9 @@ def _snapshot(
     )
 
 
-def _read(result, policy):
+def _read(result):
     return {
-        data_id: read_dataset(
-            root, mode=DatasetReadMode.MATERIALIZED, resource_policy=policy
-        )
+        data_id: read_dataset(root, mode=DatasetReadMode.MATERIALIZED)
         for data_id, root in result.artifact_roots.items()
     }
 
@@ -108,45 +104,39 @@ def test_native_null_revisions_preserve_history_and_next_session_visibility(
         for day, values in (("2020-02-01", corrected), ("2020-02-02", withdrawn)):
             for branch in ("1", "3"):
                 _snapshot(session, layout, day, values, branch=branch)
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout,
-            start_date="2019-01-01",
-            end_date="2020-02-02",
-            resource_policy=policy,
+    result = interim.materialize_interim_data(
+        layout=layout, start_date="2019-01-01", end_date="2020-02-02"
+    )
+    frames = _read(result)
+    assert set(frames) == {*FINANCIAL_FIELDS, "financial_first_disclosure"}
+    for data_id in frames:
+        profile = research_profile()
+        assert str(profile.interim.get(data_id).source_id) == "choice"
+        assert (
+            profile.producer_bindings[data_id].producer
+            is interim.materialize_interim_data
         )
-        frames = _read(result, policy)
-        assert set(frames) == {*FINANCIAL_FIELDS, "financial_first_disclosure"}
-        for data_id in frames:
-            profile = research_profile()
-            assert str(profile.interim.get(data_id).source_id) == "choice"
-            assert (
-                profile.producer_bindings[data_id].producer
-                is interim.materialize_interim_data
-            )
-        data_id = next(
-            name for name, fields in FINANCIAL_FIELDS.items() if field in fields
-        )
-        column = FINANCIAL_FIELDS[data_id][field]
-        values = frames[data_id][column]
-        assert values.iloc[:2].tolist() == [100.0, 200.0] and pd.isna(values.iloc[2])
-        assert frames[data_id].report_period.eq(pd.Timestamp("2019-12-31")).all()
-        sessions = pd.DatetimeIndex(["2020-01-31", "2020-02-03", "2020-02-04"])
-        events = financial_events_from_interim(
-            {name: frames[name] for name in FINANCIAL_FIELDS},
-            frames["financial_first_disclosure"],
-            trading_sessions=sessions,
-        )
-        ttm = construct_ttm_events(events)
-        selected = ttm.loc[ttm.metric_id.eq(column)]
-        assert selected.available_at.tolist() == list(sessions[:2])
-        assert selected.value.iloc[0] == 100.0 and pd.isna(selected.value.iloc[1])
-        pit = materialize_pit_fundamentals(
-            pd.DataFrame({"asset_id": ["000001"] * 2, "timestamp": sessions[:2]}),
-            selected,
-        )
-        assert pit.value.iloc[0] == 100.0 and pd.isna(pit.value.iloc[1])
-        assert policy.used_memory_bytes == 0
+    data_id = next(
+        (name for name, fields in FINANCIAL_FIELDS.items() if field in fields)
+    )
+    column = FINANCIAL_FIELDS[data_id][field]
+    values = frames[data_id][column]
+    assert values.iloc[:2].tolist() == [100.0, 200.0] and pd.isna(values.iloc[2])
+    assert frames[data_id].report_period.eq(pd.Timestamp("2019-12-31")).all()
+    sessions = pd.DatetimeIndex(["2020-01-31", "2020-02-03", "2020-02-04"])
+    events = financial_events_from_interim(
+        {name: frames[name] for name in FINANCIAL_FIELDS},
+        frames["financial_first_disclosure"],
+        trading_sessions=sessions,
+    )
+    ttm = construct_ttm_events(events)
+    selected = ttm.loc[ttm.metric_id.eq(column)]
+    assert selected.available_at.tolist() == list(sessions[:2])
+    assert selected.value.iloc[0] == 100.0 and pd.isna(selected.value.iloc[1])
+    pit = materialize_pit_fundamentals(
+        pd.DataFrame({"asset_id": ["000001"] * 2, "timestamp": sessions[:2]}), selected
+    )
+    assert pit.value.iloc[0] == 100.0 and pd.isna(pit.value.iloc[1])
 
 
 def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_path):
@@ -162,31 +152,24 @@ def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_pat
             fields=tuple(reversed(FIELDS)),
         )
         _disclosure(session, layout, period="2018-12-31")
-    with runtime_resource_policy_scope() as policy:
-        identity = interim.source_content_identity(
-            layout.raw_source_root("choice"), "financial_balance"
-        )
-        result = interim.materialize_interim_data(
-            layout=layout,
-            data_ids=("financial_balance",),
-            start_date="2019-01-01",
-            end_date="2020-02-02",
-            resource_policy=policy,
-        )
-        frame = _read(result, policy)["financial_balance"]
-        assert len(frame) == 1 and frame.total_assets.iloc[0] == 0.0
-        assert identity == interim.source_content_identity(
-            layout.raw_source_root("choice"), "financial_balance"
-        )
-        with pytest.raises(
-            PortfolioTargetBlocked, match="choice_first_disclosure_snapshot_missing"
-        ):
-            interim.materialize_interim_data(
-                layout=layout,
-                data_ids=("financial_income",),
-                resource_policy=policy,
-            )
-        assert filesystem_is_dir(first) and policy.used_memory_bytes == 0
+    identity = interim.source_content_identity(
+        layout.raw_source_root("choice"), "financial_balance"
+    )
+    result = interim.materialize_interim_data(
+        layout=layout,
+        data_ids=("financial_balance",),
+        start_date="2019-01-01",
+        end_date="2020-02-02",
+    )
+    frame = _read(result)["financial_balance"]
+    assert len(frame) == 1 and frame.total_assets.iloc[0] == 0.0
+    assert identity == interim.source_content_identity(
+        layout.raw_source_root("choice"), "financial_balance"
+    )
+    with pytest.raises(
+        PortfolioTargetBlocked, match="choice_first_disclosure_snapshot_missing"
+    ):
+        interim.materialize_interim_data(layout=layout, data_ids=("financial_income",))
 
 
 def test_disclosure_and_financial_superset_is_one_raw_response(tmp_path):
@@ -198,17 +181,13 @@ def test_disclosure_and_financial_superset_is_one_raw_response(tmp_path):
             period="2019-12-31",
             end_date="2020-01-30",
             indicators=(*DATE_FIELDS, *FIELDS),
-            data={CODE: ["2020/1/30", None, None, *([100.0] * 14)]},
+            data={CODE: ["2020/1/30", None, None, *[100.0] * 14]},
         )
-    with runtime_resource_policy_scope() as policy:
-        frames = _read(
-            interim.materialize_interim_data(layout=layout, resource_policy=policy),
-            policy,
-        )
-        assert frames["financial_balance"].total_assets.tolist() == [100.0]
-        assert frames["financial_first_disclosure"].first_disclosure_date.tolist() == [
-            pd.Timestamp("2020-01-30")
-        ]
+    frames = _read(interim.materialize_interim_data(layout=layout))
+    assert frames["financial_balance"].total_assets.tolist() == [100.0]
+    assert frames["financial_first_disclosure"].first_disclosure_date.tolist() == [
+        pd.Timestamp("2020-01-30")
+    ]
 
 
 def test_disclosure_date_list_order_and_duplicates_are_semantically_equal(tmp_path):
@@ -229,19 +208,14 @@ def test_disclosure_date_list_order_and_duplicates_are_semantically_equal(tmp_pa
                 ]
             },
         )
-    with runtime_resource_policy_scope() as policy:
-        frames = _read(
-            interim.materialize_interim_data(
-                layout=layout,
-                data_ids=("financial_first_disclosure",),
-                resource_policy=policy,
-            ),
-            policy,
+    frames = _read(
+        interim.materialize_interim_data(
+            layout=layout, data_ids=("financial_first_disclosure",)
         )
-        assert frames["financial_first_disclosure"].first_disclosure_date.tolist() == [
-            pd.Timestamp("2020-01-30")
-        ]
-        assert policy.used_memory_bytes == 0
+    )
+    assert frames["financial_first_disclosure"].first_disclosure_date.tolist() == [
+        pd.Timestamp("2020-01-30")
+    ]
 
 
 @pytest.mark.parametrize("field", DATE_FIELDS)
@@ -258,28 +232,22 @@ def test_partial_disclosure_completeness_obeys_requested_report_period(tmp_path,
             indicators=(field,),
             data={CODE: ["2019/1/30" if field == "STMTACTDATE" else None]},
         )
-    with runtime_resource_policy_scope() as policy:
-        result = interim.materialize_interim_data(
-            layout=layout,
-            start_date="2019-01-01",
-            end_date="2020-02-02",
-            resource_policy=policy,
-        )
-        frames = _read(result, policy)
-        assert set(frames) == {*FINANCIAL_FIELDS, "financial_first_disclosure"}
-        assert frames["financial_balance"].total_assets.tolist() == [100.0]
-        for data_id in ("financial_balance", "financial_first_disclosure"):
-            with pytest.raises(
-                PortfolioTargetBlocked, match="choice_disclosure_field_missing"
-            ) as caught:
-                interim.materialize_interim_data(
-                    layout=StorageLayout(tmp_path / "unscoped"),
-                    raw_root=layout.raw_source_root("choice"),
-                    data_ids=(data_id,),
-                    resource_policy=policy,
-                )
-            assert "report_period=2018-12-31" in " ".join(caught.value.__notes__)
-        assert policy.used_memory_bytes == 0
+    result = interim.materialize_interim_data(
+        layout=layout, start_date="2019-01-01", end_date="2020-02-02"
+    )
+    frames = _read(result)
+    assert set(frames) == {*FINANCIAL_FIELDS, "financial_first_disclosure"}
+    assert frames["financial_balance"].total_assets.tolist() == [100.0]
+    for data_id in ("financial_balance", "financial_first_disclosure"):
+        with pytest.raises(
+            PortfolioTargetBlocked, match="choice_disclosure_field_missing"
+        ) as caught:
+            interim.materialize_interim_data(
+                layout=StorageLayout(tmp_path / "unscoped"),
+                raw_root=layout.raw_source_root("choice"),
+                data_ids=(data_id,),
+            )
+        assert "report_period=2018-12-31" in " ".join(caught.value.__notes__)
 
 
 @pytest.mark.parametrize("financial", [False, True])
@@ -313,28 +281,22 @@ def test_unfetched_field_is_blocked_and_other_coordinates_cannot_fill_it(
                 indicators=fields[-1:],
                 data={CODE: values[-1:]},
             )
-    with runtime_resource_policy_scope() as policy:
-        before = interim.source_content_identity(
-            layout.raw_source_root("choice"), data_id
-        )
-        reason = (
-            "choice_financial_snapshot_field_missing"
-            if financial
-            else "choice_disclosure_field_missing"
-        )
-        with pytest.raises(PortfolioTargetBlocked, match=reason) as caught:
-            interim.materialize_interim_data(
-                layout=layout, data_ids=(data_id,), resource_policy=policy
-            )
-        details = " ".join(caught.value.__notes__)
-        assert any(field in details for field in fields)
-        assert (
-            "report_period=" in details and "EndDate=" in details and "type=" in details
-        )
-        if foreign is None:
-            assert fields[-1] in details
-        assert not filesystem_exists(layout.interim_data_root("choice", data_id))
-        assert policy.used_memory_bytes == 0
+    before = interim.source_content_identity(layout.raw_source_root("choice"), data_id)
+    reason = (
+        "choice_financial_snapshot_field_missing"
+        if financial
+        else "choice_disclosure_field_missing"
+    )
+    with pytest.raises(PortfolioTargetBlocked, match=reason) as caught:
+        interim.materialize_interim_data(layout=layout, data_ids=(data_id,))
+    details = " ".join(caught.value.__notes__)
+    assert any(field in details for field in fields)
+    assert (
+        "report_period=" in details and "EndDate=" in details and ("type=" in details)
+    )
+    if foreign is None:
+        assert fields[-1] in details
+    assert not filesystem_exists(layout.interim_data_root("choice", data_id))
     if foreign is None:
         with choice_session(SDK(response())) as session:
             write_css(
@@ -345,25 +307,20 @@ def test_unfetched_field_is_blocked_and_other_coordinates_cannot_fill_it(
                 indicators=fields[-1:],
                 data={CODE: values[-1:]},
             )
-        with runtime_resource_policy_scope() as policy:
-            assert before != interim.source_content_identity(
-                layout.raw_source_root("choice"), data_id
+        assert before != interim.source_content_identity(
+            layout.raw_source_root("choice"), data_id
+        )
+        frames = _read(
+            interim.materialize_interim_data(layout=layout, data_ids=(data_id,))
+        )
+        assert len(frames[data_id]) == 1
+        if financial:
+            assert (
+                frames[data_id][list(FINANCIAL_FIELDS[data_id].values())]
+                .isna()
+                .all()
+                .all()
             )
-            frames = _read(
-                interim.materialize_interim_data(
-                    layout=layout, data_ids=(data_id,), resource_policy=policy
-                ),
-                policy,
-            )
-            assert len(frames[data_id]) == 1
-            if financial:
-                assert (
-                    frames[data_id][list(FINANCIAL_FIELDS[data_id].values())]
-                    .isna()
-                    .all()
-                    .all()
-                )
-            assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("financial", [False, True])
@@ -427,16 +384,10 @@ def test_missing_predecessor_is_not_a_proven_all_null_snapshot(tmp_path):
         interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
     with choice_session(SDK(response())) as session:
         _snapshot(session, layout, "2020-01-31", [None] * 14, branch="3")
-    with runtime_resource_policy_scope() as policy:
-        frame = _read(
-            interim.materialize_interim_data(
-                layout=layout,
-                data_ids=("financial_balance",),
-                resource_policy=policy,
-            ),
-            policy,
-        )["financial_balance"]
-        assert frame.total_assets.tolist() == [100.0, 110.0]
+    frame = _read(
+        interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
+    )["financial_balance"]
+    assert frame.total_assets.tolist() == [100.0, 110.0]
 
 
 @pytest.mark.parametrize(
@@ -479,41 +430,6 @@ def test_known_missing_coordinates_are_blocked_in_the_real_run_and_report(
     report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
     assert report["status"] != "COMPLETE"
     assert reason in str(report["report"]["sections"]["readiness/blockers"])
-
-
-def test_source_primary_exception_survives_index_cleanup_failure(tmp_path, monkeypatch):
-    layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
-        _disclosure(session, layout)
-        _snapshot(session, layout, "2020-01-30", [100.0] * 14)
-    actual_rows = interim._rows
-    actual_close = interim.ExactPrimaryKeyIndex.close
-    primary = KeyboardInterrupt("synthetic_choice_primary")
-
-    def rows(*args):
-        yield from actual_rows(*args)
-        raise primary
-
-    def close(index):
-        actual_close(index)
-        if index.primary_key == ("source_coordinate",):
-            raise RuntimeError("synthetic_choice_cleanup")
-
-    monkeypatch.setattr(interim, "_rows", rows)
-    monkeypatch.setattr(interim.ExactPrimaryKeyIndex, "close", close)
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(KeyboardInterrupt) as caught:
-            interim.materialize_interim_data(
-                layout=layout,
-                data_ids=("financial_balance",),
-                resource_policy=policy,
-            )
-        assert caught.value is primary
-        assert any("RuntimeError" in note for note in primary.__notes__)
-        assert policy.used_memory_bytes == 0
-    assert not filesystem_exists(
-        layout.interim_data_root("choice", "financial_balance")
-    )
 
 
 def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
@@ -585,134 +501,113 @@ def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
         correction[FIELDS.index("TINCOMESTATEMENT_61")] = None
         _snapshot(session, layout, "2020-02-01", correction)
         _snapshot(session, layout, "2020-02-01", [None] * 14, branch="3")
-
-    with runtime_resource_policy_scope() as policy:
-        imported = interim.materialize_interim_data(
-            layout=layout,
-            start_date="2018-01-01",
-            end_date="2020-02-02",
-            resource_policy=policy,
-        )
-        persisted = _read(imported, policy)
-        original = (
-            persisted["financial_income"]
-            .loc[
-                persisted["financial_income"].report_period.eq(
-                    pd.Timestamp("2019-12-31")
-                )
-                & persisted["financial_income"].version_identity.eq("original")
-            ]
-            .iloc[0]
-        )
-        assert (original.consolidated_net_income, original.parent_net_income) == (
-            8.0,
-            7.0,
-        )
-        sessions = pd.bdate_range("2018-01-01", "2020-02-04")
-        calendar_spec = profile.interim.get("trading_calendar")
-        calendar = pd.DataFrame(
-            {
-                "timestamp": sessions,
-                "calendar_date": sessions,
-                "source_market_type": 4,
-                "is_trading_day": True,
-                "source_day_of_week": sessions.dayofweek + 1,
-                "source_state": "O",
-            }
-        )
-        write_dataset(
-            layout.interim_data_root(calendar_spec.source_id, calendar_spec.data_id),
-            calendar.loc[:, list(calendar_spec.required_columns)],
-            spec=calendar_spec,
-            resource_policy=policy,
-            borrowed_input=True,
-        )
-        market = pd.DataFrame(
-            {
-                "market_id": "a_share",
-                "asset_id": ["000001", "000001"],
-                "timestamp": pd.to_datetime(["2020-01-31", "2020-02-03"]),
-                "total_market_cap": 200.0,
-            }
-        )
-        market_spec = ProcessedDataSpec(
-            data_id="market_panel_1d",
-            market_id="a_share",
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            kind=ProcessedDataKind.PANEL,
-            column_roles={
-                "market_id": ColumnRole.KEY,
-                "asset_id": ColumnRole.KEY,
-                "timestamp": ColumnRole.TIMESTAMP,
-                "total_market_cap": ColumnRole.CONTEXT,
-            },
-            primary_key=("market_id", "asset_id", "timestamp"),
-            partition_columns=("year",),
-        )
-        write_dataset(
-            layout.processed_data_root(
-                "a_share", market_spec.kind, market_spec.data_id
-            ),
-            market,
-            spec=market_spec,
-            resource_policy=policy,
-            borrowed_input=True,
-        )
-        for data_id in ("fundamental_pit", "fundamental_factors"):
-            spec = profile.processed.get(data_id)
-            produced = producer.produce_a_share_processed_data(
-                spec,
-                layout=layout,
-                time_window=TimeWindow("2018-01-01", "2020-02-04"),
-                processed_catalog=profile.processed,
-                source_catalog=profile.interim,
-                resource_policy=policy,
-            )
-            root = layout.processed_data_root("a_share", spec.kind, data_id)
-            with produced as (frames, metadata, verify):
-                write_dataset(
-                    root,
-                    frames,
-                    spec=spec,
-                    resource_policy=policy,
-                    instance_metadata=metadata,
-                    staged_validator=verify,
-                )
-            persisted[data_id] = read_dataset(root, resource_policy=policy)
-        saved = read_dataset(root, resource_policy=policy)
-        expected = [
-            0.035,
-            0.3,
-            0.15,
-            0.045,
-            7 / 55,
-            8 / 90,
-            10 / 90,
-            1 / 3,
-            0.1,
-            -1 / 90,
-            0.25,
-            0.2,
-            1 / 90,
-            0.2,
-            4 / 90,
-            0.4,
-            0.16,
-            0.1,
-            0.06,
+    imported = interim.materialize_interim_data(
+        layout=layout, start_date="2018-01-01", end_date="2020-02-02"
+    )
+    persisted = _read(imported)
+    original = (
+        persisted["financial_income"]
+        .loc[
+            persisted["financial_income"].report_period.eq(pd.Timestamp("2019-12-31"))
+            & persisted["financial_income"].version_identity.eq("original")
         ]
-        assert saved.loc[0, list(FUNDAMENTAL_FACTORS)].tolist() == pytest.approx(
-            expected
+        .iloc[0]
+    )
+    assert (original.consolidated_net_income, original.parent_net_income) == (8.0, 7.0)
+    sessions = pd.bdate_range("2018-01-01", "2020-02-04")
+    calendar_spec = profile.interim.get("trading_calendar")
+    calendar = pd.DataFrame(
+        {
+            "timestamp": sessions,
+            "calendar_date": sessions,
+            "source_market_type": 4,
+            "is_trading_day": True,
+            "source_day_of_week": sessions.dayofweek + 1,
+            "source_state": "O",
+        }
+    )
+    write_dataset(
+        layout.interim_data_root(calendar_spec.source_id, calendar_spec.data_id),
+        calendar.loc[:, list(calendar_spec.required_columns)],
+        spec=calendar_spec,
+    )
+    market = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": ["000001", "000001"],
+            "timestamp": pd.to_datetime(["2020-01-31", "2020-02-03"]),
+            "total_market_cap": 200.0,
+        }
+    )
+    market_spec = ProcessedDataSpec(
+        data_id="market_panel_1d",
+        market_id="a_share",
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        kind=ProcessedDataKind.PANEL,
+        column_roles={
+            "market_id": ColumnRole.KEY,
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "total_market_cap": ColumnRole.CONTEXT,
+        },
+        primary_key=("market_id", "asset_id", "timestamp"),
+        partition_columns=("year",),
+    )
+    write_dataset(
+        layout.processed_data_root("a_share", market_spec.kind, market_spec.data_id),
+        market,
+        spec=market_spec,
+    )
+    for data_id in ("fundamental_pit", "fundamental_factors"):
+        spec = profile.processed.get(data_id)
+        produced = producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow("2018-01-01", "2020-02-04"),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
         )
-        assert (
-            saved.loc[1, ["earnings_yield", "roe", "earnings_change_to_assets"]]
-            .isna()
-            .all()
-        )
-        assert saved.loc[1, "roa"] == pytest.approx(8 / 90)
-        assert policy.used_memory_bytes == 0
-        return persisted
+        root = layout.processed_data_root("a_share", spec.kind, data_id)
+        with produced as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        persisted[data_id] = read_dataset(root)
+    saved = read_dataset(root)
+    expected = [
+        0.035,
+        0.3,
+        0.15,
+        0.045,
+        7 / 55,
+        8 / 90,
+        10 / 90,
+        1 / 3,
+        0.1,
+        -1 / 90,
+        0.25,
+        0.2,
+        1 / 90,
+        0.2,
+        4 / 90,
+        0.4,
+        0.16,
+        0.1,
+        0.06,
+    ]
+    assert saved.loc[0, list(FUNDAMENTAL_FACTORS)].tolist() == pytest.approx(expected)
+    assert (
+        saved.loc[1, ["earnings_yield", "roe", "earnings_change_to_assets"]]
+        .isna()
+        .all()
+    )
+    assert saved.loc[1, "roa"] == pytest.approx(8 / 90)
+    return persisted
 
 
 @pytest.mark.parametrize("group_size", [1, 2])
@@ -749,11 +644,7 @@ def test_choice_persisted_financials_feed_all_nineteen_factors_and_keep_nulls(
                     values.append(value)
                 selected_data[code] = values
             result = original_write_css(
-                session,
-                layout,
-                indicators=selected,
-                data=selected_data,
-                **kwargs,
+                session, layout, indicators=selected, data=selected_data, **kwargs
             )
         return result
 
@@ -836,13 +727,13 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
     active = 0
 
     @contextmanager
-    def observed_index(root, financial, policy, *, members):
+    def observed_index(root, financial, *, members):
         nonlocal active
         active += 1
         assert active == 1
         opened.append(financial)
         try:
-            with original_index(root, financial, policy, members=members) as index:
+            with original_index(root, financial, members=members) as index:
                 yield index
         finally:
             active -= 1
@@ -887,8 +778,10 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
         candidate.interim_data_root("choice", "financial_income")
     )
     assert all(
-        hashlib.sha256(filesystem_read_bytes(path)).hexdigest() == digest
-        for path, digest in before.items()
+        (
+            hashlib.sha256(filesystem_read_bytes(path)).hexdigest() == digest
+            for path, digest in before.items()
+        )
     )
 
 
@@ -932,12 +825,10 @@ def test_raw_metadata_invalid_is_source_local(tmp_path, mutation):
         "{" if mutation == "json_corrupt" else json.dumps(payload),
         encoding="utf-8",
     )
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(ValueError):
-            interim.source_content_identity(
-                layout.raw_source_root("choice"), "financial_first_disclosure"
-            )
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(ValueError):
+        interim.source_content_identity(
+            layout.raw_source_root("choice"), "financial_first_disclosure"
+        )
 
 
 def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path):
@@ -1006,46 +897,6 @@ def test_choice_fatal_io_is_not_source_blocked(tmp_path, monkeypatch, error, bou
     assert caught.value is error
 
 
-@pytest.mark.parametrize("entry", ("identity", "materialize"))
-@pytest.mark.parametrize("capacity", ("captured", "explicit"))
-def test_choice_discovery_admission_precedes_metadata_decode(
-    tmp_path, monkeypatch, entry, capacity
-):
-    from quant_research_platform.runtime import resources
-
-    layout = StorageLayout(tmp_path)
-    with choice_session(SDK(response())) as session:
-        _disclosure(session, layout)
-    if capacity == "captured":
-        monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 4096)
-    decoded = []
-    reader = interim.read_bounded_qrp_json
-
-    def observed(*args, **kwargs):
-        decoded.append(True)
-        return reader(*args, **kwargs)
-
-    monkeypatch.setattr(interim, "read_bounded_qrp_json", observed)
-    with runtime_resource_policy_scope(
-        explicit_cap_bytes=4096 if capacity == "explicit" else None
-    ) as policy:
-        with pytest.raises(
-            ValueError, match="choice_discovery_exceeds_task_memory_budget"
-        ):
-            if entry == "identity":
-                interim.source_content_identity(
-                    layout.raw_source_root("choice"), "financial_first_disclosure"
-                )
-            else:
-                interim.materialize_interim_data(
-                    layout=layout,
-                    data_ids=("financial_first_disclosure",),
-                    resource_policy=policy,
-                )
-        assert not decoded
-        assert policy.used_memory_bytes == 0
-
-
 def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revisions(
     tmp_path,
 ):
@@ -1056,7 +907,6 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
         _disclosure(session, layout, period="2019-09-30", first="2020-02-03")
         _snapshot(session, layout, "2020-01-30", [100.0] * len(FIELDS))
         _snapshot(session, layout, "2020-01-30", [None] * len(FIELDS), branch="3")
-
     arguments = dict(
         profile=profile,
         layout=layout,
@@ -1073,12 +923,7 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
         )
         for item in earlier["target_results"]
     }
-    with runtime_resource_policy_scope() as policy:
-        saved = {
-            name: read_dataset(root, resource_policy=policy)
-            for name, root in roots.items()
-        }
-        assert policy.used_memory_bytes == 0
+    saved = {name: read_dataset(root) for name, root in roots.items()}
     assert saved["financial_balance"].total_assets.tolist() == [100.0]
     assert saved["financial_balance"].report_period.tolist() == [
         pd.Timestamp("2019-12-31")
@@ -1087,14 +932,12 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
         pd.Timestamp("2020-01-30")
     ]
     old_hashes = {name: _file_hashes(root) for name, root in roots.items()}
-
     later = research.data_materialize(**arguments, end_date="2020-02-02")
     results = {item["target_id"]: item for item in later["target_results"]}
     assert results["financial_balance"]["status"] == "BLOCKED"
     assert results["financial_balance"]["reason"] == "choice_revision_snapshot_missing"
     assert results["financial_first_disclosure"]["status"] == "BUILT"
-    assert all(_file_hashes(root) == old_hashes[name] for name, root in roots.items())
-
+    assert all((_file_hashes(root) == old_hashes[name] for name, root in roots.items()))
     with choice_session(SDK(response())) as session:
         for branch in ("1", "3"):
             _snapshot(
@@ -1110,9 +953,7 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
     root = layout.instance_root(
         layout.interim_data_root("choice", "financial_balance"), identity
     )
-    with runtime_resource_policy_scope() as policy:
-        frame = read_dataset(root, resource_policy=policy)
-        assert frame.total_assets.tolist() == [100.0, 200.0]
-        assert frame.correction_disclosure_date.iloc[1] == pd.Timestamp("2020-02-01")
-        assert policy.used_memory_bytes == 0
-    assert all(_file_hashes(root) == old_hashes[name] for name, root in roots.items())
+    frame = read_dataset(root)
+    assert frame.total_assets.tolist() == [100.0, 200.0]
+    assert frame.correction_disclosure_date.iloc[1] == pd.Timestamp("2020-02-01")
+    assert all((_file_hashes(root) == old_hashes[name] for name, root in roots.items()))

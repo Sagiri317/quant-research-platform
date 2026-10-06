@@ -17,7 +17,6 @@ from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
-    runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.tardis.raw import (
     _COPY_BYTES,
@@ -77,13 +76,12 @@ def _request_url(exchange, dataset_type, symbol, date):
     return f"https://datasets.tardis.dev/v1/{exchange}/{dataset_type}/{day:%Y/%m/%d}/{symbol}.csv.gz"
 
 
-def _rows(path, *, exchange, dataset_type, symbol, date, policy, sha256):
+def _rows(path, *, exchange, dataset_type, symbol, date, sha256):
     day = _date(date)
     lower = int(dt.datetime.combine(day, dt.time(), dt.UTC).timestamp()) * 1_000_000
     upper = lower + 86_400_000_000
     previous = lower
     with (
-        policy.lease("tardis.normalized.record", 8 * MAX_RECORD_BYTES),
         _verified_file(path, expected_sha256=sha256) as raw,
         gzip.GzipFile(fileobj=raw) as stream,
     ):
@@ -146,19 +144,14 @@ def _rows(path, *, exchange, dataset_type, symbol, date, policy, sha256):
                 row[key] is None or row[key] <= 0 for key in ("price", "amount")
             ):
                 raise ValueError("tardis_normalized_trade_value_invalid")
-            yield number, row
+            _yield_value = number, row
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
 
 
-def download_dataset(
-    output_root,
-    *,
-    exchange,
-    dataset_type,
-    symbol,
-    date,
-    byte_budget,
-    resource_policy=None,
-):
+def download_dataset(output_root, *, exchange, dataset_type, symbol, date, byte_budget):
     """Keep original gzip bytes and validate every row before atomic publication."""
     url = _request_url(exchange, dataset_type, symbol, date)
     if type(byte_budget) is not int or byte_budget <= 0:
@@ -167,68 +160,65 @@ def download_dataset(
     def write(root):
         require_free_disk_headroom(root, reserve_bytes=byte_budget)
         path = root / "data.csv.gz"
-        with runtime_resource_policy_scope(resource_policy) as policy:
-            digest = hashlib.sha256()
-            size = 0
-            with policy.lease("tardis.normalized.download", 2 * _COPY_BYTES):
-                try:
-                    response = urllib.request.urlopen(url, timeout=60)
-                except urllib.error.HTTPError as error:
-                    if error.code in {401, 403}:
-                        raise PermissionError("tardis_access_not_authorized") from None
-                    raise ValueError(f"tardis_http_status_{error.code}") from None
-                with response, open_filesystem_file(path, "xb") as output:
-                    if response.status != 200:
-                        raise ValueError("tardis_http_response_invalid")
-                    while block := response.read(_COPY_BYTES):
-                        size += len(block)
-                        if size > byte_budget:
-                            raise ValueError("tardis_download_budget_exceeded")
-                        require_free_disk_headroom(root, reserve_bytes=len(block))
-                        output.write(block)
-                        digest.update(block)
-                    output.flush()
-                    os.fsync(output.fileno())
-            sha256 = digest.hexdigest()
-            count = 0
-            first = last = None
-            with closing_iterator(
-                _rows(
-                    path,
-                    exchange=exchange,
-                    dataset_type=dataset_type,
-                    symbol=symbol,
-                    date=date,
-                    policy=policy,
-                    sha256=sha256,
-                )
-            ) as rows:
-                for number, row in rows:
-                    count = number
-                    if first is None:
-                        first = row["local_timestamp"]
-                    last = row["local_timestamp"]
-            manifest = {
-                "schema_id": SCHEMA_ID,
-                "source_id": "tardis",
-                "exchange": exchange,
-                "dataset_type": dataset_type,
-                "symbol": symbol,
-                "date": date,
-                "request_url": url,
-                "path": path.name,
-                "compressed_bytes": size,
-                "sha256": sha256,
-                "row_count": count,
-                "first_observed_us": first,
-                "last_observed_us": last,
-                "clock": "vendor_utc_microseconds",
-                "coverage": "observed_rows_only_no_native_continuity_proof",
-                "amount_unit": "contracts" if exchange == "okex-swap" else "base",
-                "iv_unit": None,
-            }
-            atomic_write_json(root / "manifest.json", manifest)
-            return manifest
+        digest = hashlib.sha256()
+        size = 0
+        try:
+            response = urllib.request.urlopen(url, timeout=60)
+        except urllib.error.HTTPError as error:
+            if error.code in {401, 403}:
+                raise PermissionError("tardis_access_not_authorized") from None
+            raise ValueError(f"tardis_http_status_{error.code}") from None
+        with response, open_filesystem_file(path, "xb") as output:
+            if response.status != 200:
+                raise ValueError("tardis_http_response_invalid")
+            while block := response.read(_COPY_BYTES):
+                size += len(block)
+                if size > byte_budget:
+                    raise ValueError("tardis_download_budget_exceeded")
+                require_free_disk_headroom(root, reserve_bytes=len(block))
+                output.write(block)
+                digest.update(block)
+            output.flush()
+            os.fsync(output.fileno())
+        sha256 = digest.hexdigest()
+        count = 0
+        first = last = None
+        with closing_iterator(
+            _rows(
+                path,
+                exchange=exchange,
+                dataset_type=dataset_type,
+                symbol=symbol,
+                date=date,
+                sha256=sha256,
+            )
+        ) as rows:
+            for number, row in rows:
+                count = number
+                if first is None:
+                    first = row["local_timestamp"]
+                last = row["local_timestamp"]
+        manifest = {
+            "schema_id": SCHEMA_ID,
+            "source_id": "tardis",
+            "exchange": exchange,
+            "dataset_type": dataset_type,
+            "symbol": symbol,
+            "date": date,
+            "request_url": url,
+            "path": path.name,
+            "compressed_bytes": size,
+            "sha256": sha256,
+            "row_count": count,
+            "first_observed_us": first,
+            "last_observed_us": last,
+            "clock": "vendor_utc_microseconds",
+            "coverage": "observed_rows_only_no_native_continuity_proof",
+            "amount_unit": "contracts" if exchange == "okex-swap" else "base",
+            "iv_unit": None,
+        }
+        atomic_write_json(root / "manifest.json", manifest)
+        return manifest
 
     return atomic_write_directory(Path(output_root), write)
 
@@ -288,7 +278,7 @@ def _archive_manifest(root):
     return manifest
 
 
-def _iter_records(root, *, resource_policy, expected_manifest_hash):
+def _iter_records(root, *, expected_manifest_hash):
     """Verify manifest and compressed identity throughout bounded row consumption."""
     root = Path(root)
     manifest = _archive_manifest(root)
@@ -304,7 +294,6 @@ def _iter_records(root, *, resource_policy, expected_manifest_hash):
                 dataset_type=manifest["dataset_type"],
                 symbol=manifest["symbol"],
                 date=manifest["date"],
-                policy=resource_policy,
                 sha256=manifest["sha256"],
             )
         ) as rows:
@@ -315,7 +304,10 @@ def _iter_records(root, *, resource_policy, expected_manifest_hash):
                 if first is None:
                     first = row["local_timestamp"]
                 last = row["local_timestamp"]
-                yield row
+                try:
+                    yield row
+                except GeneratorExit:
+                    return
             if count != manifest["row_count"] or (
                 first != manifest["first_observed_us"]
                 or last != manifest["last_observed_us"]
@@ -327,7 +319,7 @@ def _iter_records(root, *, resource_policy, expected_manifest_hash):
             if canonical_json_hash(read_manifest(root / "manifest.json")) != identity:
                 raise ValueError("tardis_normalized_manifest_changed")
         except BaseException as error:
-            if primary is None or isinstance(primary, GeneratorExit):
+            if primary is None:
                 raise
             primary.add_note(
                 "Normalized manifest verification also failed: " + type(error).__name__
@@ -352,7 +344,7 @@ def _selected_archives(root, archive_paths, time_window):
     return selected
 
 
-def iter_records(root, *, archive_paths, time_window, resource_policy):
+def iter_records(root, *, archive_paths, time_window):
     """Consume the declared dated observations without manufacturing gap coverage."""
     selected = _selected_archives(root, archive_paths, time_window)
     first = selected[0][1]
@@ -363,13 +355,13 @@ def iter_records(root, *, archive_paths, time_window, resource_policy):
         ):
             raise ValueError("tardis_normalized_scope_invalid")
         with closing_iterator(
-            _iter_records(
-                path,
-                resource_policy=resource_policy,
-                expected_manifest_hash=canonical_json_hash(manifest),
-            )
+            _iter_records(path, expected_manifest_hash=canonical_json_hash(manifest))
         ) as records:
-            yield from records
+            for _yield_value in records:
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
 
 
 def source_identity(root, _target_id, *, exchange, archives, time_window=None):

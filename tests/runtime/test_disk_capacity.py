@@ -2,17 +2,13 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
-import pandas as pd
 import pytest
 
 from quant_research_platform.runtime import resources
-from quant_research_platform.runtime.resources import (
-    pandas_frame_payload_bytes,
-    require_free_disk_headroom,
-)
+from quant_research_platform.runtime.resources import require_free_disk_headroom
 
 
-def test_disk_headroom_is_independent_of_memory_policy(
+def test_disk_headroom_uses_existing_parent_volume(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path,
 ) -> None:
@@ -37,16 +33,3 @@ def test_disk_headroom_requires_exact_nonnegative_int(value: object, tmp_path) -
             tmp_path,
             reserve_bytes=value,  # type: ignore[arg-type]
         )
-
-
-def test_pandas_frame_payload_bytes_is_the_exact_runtime_diagnostic() -> None:
-    frame = pd.DataFrame({"value": ["a", "bb"]})
-
-    assert pandas_frame_payload_bytes(frame) == int(
-        frame.memory_usage(index=True, deep=True).sum()
-    )
-
-
-def test_pandas_payload_diagnostic_rejects_non_frame() -> None:
-    with pytest.raises(TypeError, match="invalid_pandas_frame_payload"):
-        pandas_frame_payload_bytes(pd.Series([1]))  # type: ignore[arg-type]

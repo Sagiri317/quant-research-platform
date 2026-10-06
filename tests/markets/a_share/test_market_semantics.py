@@ -970,7 +970,11 @@ def test_special_treatment_pit_and_late_older_events_persist(tmp_path, reverse):
     root = layout.target_root(
         spec.data_id, layout.interim_data_root(spec.source_id, spec.data_id)
     )
-    write_dataset(root, history, spec=spec, resource_policy=None, borrowed_input=True)
+    write_dataset(
+        root,
+        history,
+        spec=spec,
+    )
     restored = read_dataset(root)
     panel = pd.DataFrame(
         {

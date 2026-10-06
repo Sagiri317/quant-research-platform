@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import hashlib
-import sys
 from collections import Counter
 from collections.abc import Mapping
 from html import escape
@@ -27,11 +26,7 @@ from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
     validate_business_manifest_envelope,
 )
-from quant_research_platform.contracts.json_codec import (
-    bounded_rendered_qrp_json_object_size,
-    canonical_json_hash,
-    json_record_working_set_bytes,
-)
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.targets import (
     ProducerKind,
@@ -43,24 +38,16 @@ from quant_research_platform.contracts.targets import (
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.reports import a_share, crypto_hft, diagnostic_status
 from quant_research_platform.reports.a_share import build_a_share_report
-from quant_research_platform.runtime.resources import (
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-)
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
 )
-from quant_research_platform.storage.datasets.schema import (
-    COMMON_MANIFEST_METADATA_KEY,
-)
+from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_METADATA_KEY
 from quant_research_platform.storage.experiments import (
     read_model_trial_ledger_reference,
 )
 from quant_research_platform.storage.identity import open_filesystem_file
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import (
-    read_dataset_manifest_evidence,
-)
+from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact_record,
     write_semantic_artifact,
@@ -84,43 +71,28 @@ def _report_contract(schema_id):
     return _REPORT_CONTRACTS[schema_id]
 
 
-def report_payload_working_set(value):
-    encoded = bounded_rendered_qrp_json_object_size(
-        value, lazy_arrays={}, max_bytes=sys.maxsize
-    )
-    return json_record_working_set_bytes(encoded)
-
-
-def _reserve_report_frame(lease, frame):
-    lease.grow(
-        4 * pandas_frame_payload_bytes(frame) + len(frame) * len(frame.columns) * 192
-    )
-
-
 def write_research_run_record(path: Path, record: ResearchRunRecord) -> Path:
     return write_json_evidence(Path(path), record.payload())
 
 
 def read_research_run_record(
-    path: Path, *, expected_profile_id: str | None = None, lease=None
+    path: Path, *, expected_profile_id: str | None = None
 ) -> ResearchRunRecord:
     candidate = Path(path)
-    with read_json_evidence(
+    payload = read_json_evidence(
         candidate,
         expected_schema_id="qrp-research-run",
         error="research_run_record_invalid",
-        lease=lease,
-    ) as payload:
-        record = research_run_record_from_payload(payload)
-        if candidate.stem != record.run_id:
-            raise ValueError("research_run_id_mismatch")
-        if expected_profile_id is not None and record.profile_id != expected_profile_id:
-            raise ValueError("research_run_profile_mismatch")
-        return record
+    )
+    record = research_run_record_from_payload(payload)
+    if candidate.stem != record.run_id:
+        raise ValueError("research_run_id_mismatch")
+    if expected_profile_id is not None and record.profile_id != expected_profile_id:
+        raise ValueError("research_run_profile_mismatch")
+    return record
 
 
-def _report_rows(frame, report_lease):
-    _reserve_report_frame(report_lease, frame)
+def _report_rows(frame):
     return [
         {
             key: value.isoformat() if isinstance(value, pd.Timestamp) else value
@@ -132,12 +104,7 @@ def _report_rows(frame, report_lease):
 
 
 def read_evaluation_report_evidence(
-    root,
-    *,
-    evaluation_id,
-    instance_identity,
-    report_lease,
-    expected_member_identities=None,
+    root, *, evaluation_id, instance_identity, expected_member_identities=None
 ):
     """Read validated aggregate evaluation evidence for both market reports."""
     tables = {}
@@ -148,14 +115,10 @@ def read_evaluation_report_evidence(
                 continue
             rows = []
             with closing_iterator(
-                iter_declared_parquet_member_batches(
-                    path,
-                    expected_identity=identity,
-                    target_chunk_bytes=256 * 1024,
-                )
+                iter_declared_parquet_member_batches(path, expected_identity=identity)
             ) as chunks:
                 for frame in chunks:
-                    rows.extend(_report_rows(frame, report_lease))
+                    rows.extend(_report_rows(frame))
             tables[path.stem] = rows
 
     manifest, _members = validate_output_bundle(
@@ -170,14 +133,15 @@ def read_evaluation_report_evidence(
             if key.startswith(f"outputs/{evaluation_id}/")
         },
         observer=observe,
-        lease=report_lease,
     )
     undefined = not any(tables.values()) or any(
-        value
-        for rows in tables.values()
-        for row in rows
-        for key, value in row.items()
-        if key.endswith("_reason")
+        (
+            value
+            for rows in tables.values()
+            for row in rows
+            for key, value in row.items()
+            if key.endswith("_reason")
+        )
     )
     return {
         "evaluation_id": evaluation_id,
@@ -192,7 +156,6 @@ def load_a_share_run_evidence(
     *,
     layout: StorageLayout,
     record: ResearchRunRecord,
-    report_lease,
     selections,
     reference_member_identities=None,
 ) -> dict[str, object]:
@@ -225,7 +188,6 @@ def load_a_share_run_evidence(
                 expected_member_identities=None
                 if reference_member_identities is None
                 else reference_member_identities.get(target_id),
-                lease=report_lease,
             )
             captured[target_id] = identities
         except (FileNotFoundError, OSError, ValueError):
@@ -236,7 +198,6 @@ def load_a_share_run_evidence(
 
     def table_records(artifact, member):
         with artifact.table(member) as frame:
-            _reserve_report_frame(report_lease, frame)
             return frame.astype(object).where(frame.notna(), None).to_dict("records")
 
     scenario = record.scenario_id
@@ -258,7 +219,6 @@ def load_a_share_run_evidence(
         ),
     ):
         load(target_id)
-
     trial_refs = {
         (item["run_id"], item["experiment_id"]): dict(item)
         for item in record.trial_ledgers
@@ -338,7 +298,6 @@ def load_a_share_run_evidence(
             evaluation_id=evaluation_ref.target_id,
             instance_identity=evaluation_ref.instance_identity,
             expected_member_identities=captured[evaluation_ref.target_id],
-            report_lease=report_lease,
         )
         coverage["evaluation"] = factor_evaluation["metadata"]["evaluation_diagnostics"]
     model_costs = []
@@ -354,7 +313,6 @@ def load_a_share_run_evidence(
             expected_identity=model_ref.instance_identity,
             expected_member_identities=captured[model_ref.target_id],
             operational_metadata=operational,
-            lease=report_lease,
         )
         if "model_phase_observations" in operational:
             model_costs.append(
@@ -364,25 +322,18 @@ def load_a_share_run_evidence(
                 }
             )
         for item in operational.get("model_trial_ledgers", []):
-            trial_refs[(item["run_id"], item["experiment_id"])] = item
+            trial_refs[item["run_id"], item["experiment_id"]] = item
     trial_counts = Counter()
     trial_status = "DEFINED"
     for reference in trial_refs.values():
         try:
-            with read_model_trial_ledger_reference(layout, reference) as (
-                _plan,
-                records,
-            ):
-                try:
-                    trial_counts.update(item.status for item in records)
-                finally:
-                    _plan = records = None
+            _plan, records = read_model_trial_ledger_reference(layout, reference)
+            trial_counts.update(item.status for item in records)
         except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
             trial_status = "FAILED"
             issues.append(
                 _issue("model_trials", "FAILED", "trial_ledger_reference_invalid")
             )
-
     statistics = {}
     for group in ("global", "quarterly"):
         statistics_target = f"{scenario}_{group}_statistics"
@@ -399,7 +350,6 @@ def load_a_share_run_evidence(
                     _instance_root(layout, statistics_ref),
                     expected_identity=str(statistics_ref.instance_identity),
                     expected_member_identities=captured[statistics_ref.target_id],
-                    lease=report_lease,
                 )
                 tables = {
                     name: table_records(artifact, name + ".parquet")
@@ -430,9 +380,7 @@ def load_a_share_run_evidence(
                     _issue(statistics_target, "FAILED", "statistics_reference_invalid")
                 )
                 group_statistics = _unavailable(issues, statistics_target)
-
         statistics[group] = group_statistics
-
     candidates = record.protocol.get("portfolio_candidates")
     if type(candidates) is not tuple or any(
         type(item) is not str for item in candidates
@@ -456,7 +404,6 @@ def load_a_share_run_evidence(
                 _instance_root(layout, portfolio_ref),
                 expected_identity=portfolio_ref.instance_identity,
                 expected_member_identities=captured[portfolio_ref.target_id],
-                lease=report_lease,
             )
             summaries = {
                 name: table_records(artifact, "portfolio_" + name + ".parquet")
@@ -467,100 +414,62 @@ def load_a_share_run_evidence(
                     "group_comparison",
                 )
             }
-            with (
-                artifact.table("portfolio_attribution.parquet") as attribution,
-                artifact.table("portfolio_daily.parquet") as daily,
-            ):
-                merged = None
-                try:
-                    with current_runtime_resource_policy().lease(
-                        "reports.portfolio.attribution",
-                        4
-                        * (
-                            pandas_frame_payload_bytes(attribution)
-                            + pandas_frame_payload_bytes(daily)
-                        ),
+            with artifact.table("portfolio_attribution.parquet") as attribution:
+                with artifact.table("portfolio_daily.parquet") as daily:
+                    merged = attribution.merge(
+                        daily[["candidate_id", "entry_at", "end_at", "nav_before"]],
+                        on=["candidate_id", "entry_at", "end_at"],
+                        how="left",
+                        validate="many_to_one",
+                    )
+                    attribution_summary = []
+                    for (candidate, component, component_type), rows in merged.groupby(
+                        ["candidate_id", "component_id", "component_type"], sort=True
                     ):
-                        merged = attribution.merge(
-                            daily[["candidate_id", "entry_at", "end_at", "nav_before"]],
-                            on=["candidate_id", "entry_at", "end_at"],
-                            how="left",
-                            validate="many_to_one",
-                        )
-                        attribution_summary = []
-                        for (
-                            candidate,
-                            component,
-                            component_type,
-                        ), rows in merged.groupby(
-                            ["candidate_id", "component_id", "component_type"],
-                            sort=True,
-                        ):
-                            defined = rows.status.eq("DEFINED").all()
-                            attribution_summary.append(
-                                dict(
-                                    candidate_id=candidate,
-                                    component_id=component,
-                                    component_type=component_type,
-                                    pnl=float((rows.value * rows.nav_before).sum())
-                                    if defined
-                                    else None,
-                                    status="DEFINED"
-                                    if defined
-                                    else "BLOCKED"
-                                    if rows.status.eq("BLOCKED").any()
-                                    else "UNDEFINED",
-                                    reason=""
-                                    if defined
-                                    else str(
-                                        rows.loc[
-                                            rows.status.ne("DEFINED"), "reason"
-                                        ].iloc[0]
-                                    ),
-                                    observation_count=len(rows),
-                                )
-                            )
-                        report_lease.grow(
-                            report_payload_working_set(
-                                {"attribution": attribution_summary}
+                        defined = rows.status.eq("DEFINED").all()
+                        attribution_summary.append(
+                            dict(
+                                candidate_id=candidate,
+                                component_id=component,
+                                component_type=component_type,
+                                pnl=float((rows.value * rows.nav_before).sum())
+                                if defined
+                                else None,
+                                status="DEFINED"
+                                if defined
+                                else "BLOCKED"
+                                if rows.status.eq("BLOCKED").any()
+                                else "UNDEFINED",
+                                reason=""
+                                if defined
+                                else str(
+                                    rows.loc[rows.status.ne("DEFINED"), "reason"].iloc[
+                                        0
+                                    ]
+                                ),
+                                observation_count=len(rows),
                             )
                         )
-                finally:
-                    attribution = daily = merged = rows = None
             with artifact.table("portfolio_exposures.parquet") as exposures:
-                latest = None
-                workspace = pandas_frame_payload_bytes(exposures) + 16 * len(exposures)
-                policy = current_runtime_resource_policy()
-                policy.require_working_set(
-                    workspace, error="report_working_set_exceeds_memory_capacity"
-                )
-                with policy.lease("reports.exposure_selection", workspace):
-                    try:
-                        latest = exposures.loc[
-                            exposures.entry_at.eq(
-                                exposures.groupby("candidate_id").entry_at.transform(
-                                    "max"
-                                )
-                            )
-                        ]
-                        exposure_evidence = {
-                            "status": "DEFINED" if not latest.empty else "UNDEFINED",
-                            "reason": ""
-                            if not latest.empty
-                            else "no_exposure_observations",
-                            "artifact_identity": portfolio_ref.instance_identity,
-                            "table": "portfolio_exposures.parquet",
-                            "key_columns": [
-                                "candidate_id",
-                                "decision_at",
-                                "entry_at",
-                                "factor_id",
-                            ],
-                            "value_column": "value",
-                            "latest": _report_rows(latest, report_lease),
-                        }
-                    finally:
-                        latest = exposures = None
+                latest = exposures.loc[
+                    exposures.entry_at.eq(
+                        exposures.groupby("candidate_id").entry_at.transform("max")
+                    )
+                ]
+                exposure_evidence = {
+                    "status": "DEFINED" if not latest.empty else "UNDEFINED",
+                    "reason": "" if not latest.empty else "no_exposure_observations",
+                    "artifact_identity": portfolio_ref.instance_identity,
+                    "table": "portfolio_exposures.parquet",
+                    "key_columns": [
+                        "candidate_id",
+                        "decision_at",
+                        "entry_at",
+                        "factor_id",
+                    ],
+                    "value_column": "value",
+                    "latest": _report_rows(latest),
+                }
             portfolio_statistics = {
                 "status": diagnostic_status(
                     [
@@ -623,7 +532,6 @@ def load_a_share_run_evidence(
                 _instance_root(layout, ledger_ref),
                 expected_identity=ledger_ref.instance_identity,
                 expected_member_identities=captured[ledger_ref.target_id],
-                lease=report_lease,
                 consume_batches=lambda artifact, batches, result=economics: (
                     result.update(summarize_portfolio_ledger(artifact.capital, batches))
                 ),
@@ -634,7 +542,6 @@ def load_a_share_run_evidence(
                 expected_identity=ledger_ref.instance_identity,
                 expected_member_identities=captured[ledger_ref.target_id],
                 operational_metadata=ledger_operations,
-                lease=report_lease,
             )
             portfolios.append(
                 {
@@ -678,7 +585,6 @@ def produce_a_share_report(
     *,
     layout: StorageLayout,
     record: ResearchRunRecord,
-    report_lease,
     selections,
     reference_member_identities=None,
 ) -> dict[str, object]:
@@ -687,7 +593,6 @@ def produce_a_share_report(
         evidence=load_a_share_run_evidence(
             layout=layout,
             record=record,
-            report_lease=report_lease,
             selections=selections,
             reference_member_identities=reference_member_identities,
         ),
@@ -698,7 +603,6 @@ def read_validated_reference(
     layout: StorageLayout,
     result: ResearchRunTargetResult,
     *,
-    lease,
     member_identities=None,
     expected_member_identities=None,
 ):
@@ -723,7 +627,6 @@ def read_validated_reference(
             expected_identity=result.instance_identity,
             member_identities=member_identities,
             expected_member_identities=expected_member_identities,
-            lease=lease,
         )
     if (
         envelope["logical_artifact_id"] != result.target_id
@@ -731,7 +634,7 @@ def read_validated_reference(
         or envelope["schema_identity"] != result.schema_identity
     ):
         raise ValueError("research_run_target_reference_invalid")
-    return root, envelope
+    return (root, envelope)
 
 
 def _instance_root(layout: StorageLayout, result: ResearchRunTargetResult) -> Path:
@@ -749,8 +652,7 @@ def _issue(target_id: str, status: str, reason: str) -> dict[str, str]:
 
 def _unavailable(issues: list[dict[str, str]], target_id: str) -> dict[str, object]:
     issue = next(
-        (item for item in reversed(issues) if item.get("target_id") == target_id),
-        None,
+        (item for item in reversed(issues) if item.get("target_id") == target_id), None
     )
     return {
         "status": issue["status"] if issue is not None else "BLOCKED",
@@ -779,11 +681,10 @@ def read_research_report_artifact(
     *,
     expected_identity: str,
     source_run: ResearchRunRecord | None = None,
-    report_lease,
     include_markdown: bool = False,
 ) -> dict[str, object]:
     envelope, members = read_semantic_artifact_record(
-        Path(instance_root), expected_identity=expected_identity, lease=report_lease
+        Path(instance_root), expected_identity=expected_identity
     )
     by_path = _require_members(members, ("report.json", "report.md"))
     contract = envelope["semantic_metadata"].get("target_contract")
@@ -791,36 +692,36 @@ def read_research_report_artifact(
         raise ValueError("research_report_semantics_invalid")
     schema_id = contract.get("schema_id")
     _report_contract(schema_id)
-    with read_json_evidence(
+    payload = read_json_evidence(
         Path(instance_root) / "report.json",
         expected_schema_id=schema_id,
         error="research_report_payload_invalid",
-        lease=report_lease,
         expected_member=by_path["report.json"],
-    ) as payload:
-        _validate_report_payload(payload)
-        _validate_report_semantics(envelope, payload)
-        if source_run is not None and (
-            payload["run_id"] != source_run.run_id
-            or payload["scenario_id"] != source_run.scenario_id
-            or payload["source_run_status"] != source_run.status.value
-            or envelope["research_window"] != dict(source_run.research_window)
-            or envelope["protocol_or_spec_identity"] != source_run.protocol_identity
-            or envelope["upstream_identities"]
+    )
+    _validate_report_payload(payload)
+    _validate_report_semantics(envelope, payload)
+    if source_run is not None and (
+        payload["run_id"] != source_run.run_id
+        or payload["scenario_id"] != source_run.scenario_id
+        or payload["source_run_status"] != source_run.status.value
+        or (envelope["research_window"] != dict(source_run.research_window))
+        or (envelope["protocol_or_spec_identity"] != source_run.protocol_identity)
+        or (
+            envelope["upstream_identities"]
             != {"source_run": canonical_json_hash(source_run.payload())}
-        ):
-            raise ValueError("research_report_run_lineage_mismatch")
-        if payload["scenario_id"] != envelope["logical_artifact_id"].removesuffix(
-            "_report_artifact"
-        ):
-            raise ValueError("research_report_payload_invalid")
-        if include_markdown:
-            report_lease.grow(8 * by_path["report.md"]["size"])
-            markdown = _read_utf8(
-                Path(instance_root) / "report.md", expected_member=by_path["report.md"]
-            )
-            return {"report": payload, "markdown": markdown}
-        return payload
+        )
+    ):
+        raise ValueError("research_report_run_lineage_mismatch")
+    if payload["scenario_id"] != envelope["logical_artifact_id"].removesuffix(
+        "_report_artifact"
+    ):
+        raise ValueError("research_report_payload_invalid")
+    if include_markdown:
+        markdown = _read_utf8(
+            Path(instance_root) / "report.md", expected_member=by_path["report.md"]
+        )
+        return {"report": payload, "markdown": markdown}
+    return payload
 
 
 def _validate_report_payload(payload: object) -> None:
@@ -838,7 +739,7 @@ def _validate_report_payload(payload: object) -> None:
         payload["source_run_status"] not in {"COMPLETE", "BLOCKED", "FAILED"}
         or payload["report_status"] not in {"COMPLETE", "BLOCKED", "FAILED"}
         or type(payload["sections"]) is not dict
-        or set(payload["sections"]) != set(_report_contract(payload["schema_id"])[0])
+        or (set(payload["sections"]) != set(_report_contract(payload["schema_id"])[0]))
     ):
         raise ValueError("research_report_payload_invalid")
     try:
@@ -872,20 +773,21 @@ def _validate_report_semantics(
         != f"{payload['scenario_id']}_report_artifact"
         or window.get("access") != payload["access_window"]
         or metadata.get("source_run_id") != payload["run_id"]
-        or metadata.get("source_run_status") != payload["source_run_status"]
-        or metadata.get("report_status") != payload["report_status"]
-        or contract.get("schema_id") != payload["schema_id"]
-        or contract.get("required_sections")
-        != list(_report_contract(payload["schema_id"])[0])
-        or upstream != {"source_run": contract.get("source_run_identity")}
-        or envelope.get("schema_identity") != canonical_json_hash(contract)
+        or (metadata.get("source_run_status") != payload["source_run_status"])
+        or (metadata.get("report_status") != payload["report_status"])
+        or (contract.get("schema_id") != payload["schema_id"])
+        or (
+            contract.get("required_sections")
+            != list(_report_contract(payload["schema_id"])[0])
+        )
+        or (upstream != {"source_run": contract.get("source_run_identity")})
+        or (envelope.get("schema_identity") != canonical_json_hash(contract))
     ):
         raise ValueError("research_report_semantics_invalid")
 
 
 def _require_members(
-    members: tuple[dict[str, object], ...],
-    expected: tuple[str, ...],
+    members: tuple[dict[str, object], ...], expected: tuple[str, ...]
 ) -> MappingProxyType[str, object]:
     by_path = {str(member.get("path")): member for member in members}
     if len(members) != len(expected) or tuple(sorted(by_path)) != expected:
@@ -932,7 +834,7 @@ def _markdown_table(lines, rows):
         return
     lines.extend(
         (
-            "| " + " | ".join(_markdown_cell(key) for key in columns) + " |",
+            "| " + " | ".join((_markdown_cell(key) for key in columns)) + " |",
             "| " + " | ".join("---" for _key in columns) + " |",
         )
     )

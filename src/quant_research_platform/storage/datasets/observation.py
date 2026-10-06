@@ -32,12 +32,7 @@ class DatasetSummaryObserver:
     def __post_init__(self) -> None:
         self.null_count_summary = {column: 0 for column in self.primary_key}
 
-    def observe_batch(
-        self,
-        batch: pa.RecordBatch,
-        *,
-        frame: pd.DataFrame,
-    ) -> None:
+    def observe_batch(self, batch: pa.RecordBatch, *, frame: pd.DataFrame) -> None:
         table = pa.Table.from_batches([batch])
         duplicates = self.exact_key_index.add_table(table)
         self._observe_frame(frame, batch=batch, duplicates=duplicates)

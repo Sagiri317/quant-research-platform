@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from contextlib import contextmanager
 from dataclasses import replace
 from functools import partial
 from types import SimpleNamespace
@@ -11,9 +10,7 @@ from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
-from quant_research_platform.contracts.experiments import (
-    training_availability_columns,
-)
+from quant_research_platform.contracts.experiments import training_availability_columns
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.models import ModelSpec, model_spec_payload
 from quant_research_platform.contracts.time import TimeWindow
@@ -96,9 +93,8 @@ def _metadata(
 def _passthrough_session(**attributes):
     session = SimpleNamespace(**attributes)
 
-    @contextmanager
     def filtered_view(_time_window):
-        yield session
+        return session
 
     session.filtered_view = filtered_view
     return session
@@ -113,7 +109,7 @@ def _research_rows() -> pd.DataFrame:
                 ["2014-01-02", "2014-01-02", "2014-01-03", "2014-01-03"]
             ),
             "momentum_20d": [1.0, 2.0, 2.0, 1.0],
-            "forward_return_20d": [0.01, 0.03, 0.02, 0.00],
+            "forward_return_20d": [0.01, 0.03, 0.02, 0.0],
             "eligible": [True, True, True, True],
             "can_enter": [True, True, True, True],
             "can_exit": [True, True, True, True],
@@ -163,7 +159,7 @@ def shared_model_protocol(specs, *, development_end="2019-06-30", configurations
                     "hyperparameters": dict(spec.hyperparameters),
                 }
                 for spec in specs
-            ],
+            ]
         },
     )
     return protocol
@@ -208,7 +204,6 @@ def shared_model_rows(specs, *, development_end="2019-06-30", assets=8):
 def shared_model_case(
     tmp_path,
     *,
-    lease,
     specs=None,
     frame=None,
     dataset=None,
@@ -275,7 +270,7 @@ def shared_model_case(
             "target_contract": {
                 "protocol": protocol,
                 "model_specs": [model_spec_payload(spec) for spec in specs],
-            },
+            }
         },
     )
 
@@ -318,10 +313,7 @@ def shared_model_case(
         verify_source=verify_source,
     )
     artifact = read_quarterly_model_artifact(
-        root,
-        lease=lease,
-        expected_identity=envelope.instance_identity,
-        trial_layout=layout,
+        root, expected_identity=envelope.instance_identity, trial_layout=layout
     )
     return SimpleNamespace(
         root=root,

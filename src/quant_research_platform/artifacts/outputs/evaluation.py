@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from pathlib import Path
 
 import pandas as pd
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 import quant_research_platform.reports.evaluation as evaluation_report
 from quant_research_platform.artifacts.outputs.common_validation import (
@@ -25,9 +23,7 @@ from quant_research_platform.artifacts.outputs.manifest import (
     evaluation_output_metadata,
     output_manifest_payload,
 )
-from quant_research_platform.artifacts.outputs.parquet import (
-    write_parquet,
-)
+from quant_research_platform.artifacts.outputs.parquet import write_parquet
 from quant_research_platform.contracts.evaluations import (
     EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS,
     EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
@@ -44,44 +40,23 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
     evidence_text_stream_unsafe_reason,
 )
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    current_runtime_resource_policy,
-    require_free_disk_headroom,
-)
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     filesystem_write_text,
-    native_filesystem_path,
+    open_filesystem_file,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
-from quant_research_platform.storage.parquet import (
-    _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
-    _parquet_frames_reservation,
-    _parquet_row_group_size,
-    _parquet_table_write_state,
-    _parquet_writer_fixed_reservation,
-)
+from quant_research_platform.storage.parquet import parquet_table_writer
 
 _EVALUATION_PENDING_TABLE_LIMIT = 64
-_EVALUATION_PENDING_TABLE_OVERHEAD_BYTES = 4 * 1024
 
 
 def write_evaluation_outputs_from_chunks(
-    chunks: Iterable[
-        tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]
-        | OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
-    ],
+    chunks: Iterable[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]],
     *,
     summary_factory: Callable[
-        [],
-        tuple[
-            EvaluationDiagnostics,
-            pd.DataFrame,
-            pd.DataFrame,
-            pd.DataFrame,
-        ],
+        [], tuple[EvaluationDiagnostics, pd.DataFrame, pd.DataFrame, pd.DataFrame]
     ],
     spec: EvaluationSpec,
     output_spec: OutputSpec,
@@ -89,7 +64,6 @@ def write_evaluation_outputs_from_chunks(
     n_groups: int,
 ) -> Path:
     """Persist managed evaluation chunks without retaining aggregate frames."""
-
     output_bundle = derive_output_bundle_root(
         output_spec=output_spec,
         layout=layout,
@@ -98,17 +72,11 @@ def write_evaluation_outputs_from_chunks(
 
     def _write(temp_root: Path) -> None:
         facts = _write_evaluation_artifact_chunks(
-            chunks,
-            temp_root=temp_root,
-            spec=spec,
-            n_groups=n_groups,
+            chunks, temp_root=temp_root, spec=spec, n_groups=n_groups
         )
-        (
-            evaluation_diagnostics,
-            ic_summary,
-            group_spread_summary,
-            coverage_summary,
-        ) = summary_factory()
+        evaluation_diagnostics, ic_summary, group_spread_summary, coverage_summary = (
+            summary_factory()
+        )
         validate_output_frame(
             ic_summary,
             required=EVALUATION_IC_SUMMARY_COLUMNS,
@@ -165,17 +133,14 @@ def write_evaluation_outputs_from_chunks(
         if unsafe_summary is not None:
             raise ValueError(f"evaluation_summary_share_unsafe: {unsafe_summary}")
         filesystem_write_text(
-            temp_root / "summary.md",
-            rendered_summary,
-            encoding="utf-8",
+            temp_root / "summary.md", rendered_summary, encoding="utf-8"
         )
         write_manifest(
             temp_root / "manifest.json",
             output_manifest_payload(
                 output_spec=output_spec,
                 metadata=evaluation_output_metadata(
-                    spec=spec,
-                    evaluation_diagnostics=evaluation_diagnostics,
+                    spec=spec, evaluation_diagnostics=evaluation_diagnostics
                 ),
                 files=EVALUATION_ARTIFACTS,
             ),
@@ -186,37 +151,12 @@ def write_evaluation_outputs_from_chunks(
 
 
 def _write_evaluation_artifact_chunks(
-    chunks: Iterable[
-        tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]
-        | OwnedValue[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]]
-    ],
+    chunks: Iterable[tuple[pd.DataFrame, pd.DataFrame, Mapping[str, object]]],
     *,
     temp_root: Path,
     spec: EvaluationSpec,
     n_groups: int,
 ) -> dict[str, object]:
-    batch_row_limit = 8_192
-    writers: dict[str, pq.ParquetWriter] = {}
-    empty_frames: dict[str, pd.DataFrame] = {}
-    writer_states: dict[str, ExitStack] = {}
-    pending_states = {
-        "metrics": ExitStack(),
-        "grouped_label_values": ExitStack(),
-    }
-    pending_tables: dict[str, list[pa.Table]] = {
-        "metrics": [],
-        "grouped_label_values": [],
-    }
-    pending_rows = {"metrics": 0, "grouped_label_values": 0}
-    writer_memory = (
-        {
-            "metrics": (_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES, 0),
-            "grouped_label_values": (_PARQUET_NATIVE_FIXED_WORKSPACE_BYTES, 0),
-        }
-        if current_runtime_resource_policy() is not None
-        else {}
-    )
-    decoded_metadata: dict[str, dict[bytes, bytes]] = {}
     paths = {
         "metrics": temp_root / "metrics.parquet",
         "grouped_label_values": temp_root / "grouped_label_values.parquet",
@@ -225,8 +165,11 @@ def _write_evaluation_artifact_chunks(
         "metrics": EVALUATION_METRICS_COLUMNS,
         "grouped_label_values": EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
     }
-    row_counts = {name: 0 for name in paths}
-    fixed_state: ExitStack | None = None
+    row_counts = dict.fromkeys(paths, 0)
+    empty_frames = {}
+    pending_tables = {name: [] for name in paths}
+    pending_rows = dict.fromkeys(paths, 0)
+    writers = {}
     rows_input = 0
     rows_after_filter_mode = 0
     rows_after_signal_label_dropna = 0
@@ -238,112 +181,41 @@ def _write_evaluation_artifact_chunks(
     skipped_timestamp_count = 0
     filter_columns_used: tuple[str, ...] = ()
     filter_definition_value = ""
+    with closing_iterator(ExitStack()) as resources:
 
-    def flush(name: str) -> None:
-        tables = pending_tables[name]
-        if not tables:
-            return
-        try:
-            table = pa.concat_tables(tables)
-            persisted, table_state, batch_rows, next_memory = (
-                _parquet_table_write_state(
-                    table,
-                    previous_metadata=decoded_metadata.get(name),
-                    retained_memory=writer_memory.get(name, (0, 0)),
+        def flush(name):
+            tables = pending_tables[name]
+            if not tables:
+                return
+            if name not in writers:
+                handle = resources.enter_context(
+                    closing_iterator(open_filesystem_file(paths[name], "xb"))
                 )
-            )
-            writer_memory[name] = next_memory
-            active_states = writer_states.get(name)
-            if active_states is None:
-                active_states = ExitStack()
-                writer_states[name] = active_states
-            active_states.enter_context(table_state)
-            decoded_metadata[name] = dict(persisted.schema.metadata or {})
-            writer = writers.get(name)
-            if writer is None:
-                try:
-                    writer = pq.ParquetWriter(
-                        native_filesystem_path(paths[name]),
-                        persisted.schema,
-                        compression="zstd",
-                        write_batch_size=batch_rows,
-                        max_rows_per_page=batch_rows,
-                        use_dictionary=False,
-                        write_statistics=False,
-                        write_page_index=False,
-                        write_page_checksum=False,
-                    )
-                except BaseException as exc:
-                    state_to_close = writer_states.pop(name)
-                    try:
-                        state_to_close.close()
-                    except BaseException as close_error:
-                        exc.add_note(
-                            "evaluation writer state release also failed: "
-                            f"{type(close_error).__name__}"
-                        )
-                    writer_memory.pop(name)
-                    raise
-                writers[name] = writer
-            writer.write_table(
-                persisted,
-                row_group_size=_parquet_row_group_size(persisted.num_rows),
-            )
+                writers[name] = resources.enter_context(
+                    parquet_table_writer(handle, parent=temp_root, compression="zstd")
+                )
+            writers[name](pa.concat_tables(tables))
             row_counts[name] += pending_rows[name]
-        finally:
-            primary = sys.exception()
-            try:
-                pending_states[name].close()
-            except BaseException as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "evaluation pending frame release also failed: "
-                    f"{type(close_error).__name__}"
-                )
-            finally:
-                pending_states[name] = ExitStack()
-                pending_tables[name] = []
-                pending_rows[name] = 0
+            tables.clear()
+            pending_rows[name] = 0
 
-    def write_frame(name: str, frame: pd.DataFrame) -> None:
-        if frame.empty:
-            empty_frames[name] = frame.copy()
-            return
-        table = pa.Table.from_pandas(frame, preserve_index=False)
-        policy = current_runtime_resource_policy()
-        if policy is not None:
-            pending_states[name].enter_context(
-                policy.lease(
-                    "artifacts.parquet.pending",
-                    max(1, table.nbytes) + _EVALUATION_PENDING_TABLE_OVERHEAD_BYTES,
-                )
+        def write_frame(name, frame):
+            if frame.empty:
+                empty_frames[name] = frame.copy()
+                return
+            pending_tables[name].append(
+                pa.Table.from_pandas(frame, preserve_index=False)
             )
-        pending_tables[name].append(table)
-        pending_rows[name] += len(frame)
-        if pending_rows[name] >= batch_row_limit:
-            flush(name)
-        elif len(pending_tables[name]) >= _EVALUATION_PENDING_TABLE_LIMIT:
-            flush(name)
+            pending_rows[name] += len(frame)
+            if (
+                pending_rows[name] >= 8192
+                or len(pending_tables[name]) >= _EVALUATION_PENDING_TABLE_LIMIT
+            ):
+                flush(name)
 
-    primary: BaseException | None = None
-    try:
-        require_free_disk_headroom(
-            temp_root,
-            reserve_bytes=2 * _PARQUET_NATIVE_FIXED_WORKSPACE_BYTES,
-        )
-        fixed_state = _parquet_writer_fixed_reservation(
-            writer_count=2,
-            index_bytes=0,
-        )
         with closing_iterator(iter(chunks)) as active_chunks:
             for item in active_chunks:
-                if isinstance(item, OwnedValue):
-                    value = item.value
-                    owned_lease = item.lease
-                else:
-                    value = item
-                    owned_lease = None
+                value = item
                 metrics, grouped, metadata = value
                 validate_output_frame(
                     metrics,
@@ -355,194 +227,100 @@ def _write_evaluation_artifact_chunks(
                     required=required["grouped_label_values"],
                     error_name="evaluation_grouped_label_values",
                 )
-                with _parquet_frames_reservation(
-                    ((metrics, ()), (grouped, ())),
-                    owned_lease=owned_lease,
-                ):
-                    try:
-                        validate_evaluation_artifact_structure(
-                            metrics=metrics,
-                            grouped_label_values=grouped,
-                            ic_summary=pd.DataFrame(
-                                columns=EVALUATION_IC_SUMMARY_COLUMNS
-                            ),
-                            group_spread_summary=pd.DataFrame(
-                                columns=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS
-                            ),
-                            spec=spec,
-                            n_groups=n_groups,
-                        )
-                        timestamps = strict_timestamp_series(
-                            metrics["timestamp"],
-                            error="evaluation_diagnostics_inconsistent",
-                        )
-                        n_obs = strict_non_negative_count_series(metrics["n_obs"])
-                        rows_input += int(metadata["rows_input"])
-                        rows_after_filter_mode += int(
-                            metadata["rows_after_filter_mode"]
-                        )
-                        rows_after_signal_label_dropna += int(n_obs.sum())
-                        metric_rows += len(metrics)
-                        grouped_label_value_rows += len(grouped)
-                        if spec.evaluation_axis == "single_asset_time_series":
-                            chunk_timestamp_count = int(metadata["timestamp_count"])
-                            timestamp_count += chunk_timestamp_count
-                            skipped_timestamp_count += int(
-                                metadata["skipped_timestamp_count"]
-                            )
-                            chunk_min = metadata["min_timestamp"]
-                            chunk_max = metadata["max_timestamp"]
-                            if chunk_timestamp_count == 0:
-                                if (
-                                    not metrics.empty
-                                    or not grouped.empty
-                                    or chunk_min is not None
-                                    or chunk_max is not None
-                                ):
-                                    raise ValueError(
-                                        "evaluation_diagnostics_inconsistent"
-                                    )
-                            elif (
-                                chunk_timestamp_count < 0
-                                or not isinstance(chunk_min, str)
-                                or not isinstance(chunk_max, str)
-                            ):
-                                raise ValueError("evaluation_diagnostics_inconsistent")
-                        else:
-                            timestamp_count += int(timestamps.nunique())
-                            skipped_timestamp_count += int(
-                                timestamps.loc[n_obs.lt(2)].nunique()
-                            )
-                            chunk_min = (
-                                time_value_isoformat(
-                                    pd.Timestamp(timestamps.min()),
-                                    preserve_datetime=True,
-                                )
-                                if not timestamps.empty
-                                else None
-                            )
-                            chunk_max = (
-                                time_value_isoformat(
-                                    pd.Timestamp(timestamps.max()),
-                                    preserve_datetime=True,
-                                )
-                                if not timestamps.empty
-                                else None
-                            )
-                        if chunk_min is not None and chunk_max is not None:
-                            min_timestamp = (
-                                chunk_min
-                                if min_timestamp is None
-                                else min(min_timestamp, chunk_min)
-                            )
-                            max_timestamp = (
-                                chunk_max
-                                if max_timestamp is None
-                                else max(max_timestamp, chunk_max)
-                            )
-                        chunk_filter_columns = tuple(
-                            str(column) for column in metadata["filter_columns_used"]
-                        )
-                        chunk_filter_definition = str(metadata["filter_definition"])
-                        if not filter_definition_value:
-                            filter_columns_used = chunk_filter_columns
-                            filter_definition_value = chunk_filter_definition
-                        elif (
-                            filter_columns_used != chunk_filter_columns
-                            or filter_definition_value != chunk_filter_definition
+                validate_evaluation_artifact_structure(
+                    metrics=metrics,
+                    grouped_label_values=grouped,
+                    ic_summary=pd.DataFrame(columns=EVALUATION_IC_SUMMARY_COLUMNS),
+                    group_spread_summary=pd.DataFrame(
+                        columns=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS
+                    ),
+                    spec=spec,
+                    n_groups=n_groups,
+                )
+                timestamps = strict_timestamp_series(
+                    metrics["timestamp"], error="evaluation_diagnostics_inconsistent"
+                )
+                n_obs = strict_non_negative_count_series(metrics["n_obs"])
+                rows_input += int(metadata["rows_input"])
+                rows_after_filter_mode += int(metadata["rows_after_filter_mode"])
+                rows_after_signal_label_dropna += int(n_obs.sum())
+                metric_rows += len(metrics)
+                grouped_label_value_rows += len(grouped)
+                if spec.evaluation_axis == "single_asset_time_series":
+                    chunk_timestamp_count = int(metadata["timestamp_count"])
+                    timestamp_count += chunk_timestamp_count
+                    skipped_timestamp_count += int(metadata["skipped_timestamp_count"])
+                    chunk_min = metadata["min_timestamp"]
+                    chunk_max = metadata["max_timestamp"]
+                    if chunk_timestamp_count == 0:
+                        if (
+                            not metrics.empty
+                            or not grouped.empty
+                            or chunk_min is not None
+                            or (chunk_max is not None)
                         ):
                             raise ValueError("evaluation_diagnostics_inconsistent")
-                        write_frame("metrics", metrics)
-                        write_frame("grouped_label_values", grouped)
-                    finally:
-                        metrics = grouped = metadata = value = timestamps = n_obs = None
-                        if isinstance(item, OwnedValue):
-                            item.value = None
-                        item = None
-        flush("metrics")
-        flush("grouped_label_values")
-        for name in tuple(writers):
-            writer = writers.pop(name)
-            state_to_close = writer_states.pop(name)
-            try:
-                writer.add_key_value_metadata(decoded_metadata[name])
-            except BaseException as exc:
-                try:
-                    writer.close()
-                except BaseException as close_error:
-                    exc.add_note(
-                        "evaluation parquet writer close also failed: "
-                        f"{type(close_error).__name__}"
+                    elif (
+                        chunk_timestamp_count < 0
+                        or not isinstance(chunk_min, str)
+                        or (not isinstance(chunk_max, str))
+                    ):
+                        raise ValueError("evaluation_diagnostics_inconsistent")
+                else:
+                    timestamp_count += int(timestamps.nunique())
+                    skipped_timestamp_count += int(
+                        timestamps.loc[n_obs.lt(2)].nunique()
                     )
-                try:
-                    state_to_close.close()
-                except BaseException as close_error:
-                    exc.add_note(
-                        "evaluation writer state release also failed: "
-                        f"{type(close_error).__name__}"
+                    chunk_min = (
+                        time_value_isoformat(
+                            pd.Timestamp(timestamps.min()), preserve_datetime=True
+                        )
+                        if not timestamps.empty
+                        else None
                     )
-                raise
-            try:
-                writer.close()
-            except BaseException as exc:
-                try:
-                    state_to_close.close()
-                except BaseException as close_error:
-                    exc.add_note(
-                        "evaluation writer state release also failed: "
-                        f"{type(close_error).__name__}"
+                    chunk_max = (
+                        time_value_isoformat(
+                            pd.Timestamp(timestamps.max()), preserve_datetime=True
+                        )
+                        if not timestamps.empty
+                        else None
                     )
-                raise
-            state_to_close.close()
-        for name, columns in required.items():
-            if row_counts[name] == 0:
-                write_parquet(
-                    empty_frames.get(name, pd.DataFrame(columns=list(columns))),
-                    paths[name],
-                    engine="pyarrow",
-                    compression="zstd",
-                    index=False,
+                if chunk_min is not None and chunk_max is not None:
+                    min_timestamp = (
+                        chunk_min
+                        if min_timestamp is None
+                        else min(min_timestamp, chunk_min)
+                    )
+                    max_timestamp = (
+                        chunk_max
+                        if max_timestamp is None
+                        else max(max_timestamp, chunk_max)
+                    )
+                chunk_filter_columns = tuple(
+                    str(column) for column in metadata["filter_columns_used"]
                 )
-    except BaseException as exc:
-        primary = exc
-        for pending_state in pending_states.values():
-            try:
-                pending_state.close()
-            except BaseException as close_error:
-                primary.add_note(
-                    "evaluation pending frame release also failed: "
-                    f"{type(close_error).__name__}"
-                )
-        for name in tuple(writers):
-            writer = writers.pop(name)
-            try:
-                writer.close()
-            except BaseException as close_error:
-                primary.add_note(
-                    "evaluation parquet writer close also failed: "
-                    f"{type(close_error).__name__}"
-                )
-        for name, state_to_close in tuple(writer_states.items()):
-            writer_states.pop(name)
-            try:
-                state_to_close.close()
-            except BaseException as close_error:
-                primary.add_note(
-                    "evaluation writer state release also failed: "
-                    f"{type(close_error).__name__}"
-                )
-        raise
-    finally:
-        if fixed_state is not None:
-            try:
-                fixed_state.close()
-            except BaseException as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "evaluation writer fixed reservation release also failed: "
-                    f"{type(close_error).__name__}"
-                )
+                chunk_filter_definition = str(metadata["filter_definition"])
+                if not filter_definition_value:
+                    filter_columns_used = chunk_filter_columns
+                    filter_definition_value = chunk_filter_definition
+                elif (
+                    filter_columns_used != chunk_filter_columns
+                    or filter_definition_value != chunk_filter_definition
+                ):
+                    raise ValueError("evaluation_diagnostics_inconsistent")
+                write_frame("metrics", metrics)
+                write_frame("grouped_label_values", grouped)
+        for name in paths:
+            flush(name)
+    for name, columns in required.items():
+        if row_counts[name] == 0:
+            write_parquet(
+                empty_frames.get(name, pd.DataFrame(columns=list(columns))),
+                paths[name],
+                engine="pyarrow",
+                compression="zstd",
+                index=False,
+            )
     return {
         "rows_input": rows_input,
         "rows_after_filter_mode": rows_after_filter_mode,

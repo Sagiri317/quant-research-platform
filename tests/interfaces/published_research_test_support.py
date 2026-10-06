@@ -32,10 +32,6 @@ from quant_research_platform.profiles.research import (
     A_SHARE_PROFILE_ID,
     CRYPTO_PROFILE_ID,
 )
-from quant_research_platform.runtime import resources
-from quant_research_platform.runtime.resources import (
-    runtime_resource_policy_scope as artifact_resource_scope,
-)
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_mkdir,
@@ -95,54 +91,44 @@ def check_published_evidence_views(
     target_id = f"{record.scenario_id}_report_artifact"
     logical = layout.semantic_artifact_root(profile.market_id, target_id)
     root = layout.instance_root(logical, report_identity)
-    with (
-        artifact_resource_scope() as artifact_policy,
-        artifact_policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        envelope = read_semantic_artifact(
-            root, expected_identity=report_identity, lease=artifact_lease
-        )
-        payload = report_artifact.read_research_report_artifact(
-            root, expected_identity=report_identity, report_lease=artifact_lease
-        )
-        previous = build_business_manifest_envelope(
-            logical_artifact_id=target_id,
-            schema_identity=envelope["schema_identity"],
-            protocol_or_spec_identity=envelope["protocol_or_spec_identity"],
-            software_identity=canonical_json_hash(
-                {"synthetic_renderer": "archived_report"}
-            ),
-            research_window=envelope["research_window"],
-            upstream_identities=envelope["upstream_identities"],
-            semantic_metadata=envelope["semantic_metadata"],
-        )
-        archived_payload = deepcopy(payload)
-        archived_payload["sections"]["Data/Coverage"]["scale diagnostics"] = {
-            "results": [
-                {"metric_id": "synthetic_metric", "value": 0.1} for _ in range(20000)
-            ]
-        }
-        archived_markdown = (
-            "# Archived synthetic evidence\n\nRead the exact report.json.\n"
-        )
+    envelope = read_semantic_artifact(root, expected_identity=report_identity)
+    payload = report_artifact.read_research_report_artifact(
+        root, expected_identity=report_identity
+    )
+    previous = build_business_manifest_envelope(
+        logical_artifact_id=target_id,
+        schema_identity=envelope["schema_identity"],
+        protocol_or_spec_identity=envelope["protocol_or_spec_identity"],
+        software_identity=canonical_json_hash(
+            {"synthetic_renderer": "archived_report"}
+        ),
+        research_window=envelope["research_window"],
+        upstream_identities=envelope["upstream_identities"],
+        semantic_metadata=envelope["semantic_metadata"],
+    )
+    archived_payload = deepcopy(payload)
+    archived_payload["sections"]["Data/Coverage"]["scale diagnostics"] = {
+        "results": [
+            {"metric_id": "synthetic_metric", "value": 0.1} for _ in range(20000)
+        ]
+    }
+    archived_markdown = "# Archived synthetic evidence\n\nRead the exact report.json.\n"
 
-        def archived_writer(staging):
-            write_json_evidence(staging / "report.json", archived_payload)
-            write_markdown_evidence(staging / "report.md", archived_markdown)
+    def archived_writer(staging):
+        write_json_evidence(staging / "report.json", archived_payload)
+        write_markdown_evidence(staging / "report.md", archived_markdown)
 
-        previous_root = layout.instance_root(logical, previous.instance_identity)
-        if filesystem_exists(previous_root):
-            assert (
-                report_artifact.read_research_report_artifact(
-                    previous_root,
-                    expected_identity=previous.instance_identity,
-                    report_lease=artifact_lease,
-                )
-                == archived_payload
+    previous_root = layout.instance_root(logical, previous.instance_identity)
+    if filesystem_exists(previous_root):
+        assert (
+            report_artifact.read_research_report_artifact(
+                previous_root, expected_identity=previous.instance_identity
             )
-        else:
-            write_semantic_artifact(logical, previous, archived_writer)
-        assert filesystem_stat(previous_root / "report.json").st_size > 1024 * 1024
+            == archived_payload
+        )
+    else:
+        write_semantic_artifact(logical, previous, archived_writer)
+    assert filesystem_stat(previous_root / "report.json").st_size > 1024 * 1024
     before = _files(layout.project_root / "data")
     guarded = replace(
         profile,
@@ -152,19 +138,11 @@ def check_published_evidence_views(
         },
     )
     original_profile = api_module.research_profile
-    original_capture = resources._capture_runtime_resource_policy
-    captured = []
-
-    def capture(*args, **kwargs):
-        policy = original_capture(*args, **kwargs)
-        captured.append(policy)
-        return policy
 
     with monkeypatch.context() as patch:
         for name in _FORBIDDEN_ACTIONS:
             patch.setattr(research, name, _forbidden)
         patch.setattr(report_artifact, "_markdown", _forbidden)
-        patch.setattr(resources, "_capture_runtime_resource_policy", capture)
         patch.setattr(
             api_module,
             "research_profile",
@@ -239,10 +217,6 @@ def check_published_evidence_views(
                     curve.json()["source_point_count"]
                     == curve.json()["displayed_point_count"]
                 )
-                assert len(captured) == 7 and all(
-                    policy.state == "CLOSED" and policy.used_memory_bytes == 0
-                    for policy in captured
-                )
                 wrong_profile = (
                     CRYPTO_PROFILE_ID
                     if profile.profile_id == A_SHARE_PROFILE_ID
@@ -307,10 +281,6 @@ def check_published_evidence_views(
                     "invalid_private_payload" not in response.text
                     and str(layout.project_root) not in response.text
                     for response in failures
-                )
-                assert all(
-                    policy.state == "CLOSED" and policy.used_memory_bytes == 0
-                    for policy in captured
                 )
 
         asyncio.run(check_http())

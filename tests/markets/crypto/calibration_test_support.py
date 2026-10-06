@@ -9,24 +9,22 @@ from quant_research_platform.markets.implementations.crypto.execution import (
 )
 
 
-def calibration_from_paths(paths, errors, policy):
+def calibration_from_paths(paths, errors):
     return MakerCalibration(
-        *calibration_inputs(paths, errors),
-        resource_policy=policy,
-        price_unit=paths[0][0][0].price_unit,
+        *calibration_inputs(paths, errors), price_unit=paths[0][0][0].price_unit
     )
 
 
 def calibration_inputs(paths, errors):
-    event_rows, offsets, samples = [], [], []
+    event_rows, offsets, samples = ([], [], [])
     event_id = 0
     for sample_id, ((books, trades), error) in enumerate(
         zip(paths, errors, strict=True)
     ):
-        start = sample_id * 1_000_000_000
+        start = sample_id * 1000000000
         initial = event_id
         for _key, event in _market_events(books, trades):
-            if event.observed_time_ns >= 500_000_000:
+            if event.observed_time_ns >= 500000000:
                 continue
             offsets.append(len(event_rows))
             event_rows.extend(maker_event_rows(event_id, event, offset=start))
@@ -77,12 +75,12 @@ def calibration_inputs(paths, errors):
                 ),
             )
 
-    return sample_rows, events
+    return (sample_rows, events)
 
 
 def maker_event_rows(event_id, event, *, offset=0):
     if isinstance(event, TradeEvent):
-        kind, context = "trade", event.observation_id
+        kind, context = ("trade", event.observation_id)
         levels = (
             (
                 "buy" if event.buyer_is_maker else "sell",
@@ -92,10 +90,10 @@ def maker_event_rows(event_id, event, *, offset=0):
             ),
         )
     elif isinstance(event, BookBoundary):
-        kind, context = "boundary", event.segment_id
+        kind, context = ("boundary", event.segment_id)
         levels = (("", 0, 0, 0.0),)
     else:
-        kind, context = "book", event.segment_id
+        kind, context = ("book", event.segment_id)
         levels = (
             (side, index, tick, quantity)
             for side, rows in (("buy", event.bids), ("sell", event.asks))

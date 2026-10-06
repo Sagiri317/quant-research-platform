@@ -35,11 +35,7 @@ from quant_research_platform.markets.implementations.crypto.ids import (
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.protocols.crypto_hft import HFT_FACTOR_COLUMNS
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    RuntimeResourcePolicy,
-    pandas_frame_payload_bytes,
-)
+from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
@@ -48,12 +44,7 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.datasets.schema import dataset_identity_payload
 
-_PANEL_ROW_BUFFER_BYTES = 4 * 1024
-_FRAME_FIXED_BYTES = 1024 * 1024
-_PANEL_MAX_BATCH_ROWS = 64 * 1024
 _EPOCH = dt.datetime(1970, 1, 1)
-
-# OKX USDT contract face values effective March 2020; Bybit linear sizes are base.
 EXTERNAL_INSTRUMENTS = {
     "bybit": {
         "exchange": "bybit",
@@ -76,7 +67,6 @@ def produce_hft_processed_data(
     time_window,
     processed_catalog,
     source_catalog,
-    resource_policy,
     open_run,
     reconstruct_depth,
     read_trades,
@@ -93,7 +83,7 @@ def produce_hft_processed_data(
     metadata = {}
     with ExitStack() as readers:
         if spec.data_id == panel_id:
-            run = readers.enter_context(open_run(raw_root, resource_policy))
+            run = readers.enter_context(open_run(raw_root))
             if canonical_json_hash(run.source_identity) != expected_source_identity:
                 raise ValueError("hft_recorder_source_identity_changed")
             source_info = run.hft_source_info()
@@ -102,15 +92,7 @@ def produce_hft_processed_data(
                 _milliseconds(time_window.end),
             )
             stats = {symbol: make_stats() for symbol in symbols}
-            target = max(
-                _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
-                resource_policy.planning_headroom_bytes // 2,
-            )
-            batch_rows = min(
-                _PANEL_MAX_BATCH_ROWS,
-                (target - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES,
-            )
-            bound = _FRAME_FIXED_BYTES + batch_rows * _PANEL_ROW_BUFFER_BYTES
+            batch_rows = DEFAULT_BATCH_ROWS
             symbol_rows = max(1, batch_rows // len(symbols))
 
             def symbol_frames(symbol):
@@ -122,21 +104,14 @@ def produce_hft_processed_data(
                         symbol=symbol,
                         stats=active,
                         output_levels=10,
-                        end_ns=end_ms * 1_000_000,
+                        end_ns=end_ms * 1000000,
                     ),
-                    read_trades(
-                        run,
-                        market_type,
-                        symbol=symbol,
-                        end_ms=end_ms,
-                    ),
+                    read_trades(run, market_type, symbol=symbol, end_ms=end_ms),
                     start_ms=start_ms,
                     end_ms=end_ms,
                     book_coverage=active.coverage_segments,
                     trade_coverage=run.observation_coverage(
-                        market_type=market_type,
-                        data_kind="agg_trades",
-                        symbol=symbol,
+                        market_type=market_type, data_kind="agg_trades", symbol=symbol
                     ).covering,
                     market_id=str(MARKET_ID),
                     asset_id=canonical_crypto_asset_id(symbol),
@@ -150,7 +125,11 @@ def produce_hft_processed_data(
             def independent_frames():
                 for symbol in symbols:
                     with closing_iterator(symbol_frames(symbol)) as active:
-                        yield from active
+                        for _yield_value in active:
+                            try:
+                                yield _yield_value
+                            except GeneratorExit:
+                                return
 
             def frames():
                 source = (
@@ -162,10 +141,14 @@ def produce_hft_processed_data(
                     if synchronize
                     else independent_frames()
                 )
-                with closing_iterator(source) as active:
-                    yield from _event_frame_producer(
-                        active, columns=spec.required_columns, producer_bound=bound
-                    )
+                with closing_iterator(
+                    _event_frame_producer(source, columns=spec.required_columns)
+                ) as active:
+                    for frame in active:
+                        try:
+                            yield frame
+                        except GeneratorExit:
+                            return
                 metadata["producer_diagnostics"] = {
                     "observation_grid": "common_btc_eth_observed_timestamps"
                     if synchronize
@@ -194,14 +177,7 @@ def produce_hft_processed_data(
                     panel_spec.market_id, panel_spec.kind, panel_spec.data_id
                 ),
             )
-            session = readers.enter_context(
-                open_dataset_session(
-                    root,
-                    columns=None,
-                    time_window=time_window,
-                    resource_policy=resource_policy,
-                )
-            )
+            session = open_dataset_session(root, columns=None, time_window=time_window)
             metadata["input_dataset_identities"] = {
                 input_id: dataset_identity_payload(session.spec, session.manifest)
             }
@@ -210,9 +186,11 @@ def produce_hft_processed_data(
                     lambda frames: iter_factor_frames(
                         frames,
                         columns=tuple(
-                            name
-                            for name in spec.required_columns
-                            if name in HFT_FACTOR_COLUMNS
+                            (
+                                name
+                                for name in spec.required_columns
+                                if name in HFT_FACTOR_COLUMNS
+                            )
                         ),
                     )
                 )
@@ -233,7 +211,6 @@ def produce_hft_processed_data(
                 session,
                 transform=transform,
                 columns=spec.required_columns,
-                resource_policy=resource_policy,
                 asset_ids=tuple(json.loads(spec.parameters_json)["asset_ids"]),
             )
 
@@ -243,7 +220,7 @@ def produce_hft_processed_data(
         else:
             raise ValueError("hft_processed_target_invalid")
         with closing_iterator(data):
-            yield data, metadata, verify
+            yield (data, metadata, verify)
 
 
 def _common_symbol_panel_frames(
@@ -253,7 +230,6 @@ def _common_symbol_panel_frames(
     batch_rows: int,
 ) -> Iterator[pd.DataFrame]:
     """Merge sorted symbol rows by timestamp, independent of frame boundaries."""
-
     if set(frames_by_symbol) != set(binance_ids.RESEARCH_SYMBOLS) or batch_rows < len(
         binance_ids.RESEARCH_SYMBOLS
     ):
@@ -274,7 +250,10 @@ def _common_symbol_panel_frames(
                     if previous is not None and timestamp <= previous:
                         raise ValueError("hft_symbol_panel_timestamp_invalid")
                     previous = timestamp
-                    yield row
+                    try:
+                        yield row
+                    except GeneratorExit:
+                        return
 
     streams = [
         rows(frames_by_symbol[symbol]) for symbol in binance_ids.RESEARCH_SYMBOLS
@@ -308,13 +287,17 @@ def _common_symbol_panel_frames(
             if any(row[timestamp_position] != target for row in current):
                 continue
             if records and len(records) + len(current) > batch_rows:
-                yield (
+                _yield_value = (
                     pd.DataFrame.from_records(records, columns=columns)
                     .astype(dtypes)
                     .sort_values(
                         ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
                     )
                 )
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
                 records.clear()
             if (
                 previous_common_time is None
@@ -337,26 +320,34 @@ def _common_symbol_panel_frames(
                 except StopIteration:
                     ended = True
             if len(records) >= batch_rows:
-                yield (
+                _yield_value = (
                     pd.DataFrame.from_records(records, columns=columns)
                     .astype(dtypes)
                     .sort_values(
                         ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
                     )
                 )
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
                 records.clear()
         if ended:
             for stream in active:
                 for _row in stream:
                     pass
         if records:
-            yield (
+            _yield_value = (
                 pd.DataFrame.from_records(records, columns=columns)
                 .astype(dtypes)
                 .sort_values(
                     ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
                 )
             )
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
 
 
 def _milliseconds(value: dt.datetime, *, ceil: bool = False) -> int:
@@ -367,28 +358,15 @@ def _milliseconds(value: dt.datetime, *, ceil: bool = False) -> int:
     return -(-delta // unit) if ceil else delta // unit
 
 
-def _event_frame_producer(
-    frames: Iterable[pd.DataFrame],
-    *,
-    columns: tuple[str, ...],
-    producer_bound: int,
-) -> Iterator[object]:
-    active_frames = iter(frames)
-    with closing_iterator(active_frames):
-        lease = yield producer_bound
-        while True:
-            try:
-                frame = next(active_frames)
-            except StopIteration:
-                return
+def _event_frame_producer(frames, *, columns):
+    with closing_iterator(iter(frames)) as active_frames:
+        for frame in active_frames:
             if tuple(frame.columns) != columns:
                 raise ValueError("hft_panel_frame_columns_invalid")
-            actual_bound = pandas_frame_payload_bytes(frame) + 64 * 1024
-            if actual_bound > lease.reserved_bytes:
-                raise ValueError("hft_dataframe_producer_bound_invalid")
-            yield OwnedValue(frame, lease)
-            del frame
-            lease = yield (producer_bound, lease)
+            try:
+                yield frame
+            except GeneratorExit:
+                return
 
 
 def _panel_frame_producer(
@@ -396,14 +374,8 @@ def _panel_frame_producer(
     *,
     transform: Callable[[Iterable[pd.DataFrame]], Iterable[pd.DataFrame]],
     columns: tuple[str, ...],
-    resource_policy: RuntimeResourcePolicy,
     asset_ids: tuple[str, ...],
 ) -> Iterator[object]:
-    target_chunk_bytes = max(1, resource_policy.planning_headroom_bytes // 8)
-    producer_bound = max(
-        _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
-        resource_policy.planning_headroom_bytes // 2,
-    )
 
     def frames() -> Iterator[pd.DataFrame]:
         for asset in asset_ids:
@@ -411,22 +383,18 @@ def _panel_frame_producer(
             asset_session = replace(
                 session,
                 parquet_filters=(*(session.parquet_filters or ()), asset_filter),
-                owns_inventory=False,
-                owns_lease=False,
             )
-            chunks = iter_dataset_chunks(
-                asset_session, target_chunk_bytes=target_chunk_bytes
-            )
-            with (
-                closing_iterator(chunks),
-                closing_iterator(iter(transform(chunks))) as transformed,
-            ):
-                for frame in transformed:
-                    yield frame.loc[:, list(columns)]
+            chunks = iter_dataset_chunks(asset_session, batch_rows=65536)
+            with closing_iterator(chunks):
+                with closing_iterator(iter(transform(chunks))) as transformed:
+                    for frame in transformed:
+                        _yield_value = frame.loc[:, list(columns)]
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
 
-    yield from _event_frame_producer(
-        frames(), columns=columns, producer_bound=producer_bound
-    )
+    yield from _event_frame_producer(frames(), columns=columns)
 
 
 @contextmanager
@@ -436,7 +404,6 @@ def produce_derivative_processed_data(
     layout,
     time_window,
     processed_catalog,
-    resource_policy,
     open_archive,
     expected_source_identity,
     source_catalog,
@@ -452,15 +419,8 @@ def produce_derivative_processed_data(
         ),
     )
     with ExitStack() as readers:
-        archive = readers.enter_context(open_archive(raw_root, resource_policy))
-        session = readers.enter_context(
-            open_dataset_session(
-                root,
-                columns=None,
-                time_window=time_window,
-                resource_policy=resource_policy,
-            )
-        )
+        archive = readers.enter_context(open_archive(raw_root))
+        session = open_dataset_session(root, columns=None, time_window=time_window)
         if canonical_json_hash(archive.source_identity) != expected_source_identity:
             raise ValueError("hft_derivative_source_identity_changed")
         metadata = {
@@ -468,7 +428,7 @@ def produce_derivative_processed_data(
             "input_dataset_identities": {
                 HFT_PANEL_DATA_ID: dataset_identity_payload(
                     session.spec, session.manifest
-                ),
+                )
             },
             "producer_diagnostics": {
                 "alignment": "observed_at_lte_decision_time",
@@ -497,7 +457,6 @@ def produce_derivative_processed_data(
             session,
             transform=transform,
             columns=spec.required_columns,
-            resource_policy=resource_policy,
             asset_ids=tuple(
                 canonical_crypto_asset_id(symbol)
                 for symbol in binance_ids.RESEARCH_SYMBOLS
@@ -509,116 +468,86 @@ def produce_derivative_processed_data(
             readers.close()
 
         with closing_iterator(data):
-            yield data, metadata, verify
+            yield (data, metadata, verify)
 
 
 @contextmanager
 def produce_spot_perp_context(
-    spec,
-    *,
-    layout,
-    time_window,
-    processed_catalog,
-    source_catalog,
-    resource_policy,
+    spec, *, layout, time_window, processed_catalog, source_catalog
 ):
     """Publish information rows on the execution panel's exact primary keys."""
     max_age_ms = json.loads(spec.parameters_json)["max_age_ms"]
-    with ExitStack() as readers:
-        sessions = {}
-        for data_id in (HFT_PANEL_DATA_ID, HFT_SPOT_PANEL_DATA_ID):
-            input_spec = processed_catalog.get(data_id)
-            root = layout.target_root(
-                data_id,
-                layout.processed_data_root(
-                    input_spec.market_id, input_spec.kind, data_id
-                ),
-            )
-            sessions[data_id] = readers.enter_context(
-                open_dataset_session(
-                    root,
-                    columns=None,
-                    time_window=time_window,
-                    resource_policy=resource_policy,
-                )
-            )
-        metadata = {
-            "input_dataset_identities": {
-                key: dataset_identity_payload(session.spec, session.manifest)
-                for key, session in sessions.items()
-            },
-            "producer_diagnostics": {
-                "alignment": "spot_grid_available_by_perpetual_decision",
-                "max_age_ms": max_age_ms,
-                "lag_ms": 100,
-                "execution_market": "binance_futures_btc_eth_only",
-                "clock_interpretation": (
-                    "vendor_observation_order_not_colocated_latency"
-                ),
-            },
-        }
-        target_bytes = max(1, resource_policy.planning_headroom_bytes // 32)
-        producer_bound = max(
-            _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
-            resource_policy.planning_headroom_bytes // 2,
+    sessions = {}
+    for data_id in (HFT_PANEL_DATA_ID, HFT_SPOT_PANEL_DATA_ID):
+        input_spec = processed_catalog.get(data_id)
+        root = layout.target_root(
+            data_id,
+            layout.processed_data_root(input_spec.market_id, input_spec.kind, data_id),
         )
-        batch_rows = (producer_bound - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES
+        sessions[data_id] = open_dataset_session(
+            root, columns=None, time_window=time_window
+        )
+    metadata = {
+        "input_dataset_identities": {
+            key: dataset_identity_payload(session.spec, session.manifest)
+            for key, session in sessions.items()
+        },
+        "producer_diagnostics": {
+            "alignment": "spot_grid_available_by_perpetual_decision",
+            "max_age_ms": max_age_ms,
+            "lag_ms": 100,
+            "execution_market": "binance_futures_btc_eth_only",
+            "clock_interpretation": "vendor_observation_order_not_colocated_latency",
+        },
+    }
+    batch_rows = DEFAULT_BATCH_ROWS
 
-        def frames():
-            for symbol in binance_ids.RESEARCH_SYMBOLS:
-                asset = canonical_crypto_asset_id(symbol)
-                asset_sessions = {
-                    key: replace(
-                        session,
-                        parquet_filters=(
-                            *(session.parquet_filters or ()),
-                            ("asset_id", "==", asset),
-                        ),
-                        owns_inventory=False,
-                        owns_lease=False,
+    def frames():
+        for symbol in binance_ids.RESEARCH_SYMBOLS:
+            asset = canonical_crypto_asset_id(symbol)
+            asset_sessions = {
+                key: replace(
+                    session,
+                    parquet_filters=(
+                        *(session.parquet_filters or ()),
+                        ("asset_id", "==", asset),
+                    ),
+                )
+                for key, session in sessions.items()
+            }
+            with closing_iterator(
+                iter_dataset_chunks(asset_sessions[HFT_PANEL_DATA_ID], batch_rows=65536)
+            ) as perpetual:
+                with closing_iterator(
+                    iter_dataset_chunks(
+                        asset_sessions[HFT_SPOT_PANEL_DATA_ID], batch_rows=65536
                     )
-                    for key, session in sessions.items()
-                }
-                with (
-                    closing_iterator(
-                        iter_dataset_chunks(
-                            asset_sessions[HFT_PANEL_DATA_ID],
-                            target_chunk_bytes=target_bytes,
-                        )
-                    ) as perpetual,
-                    closing_iterator(
-                        iter_dataset_chunks(
-                            asset_sessions[HFT_SPOT_PANEL_DATA_ID],
-                            target_chunk_bytes=target_bytes,
-                        )
-                    ) as spot,
-                    closing_iterator(
+                ) as spot:
+                    with closing_iterator(
                         iter_spot_perp_factor_frames(
                             perpetual,
                             spot_frames=spot,
                             max_age_ms=max_age_ms,
                             batch_rows=batch_rows,
                         )
-                    ) as aligned,
-                ):
-                    for frame in aligned:
-                        frame["market_id"] = str(MARKET_ID)
-                        frame["asset_id"] = asset
-                        yield frame.loc[:, list(spec.required_columns)]
+                    ) as aligned:
+                        for frame in aligned:
+                            frame["market_id"] = str(MARKET_ID)
+                            frame["asset_id"] = asset
+                            _yield_value = frame.loc[:, list(spec.required_columns)]
+                            try:
+                                yield _yield_value
+                            except GeneratorExit:
+                                return
 
-        data = _event_frame_producer(
-            frames(),
-            columns=spec.required_columns,
-            producer_bound=producer_bound,
-        )
+    data = _event_frame_producer(frames(), columns=spec.required_columns)
 
-        def verify(_receipt):
-            for session in sessions.values():
-                session.verify()
-            readers.close()
+    def verify(_receipt):
+        for session in sessions.values():
+            session.verify()
 
-        with closing_iterator(data):
-            yield data, metadata, verify
+    with closing_iterator(data):
+        yield (data, metadata, verify)
 
 
 def _union_panel_frames(
@@ -636,7 +565,11 @@ def _union_panel_frames(
         with closing_iterator(iter(frames)) as active:
             for frame in active:
                 dtypes.update(frame.dtypes)
-                yield from frame.itertuples(index=False, name=None)
+                for _yield_value in frame.itertuples(index=False, name=None):
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
 
     with ExitStack() as live:
         streams = [
@@ -659,7 +592,10 @@ def _union_panel_frames(
                 }
             )
             records.clear()
-            yield frame
+            try:
+                yield frame
+            except GeneratorExit:
+                return
             del frame
             records = list(islice(merged, batch_rows))
             if not records:
@@ -668,158 +604,112 @@ def _union_panel_frames(
 
 @contextmanager
 def produce_information_panel(
-    spec,
-    *,
-    layout,
-    time_window,
-    processed_catalog,
-    source_catalog,
-    resource_policy,
+    spec, *, layout, time_window, processed_catalog, source_catalog
 ):
     """Union disjoint BTC/ETH and SOL rows, preserving native source segments."""
-    with ExitStack() as readers:
-        sessions = []
-        identities = {}
-        for data_id in spec.processed_input_data_ids:
-            source_spec = processed_catalog.get(data_id)
-            root = layout.target_root(
-                data_id,
-                layout.processed_data_root(
-                    source_spec.market_id, source_spec.kind, data_id
-                ),
-            )
-            session = readers.enter_context(
-                open_dataset_session(
-                    root,
-                    columns=spec.required_columns,
-                    time_window=time_window,
-                    resource_policy=resource_policy,
-                )
-            )
-            sessions.append(session)
-            identities[data_id] = dataset_identity_payload(
-                session.spec, session.manifest
-            )
-        bound = max(
-            _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
-            resource_policy.planning_headroom_bytes // 2,
-        )
-
-        batch_rows = (bound - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES
-        target_bytes = max(1, bound // (4 * len(sessions)))
-        frames = _union_panel_frames(
-            (
-                iter_dataset_chunks(session, target_chunk_bytes=target_bytes)
-                for session in sessions
+    sessions = []
+    identities = {}
+    for data_id in spec.processed_input_data_ids:
+        source_spec = processed_catalog.get(data_id)
+        root = layout.target_root(
+            data_id,
+            layout.processed_data_root(
+                source_spec.market_id, source_spec.kind, data_id
             ),
-            columns=spec.required_columns,
-            batch_rows=batch_rows,
         )
-        data = _event_frame_producer(
-            frames, columns=spec.required_columns, producer_bound=bound
+        session = open_dataset_session(
+            root, columns=spec.required_columns, time_window=time_window
         )
+        sessions.append(session)
+        identities[data_id] = dataset_identity_payload(session.spec, session.manifest)
+    batch_rows = DEFAULT_BATCH_ROWS
+    frames = _union_panel_frames(
+        (iter_dataset_chunks(session, batch_rows=65536) for session in sessions),
+        columns=spec.required_columns,
+        batch_rows=batch_rows,
+    )
+    data = _event_frame_producer(frames, columns=spec.required_columns)
 
-        def verify(_receipt):
-            for session in sessions:
-                session.verify()
-            readers.close()
+    def verify(_receipt):
+        for session in sessions:
+            session.verify()
 
-        with closing_iterator(data):
-            yield data, {"input_dataset_identities": identities}, verify
+    with closing_iterator(data):
+        yield (data, {"input_dataset_identities": identities}, verify)
 
 
 @contextmanager
 def produce_cross_asset_context(
-    spec,
-    *,
-    layout,
-    time_window,
-    processed_catalog,
-    source_catalog,
-    resource_policy,
+    spec, *, layout, time_window, processed_catalog, source_catalog
 ):
     """Read persisted shared-kernel information without creating an execution venue."""
     parameters = json.loads(spec.parameters_json)
     target_id, information_id = spec.processed_input_data_ids
-    with ExitStack() as readers:
-        sessions = {}
-        for data_id in spec.processed_input_data_ids:
-            data_spec = processed_catalog.get(data_id)
-            root = layout.target_root(
-                data_id,
-                layout.processed_data_root(
-                    data_spec.market_id, data_spec.kind, data_id
-                ),
-            )
-            sessions[data_id] = readers.enter_context(
-                open_dataset_session(
-                    root,
-                    columns=None,
-                    time_window=time_window,
-                    resource_policy=resource_policy,
+    sessions = {}
+    for data_id in spec.processed_input_data_ids:
+        data_spec = processed_catalog.get(data_id)
+        root = layout.target_root(
+            data_id,
+            layout.processed_data_root(data_spec.market_id, data_spec.kind, data_id),
+        )
+        sessions[data_id] = open_dataset_session(
+            root, columns=None, time_window=time_window
+        )
+    metadata = {
+        "input_dataset_identities": {
+            key: dataset_identity_payload(session.spec, session.manifest)
+            for key, session in sessions.items()
+        },
+        "producer_diagnostics": {
+            "information_assets": parameters["information_assets"],
+            "target_assets": parameters["target_assets"],
+            "max_age_ms": parameters["max_age_ms"],
+            "units": "mature_simple_return_and_dimensionless_order_flow",
+            "execution_assets": ["btc_usdt", "eth_usdt"],
+        },
+    }
+    batch_rows = DEFAULT_BATCH_ROWS
+
+    def asset_chunks(session, asset):
+        view = replace(
+            session,
+            parquet_filters=(
+                *(session.parquet_filters or ()),
+                ("asset_id", "==", asset),
+            ),
+        )
+        yield from iter_dataset_chunks(view, batch_rows=65536)
+
+    def frames():
+        for asset in parameters["target_assets"]:
+            with closing_iterator(
+                iter_cross_asset_factor_frames(
+                    asset_chunks(sessions[target_id], asset),
+                    information_frames={
+                        key: asset_chunks(sessions[information_id], key)
+                        for key in parameters["information_assets"]
+                    },
+                    max_age_ms=parameters["max_age_ms"],
+                    batch_rows=batch_rows,
                 )
-            )
-        metadata = {
-            "input_dataset_identities": {
-                key: dataset_identity_payload(session.spec, session.manifest)
-                for key, session in sessions.items()
-            },
-            "producer_diagnostics": {
-                "information_assets": parameters["information_assets"],
-                "target_assets": parameters["target_assets"],
-                "max_age_ms": parameters["max_age_ms"],
-                "units": "mature_simple_return_and_dimensionless_order_flow",
-                "execution_assets": ["btc_usdt", "eth_usdt"],
-            },
-        }
-        bound = max(
-            _FRAME_FIXED_BYTES + _PANEL_ROW_BUFFER_BYTES,
-            resource_policy.planning_headroom_bytes // 2,
-        )
-        batch_rows = (bound - _FRAME_FIXED_BYTES) // _PANEL_ROW_BUFFER_BYTES
-        chunk_bytes = max(1, resource_policy.planning_headroom_bytes // 64)
+            ) as aligned:
+                for frame in aligned:
+                    frame["market_id"] = str(MARKET_ID)
+                    frame["asset_id"] = asset
+                    _yield_value = frame.loc[:, list(spec.required_columns)]
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
 
-        def asset_chunks(session, asset):
-            view = replace(
-                session,
-                parquet_filters=(
-                    *(session.parquet_filters or ()),
-                    ("asset_id", "==", asset),
-                ),
-                owns_inventory=False,
-                owns_lease=False,
-            )
-            yield from iter_dataset_chunks(view, target_chunk_bytes=chunk_bytes)
+    data = _event_frame_producer(frames(), columns=spec.required_columns)
 
-        def frames():
-            for asset in parameters["target_assets"]:
-                with closing_iterator(
-                    iter_cross_asset_factor_frames(
-                        asset_chunks(sessions[target_id], asset),
-                        information_frames={
-                            key: asset_chunks(sessions[information_id], key)
-                            for key in parameters["information_assets"]
-                        },
-                        max_age_ms=parameters["max_age_ms"],
-                        batch_rows=batch_rows,
-                    )
-                ) as aligned:
-                    for frame in aligned:
-                        frame["market_id"] = str(MARKET_ID)
-                        frame["asset_id"] = asset
-                        yield frame.loc[:, list(spec.required_columns)]
+    def verify(_receipt):
+        for session in sessions.values():
+            session.verify()
 
-        data = _event_frame_producer(
-            frames(), columns=spec.required_columns, producer_bound=bound
-        )
-
-        def verify(_receipt):
-            for session in sessions.values():
-                session.verify()
-            readers.close()
-
-        with closing_iterator(data):
-            yield data, metadata, verify
+    with closing_iterator(data):
+        yield (data, metadata, verify)
 
 
 @contextmanager
@@ -830,7 +720,6 @@ def produce_normalized_context(
     time_window,
     processed_catalog,
     source_catalog,
-    resource_policy,
     raw_root,
     expected_source_identity,
     read_records,
@@ -849,83 +738,64 @@ def produce_normalized_context(
             panel_spec.market_id, panel_spec.kind, panel_spec.data_id
         ),
     )
-    with ExitStack() as readers:
-        session = readers.enter_context(
-            open_dataset_session(
-                root,
-                columns=None,
+    session = open_dataset_session(root, columns=None, time_window=time_window)
+    metadata = {
+        "source_artifact_identity": {
+            "schema_id": source_schema_id,
+            "artifact_id": spec.data_id,
+            "manifest_hash": expected_source_identity,
+        },
+        "input_dataset_identities": {
+            HFT_PANEL_DATA_ID: dataset_identity_payload(session.spec, session.manifest)
+        },
+        "producer_diagnostics": {
+            "alignment": "local_timestamp_lte_decision_time",
+            "coverage": "observed_only",
+            "units": {
+                "quote_currency": "USDT",
+                "base_units_per_amount": parameters["base_units_per_amount"],
+            },
+            "max_age_ms": parameters["max_age_ms"],
+            "execution_assets": ["btc_usdt", "eth_usdt"],
+        },
+    }
+
+    def transform(frames):
+        first = next(frames, None)
+        if first is None:
+            return
+        asset = first["asset_id"].iloc[0]
+        symbol = parameters["symbols"][asset]
+        paths = archives[symbol]
+        yield from iter_external_context_frames(
+            chain((first,), frames),
+            quotes=read_records(
+                raw_root, archive_paths=paths["quotes"], time_window=time_window
+            ),
+            trades=read_records(
+                raw_root, archive_paths=paths["trades"], time_window=time_window
+            ),
+            tickers=read_records(
+                raw_root,
+                archive_paths=paths["derivative_ticker"],
                 time_window=time_window,
-                resource_policy=resource_policy,
-            )
-        )
-        metadata = {
-            "source_artifact_identity": {
-                "schema_id": source_schema_id,
-                "artifact_id": spec.data_id,
-                "manifest_hash": expected_source_identity,
-            },
-            "input_dataset_identities": {
-                HFT_PANEL_DATA_ID: dataset_identity_payload(
-                    session.spec, session.manifest
-                ),
-            },
-            "producer_diagnostics": {
-                "alignment": "local_timestamp_lte_decision_time",
-                "coverage": "observed_only",
-                "units": {
-                    "quote_currency": "USDT",
-                    "base_units_per_amount": parameters["base_units_per_amount"],
-                },
-                "max_age_ms": parameters["max_age_ms"],
-                "execution_assets": ["btc_usdt", "eth_usdt"],
-            },
-        }
-
-        def transform(frames):
-            first = next(frames, None)
-            if first is None:
-                return
-            asset = first["asset_id"].iloc[0]
-            symbol = parameters["symbols"][asset]
-            paths = archives[symbol]
-            yield from iter_external_context_frames(
-                chain((first,), frames),
-                quotes=read_records(
-                    raw_root,
-                    archive_paths=paths["quotes"],
-                    time_window=time_window,
-                    resource_policy=resource_policy,
-                ),
-                trades=read_records(
-                    raw_root,
-                    archive_paths=paths["trades"],
-                    time_window=time_window,
-                    resource_policy=resource_policy,
-                ),
-                tickers=read_records(
-                    raw_root,
-                    archive_paths=paths["derivative_ticker"],
-                    time_window=time_window,
-                    resource_policy=resource_policy,
-                ),
-                venue=parameters["venue"],
-                base_units_per_amount=parameters["base_units_per_amount"][asset],
-                max_age_ms=parameters["max_age_ms"],
-            )
-
-        data = _panel_frame_producer(
-            session,
-            transform=transform,
-            columns=spec.required_columns,
-            resource_policy=resource_policy,
-            asset_ids=("btc_usdt", "eth_usdt"),
+            ),
+            venue=parameters["venue"],
+            base_units_per_amount=parameters["base_units_per_amount"][asset],
+            max_age_ms=parameters["max_age_ms"],
         )
 
-        def verify(_receipt):
-            session.verify()
-            readers.close()
-            if source_identity(raw_root, spec.data_id) != expected_source_identity:
-                raise ValueError("hft_external_source_identity_changed")
+    data = _panel_frame_producer(
+        session,
+        transform=transform,
+        columns=spec.required_columns,
+        asset_ids=("btc_usdt", "eth_usdt"),
+    )
 
-        with closing_iterator(data):
-            yield data, metadata, verify
+    def verify(_receipt):
+        session.verify()
+        if source_identity(raw_root, spec.data_id) != expected_source_identity:
+            raise ValueError("hft_external_source_identity_changed")
+
+    with closing_iterator(data):
+        yield (data, metadata, verify)

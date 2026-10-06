@@ -24,7 +24,6 @@ from quant_research_platform.contracts.validation import (
     strict_real_numeric_series,
     strict_timestamp_series,
 )
-from quant_research_platform.runtime.resources import current_runtime_resource_policy
 
 
 @dataclass(frozen=True)
@@ -134,11 +133,12 @@ def aligned_candidate_matrix(
     if (
         frame.columns.has_duplicates
         or any(type(column) is not str or not column for column in frame.columns)
-        or not frame.index.is_unique
+        or (not frame.index.is_unique)
     ):
         raise ValueError("candidate_matrix_identity_invalid")
-    if not isinstance(frame.index, (pd.DatetimeIndex, pd.RangeIndex)) or not (
-        frame.index.is_monotonic_increasing
+    if (
+        not isinstance(frame.index, (pd.DatetimeIndex, pd.RangeIndex))
+        or not frame.index.is_monotonic_increasing
     ):
         raise ValueError("candidate_matrix_time_order_invalid")
     if any(
@@ -147,21 +147,10 @@ def aligned_candidate_matrix(
         for column in frame.columns
     ):
         raise ValueError("candidate_matrix_numeric_required")
-    policy = current_runtime_resource_policy()
-    # Cast, filtered frame and detached output may coexist with masks and indices.
-    snapshot_bytes = (
-        len(frame) * (26 * frame.shape[1] + 24) + 128 * frame.shape[1] + 64 * 1024
-    )
-    if (
-        policy is not None
-        and policy.explicit_memory_cap_bytes is not None
-        and policy.used_memory_bytes + snapshot_bytes > policy.explicit_memory_cap_bytes
-    ):
-        raise MemoryError("statistical_matrix_exceeds_runtime_headroom")
     numeric = frame.astype("float64")
     complete = numeric.notna().all(axis=1)
     values = numeric.loc[complete].to_numpy(dtype="float64", copy=True)
-    if values.size and not bool(np.isfinite(values).all()):
+    if values.size and (not bool(np.isfinite(values).all())):
         raise ValueError("candidate_matrix_nonfinite")
     count = len(values)
     return AlignedCandidateMatrix(
@@ -198,8 +187,8 @@ def hac_mean(
     if (
         not bool(np.isfinite(outputs).all())
         or outputs[1] <= 0
-        or not 0 <= outputs[3] <= 1
-        or outputs[4] > outputs[5]
+        or (not 0 <= outputs[3] <= 1)
+        or (outputs[4] > outputs[5])
     ):
         raise ValueError("hac_inference_undefined")
     return MeanInference(
@@ -269,26 +258,13 @@ def spa_reality_check(
     reason = aligned.reason or _loss_differential_reason(aligned.values, pairwise=False)
     if reason is not None:
         return SpaResult(
-            None,
-            None,
-            None,
-            aligned.observation_count,
-            "UNDEFINED",
-            reason,
+            None, None, None, aligned.observation_count, "UNDEFINED", reason
         )
     benchmark = aligned.values[:, 0]
     models = pd.DataFrame(
-        aligned.values[:, 1:],
-        index=aligned.index,
-        columns=aligned.candidate_ids[1:],
+        aligned.values[:, 1:], index=aligned.index, columns=aligned.candidate_ids[1:]
     )
-    test = SPA(
-        benchmark,
-        models,
-        block_size=block_size,
-        reps=repetitions,
-        seed=seed,
-    )
+    test = SPA(benchmark, models, block_size=block_size, reps=repetitions, seed=seed)
     test.compute()
     values = test.pvalues
     if not _positive_finite_variances(test._loss_diff_var) or not _valid_p_values(
@@ -329,9 +305,7 @@ def stepm_superior_models(
         return StepMResult((), aligned.observation_count, "UNDEFINED", reason)
     benchmark = aligned.values[:, 0]
     models = pd.DataFrame(
-        aligned.values[:, 1:],
-        index=aligned.index,
-        columns=aligned.candidate_ids[1:],
+        aligned.values[:, 1:], index=aligned.index, columns=aligned.candidate_ids[1:]
     )
     test = StepM(
         benchmark,
@@ -378,17 +352,10 @@ def model_confidence_set(
     frame = pd.DataFrame(
         aligned.values, index=aligned.index, columns=aligned.candidate_ids
     )
-    test = MCS(
-        frame,
-        size=alpha,
-        reps=repetitions,
-        block_size=block_size,
-        seed=seed,
-    )
+    test = MCS(frame, size=alpha, reps=repetitions, block_size=block_size, seed=seed)
     try:
         test.compute()
     except IndexError:
-        # arch MCS-R divides by pairwise bootstrap variances before elimination.
         if _positive_finite_variances(
             test._variances[~np.eye(frame.shape[1], dtype=bool)]
         ):
@@ -473,7 +440,7 @@ def probabilistic_and_deflated_sharpe(
     variance = (
         1.0
         - sample_skew * observed
-        + ((sample_kurtosis - 1.0) / 4.0) * observed * observed
+        + (sample_kurtosis - 1.0) / 4.0 * observed * observed
     ) / (len(data) - 1)
     if not np.isfinite(variance) or variance <= 0.0:
         raise ValueError("sharpe_variance_invalid")
@@ -534,7 +501,7 @@ def cscv_pbo(
         or type(slice_count) is not int
         or slice_count < 4
         or slice_count % 2
-        or shape[0] < slice_count
+        or (shape[0] < slice_count)
     ):
         raise ValueError("cscv_slice_count_invalid")
     combination_count = comb(slice_count, slice_count // 2)
@@ -603,8 +570,8 @@ def fama_macbeth_period(
     if (
         not isinstance(frame, pd.DataFrame)
         or not required.issubset(frame.columns)
-        or not factor_columns
-        or len(set(factor_columns)) != len(factor_columns)
+        or (not factor_columns)
+        or (len(set(factor_columns)) != len(factor_columns))
     ):
         raise ValueError("fama_macbeth_columns_invalid")
     timestamps = strict_timestamp_series(
@@ -683,13 +650,9 @@ def fama_macbeth_period(
 
 
 def cross_sectional_rank_ic(
-    frame: pd.DataFrame,
-    *,
-    value_columns: tuple[str, ...],
-    label_column: str,
+    frame: pd.DataFrame, *, value_columns: tuple[str, ...], label_column: str
 ) -> pd.DataFrame:
     """Return per-date cross-sectional Spearman correlations."""
-
     required = {"timestamp", "asset_id", label_column, *value_columns}
     if not isinstance(frame, pd.DataFrame) or not required.issubset(frame.columns):
         raise ValueError("rank_ic_columns_invalid")
@@ -725,10 +688,7 @@ def cross_sectional_rank_ic(
             )
             record[column] = np.nan if correlation is None else correlation
         records.append(record)
-    return pd.DataFrame.from_records(
-        records,
-        columns=["timestamp", *value_columns],
-    )
+    return pd.DataFrame.from_records(records, columns=["timestamp", *value_columns])
 
 
 def time_series_inference_summary(
@@ -741,7 +701,6 @@ def time_series_inference_summary(
     fdr_family_size: int | None = None,
 ) -> pd.DataFrame:
     """Summarize complete time-series columns with HAC inference and one FDR family."""
-
     if not isinstance(frame, pd.DataFrame) or identity_column not in frame.columns:
         raise ValueError("time_series_inference_columns_invalid")
     value_columns = tuple(
@@ -823,11 +782,7 @@ def time_series_inference_summary(
         conservative_work = np.concatenate(
             (observed, np.ones(family_size - len(observed), dtype="float64"))
         )
-        adjusted = fdr_adjust(
-            conservative_work,
-            method=fdr_method,
-            alpha=fdr_alpha,
-        )
+        adjusted = fdr_adjust(conservative_work, method=fdr_method, alpha=fdr_alpha)
         result["fdr_method"] = fdr_method
         result["fdr_alpha"] = fdr_alpha
         result["fdr_adjusted_p_value"] = np.nan
@@ -845,7 +800,7 @@ def time_series_inference_summary(
 
 def _finite_vector(values: object, *, minimum: int) -> np.ndarray:
     data = np.asarray(values, dtype="float64")
-    if data.ndim != 1 or len(data) < minimum or not bool(np.isfinite(data).all()):
+    if data.ndim != 1 or len(data) < minimum or (not bool(np.isfinite(data).all())):
         raise ValueError("finite_vector_required")
     return data
 
@@ -857,8 +812,8 @@ def _validate_bootstrap_configuration(
         type(block_size) is not int
         or block_size <= 0
         or type(repetitions) is not int
-        or repetitions < 2
-        or type(seed) is not int
+        or (repetitions < 2)
+        or (type(seed) is not int)
     ):
         raise ValueError("bootstrap_configuration_invalid")
 
@@ -876,21 +831,12 @@ def _finite_matrix(
         shape = np.shape(values)
     if len(shape) != 2:
         raise ValueError("finite_matrix_required")
-    policy = current_runtime_resource_policy()
-    # The float64 conversion and finite-value mask coexist.
-    snapshot_bytes = int(shape[0]) * int(shape[1]) * 9 + 64 * 1024
-    if (
-        policy is not None
-        and policy.explicit_memory_cap_bytes is not None
-        and policy.used_memory_bytes + snapshot_bytes > policy.explicit_memory_cap_bytes
-    ):
-        raise MemoryError("statistical_matrix_exceeds_runtime_headroom")
     data = np.asarray(values, dtype="float64")
     if (
         data.ndim != 2
         or data.shape[0] < minimum_rows
         or data.shape[1] < minimum_columns
-        or not bool(np.isfinite(data).all())
+        or (not bool(np.isfinite(data).all()))
     ):
         raise ValueError("finite_matrix_required")
     return data
@@ -933,8 +879,6 @@ def _return_roundoff(values: np.ndarray, roundoff: object) -> np.ndarray:
 
 
 def _return_intervals_overlap(data: np.ndarray, errors: np.ndarray) -> np.ndarray:
-    # With finite centers and nonnegative errors, overflowing endpoints extend
-    # outward only. Their infinities preserve the exact interval intersection.
     with np.errstate(over="ignore"):
         lower = np.max(data - errors, axis=0)
         upper = np.min(data + errors, axis=0)
@@ -943,16 +887,18 @@ def _return_intervals_overlap(data: np.ndarray, errors: np.ndarray) -> np.ndarra
         selected = (slice(None), *column)
         if lower[column] != upper[column] or not errors[selected].any():
             continue
-        # Rounding is monotone, so only equal rounded extrema are ambiguous.
-        # Refine that column without retaining a matrix of exact endpoints.
         finite = np.isfinite(errors[selected])
-        values, bounds = data[selected][finite], errors[selected][finite]
+        values, bounds = (data[selected][finite], errors[selected][finite])
         overlap[column] = max(
-            Fraction(float(value)) - Fraction(float(error))
-            for value, error in zip(values, bounds, strict=True)
+            (
+                Fraction(float(value)) - Fraction(float(error))
+                for value, error in zip(values, bounds, strict=True)
+            )
         ) <= min(
-            Fraction(float(value)) + Fraction(float(error))
-            for value, error in zip(values, bounds, strict=True)
+            (
+                Fraction(float(value)) + Fraction(float(error))
+                for value, error in zip(values, bounds, strict=True)
+            )
         )
     return overlap
 
@@ -976,7 +922,6 @@ def return_standard_deviation(values: object, *, roundoff: object = 0.0) -> np.n
         out=np.zeros(data.shape[1:]),
         where=~unresolved,
     )
-    # Unbounded NAV uncertainty cannot establish a finite risk, even at zero return.
     return np.where(np.isfinite(errors).all(axis=0), result, np.nan)
 
 
@@ -1005,10 +950,7 @@ def _candidate_sharpes(values: np.ndarray, errors: np.ndarray) -> np.ndarray | N
 
 
 def _undefined_pbo(
-    matrix: np.ndarray,
-    slice_count: int,
-    combination_count: int,
-    reason: str,
+    matrix: np.ndarray, slice_count: int, combination_count: int, reason: str
 ) -> PboResult:
     return PboResult(
         pbo=None,

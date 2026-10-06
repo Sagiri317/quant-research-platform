@@ -42,7 +42,7 @@ from tests.storage.low_level_fixtures import (
 )
 
 
-def _envelope(spec, *, seed: int) -> BusinessManifestEnvelope:  # noqa: ANN001
+def _envelope(spec, *, seed: int) -> BusinessManifestEnvelope:
     return build_business_manifest_envelope(
         logical_artifact_id=spec.data_id,
         schema_identity=canonical_json_hash(data_spec_payload(spec)),
@@ -60,10 +60,9 @@ def _envelope(spec, *, seed: int) -> BusinessManifestEnvelope:  # noqa: ANN001
 
 def _write_instance(
     logical_root: Path, spec, envelope: BusinessManifestEnvelope
-) -> Path:  # noqa: ANN001
+) -> Path:
     instance_root = StorageLayout().instance_root(
-        logical_root,
-        envelope.instance_identity,
+        logical_root, envelope.instance_identity
     )
     write_dataset(
         instance_root,
@@ -81,7 +80,6 @@ def test_two_immutable_instances_round_trip_and_discover_deterministically(
     logical_root = make_dataset_artifact_root(tmp_path, "demo")
     first = _write_instance(logical_root, spec, _envelope(spec, seed=1))
     second = _write_instance(logical_root, spec, _envelope(spec, seed=2))
-
     assert first != second
     assert inspect_dataset(first).manifest["common_manifest"]["status"] == "COMPLETE"
     assert len(read_dataset(first)) == len(make_default_dataset_frame())
@@ -92,8 +90,7 @@ def test_two_immutable_instances_round_trip_and_discover_deterministically(
 
 @pytest.mark.parametrize("deep_root", (False, True))
 def test_research_instance_round_trip_discovery_and_inspect_at_variable_roots(
-    tmp_path: Path,
-    deep_root: bool,
+    tmp_path: Path, deep_root: bool
 ) -> None:
     project_root = tmp_path
     if deep_root:
@@ -114,12 +111,8 @@ def test_research_instance_round_trip_discovery_and_inspect_at_variable_roots(
     frame = make_default_dataset_frame()
     frame["label"] = [0.1, 0.2, 0.3]
     write_dataset(
-        instance_root,
-        frame,
-        spec=spec,
-        instance_metadata={"common_manifest": envelope},
+        instance_root, frame, spec=spec, instance_metadata={"common_manifest": envelope}
     )
-
     assert inspect_dataset(instance_root).row_count == len(frame)
     assert len(read_dataset(instance_root)) == len(frame)
     assert discover_dataset_instances(logical_root) == (instance_root,)
@@ -149,19 +142,16 @@ def test_discovery_rejects_bare_and_mismatched_instance_directories(
     filesystem_mkdir(instances_root / "not-an-instance")
     with pytest.raises(ValueError, match="dataset_instance_child_invalid"):
         discover_dataset_instances(logical_root)
-
     Path(native_filesystem_path(instances_root / "not-an-instance")).rmdir()
     unexpected_file = instances_root / "unexpected"
     filesystem_write_bytes(unexpected_file, b"not-an-instance")
     with pytest.raises(ValueError, match="dataset_instance_child_invalid"):
         discover_dataset_instances(logical_root)
     filesystem_unlink(unexpected_file)
-
     bare = instances_root / ("d" * 64)
     filesystem_mkdir(bare)
     with pytest.raises(ValueError, match="dataset_instance_invalid"):
         discover_dataset_instances(logical_root)
-
     Path(native_filesystem_path(bare)).rmdir()
     renamed = instances_root / ("e" * 64)
     filesystem_rename(valid, renamed)
@@ -169,43 +159,28 @@ def test_discovery_rejects_bare_and_mismatched_instance_directories(
         discover_dataset_instances(logical_root)
 
 
-@pytest.mark.parametrize(
-    "mutation",
-    ("logical_artifact_id", "schema_identity"),
-)
+@pytest.mark.parametrize("mutation", ("logical_artifact_id", "schema_identity"))
 def test_dataset_writer_rejects_common_manifest_cross_binding(
-    tmp_path: Path,
-    mutation: str,
+    tmp_path: Path, mutation: str
 ) -> None:
     spec = make_processed_dataset_spec("demo")
     logical_root = make_dataset_artifact_root(tmp_path, "demo")
-    values = {
-        "logical_artifact_id": "other_dataset",
-        "schema_identity": "d" * 64,
-    }
+    values = {"logical_artifact_id": "other_dataset", "schema_identity": "d" * 64}
     envelope = _envelope(spec, seed=1)
     bad = build_business_manifest_envelope(
-        logical_artifact_id=(
-            values["logical_artifact_id"]
-            if mutation == "logical_artifact_id"
-            else envelope.logical_artifact_id
-        ),
-        schema_identity=(
-            values["schema_identity"]
-            if mutation == "schema_identity"
-            else envelope.schema_identity
-        ),
+        logical_artifact_id=values["logical_artifact_id"]
+        if mutation == "logical_artifact_id"
+        else envelope.logical_artifact_id,
+        schema_identity=values["schema_identity"]
+        if mutation == "schema_identity"
+        else envelope.schema_identity,
         protocol_or_spec_identity=envelope.protocol_or_spec_identity,
         software_identity=envelope.software_identity,
         research_window=dict(envelope.research_window),
         upstream_identities=dict(envelope.upstream_identities),
         semantic_metadata=dict(envelope.semantic_metadata),
     )
-    instance_root = StorageLayout().instance_root(
-        logical_root,
-        bad.instance_identity,
-    )
-
+    instance_root = StorageLayout().instance_root(logical_root, bad.instance_identity)
     with pytest.raises(ValueError, match="dataset_manifest_common_"):
         write_dataset(
             instance_root,
@@ -218,9 +193,7 @@ def test_dataset_writer_rejects_common_manifest_cross_binding(
 
 @pytest.mark.parametrize("fixed_directory_identity", (False, True))
 def test_discovery_rejects_instances_directory_mutation(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-    fixed_directory_identity: bool,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fixed_directory_identity: bool
 ) -> None:
     spec = make_processed_dataset_spec("demo")
     logical_root = make_dataset_artifact_root(tmp_path, "demo")
@@ -243,9 +216,7 @@ def test_discovery_rejects_instances_directory_mutation(
         return read_manifest(entry)
 
     monkeypatch.setattr(
-        dataset_instances,
-        "read_dataset_manifest_evidence",
-        mutate_directory,
+        dataset_instances, "read_dataset_manifest_evidence", mutate_directory
     )
     with pytest.raises(ValueError, match="dataset_instance_identity_changed"):
         discover_dataset_instances(logical_root)
@@ -265,7 +236,6 @@ def test_discovery_rejects_symlink_instance_child(tmp_path: Path) -> None:
         )
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
-
     with pytest.raises(ValueError, match="dataset_instance_child_invalid"):
         discover_dataset_instances(logical_root)
 

@@ -9,9 +9,6 @@ from pathlib import Path
 
 import pytest
 
-from quant_research_platform.runtime.resources import (
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.sources.choice.raw_exports import (
     ChoiceRequest,
     choice_session,
@@ -29,7 +26,6 @@ from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_manifest
 from tests.helpers.choice_raw import SDK
 from tests.helpers.choice_raw import response as _response
-from tests.helpers.runtime_resources import capture_test_policy
 
 
 def _immediate_file_bytes(root: Path) -> dict[str, bytes]:
@@ -84,14 +80,11 @@ def test_official_shapes_roundtrip_and_exact_reuse(
         original = filesystem_read_bytes(root / "response.csv")
         assert session.fetch(layout, request) == root
         assert sdk.calls == 1
-        with read_choice_response(
-            root, request, resource_policy=session.policy
-        ) as restored:
+        with read_choice_response(root, request) as restored:
             assert restored == vars(response)
             actual = copy.deepcopy(restored)
         assert actual == vars(response)
         assert filesystem_read_bytes(root / "response.csv") == original
-        assert session.policy.used_memory_bytes == 0
     assert sdk.stops == 1
     metadata = read_manifest(root / "response.metadata.json")
     assert metadata["columns"][2:] == response.Indicators
@@ -123,15 +116,12 @@ def test_documented_ctr_report_type_is_forwarded_and_persisted_exactly(tmp_path:
         before = _immediate_file_bytes(root)
         assert session.fetch(StorageLayout(tmp_path), request) == root
         assert sdk.calls == 1 and sdk.last_arguments == request.arguments
-        with read_choice_response(
-            root, request, resource_policy=session.policy
-        ) as restored:
+        with read_choice_response(root, request) as restored:
             assert restored == vars(sdk.response)
         metadata = read_manifest(root / "response.metadata.json")["metadata"]
         assert metadata["request"]["arguments"] == list(request.arguments)
         assert metadata["scope"]["research_cutoff_applied"] is False
         assert before == _immediate_file_bytes(root)
-        assert session.policy.used_memory_bytes == 0
     assert sdk.stops == 1
 
 
@@ -143,9 +133,7 @@ def test_sdk_null_empty_nonfinite_and_bytes_are_distinct(tmp_path: Path) -> None
     request = _request()
     with choice_session(sdk) as session:
         root = session.fetch(StorageLayout(tmp_path), request)
-        with read_choice_response(
-            root, request, resource_policy=session.policy
-        ) as response:
+        with read_choice_response(root, request) as response:
             restored = response["Data"]["0"]
             assert restored[:5] == values[:5]
             assert [type(value) for value in restored[:5]] == [
@@ -184,7 +172,7 @@ def test_corrupt_completed_response_refuses_reuse_without_overwriting(
         with pytest.raises(ValueError):
             session.fetch(StorageLayout(tmp_path), request)
         with pytest.raises(ValueError):
-            with read_choice_response(root, request, resource_policy=session.policy):
+            with read_choice_response(root, request):
                 pytest.fail("corrupt raw became visible")
         assert sdk.calls == 1
         assert before == _immediate_file_bytes(root)
@@ -213,58 +201,10 @@ def test_empty_success_and_failed_attempt_then_explicit_success(tmp_path: Path) 
             ]
             == []
         )
-        with read_choice_response(
-            root, request, resource_policy=session.policy
-        ) as response:
+        with read_choice_response(root, request) as response:
             assert response["Data"] == {}
         session.fetch(StorageLayout(tmp_path), request)
         assert sdk.calls == 2
-
-
-def test_admission_precedes_query_and_leases_are_released(tmp_path: Path) -> None:
-    sdk = SDK(_response())
-    with runtime_resource_policy_scope(explicit_cap_bytes=16 * 1024 * 1024) as policy:
-        with choice_session(sdk, resource_policy=policy) as session:
-            with pytest.raises(MemoryError, match="choice_request_exceeds_memory_plan"):
-                session.fetch(StorageLayout(tmp_path), _request())
-            assert sdk.calls == 0 and policy.used_memory_bytes == 0
-    assert sdk.stops == 1
-
-
-@pytest.mark.parametrize("mode", ["fetch", "read"])
-@pytest.mark.parametrize("boundary", ["soft", "captured", "explicit"])
-def test_choice_request_uses_capacity_instead_of_soft_plan(tmp_path, mode, boundary):
-    request = _request()
-    response = _response(Indicators=["QKMZ"], Data={"0": [12.0]})
-    if mode == "read":
-        with choice_session(SDK(response)) as session:
-            root = session.fetch(StorageLayout(tmp_path / "seed"), request)
-    policy = capture_test_policy(
-        available_memory_bytes=(100 if boundary == "captured" else 180) * 1024**2,
-        explicit_cap_bytes=100 * 1024**2 if boundary == "explicit" else None,
-    )
-    sdk = SDK(response)
-
-    def execute():
-        if mode == "fetch":
-            with choice_session(sdk, resource_policy=policy) as session:
-                session.fetch(StorageLayout(tmp_path / "output"), request)
-        else:
-            with read_choice_response(
-                root, request, resource_policy=policy
-            ) as restored:
-                assert restored["Data"]["0"] == [12.0]
-
-    with runtime_resource_policy_scope(policy):
-        if boundary == "soft":
-            assert 128 * 1024**2 > policy.memory_budget_bytes
-            execute()
-            assert sdk.calls == (1 if mode == "fetch" else 0)
-        else:
-            with pytest.raises(MemoryError, match="choice_request_exceeds_memory_plan"):
-                execute()
-            assert sdk.calls == 0
-        assert policy.used_memory_bytes == 0
 
 
 def test_invalid_shape_or_oversize_preserves_old_good(tmp_path: Path) -> None:
@@ -279,7 +219,6 @@ def test_invalid_shape_or_oversize_preserves_old_good(tmp_path: Path) -> None:
             with pytest.raises(ValueError):
                 session.fetch(StorageLayout(tmp_path), different)
             assert filesystem_read_bytes(root / "response.csv") == original
-            assert session.policy.used_memory_bytes == 0
         assert len(list(filesystem_iterdir(root.parent))) == 1
 
 
@@ -342,10 +281,9 @@ def test_scalar_saved_metadata_preserves_primary_error_at_read_and_reuse(
         filesystem_write_text(path, json.dumps(manifest), encoding="utf-8")
         corrupt = filesystem_read_bytes(path)
         with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
-            with read_choice_response(root, request, resource_policy=session.policy):
+            with read_choice_response(root, request):
                 pytest.fail("invalid metadata admitted")
         with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
             session.fetch(layout, request)
         assert sdk.calls == 1
         assert filesystem_read_bytes(path) == corrupt
-        assert session.policy.used_memory_bytes == 0

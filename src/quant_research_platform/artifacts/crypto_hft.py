@@ -24,7 +24,6 @@ from quant_research_platform.artifacts.research import (
     _unavailable,
     read_evaluation_report_evidence,
     read_validated_reference,
-    report_payload_working_set,
 )
 from quant_research_platform.artifacts.statistics import (
     STATISTICS_TABLE_GROUPS,
@@ -46,7 +45,6 @@ from quant_research_platform.contracts.targets import ProducerKind, TargetStatus
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.reports import diagnostic_status
 from quant_research_platform.reports.crypto_hft import build_crypto_research_report
-from quant_research_platform.runtime.resources import current_runtime_resource_policy
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
 )
@@ -54,9 +52,7 @@ from quant_research_platform.storage.identity import (
     dataset_file_identity,
     native_filesystem_path,
 )
-from quant_research_platform.storage.manifests import (
-    read_dataset_manifest_evidence,
-)
+from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from quant_research_platform.storage.parquet import (
     _opened_parquet,
     parquet_table_writer,
@@ -134,7 +130,10 @@ def _episode_rows(
     previous_stop = None
     expected_paths = {"episodes.parquet"}
     window = envelope["research_window"]
-    first, last = pd.Timestamp(window["start"]).value, pd.Timestamp(window["end"]).value
+    first, last = (
+        pd.Timestamp(window["start"]).value,
+        pd.Timestamp(window["end"]).value,
+    )
     try:
         with _opened_parquet(
             root / "episodes.parquet", expected_identity=identities["episodes.parquet"]
@@ -143,13 +142,8 @@ def _episode_rows(
                 CRYPTO_EPISODE_SCHEMA, check_metadata=False
             ):
                 raise ValueError("crypto_episode_schema_invalid")
-        policy = current_runtime_resource_policy()
         chunks = iter_declared_parquet_member_batches(
-            root / "episodes.parquet",
-            expected_identity=identities["episodes.parquet"],
-            target_chunk_bytes=max(1, policy.planning_headroom_bytes // 8)
-            if policy is not None
-            else 1024 * 1024,
+            root / "episodes.parquet", expected_identity=identities["episodes.parquet"]
         )
         count = 0
         with closing_iterator(chunks):
@@ -170,15 +164,16 @@ def _episode_rows(
                     if (
                         row["episode_id"] != episode_id
                         or row["ledger_root"] != child_root
-                        or not first <= start <= terminal < stop <= last + 1
-                        or previous_stop is not None
-                        and start < previous_stop
-                        or not reasons
-                        or reasons != sorted(set(reasons))
-                        or not set(reasons) <= _EPISODE_STOP_REASONS
-                        or row["termination"]
-                        != ("PLANNED_END" if stop == last + 1 else "TRUNCATED")
-                        or ("planned_oos_end" in reasons) != (stop == last + 1)
+                        or (not first <= start <= terminal < stop <= last + 1)
+                        or (previous_stop is not None and start < previous_stop)
+                        or (not reasons)
+                        or (reasons != sorted(set(reasons)))
+                        or (not set(reasons) <= _EPISODE_STOP_REASONS)
+                        or (
+                            row["termination"]
+                            != ("PLANNED_END" if stop == last + 1 else "TRUNCATED")
+                        )
+                        or (("planned_oos_end" in reasons) != (stop == last + 1))
                     ):
                         raise ValueError("crypto_episode_index_invalid")
                     previous_stop = stop
@@ -199,29 +194,26 @@ def _episode_rows(
                     terminal_observed = None
 
                     def consume(artifact, batches, row=row):
+
                         def observe():
                             nonlocal terminal_observed
                             for batch in batches:
-                                try:
-                                    for value in batch.valuations:
-                                        if value.phase == "end":
-                                            terminal_observed = (
-                                                value.timestamp_ns
-                                                if terminal_observed is None
-                                                else max(
-                                                    terminal_observed,
-                                                    value.timestamp_ns,
-                                                )
+                                for value in batch.valuations:
+                                    if value.phase == "end":
+                                        terminal_observed = (
+                                            value.timestamp_ns
+                                            if terminal_observed is None
+                                            else max(
+                                                terminal_observed, value.timestamp_ns
                                             )
-                                    yield batch
-                                finally:
-                                    batch = value = None
+                                        )
+                                yield batch
 
                         with closing_iterator(observe()) as observed:
                             if consume_episode is not None:
                                 consume_episode(row, artifact, observed)
-                            for _batch in observed:
-                                _batch = None
+                            for _ in observed:
+                                pass
 
                     expected_child = _episode_envelope(envelope, start, stop)
                     if row["ledger_identity"] != expected_child.instance_identity:
@@ -230,25 +222,20 @@ def _episode_rows(
                         path.removeprefix(child_root + "/"): identities[path]
                         for path in child_paths
                     }
-                    with policy.lease(
-                        "artifacts.crypto_episode.child_metadata", 0
-                    ) as child_lease:
-                        child = read_portfolio_ledger_artifact(
-                            root / child_root,
-                            expected_identity=expected_child.instance_identity,
-                            expected_member_identities=child_identities,
-                            consume_batches=consume,
-                            lease=child_lease,
-                        )
-                        try:
-                            if terminal_observed != terminal:
-                                raise ValueError(
-                                    "crypto_episode_child_contract_invalid"
-                                )
-                            count += 1
-                            yield row, child
-                        finally:
-                            child = None
+                    child = read_portfolio_ledger_artifact(
+                        root / child_root,
+                        expected_identity=expected_child.instance_identity,
+                        expected_member_identities=child_identities,
+                        consume_batches=consume,
+                    )
+                    if terminal_observed != terminal:
+                        raise ValueError("crypto_episode_child_contract_invalid")
+                    count += 1
+                    yielded_value = (row, child)
+                    try:
+                        yield yielded_value
+                    except GeneratorExit:
+                        return
         if not count or expected_paths != {member["path"] for member in members}:
             raise ValueError("crypto_episode_child_members_invalid")
     finally:
@@ -259,8 +246,10 @@ def _episode_rows(
                 root, lambda relative, path: observed_paths.add(relative)
             )
             if observed_paths != set(identities) or any(
-                dataset_file_identity(root / path) != identity
-                for path, identity in identities.items()
+                (
+                    dataset_file_identity(root / path) != identity
+                    for path, identity in identities.items()
+                )
             ):
                 raise ValueError("crypto_episode_member_identity_changed")
             if (
@@ -269,7 +258,7 @@ def _episode_rows(
             ):
                 raise ValueError("crypto_episode_manifest_identity_changed")
         except BaseException as error:
-            if primary is None or isinstance(primary, GeneratorExit):
+            if primary is None:
                 raise
             primary.add_note(
                 "episode member verification also failed: " + type(error).__name__
@@ -287,23 +276,25 @@ class CryptoEpisodeArtifact:
     _manifest_identity: object
 
     def iter_episodes(self, *, consume_episode=None):
-        yield from _episode_rows(
-            self.root,
-            self._envelope,
-            self._members,
-            self._identities,
-            self._manifest_identity,
-            consume_episode,
-        )
+        with closing_iterator(
+            _episode_rows(
+                self.root,
+                self._envelope,
+                self._members,
+                self._identities,
+                self._manifest_identity,
+                consume_episode,
+            )
+        ) as delegated_chunks:
+            for yielded_value in delegated_chunks:
+                try:
+                    yield yielded_value
+                except GeneratorExit:
+                    return
 
 
 def read_crypto_episode_artifact(
-    root,
-    *,
-    lease,
-    expected_identity,
-    expected_member_identities=None,
-    consume_episode=None,
+    root, *, expected_identity, expected_member_identities=None, consume_episode=None
 ):
     root = Path(root)
     identities = {}
@@ -312,7 +303,6 @@ def read_crypto_episode_artifact(
         expected_identity=expected_identity,
         member_identities=identities,
         expected_member_identities=expected_member_identities,
-        lease=lease,
     )
     manifest_identity = identities.pop("manifest.json")
     artifact = CryptoEpisodeArtifact(
@@ -353,6 +343,7 @@ def write_crypto_episode_artifact(logical_root, *, envelope, produce):
                 terminal = None
 
                 def produce_child(emit):
+
                     def capture(batch):
                         nonlocal terminal
                         for value in batch.valuations:
@@ -418,7 +409,6 @@ def produce_crypto_report(
     record,
     panel_id,
     read_model_artifact,
-    report_lease,
     expected_symbols,
     read_reconstruction,
     validate_maker_calibration,
@@ -428,16 +418,14 @@ def produce_crypto_report(
 ):
     protocol = record.payload()["protocol"]
     final_test = record.research_window["access"] == "holdout"
-    issues, references, captured = [], {}, {}
+    issues, references, captured = ([], {}, {})
     for result in record.target_results:
         if result.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}:
             issues.append(_issue(result.target_id, result.status.value, result.reason))
             continue
         try:
             identities = {}
-            read_validated_reference(
-                layout, result, member_identities=identities, lease=report_lease
-            )
+            read_validated_reference(layout, result, member_identities=identities)
             captured[result.target_id] = identities
         except (OSError, ValueError):
             issues.append(
@@ -445,8 +433,7 @@ def produce_crypto_report(
             )
         else:
             references[result.target_id] = result
-
-    data_rows, quality = [], {}
+    data_rows, quality = ([], {})
     recording_counts = {}
     reconstruction_defined = False
     data_targets = {panel_id, record.scenario_id} | {
@@ -455,8 +442,8 @@ def produce_crypto_report(
         if result.producer_kind in {ProducerKind.PROCESSED, ProducerKind.DATASET}
     }
     for target in (panel_id, record.scenario_id):
-        if target not in references and not any(
-            issue["target_id"] == target for issue in issues
+        if target not in references and (
+            not any(issue["target_id"] == target for issue in issues)
         ):
             issues.append(_issue(target, "BLOCKED", "run_target_result_missing"))
     for target, result in references.items():
@@ -521,7 +508,6 @@ def produce_crypto_report(
         "issues": data_issues,
         "reconstruction_status": "DEFINED" if reconstruction_defined else "UNDEFINED",
     }
-
     model_target = f"{record.scenario_id}_models"
     models = _unavailable(issues, model_target)
     if model_target in references:
@@ -532,15 +518,6 @@ def produce_crypto_report(
                 expected_identity=reference.instance_identity,
                 expected_member_identities=captured[reference.target_id],
                 trial_layout=layout,
-                lease=report_lease,
-            )
-            report_lease.grow(
-                report_payload_working_set(
-                    {
-                        "fold_models": list(artifact.models),
-                        "final_models": list(artifact.final_models),
-                    }
-                )
             )
             models = {
                 "status": "DEFINED",
@@ -554,7 +531,6 @@ def produce_crypto_report(
         except (OSError, KeyError, TypeError, ValueError):
             issues.append(_issue(model_target, "FAILED", "model_artifact_invalid"))
             models = _unavailable(issues, model_target)
-
     prediction_target = f"{record.scenario_id}_predictions"
     predictions = (
         _unavailable(issues, prediction_target)
@@ -576,7 +552,6 @@ def produce_crypto_report(
                         for key, value in captured[reference.target_id].items()
                         if key.startswith(f"outputs/{output_id}/")
                     },
-                    lease=report_lease,
                 )
                 metadata = manifest["metadata"]
                 if (
@@ -604,7 +579,6 @@ def produce_crypto_report(
                 _issue(prediction_target, "FAILED", "prediction_artifact_invalid")
             )
             predictions = _unavailable(issues, prediction_target)
-
     evaluations = []
     for result in record.target_results:
         if result.producer_kind is not ProducerKind.EVALUATION:
@@ -624,7 +598,6 @@ def produce_crypto_report(
                     evaluation_id=result.target_id,
                     instance_identity=result.instance_identity,
                     expected_member_identities=captured[result.target_id],
-                    report_lease=report_lease,
                 )
             )
         except (OSError, KeyError, TypeError, ValueError):
@@ -637,7 +610,6 @@ def produce_crypto_report(
                     **_unavailable(issues, result.target_id),
                 }
             )
-
     calibrations = []
     for item in calibration_candidates:
         calibration_target = item.calibration_target_id
@@ -650,7 +622,6 @@ def produce_crypto_report(
                     expected_identity=reference.instance_identity,
                     expected_member_identities=captured[reference.target_id],
                     validate_tables=validate_maker_calibration,
-                    lease=report_lease,
                 )
                 with artifact.table("crypto_maker_calibration.parquet") as frame:
                     calibration = {
@@ -658,7 +629,7 @@ def produce_crypto_report(
                         if frame.status.eq("DEFINED").all()
                         else "UNDEFINED",
                         "identity": reference.instance_identity,
-                        "summary": _report_rows(frame, report_lease),
+                        "summary": _report_rows(frame),
                         "method": (
                             "paired_validation_event_paths_and_forecast_error_by_side"
                         ),
@@ -685,7 +656,6 @@ def produce_crypto_report(
                 **calibration,
             }
         )
-
     portfolios = []
     statistics = []
     for execution_target in execution_targets if final_test else ():
@@ -709,7 +679,6 @@ def produce_crypto_report(
                         root,
                         expected_identity=reference.instance_identity,
                         expected_member_identities=captured[reference.target_id],
-                        lease=report_lease,
                         consume_batches=lambda ledger, batches, result=economics: (
                             result.update(
                                 summarize_portfolio_ledger(ledger.capital, batches)
@@ -728,7 +697,6 @@ def produce_crypto_report(
                             "use": "execution_only_not_annualized",
                         },
                     }
-                    report_lease.grow(report_payload_working_set(result))
                 else:
                     episode_rows = []
 
@@ -760,19 +728,17 @@ def produce_crypto_report(
                                 "use": "independent_episode_only",
                             },
                         }
-                        report_lease.grow(report_payload_working_set(row))
                         episode_rows.append(row)
 
                     read_crypto_episode_artifact(
                         root,
                         expected_identity=reference.instance_identity,
                         expected_member_identities=captured[reference.target_id],
-                        lease=report_lease,
                         consume_episode=consume_episode,
                     )
                     result = {
                         "episodes": episode_rows,
-                        "return_policy": ("per_episode_only"),
+                        "return_policy": "per_episode_only",
                     }
                 portfolios.append(
                     {
@@ -787,7 +753,6 @@ def produce_crypto_report(
                     _issue(target, "FAILED", "portfolio_execution_artifact_invalid")
                 )
                 portfolios.append({**key, **_unavailable(issues, target)})
-
         statistics_target = execution_target.statistics_target_id
         key = {
             "candidate_id": candidate.candidate_id,
@@ -803,14 +768,11 @@ def produce_crypto_report(
                 _instance_root(layout, reference),
                 expected_identity=reference.instance_identity,
                 expected_member_identities=captured[reference.target_id],
-                lease=report_lease,
             )
             tables = {}
             for member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]:
                 with artifact.table(member) as frame:
-                    tables[member.removesuffix(".parquet")] = _report_rows(
-                        frame, report_lease
-                    )
+                    tables[member.removesuffix(".parquet")] = _report_rows(frame)
             statistics.append(
                 {
                     **key,

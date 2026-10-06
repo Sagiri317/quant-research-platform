@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-import weakref
-from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -33,24 +31,13 @@ from quant_research_platform.research.datasets.validation import (
     validate_evaluation_input,
     validate_research_input,
 )
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    current_runtime_resource_policy,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
     make_demo_processed_catalog,
     write_demo_processed_inputs,
 )
-from tests.helpers.research_specs import (
-    make_research_dataset_catalog,
-)
-from tests.helpers.runtime_resources import (
-    capture_storage_test_policy,
-    capture_test_policy,
-)
+from tests.helpers.research_specs import make_research_dataset_catalog
 from tests.research.workflow_test_support import (
     _passthrough_session,
     _research_rows,
@@ -58,13 +45,11 @@ from tests.research.workflow_test_support import (
 )
 
 
-def test_research_dataset_assembles_from_processed_inputs(
-    tmp_path: Path,
-) -> None:
+def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_demo_processed_catalog()
     dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
     )
     write_demo_processed_inputs(layout, processed_catalog)
     root = assemble_research_dataset(
@@ -84,7 +69,6 @@ def test_research_dataset_assembles_from_processed_inputs(
         ignore_index=True,
     )
     inspection = inspect_dataset(root)
-
     assert root == tmp_path / "data" / "research" / "a_share" / "demo"
     assert list(result.columns) == [
         "market_id",
@@ -110,123 +94,35 @@ def test_research_dataset_assembles_from_processed_inputs(
         label_columns=("forward_return_20d",),
     )
     validate_research_input(
-        result,
-        dataset_catalog.get("demo"),
-        input_columns=("momentum_20d",),
+        result, dataset_catalog.get("demo"), input_columns=("momentum_20d",)
     )
-
-
-def test_research_join_bound_admission_precedes_join_pull(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=64 * 1024,
-        explicit_cap_bytes=32 * 1024,
-    )
-    time_key_pulls: list[bool] = []
-    pulled: list[bool] = []
-
-    def fake_iter_dataset_chunks(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        time_key_pulls.append(True)
-        yield pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")]})
-
-    monkeypatch.setattr(
-        assembler_module,
-        "iter_dataset_chunks",
-        fake_iter_dataset_chunks,
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_iter_research_chunk_windows_from_base_input",
-        lambda *_args, **_kwargs: iter((object(),)),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_join_processed_inputs",
-        lambda **_kwargs: (pulled.append(True), pd.DataFrame({"id": [1]}))[1],
-    )
-    dataset_spec = SimpleNamespace(
-        primary_key=("id",),
-        feature_transforms=(),
-        input_data_ids=("base",),
-        base_input_data_id="base",
-    )
-    sessions = {
-        "base": _passthrough_session(
-            retained_memory_bytes=0,
-            path_selection=None,
-            close=lambda: None,
-        )
-    }
-    chunks = assembler_module._iter_joined_processed_chunks(
-        dataset_spec=dataset_spec,
-        processed_catalog=SimpleNamespace(get=lambda _key: object()),
-        sessions=sessions,
-        time_window=object(),
-    )
-
-    with runtime_resource_policy_scope(policy):
-        blocker = policy.lease("test.research.blocker", policy.memory_budget_bytes)
-        try:
-            bound = next(chunks)
-            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-                policy.lease("test.research.consumer", bound)
-            assert time_key_pulls == []
-            assert pulled == []
-        finally:
-            blocker.close()
 
 
 def test_research_time_window_driver_uses_one_window_per_physical_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    observed_targets: list[int] = []
     timestamps = pd.date_range("2026-01-01", periods=20, freq="min")
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 768,
-    )
-    session = _passthrough_session(path_selection=None, close=lambda: None)
+    session = _passthrough_session()
 
-    def fake_iter_dataset_chunks(_context, *, target_chunk_bytes):  # noqa: ANN001
-        observed_targets.append(target_chunk_bytes)
+    def fake_iter_dataset_chunks(_context):
         yield pd.DataFrame({"timestamp": timestamps})
 
     monkeypatch.setattr(
-        assembler_module,
-        "iter_dataset_chunks",
-        fake_iter_dataset_chunks,
-        raising=False,
+        assembler_module, "iter_dataset_chunks", fake_iter_dataset_chunks, raising=False
     )
-
-    with runtime_resource_policy_scope(policy):
-        result = list(
-            assembler_module._iter_research_chunk_windows_from_base_input(
-                session,
-                time_window=TimeWindow(
-                    "2026-01-01T00:00:00",
-                    "2026-01-01T00:19:00",
-                ),
-            )
+    result = list(
+        assembler_module._iter_research_chunk_windows_from_base_input(
+            session,
+            time_window=TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:19:00"),
         )
-
-    assert result == [
-        TimeWindow(
-            "2026-01-01T00:00:00",
-            "2026-01-01T00:19:00",
-        )
-    ]
-    assert observed_targets == [policy.planning_headroom_bytes]
+    )
+    assert result == [TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:19:00")]
 
 
 def test_research_time_window_driver_preserves_single_timestamp(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 240,
-    )
-    session = _passthrough_session(path_selection=None, close=lambda: None)
+    session = _passthrough_session()
     monkeypatch.setattr(
         assembler_module,
         "iter_dataset_chunks",
@@ -235,24 +131,18 @@ def test_research_time_window_driver_preserves_single_timestamp(
             for frame in (pd.DataFrame({"timestamp": [pd.Timestamp("2026-01-01")]}),)
         ),
     )
-
-    with runtime_resource_policy_scope(policy):
-        assert list(
-            assembler_module._iter_research_chunk_windows_from_base_input(
-                session,
-                time_window=TimeWindow(
-                    "2026-01-01T00:00:00",
-                    "2026-01-01T00:00:00",
-                ),
-            )
-        ) == [TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:00:00")]
+    assert list(
+        assembler_module._iter_research_chunk_windows_from_base_input(
+            session,
+            time_window=TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:00:00"),
+        )
+    ) == [TimeWindow("2026-01-01T00:00:00", "2026-01-01T00:00:00")]
 
 
 def test_research_time_window_driver_normalizes_and_deduplicates_dates(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = capture_test_policy(available_memory_bytes=128 * 1024)
-    session = _passthrough_session(path_selection=None, close=lambda: None)
+    session = _passthrough_session()
     monkeypatch.setattr(
         assembler_module,
         "iter_dataset_chunks",
@@ -277,15 +167,11 @@ def test_research_time_window_driver_normalizes_and_deduplicates_dates(
             )
         ),
     )
-
-    with runtime_resource_policy_scope(policy):
-        result = list(
-            assembler_module._iter_research_chunk_windows_from_base_input(
-                session,
-                time_window=TimeWindow("2026-01-01", "2026-01-03"),
-            )
+    result = list(
+        assembler_module._iter_research_chunk_windows_from_base_input(
+            session, time_window=TimeWindow("2026-01-01", "2026-01-03")
         )
-
+    )
     assert result == [
         TimeWindow("2026-01-01", "2026-01-02"),
         TimeWindow("2026-01-03", "2026-01-03"),
@@ -295,8 +181,7 @@ def test_research_time_window_driver_normalizes_and_deduplicates_dates(
 def test_research_time_window_driver_rejects_empty_input(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = capture_test_policy(available_memory_bytes=128 * 1024)
-    session = _passthrough_session(path_selection=None, close=lambda: None)
+    session = _passthrough_session()
     monkeypatch.setattr(
         assembler_module,
         "iter_dataset_chunks",
@@ -304,22 +189,18 @@ def test_research_time_window_driver_rejects_empty_input(
             (pd.DataFrame({"timestamp": pd.Series(dtype="datetime64[ns]")}),)
         ),
     )
-
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(ValueError, match="no_research_dataset_sessions"):
-            list(
-                assembler_module._iter_research_chunk_windows_from_base_input(
-                    session,
-                    time_window=TimeWindow("2026-01-01", "2026-01-01"),
-                )
+    with pytest.raises(ValueError, match="no_research_dataset_sessions"):
+        list(
+            assembler_module._iter_research_chunk_windows_from_base_input(
+                session, time_window=TimeWindow("2026-01-01", "2026-01-01")
             )
+        )
 
 
 def test_research_time_window_driver_rejects_non_monotonic_chunks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    policy = capture_test_policy(available_memory_bytes=128 * 1024)
-    session = _passthrough_session(path_selection=None, close=lambda: None)
+    session = _passthrough_session()
     monkeypatch.setattr(
         assembler_module,
         "iter_dataset_chunks",
@@ -330,34 +211,22 @@ def test_research_time_window_driver_rejects_non_monotonic_chunks(
             )
         ),
     )
-
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(ValueError, match="non_monotonic_research_time_keys"):
-            list(
-                assembler_module._iter_research_chunk_windows_from_base_input(
-                    session,
-                    time_window=TimeWindow("2026-01-01", "2026-01-02"),
-                )
+    with pytest.raises(ValueError, match="non_monotonic_research_time_keys"):
+        list(
+            assembler_module._iter_research_chunk_windows_from_base_input(
+                session, time_window=TimeWindow("2026-01-01", "2026-01-02")
             )
+        )
 
 
-def test_research_time_window_driver_closes_iterator_before_view_cleanup(
+def test_research_time_window_driver_closes_iterator_on_failure(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     events: list[str] = []
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 768,
-    )
+    view = SimpleNamespace()
 
-    view = SimpleNamespace(path_selection=1)
-
-    @contextmanager
     def filtered_view(_time_window):
-        try:
-            yield view
-        finally:
-            events.extend(("selection_release", "view_close"))
+        return view
 
     base_session = SimpleNamespace(filtered_view=filtered_view)
 
@@ -369,176 +238,15 @@ def test_research_time_window_driver_closes_iterator_before_view_cleanup(
 
     iterator = chunks()
     monkeypatch.setattr(
-        assembler_module,
-        "iter_dataset_chunks",
-        lambda *_args, **_kwargs: iterator,
+        assembler_module, "iter_dataset_chunks", lambda *_args, **_kwargs: iterator
     )
-
-    with runtime_resource_policy_scope(policy):
-        with pytest.raises(KeyError, match="timestamp"):
-            list(
-                assembler_module._iter_research_chunk_windows_from_base_input(
-                    base_session,
-                    time_window=TimeWindow("2026-01-01", "2026-01-01"),
-                )
+    with pytest.raises(KeyError, match="timestamp"):
+        list(
+            assembler_module._iter_research_chunk_windows_from_base_input(
+                base_session, time_window=TimeWindow("2026-01-01", "2026-01-01")
             )
-    assert events == ["iterator_close", "selection_release", "view_close"]
-
-
-def test_research_processed_input_uses_live_budget_for_materialization(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    processed_catalog = make_demo_processed_catalog()
-    dataset_spec = make_research_dataset_catalog().get("demo")
-    processed_spec = processed_catalog.get("demo_factors")
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 9216,
-    )
-    observed: dict[str, object] = {}
-    columns = assembler_module._processed_input_columns(
-        dataset_spec,
-        processed_spec,
-        existing_columns=(),
-    )
-    context = _passthrough_session(
-        logical_columns=columns,
-        path_selection=None,
-        close=lambda: None,
-    )
-
-    def materialize(context, **kwargs):  # noqa: ANN001
-        observed["context"] = context
-        observed.update(kwargs)
-        return OwnedValue(
-            pd.DataFrame(),
-            policy.lease("test.research.input", 0),
         )
-
-    monkeypatch.setattr(
-        assembler_module,
-        "materialize_dataset_session_owned",
-        materialize,
-    )
-
-    with runtime_resource_policy_scope(policy):
-        owned = assembler_module._read_processed_input(
-            dataset_spec=dataset_spec,
-            processed_spec=processed_spec,
-            session=context,
-            existing_columns=(),
-            time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        )
-        owned.lease.close()
-
-    assert observed == {
-        "context": context,
-        "target_chunk_bytes": policy.planning_headroom_bytes,
-    }
-
-
-def test_research_join_preflights_merged_output_allocation(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 750,
-    )
-    base = pd.DataFrame({"id": [1], "left": [1]})
-    right = pd.DataFrame({"id": [1], "right": [1]})
-    frames = iter((base, right))
-    monkeypatch.setattr(
-        assembler_module,
-        "_ordered_input_data_ids",
-        lambda *_args, **_kwargs: ("left", "right"),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_read_processed_input",
-        lambda **_kwargs: OwnedValue(
-            next(frames),
-            policy.lease("test.research.input", 0),
-        ),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "pandas_frame_payload_bytes",
-        lambda frame: {
-            ("id",): 100,
-            ("id", "left"): 200,
-            ("id", "right"): 151,
-        }[tuple(frame.columns)],
-    )
-
-    with runtime_resource_policy_scope(policy):
-        blocking_lease = policy.lease(
-            "test.research.merge.capacity",
-            policy.memory_budget_bytes - 700,
-        )
-        try:
-            with pytest.raises(MemoryError, match="runtime_memory_budget_exceeded"):
-                assembler_module._join_processed_inputs(
-                    dataset_spec=SimpleNamespace(primary_key=("id",)),
-                    processed_catalog=SimpleNamespace(get=lambda _key: object()),
-                    sessions={
-                        "left": SimpleNamespace(),
-                        "right": SimpleNamespace(),
-                    },
-                    time_window=object(),
-                )
-        finally:
-            blocking_lease.close()
-
-
-def test_research_join_clears_transient_chunk_before_next_bound(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
-    holder = {
-        "frame": pd.DataFrame(
-            {"timestamp": [pd.Timestamp("2024-01-02")], "id": [1], "value": [1.0]}
-        ),
-    }
-    frame_ref = weakref.ref(holder["frame"])
-    monkeypatch.setattr(
-        assembler_module,
-        "_base_input_data_id",
-        lambda *_args, **_kwargs: "one",
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_iter_research_chunk_windows_from_base_input",
-        lambda *_args, **_kwargs: iter((object(), object())),
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "_join_processed_inputs",
-        lambda **_kwargs: holder["frame"],
-    )
-    monkeypatch.setattr(
-        assembler_module,
-        "validate_research_dataset",
-        lambda *_args, **_kwargs: None,
-    )
-
-    chunks = assembler_module._iter_joined_processed_chunks(
-        dataset_spec=SimpleNamespace(primary_key=("timestamp", "id")),
-        processed_catalog=SimpleNamespace(get=lambda _key: object()),
-        sessions={"one": SimpleNamespace(retained_memory_bytes=0)},
-        time_window=object(),
-    )
-    with runtime_resource_policy_scope(policy):
-        bound = next(chunks)
-        lease = policy.lease("test.research.consumer", bound)
-        owned = chunks.send(lease)
-        assert policy.used_memory_bytes == lease.reserved_bytes
-        holder["frame"] = None
-        del owned
-        next_bound = chunks.send(None)
-        assert type(next_bound) is int and next_bound > 0
-        assert frame_ref() is None
-        lease.close()
-        chunks.close()
+    assert events == ["iterator_close"]
 
 
 def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) -> None:
@@ -588,19 +296,11 @@ def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) ->
         grain=DataGrain.ASSET_TIMESTAMP,
     )
     timestamps = pd.to_datetime(
-        [
-            "2026-07-06T00:00:00",
-            "2026-07-06T00:01:00",
-            "2026-07-06T00:02:00",
-        ]
+        ["2026-07-06T00:00:00", "2026-07-06T00:01:00", "2026-07-06T00:02:00"]
     )
     keys = pd.DataFrame(
         [
-            {
-                "market_id": "crypto",
-                "asset_id": asset_id,
-                "timestamp": timestamp,
-            }
+            {"market_id": "crypto", "asset_id": asset_id, "timestamp": timestamp}
             for timestamp in timestamps
             for asset_id in ("asset_a", "asset_b")
         ]
@@ -615,30 +315,22 @@ def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) ->
             frame,
             spec=spec,
         )
-
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="minute_research",
-        time_window=TimeWindow(
-            "2026-07-06T00:01:00",
-            "2026-07-06T00:02:00",
-        ),
+        time_window=TimeWindow("2026-07-06T00:01:00", "2026-07-06T00:02:00"),
     )
     result = pd.concat(
         iter_research_dataset_chunks(
             layout,
             market_id=MarketId("crypto"),
             dataset_id="minute_research",
-            time_window=TimeWindow(
-                "2026-07-06T00:01:00",
-                "2026-07-06T00:02:00",
-            ),
+            time_window=TimeWindow("2026-07-06T00:01:00", "2026-07-06T00:02:00"),
         ),
         ignore_index=True,
     )
-
     assert len(result) == 4
     assert sorted(result["timestamp"].unique()) == list(timestamps[1:])
 
@@ -688,7 +380,6 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
         )
     )
     write_demo_processed_inputs(layout, processed_catalog)
-
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -705,7 +396,6 @@ def test_research_dataset_assembler_generates_feature_transforms_from_factors(
         ),
         ignore_index=True,
     ).sort_values(["timestamp", "asset_id"])
-
     assert list(result.columns) == [
         "market_id",
         "asset_id",
@@ -857,52 +547,41 @@ def test_custom_feature_spec_survives_context_and_persisted_assembly(
         frame,
         spec=source,
     )
-    policy = capture_storage_test_policy(working_headroom_bytes=16 * 1024**2)
-    with runtime_resource_policy_scope(policy):
-        window = TimeWindow("2020-01-03", "2020-01-03")
-        assemble_research_dataset(
-            layout=layout,
-            dataset_catalog=datasets,
-            processed_catalog=ProcessedDataCatalog((source,)),
+    window = TimeWindow("2020-01-03", "2020-01-03")
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=datasets,
+        processed_catalog=ProcessedDataCatalog((source,)),
+        dataset_id="custom_rank",
+        time_window=window,
+    )
+    result = pd.concat(
+        iter_research_dataset_chunks(
+            layout,
+            market_id=MarketId("a_share"),
             dataset_id="custom_rank",
             time_window=window,
-            resource_policy=policy,
-        )
-        result = pd.concat(
-            iter_research_dataset_chunks(
-                layout,
-                market_id=MarketId("a_share"),
-                dataset_id="custom_rank",
-                time_window=window,
-            ),
-            ignore_index=True,
-        )
-        assert result["rank_1"].tolist() == pytest.approx([1 / 3, 2 / 3, 1.0])
-        assert not any(column.startswith("feature_") for column in result)
-        assert policy.used_memory_bytes == 0
+        ),
+        ignore_index=True,
+    )
+    assert result["rank_1"].tolist() == pytest.approx([1 / 3, 2 / 3, 1.0])
+    assert not any(column.startswith("feature_") for column in result)
 
 
 def test_research_dataset_session_complete_chunks_preserve_output(
     tmp_path: Path,
 ) -> None:
     frame = _research_rows_for_dates(
-        [
-            "2014-01-02",
-            "2014-01-03",
-            "2014-01-06",
-            "2014-01-07",
-            "2014-01-08",
-        ]
+        ["2014-01-02", "2014-01-03", "2014-01-06", "2014-01-07", "2014-01-08"]
     )
     default_layout = StorageLayout(project_root=tmp_path / "default")
     tiny_layout = StorageLayout(project_root=tmp_path / "tiny")
     processed_catalog = make_demo_processed_catalog()
     dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
     )
     write_demo_processed_inputs(default_layout, processed_catalog, frame=frame)
     write_demo_processed_inputs(tiny_layout, processed_catalog, frame=frame)
-
     default_root = assemble_research_dataset(
         layout=default_layout,
         dataset_catalog=dataset_catalog,
@@ -910,18 +589,13 @@ def test_research_dataset_session_complete_chunks_preserve_output(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
     )
-    tiny_policy = capture_storage_test_policy(
-        working_headroom_bytes=4 * 1024**2,
-    )
     tiny_root = assemble_research_dataset(
         layout=tiny_layout,
         dataset_catalog=dataset_catalog,
         processed_catalog=processed_catalog,
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-08"),
-        resource_policy=tiny_policy,
     )
-
     default = pd.concat(
         iter_research_dataset_chunks(
             default_layout,
@@ -940,10 +614,8 @@ def test_research_dataset_session_complete_chunks_preserve_output(
         ),
         ignore_index=True,
     ).sort_values(["market_id", "asset_id", "timestamp"])
-
     pd.testing.assert_frame_equal(
-        default.reset_index(drop=True),
-        tiny.reset_index(drop=True),
+        default.reset_index(drop=True), tiny.reset_index(drop=True)
     )
     assert (
         inspect_dataset(tiny_root).file_count
@@ -952,8 +624,7 @@ def test_research_dataset_session_complete_chunks_preserve_output(
 
 
 def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_demo_processed_catalog()
@@ -961,116 +632,32 @@ def test_research_chunk_view_prunes_top_level_multi_year_physical_paths(
     write_demo_processed_inputs(layout, processed_catalog, frame=frame)
     processed_spec = processed_catalog.get("demo_factors")
     dataset_spec = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
     ).get("demo")
     columns = assembler_module._processed_input_columns(
-        dataset_spec,
-        processed_spec,
-        existing_columns=(),
+        dataset_spec, processed_spec, existing_columns=()
     )
-    policy = capture_test_policy(
-        available_memory_bytes=1024**3,
-    )
-    with assembler_module.open_dataset_session(
+    session = assembler_module.open_dataset_session(
         layout.processed_data_root(
-            processed_spec.market_id,
-            processed_spec.kind,
-            processed_spec.data_id,
+            processed_spec.market_id, processed_spec.kind, processed_spec.data_id
         ),
         columns=columns,
         time_window=TimeWindow("2014-12-31", "2015-01-02"),
-        resource_policy=policy,
-    ) as session:
-        with runtime_resource_policy_scope(policy):
-            with session.filtered_view(TimeWindow("2015-01-02", "2015-01-02")) as view:
-                assert len(view.read_paths) == 1
-                assert view.read_paths[0].parent.name == "year=2015"
-                assert view.path_selection is not None
-                view_selection = view.path_selection
-        assert len(session.read_paths) == 2
-        assert (
-            session.inventory.path_count(
-                selected=True,
-                path_selection=view_selection,
-            )
-            == 0
-        )
-
-        observed_selections: list[int] = []
-
-        def materialize(current, **_kwargs):  # noqa: ANN001
-            assert len(current.read_paths) == 1
-            assert current.path_selection is not None
-            observed_selections.append(current.path_selection)
-            return OwnedValue(
-                pd.DataFrame(),
-                policy.lease("test.research.input", 0),
-            )
-
-        monkeypatch.setattr(
-            assembler_module,
-            "materialize_dataset_session_owned",
-            materialize,
-        )
-        with runtime_resource_policy_scope(policy):
-            owned = assembler_module._read_processed_input(
-                dataset_spec=dataset_spec,
-                processed_spec=processed_spec,
-                session=session,
-                existing_columns=(),
-                time_window=TimeWindow("2014-12-31", "2014-12-31"),
-            )
-            owned.lease.close()
-        normal_selection = observed_selections.pop()
-        assert (
-            session.inventory.path_count(
-                selected=True,
-                path_selection=normal_selection,
-            )
-            == 0
-        )
-
-        def fail_materialization(current, **_kwargs):  # noqa: ANN001
-            assert current.path_selection is not None
-            observed_selections.append(current.path_selection)
-            raise RuntimeError("research_test_materialization_failure")
-
-        monkeypatch.setattr(
-            assembler_module,
-            "materialize_dataset_session_owned",
-            fail_materialization,
-        )
-        with runtime_resource_policy_scope(policy):
-            with pytest.raises(
-                RuntimeError,
-                match="research_test_materialization_failure",
-            ):
-                assembler_module._read_processed_input(
-                    dataset_spec=dataset_spec,
-                    processed_spec=processed_spec,
-                    session=session,
-                    existing_columns=(),
-                    time_window=TimeWindow("2015-01-02", "2015-01-02"),
-                )
-        error_selection = observed_selections.pop()
-        assert (
-            session.inventory.path_count(
-                selected=True,
-                path_selection=error_selection,
-            )
-            == 0
-        )
+    )
+    view = session.filtered_view(TimeWindow("2015-01-02", "2015-01-02"))
+    assert len(view.read_paths) == 1
+    assert view.read_paths[0].parent.name == "year=2015"
+    assert len(session.read_paths) == 2
 
 
 def test_research_assembly_rejects_dependency_replacement_after_identity_capture(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = StorageLayout(project_root=tmp_path / "current")
     replacement_layout = StorageLayout(project_root=tmp_path / "replacement")
     processed_catalog = make_demo_processed_catalog()
     dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
     )
     write_demo_processed_inputs(layout, processed_catalog)
     write_demo_processed_inputs(
@@ -1080,14 +667,10 @@ def test_research_assembly_rejects_dependency_replacement_after_identity_capture
     )
     factor_spec = processed_catalog.get("demo_factors")
     current_root = layout.processed_data_root(
-        factor_spec.market_id,
-        factor_spec.kind,
-        factor_spec.data_id,
+        factor_spec.market_id, factor_spec.kind, factor_spec.data_id
     )
     replacement_root = replacement_layout.processed_data_root(
-        factor_spec.market_id,
-        factor_spec.kind,
-        factor_spec.data_id,
+        factor_spec.market_id, factor_spec.kind, factor_spec.data_id
     )
     backup_root = current_root.with_name(current_root.name + "-before-replacement")
     real_identity = assembler_module.dataset_identity_payload
@@ -1099,10 +682,10 @@ def test_research_assembly_rejects_dependency_replacement_after_identity_capture
         opened_roots.append(Path(root))
         return real_open(root, **kwargs)
 
-    def replace_after_identity(spec, manifest):  # noqa: ANN001
+    def replace_after_identity(spec, manifest):
         nonlocal replaced
         identity = real_identity(spec, manifest)
-        if spec["data_id"] == factor_spec.data_id and not replaced:
+        if spec["data_id"] == factor_spec.data_id and (not replaced):
             current_root.rename(backup_root)
             replacement_root.rename(current_root)
             replaced = True
@@ -1110,15 +693,9 @@ def test_research_assembly_rejects_dependency_replacement_after_identity_capture
 
     monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
     monkeypatch.setattr(
-        assembler_module,
-        "dataset_identity_payload",
-        replace_after_identity,
+        assembler_module, "dataset_identity_payload", replace_after_identity
     )
-
-    with pytest.raises(
-        ValueError,
-        match="dataset_(spec|manifest)_identity_changed",
-    ):
+    with pytest.raises(ValueError, match="dataset_(spec|manifest)_identity_changed"):
         assemble_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -1126,24 +703,18 @@ def test_research_assembly_rejects_dependency_replacement_after_identity_capture
             dataset_id="demo",
             time_window=TimeWindow("2014-01-02", "2014-01-03"),
         )
-
     assert replaced
     assert len(opened_roots) == len(processed_catalog.list())
     assert len(opened_roots) == len(set(opened_roots))
 
-    reopened_policy = capture_test_policy(available_memory_bytes=16 * 1024 * 1024)
-    with runtime_resource_policy_scope(reopened_policy):
-        assert current_runtime_resource_policy() is reopened_policy
-
 
 def test_research_assembly_verifies_every_input_inside_staged_boundary(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_demo_processed_catalog()
     dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
     )
     write_demo_processed_inputs(layout, processed_catalog)
     real_open = assembler_module.open_dataset_session
@@ -1156,26 +727,24 @@ def test_research_assembly_verifies_every_input_inside_staged_boundary(
     inside_staged_validator = False
     writer_returned = False
 
-    @contextmanager
     def record_open(root: Path, **kwargs):
         opened_roots.append(Path(root))
-        with real_open(root, **kwargs) as session:
-            opened_sessions.append(session)
-            yield session
+        session = real_open(root, **kwargs)
+        opened_sessions.append(session)
+        return session
 
-    def record_verify(session) -> None:  # noqa: ANN001
+    def record_verify(session) -> None:
         if inside_staged_validator:
             staged_verified_roots.append(session.root)
         elif writer_returned and session.root in opened_roots:
             post_publish_verified_roots.append(session.root)
         real_verify(session)
 
-    def record_write(root, data, *, staged_validator, **kwargs):  # noqa: ANN001
+    def record_write(root, data, *, staged_validator, **kwargs):
         nonlocal inside_staged_validator, writer_returned
         assert staged_validator is not None
-        assert "retained_payload_bytes" not in kwargs
 
-        def record_staged(receipt) -> None:  # noqa: ANN001
+        def record_staged(receipt) -> None:
             nonlocal inside_staged_validator
             inside_staged_validator = True
             try:
@@ -1183,19 +752,13 @@ def test_research_assembly_verifies_every_input_inside_staged_boundary(
             finally:
                 inside_staged_validator = False
 
-        result = real_write(
-            root,
-            data,
-            staged_validator=record_staged,
-            **kwargs,
-        )
+        result = real_write(root, data, staged_validator=record_staged, **kwargs)
         writer_returned = True
         return result
 
     monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
     monkeypatch.setattr(assembler_module.DatasetSession, "verify", record_verify)
     monkeypatch.setattr(assembler_module, "write_dataset", record_write)
-
     artifact_root = assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -1203,7 +766,6 @@ def test_research_assembly_verifies_every_input_inside_staged_boundary(
         dataset_id="demo",
         time_window=TimeWindow("2014-01-02", "2014-01-03"),
     )
-
     assert artifact_root.is_dir()
     assert len(opened_roots) == len(processed_catalog.list())
     assert len(opened_roots) == len(set(opened_roots))
@@ -1212,14 +774,13 @@ def test_research_assembly_verifies_every_input_inside_staged_boundary(
 
 
 def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     layout = StorageLayout(project_root=tmp_path / "current")
     replacement_layout = StorageLayout(project_root=tmp_path / "replacement")
     processed_catalog = make_demo_processed_catalog()
     dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
     )
     write_demo_processed_inputs(layout, processed_catalog)
     write_demo_processed_inputs(
@@ -1229,14 +790,10 @@ def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
     )
     factor_spec = processed_catalog.get("demo_factors")
     current_root = layout.processed_data_root(
-        factor_spec.market_id,
-        factor_spec.kind,
-        factor_spec.data_id,
+        factor_spec.market_id, factor_spec.kind, factor_spec.data_id
     )
     replacement_root = replacement_layout.processed_data_root(
-        factor_spec.market_id,
-        factor_spec.kind,
-        factor_spec.data_id,
+        factor_spec.market_id, factor_spec.kind, factor_spec.data_id
     )
     backup_root = current_root.with_name(current_root.name + "-before-replacement")
     artifact_root = layout.research_dataset_root(MarketId("a_share"), "demo")
@@ -1251,35 +808,24 @@ def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
         opened_roots.append(Path(root))
         return real_open(root, **kwargs)
 
-    def replace_after_last_input(**kwargs):  # noqa: ANN003, ANN202
+    def replace_after_last_input(**kwargs):
         nonlocal replaced
         yield from real_joined_chunks(**kwargs)
         current_root.rename(backup_root)
         replacement_root.rename(current_root)
         replaced = True
 
-    def record_write(root, data, *, staged_validator, **kwargs):  # noqa: ANN001
+    def record_write(root, data, *, staged_validator, **kwargs):
         nonlocal staged_validator_supplied
         staged_validator_supplied = staged_validator is not None
-        return real_write(
-            root,
-            data,
-            staged_validator=staged_validator,
-            **kwargs,
-        )
+        return real_write(root, data, staged_validator=staged_validator, **kwargs)
 
     monkeypatch.setattr(assembler_module, "open_dataset_session", record_open)
     monkeypatch.setattr(
-        assembler_module,
-        "_iter_joined_processed_chunks",
-        replace_after_last_input,
+        assembler_module, "_iter_joined_processed_chunks", replace_after_last_input
     )
     monkeypatch.setattr(assembler_module, "write_dataset", record_write)
-
-    with pytest.raises(
-        ValueError,
-        match="dataset_(spec|manifest)_identity_changed",
-    ):
+    with pytest.raises(ValueError, match="dataset_(spec|manifest)_identity_changed"):
         assemble_research_dataset(
             layout=layout,
             dataset_catalog=dataset_catalog,
@@ -1287,7 +833,6 @@ def test_research_assembly_rejects_replacement_before_publish_and_cleans_stage(
             dataset_id="demo",
             time_window=TimeWindow("2014-01-02", "2014-01-03"),
         )
-
     assert replaced
     assert staged_validator_supplied
     assert len(opened_roots) == len(processed_catalog.list())
@@ -1308,7 +853,6 @@ def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
     frame = _research_rows()
     labels = frame.drop(index=frame.index[-1]).reset_index(drop=True)
     write_demo_processed_inputs(layout, processed_catalog, label_frame=labels)
-
     assemble_research_dataset(
         layout=layout,
         dataset_catalog=dataset_catalog,
@@ -1329,7 +873,6 @@ def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
         result["asset_id"].eq("000002")
         & result["timestamp"].eq(pd.Timestamp("2014-01-03"))
     ].iloc[0]
-
     assert len(result) == 4
     assert pd.isna(missing_row["forward_return_20d"])
 
@@ -1363,7 +906,6 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
         )
     )
     write_demo_processed_inputs(layout, processed_catalog)
-
     with pytest.raises(ValueError, match="invalid_research_factor_columns"):
         assemble_research_dataset(
             layout=layout,
@@ -1383,9 +925,7 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
     ],
 )
 def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context(
-    field_name: str,
-    bad_column: str,
-    expected_error: str,
+    field_name: str, bad_column: str, expected_error: str
 ) -> None:
     spec_kwargs = {
         "factor_columns": ("momentum_20d",),
@@ -1507,34 +1047,8 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
         frame = read_dataset(assemble())
         assert frame.timestamp.tolist() == rows.timestamp.tolist()
     assert all(
-        hashlib.sha256(path.read_bytes()).hexdigest() == digest
-        for path, digest in before.items()
+        (
+            hashlib.sha256(path.read_bytes()).hexdigest() == digest
+            for path, digest in before.items()
+        )
     )
-
-
-def test_research_assembly_can_finish_after_soft_planning_target_is_used(
-    tmp_path, monkeypatch
-):
-    from quant_research_platform.runtime import resources
-
-    layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_demo_processed_catalog()
-    dataset_catalog = make_research_dataset_catalog(
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
-    )
-    write_demo_processed_inputs(layout, processed_catalog)
-    monkeypatch.setattr(resources, "_available_memory_bytes", lambda: 256 * 1024**2)
-    with runtime_resource_policy_scope() as policy:
-        with policy.lease("tests.existing", policy.memory_budget_bytes):
-            assert policy.planning_headroom_bytes == 0
-            root = assemble_research_dataset(
-                layout=layout,
-                dataset_catalog=dataset_catalog,
-                processed_catalog=processed_catalog,
-                dataset_id="demo",
-                time_window=TimeWindow("2014-01-02", "2014-01-03"),
-                resource_policy=policy,
-            )
-            assert root.is_dir()
-        assert policy.used_memory_bytes == 0
-    assert inspect_dataset(root).row_count > 0

@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Iterable, Mapping
 from dataclasses import dataclass, replace
 from datetime import datetime
@@ -26,9 +25,7 @@ from quant_research_platform.contracts.models import (
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.datasets.io import (
-    _research_dataset_access_window,
-)
+from quant_research_platform.research.datasets.io import _research_dataset_access_window
 from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
 )
@@ -58,13 +55,6 @@ from quant_research_platform.research.protocols.a_share import (
 )
 from quant_research_platform.research.randomness import ROOT_SEED, derive_seed
 from quant_research_platform.runtime.execution_metrics import record_run_observations
-from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    OwnedValue,
-    RuntimeResourcePolicy,
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-)
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     iter_dataset_chunks,
@@ -95,20 +85,15 @@ def _model_input_chunks(dataset_session, *, dataset_spec, columns, time_window):
         dataset_session,
         logical_columns=columns,
         physical_columns=columns,
-        owns_inventory=False,
-        owns_lease=False,
     )
     window = _research_dataset_access_window(dataset_spec.market_id, time_window)
-    with projection.filtered_view(window) as view:
-        with closing_iterator(
-            iter_dataset_chunks(
-                view,
-                target_chunk_bytes=max(
-                    1, dataset_session.resource_policy.planning_headroom_bytes
-                ),
-            )
-        ) as source:
-            yield from source
+    view = projection.filtered_view(window)
+    with closing_iterator(iter_dataset_chunks(view)) as source:
+        for yielded_value in source:
+            try:
+                yield yielded_value
+            except GeneratorExit:
+                return
 
 
 def build_model_selection_result(
@@ -119,7 +104,6 @@ def build_model_selection_result(
     dataset_id: str,
     model_ids: tuple[str, ...],
     time_window: TimeWindow,
-    resource_policy: RuntimeResourcePolicy,
     protocol_manifest: Mapping[str, object],
     run_id: str,
     research_protocol_identity: str,
@@ -131,7 +115,7 @@ def build_model_selection_result(
     on_trial,
     select_models,
     on_observation,
-) -> Iterable[FinalModelResult | OwnedValue[FinalModelResult]]:
+) -> Iterable[FinalModelResult]:
     if not model_ids:
         raise ValueError("model_selection_model_ids_invalid")
     dataset_spec = dataset_catalog.get(dataset_id)
@@ -144,7 +128,7 @@ def build_model_selection_result(
         type(chronology) is not dict
         or set(chronology) != {"scoring_lookback_months", "warmup_window"}
         or type(formal_dataset_window) is not dict
-        or type(development_window) is not dict
+        or (type(development_window) is not dict)
     ):
         raise ValueError("model_chronology_missing")
     root_seed = protocol_manifest.get("root_seed")
@@ -158,21 +142,28 @@ def build_model_selection_result(
         start: object | None,
         end: object,
     ) -> Iterable[pd.DataFrame]:
-        yield from iter_validated_research_input_chunks(
-            _model_input_chunks(
-                dataset_session,
-                dataset_spec=dataset_spec,
-                columns=read_columns,
-                time_window=TimeWindow(
-                    pd.Timestamp(
-                        formal_dataset_window["start"] if start is None else start
+        with closing_iterator(
+            iter_validated_research_input_chunks(
+                _model_input_chunks(
+                    dataset_session,
+                    dataset_spec=dataset_spec,
+                    columns=read_columns,
+                    time_window=TimeWindow(
+                        pd.Timestamp(
+                            formal_dataset_window["start"] if start is None else start
+                        ),
+                        pd.Timestamp(end),
                     ),
-                    pd.Timestamp(end),
                 ),
-            ),
-            dataset_spec=dataset_spec,
-            input_columns=input_columns,
-        )
+                dataset_spec=dataset_spec,
+                input_columns=input_columns,
+            )
+        ) as delegated_chunks:
+            for yielded_value in delegated_chunks:
+                try:
+                    yield yielded_value
+                except GeneratorExit:
+                    return
 
     return _build_a_share_models(
         layout=layout,
@@ -304,19 +295,15 @@ def _build_a_share_models(
             )
         ) as frames:
             for frame in frames:
-                with current_runtime_resource_policy().lease(
-                    "research.model.validation_coverage",
-                    max(1, 3 * pandas_frame_payload_bytes(frame)),
-                ):
-                    legal = legal_training_rows(
-                        frame,
-                        fitting_cutoff=fold.validation.end,
-                        availability_column=availability,
-                        feature_columns=common_inputs,
-                        target_column=label,
-                    )
-                    coverage.add(legal)
-                    del legal, frame
+                legal = legal_training_rows(
+                    frame,
+                    fitting_cutoff=fold.validation.end,
+                    availability_column=availability,
+                    feature_columns=common_inputs,
+                    target_column=label,
+                )
+                coverage.add(legal)
+
         if not coverage.row_count:
             raise PortfolioTargetBlocked("a_share_validation_scoring_coverage_missing")
         for family_id in model_ids:
@@ -367,9 +354,7 @@ def _build_a_share_models(
             )
             recorder = TrialRecorder(layout, run_id, plan)
             observation = {}
-            with record_run_observations(
-                current_runtime_resource_policy(), observation
-            ):
+            with record_run_observations(observation):
                 fit_validation_candidates(
                     fold=fold,
                     candidate_specs=candidates,
@@ -398,7 +383,6 @@ def _build_a_share_models(
             on_trial(fold, family_id, recorder.reference())
             last_recorders[family_id] = recorder
             last_specs[family_id] = candidates
-
     cutoff = pd.Timestamp(development_window["end"])
     if pd.Timestamp(time_window.end) < cutoff:
         return
@@ -437,7 +421,7 @@ def _build_a_share_models(
             ]
             recorder = last_recorders[family_id]
             refit_recorder = attempt = fit_coverage = actual_spec = None
-            model_result = model_lease = None
+
             finished = False
 
             def begin_refit(
@@ -465,10 +449,8 @@ def _build_a_share_models(
 
             try:
                 observation = {}
-                with record_run_observations(
-                    current_runtime_resource_policy(), observation
-                ):
-                    model_result, model_lease = _fit_selected_model_result(
+                with record_run_observations(observation):
+                    model_result = _fit_selected_model_result(
                         dataset_spec=dataset_spec,
                         selected_spec=selected,
                         chunks=chunks,
@@ -501,9 +483,9 @@ def _build_a_share_models(
                     fit_coverage.semantic_identity,
                     refit_recorder.reference(),
                 )
-                yield OwnedValue(member, model_lease)
+                yield member
             except BaseException as error:
-                if attempt is not None and not finished:
+                if attempt is not None and (not finished):
                     try:
                         refit_recorder.finish(attempt, error=error)
                     except BaseException as secondary:
@@ -512,19 +494,6 @@ def _build_a_share_models(
                             + type(secondary).__name__
                         )
                 raise
-            finally:
-                member = model_result = None
-                if model_lease is not None and model_lease.active:
-                    primary = sys.exception()
-                    try:
-                        model_lease.close()
-                    except BaseException as cleanup:
-                        if primary is None:
-                            raise
-                        primary.add_note(
-                            "final model release also failed: " + type(cleanup).__name__
-                        )
-                model_lease = None
 
 
 def _dataset_sessions(chunks: Iterable[pd.DataFrame]) -> pd.DatetimeIndex:
@@ -574,7 +543,7 @@ def _fit_selected_model_result(
     root_seed: int,
     candidate_parameters,
     on_fit_start=None,
-) -> tuple[fitting.ModelFitResult, MemoryLease | None]:
+) -> fitting.ModelFitResult:
     n_refit = _count_training_rows(
         dataset_spec,
         selected_spec,
@@ -595,26 +564,21 @@ def _fit_selected_model_result(
         label_column=refit_spec.label_column,
         sample_filter_mode=refit_spec.sample_filter_mode,
     )
-    owned_model = fitting._fit_model_result_owned_from_frames(
+    model_result = fitting._fit_model_result_from_frames(
         training_scope_chunks(
             chunks(
                 refit_read_columns,
                 input_columns=refit_spec.input_columns,
                 start=None,
                 end=fitting_cutoff,
-            ),
+            )
         ),
         refit_spec,
         estimator=build_estimator_from_model_spec(refit_spec),
         fitting_cutoff=fitting_cutoff,
         on_fit_start=on_fit_start,
     )
-    model_result = (
-        owned_model.value if isinstance(owned_model, OwnedValue) else owned_model
-    )
-    return model_result, owned_model.lease if isinstance(
-        owned_model, OwnedValue
-    ) else None
+    return model_result
 
 
 def _resolve_candidate_parameters(algorithm, parameters, n_train):
@@ -653,36 +617,33 @@ def _refit_model_spec(
 
 def _selection_model_specs(base_spec, parameters, *, n_train, root_seed, quarter_id):
     return tuple(
-        replace(
-            base_spec,
-            model_id=base_spec.model_id
-            if len(parameters) == 1
-            else f"{base_spec.model_id}__config_{index}",
-            hyperparameters=_resolve_candidate_parameters(
-                base_spec.model_algorithm, values, n_train
-            ),
-            random_seed=derive_seed(
-                root_seed,
-                "a_share_model_trial",
-                base_spec.model_algorithm,
-                base_spec.model_id
+        (
+            replace(
+                base_spec,
+                model_id=base_spec.model_id
                 if len(parameters) == 1
                 else f"{base_spec.model_id}__config_{index}",
-                quarter_id,
-                index,
-            ),
+                hyperparameters=_resolve_candidate_parameters(
+                    base_spec.model_algorithm, values, n_train
+                ),
+                random_seed=derive_seed(
+                    root_seed,
+                    "a_share_model_trial",
+                    base_spec.model_algorithm,
+                    base_spec.model_id
+                    if len(parameters) == 1
+                    else f"{base_spec.model_id}__config_{index}",
+                    quarter_id,
+                    index,
+                ),
+            )
+            for index, values in enumerate(parameters)
         )
-        for index, values in enumerate(parameters)
     )
 
 
 def _count_training_rows(
-    dataset_spec,
-    model_spec,
-    *,
-    chunks,
-    train_end: str,
-    cache,
+    dataset_spec, model_spec, *, chunks, train_end: str, cache
 ) -> int:
     scope = (
         frozenset(model_spec.input_columns),
@@ -765,7 +726,6 @@ def build_crypto_fold_models(
     dataset_id,
     model_ids,
     time_window,
-    resource_policy,
     protocol_manifest,
     run_id,
     research_protocol_identity,
@@ -826,7 +786,7 @@ def build_crypto_fold_models(
                 candidate_parameters={model_id: model_spec_payload(spec)},
             )
             recorder = TrialRecorder(layout, run_id, plan)
-            train_owned = refit_owned = trained = result = None
+
             metrics = training_metadata = None
 
             def chunks(window, spec=spec, prediction=prediction):
@@ -844,14 +804,21 @@ def build_crypto_fold_models(
                         *HFT_EXECUTION_CONTEXT_COLUMNS,
                     ),
                 )
-                yield from training_scope_chunks(
-                    iter_validated_research_input_chunks(
-                        source,
-                        dataset_spec=dataset,
-                        input_columns=spec.input_columns,
-                    ),
-                    asset_ids=prediction.training_asset_ids,
-                )
+                with closing_iterator(
+                    training_scope_chunks(
+                        iter_validated_research_input_chunks(
+                            source,
+                            dataset_spec=dataset,
+                            input_columns=spec.input_columns,
+                        ),
+                        asset_ids=prediction.training_asset_ids,
+                    )
+                ) as delegated_chunks:
+                    for yielded_value in delegated_chunks:
+                        try:
+                            yield yielded_value
+                        except GeneratorExit:
+                            return
 
             validation_coverage = ModelSampleCoverage(
                 crypto_validation_coverage_scope(
@@ -860,23 +827,19 @@ def build_crypto_fold_models(
             )
             with closing_iterator(chunks(fold.validation)) as validation_source:
                 for frame in validation_source:
-                    with resource_policy.lease(
-                        "research.model.validation_coverage",
-                        max(1, 2 * pandas_frame_payload_bytes(frame)),
-                    ):
-                        legal = legal_training_rows(
-                            frame,
-                            fitting_cutoff=fold.validation.end,
-                            availability_column=training_availability_columns(
-                                spec.label_column
-                            )[0],
-                            feature_columns=model_input_validity_columns(
-                                spec.input_columns, spec.model_algorithm
-                            ),
-                            target_column=spec.label_column,
-                        )
-                        validation_coverage.add(legal)
-                        del legal, frame
+                    legal = legal_training_rows(
+                        frame,
+                        fitting_cutoff=fold.validation.end,
+                        availability_column=training_availability_columns(
+                            spec.label_column
+                        )[0],
+                        feature_columns=model_input_validity_columns(
+                            spec.input_columns, spec.model_algorithm
+                        ),
+                        target_column=spec.label_column,
+                    )
+                    validation_coverage.add(legal)
+
             if validation_coverage.row_count == 0:
                 raise PortfolioTargetBlocked(
                     "crypto_model_validation_legal_rows_missing"
@@ -884,7 +847,7 @@ def build_crypto_fold_models(
             attempt = recorder.begin(
                 spec, common_coverage_id=validation_coverage.semantic_identity
             )
-            member = None
+
             finished = False
             refit_recorder = refit_attempt = fit_coverage = None
             refit_finished = False
@@ -918,16 +881,11 @@ def build_crypto_fold_models(
                 )
 
             try:
-                train_owned = fitting._fit_model_result_owned_from_frames(
+                trained = fitting._fit_model_result_from_frames(
                     chunks(fold.train),
                     spec,
                     estimator=build_estimator_from_model_spec(spec),
                     fitting_cutoff=fold.train.end,
-                )
-                trained = (
-                    train_owned.value
-                    if isinstance(train_owned, OwnedValue)
-                    else train_owned
                 )
                 training_metadata = dict(trained.metadata)
                 validation = iter_validation_prediction_chunks(
@@ -944,25 +902,20 @@ def build_crypto_fold_models(
                 ):
                     with closing_iterator(iter(validation)) as validation_source:
                         for item in validation_source:
-                            frame = item.value if isinstance(item, OwnedValue) else item
-                            with resource_policy.lease(
-                                "research.model.crypto.validation.maturity",
-                                max(1, 3 * pandas_frame_payload_bytes(frame)),
-                            ):
-                                mature = frame.loc[
-                                    label_maturity_mask(
-                                        frame,
-                                        fitting_cutoff=fold.validation.end,
-                                        availability_column="label_available_at",
-                                        target_column=spec.label_column,
-                                    )
-                                ]
-                                on_validation(fold, spec, mature)
-                                yield (
-                                    OwnedValue(mature, item.lease)
-                                    if isinstance(item, OwnedValue)
-                                    else mature
+                            frame = item
+                            mature = frame.loc[
+                                label_maturity_mask(
+                                    frame,
+                                    fitting_cutoff=fold.validation.end,
+                                    availability_column="label_available_at",
+                                    target_column=spec.label_column,
                                 )
+                            ]
+                            on_validation(fold, spec, mature)
+                            try:
+                                yield mature
+                            except GeneratorExit:
+                                return
 
                 metrics = evaluate_model_trial_metrics_from_chunks(
                     observed_validation(),
@@ -975,10 +928,6 @@ def build_crypto_fold_models(
                     metrics["validation_mse"]
                 ):
                     raise ValueError("crypto_validation_sample_empty")
-                trained = None
-                if isinstance(train_owned, OwnedValue):
-                    train_owned.release(owner="research.model.crypto.validation")
-                train_owned = None
 
                 recorder.finish(
                     attempt, metrics=metrics, model_metadata=training_metadata
@@ -1000,20 +949,25 @@ def build_crypto_fold_models(
                     continue
 
                 def refit_chunks(fold=fold):
-                    yield from chunks(fold.train)
-                    yield from chunks(fold.validation)
+                    with closing_iterator(chunks(fold.train)) as delegated_chunks:
+                        for yielded_value in delegated_chunks:
+                            try:
+                                yield yielded_value
+                            except GeneratorExit:
+                                return
+                    with closing_iterator(chunks(fold.validation)) as delegated_chunks:
+                        for yielded_value in delegated_chunks:
+                            try:
+                                yield yielded_value
+                            except GeneratorExit:
+                                return
 
-                refit_owned = fitting._fit_model_result_owned_from_frames(
+                result = fitting._fit_model_result_from_frames(
                     refit_chunks(),
                     spec,
                     estimator=build_estimator_from_model_spec(spec),
                     fitting_cutoff=fold.validation.end,
                     on_fit_start=begin_crypto_refit,
-                )
-                result = (
-                    refit_owned.value
-                    if isinstance(refit_owned, OwnedValue)
-                    else refit_owned
                 )
                 refit_recorder.finish(refit_attempt, model_metadata=result.metadata)
                 refit_finished = True
@@ -1027,13 +981,9 @@ def build_crypto_fold_models(
                     refit_recorder.reference(),
                     fit_coverage.semantic_identity,
                 )
-                yield (
-                    OwnedValue(member, refit_owned.lease)
-                    if isinstance(refit_owned, OwnedValue)
-                    else member
-                )
+                yield member
             except BaseException as error:
-                if refit_attempt is not None and not refit_finished:
+                if refit_attempt is not None and (not refit_finished):
                     try:
                         refit_recorder.finish(refit_attempt, error=error)
                     except BaseException as secondary:
@@ -1054,24 +1004,4 @@ def build_crypto_fold_models(
                             "trial failure record also failed: "
                             f"{type(secondary).__name__}"
                         )
-                from quant_research_platform.contracts.validation import (
-                    clear_exception_frames,
-                )
-
-                clear_exception_frames(error)
                 raise
-            finally:
-                trained = member = result = None
-                for owner in (train_owned, refit_owned):
-                    if isinstance(owner, OwnedValue) and owner.lease.active:
-                        primary = sys.exception()
-                        try:
-                            owner.release(owner="research.model.crypto")
-                        except BaseException as cleanup:
-                            if primary is None:
-                                raise
-                            primary.add_note(
-                                "crypto model release also failed: "
-                                f"{type(cleanup).__name__}"
-                            )
-                train_owned = refit_owned = None

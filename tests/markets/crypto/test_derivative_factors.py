@@ -114,7 +114,6 @@ def test_native_epoch_invalidates_all_assets_only_after_known_clock(tmp_path, mo
     import json
 
     from quant_research_platform.markets.implementations.crypto.processed import catalog
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.sources import open_market_source
     from quant_research_platform.sources.tardis.raw import STATE_CHANNELS, import_slices
     from quant_research_platform.storage.datasets.reading import read_dataset
@@ -126,7 +125,7 @@ def test_native_epoch_invalidates_all_assets_only_after_known_clock(tmp_path, mo
 
     def line(milliseconds, symbol, channel, payload):
         stamp = (
-            pd.Timestamp(origin + milliseconds * 1_000_000, tz="UTC")
+            pd.Timestamp(origin + milliseconds * 1000000, tz="UTC")
             .isoformat()
             .replace("+00:00", "Z")
         )
@@ -143,14 +142,14 @@ def test_native_epoch_invalidates_all_assets_only_after_known_clock(tmp_path, mo
         "forceOrder",
         {
             "e": "forceOrder",
-            "E": origin // 1_000_000 + 4500,
+            "E": origin // 1000000 + 4500,
             "o": {
                 "s": "BTCUSDT",
                 "S": "SELL",
                 "q": "2",
                 "l": "2",
                 "z": "2",
-                "T": origin // 1_000_000 + 4500,
+                "T": origin // 1000000 + 4500,
             },
         },
     )
@@ -162,21 +161,13 @@ def test_native_epoch_invalidates_all_assets_only_after_known_clock(tmp_path, mo
         next_ms,
         symbol,
         "openInterest",
-        {
-            "symbol": symbol,
-            "time": origin // 1_000_000 + next_ms,
-            "openInterest": "10",
-        },
+        {"symbol": symbol, "time": origin // 1000000 + next_ms, "openInterest": "10"},
     )
     native += line(
         6000,
         "BTCUSDT",
         "openInterest",
-        {
-            "symbol": "BTCUSDT",
-            "time": origin // 1_000_000 + 6000,
-            "openInterest": "10",
-        },
+        {"symbol": "BTCUSDT", "time": origin // 1000000 + 6000, "openInterest": "10"},
     )
     panel = pd.DataFrame(
         {
@@ -187,36 +178,32 @@ def test_native_epoch_invalidates_all_assets_only_after_known_clock(tmp_path, mo
             "mid": 100.0,
         }
     )
-    with runtime_resource_policy_scope() as policy:
-        root = tmp_path / "archive"
-        import_slices(
-            root,
-            date="2026-09-01",
-            slices=_slices(tmp_path / "native", native, count=1),
-            byte_budget=1024**2,
-            resource_policy=policy,
-            channels=STATE_CHANNELS,
+    root = tmp_path / "archive"
+    import_slices(
+        root,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", native, count=1),
+        byte_budget=1024**2,
+        channels=STATE_CHANNELS,
+    )
+    with open_market_source(root) as archive:
+        frames = iter_derivative_factor_frames(
+            [panel],
+            observations=archive.iter_state_observations(symbol="BTCUSDT"),
+            max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 400000),
         )
-        with open_market_source(root, resource_policy=policy) as archive:
-            frames = iter_derivative_factor_frames(
-                [panel],
-                observations=archive.iter_state_observations(symbol="BTCUSDT"),
-                max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 400000),
-            )
-            spec = catalog.hft_processed_catalog().get(
-                "binance_futures_derivative_factors_100ms"
-            )
-            layout = StorageLayout(tmp_path)
-            output = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-            write_dataset(
-                output, frames, spec=spec, resource_policy=policy, borrowed_input=True
-            )
-            result = read_dataset(output, resource_policy=policy)
-            value = result.observed_force_order_imbalance_5s.iloc[-1]
-            if mode in ("no_gap", "future_gap"):
-                assert value == -1
-            else:
-                assert pd.isna(value)
+        spec = catalog.hft_processed_catalog().get(
+            "binance_futures_derivative_factors_100ms"
+        )
+        layout = StorageLayout(tmp_path)
+        output = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        write_dataset(output, frames, spec=spec)
+        result = read_dataset(output)
+        value = result.observed_force_order_imbalance_5s.iloc[-1]
+        if mode in ("no_gap", "future_gap"):
+            assert value == -1
+        else:
+            assert pd.isna(value)
 
 
 @pytest.mark.parametrize("count", [200, 400])
@@ -246,11 +233,10 @@ def test_derivative_catchup_retains_no_expired_force_orders(monkeypatch, count):
     )
     events = [
         (
-            origin - 31_000_000_000 - (count - 1 - i) * 1_000_000,
+            origin - 31000000000 - (count - 1 - i) * 1000000,
             "forceOrder",
             {
-                "E": (origin - 31_000_000_000 - (count - 1 - i) * 1_000_000)
-                // 1_000_000,
+                "E": (origin - 31000000000 - (count - 1 - i) * 1000000) // 1000000,
                 "o": {"S": "SELL", "z": "2", "q": "100"},
             },
             0,

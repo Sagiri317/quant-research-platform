@@ -7,22 +7,23 @@ from contextlib import contextmanager
 
 
 @contextmanager
-def closing_iterator(iterator: Iterator[object]) -> Iterator[object]:
-    """Close one iterator without replacing an active primary exception."""
+def closing_iterator[T](iterator: T) -> Iterator[T]:
+    """Close a resource, preserving real failures but surfacing close errors."""
 
+    primary = None
     try:
         yield iterator
-    except BaseException as primary:
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
         try:
             close = getattr(iterator, "close", None)
             if close is not None:
                 close()
         except BaseException as cleanup_error:
+            if primary is None:
+                raise
             primary.add_note(
                 f"iterator close also failed: {type(cleanup_error).__name__}"
             )
-        raise
-    else:
-        close = getattr(iterator, "close", None)
-        if close is not None:
-            close()

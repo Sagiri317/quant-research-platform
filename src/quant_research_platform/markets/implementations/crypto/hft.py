@@ -39,7 +39,6 @@ from quant_research_platform.research.protocols.crypto_hft import (
     HFT_SPOT_FACTOR_COLUMNS,
     label_catalog,
 )
-from quant_research_platform.runtime.resources import OwnedValue
 
 HFT_GRID_MS = 100
 _NANOSECONDS_PER_MILLISECOND = 1_000_000
@@ -73,7 +72,7 @@ def l1_ofi(
 
 
 def iter_panel_frames(
-    book_events: Iterable[BookState | OwnedValue[BookState] | BookBoundary],
+    book_events: Iterable[BookState | BookBoundary],
     trades: Iterable[TradeEvent],
     *,
     market_id: str,
@@ -101,199 +100,183 @@ def iter_panel_frames(
     active_books = iter(book_events)
     active_trades = iter(trades)
     with closing_iterator(active_books), closing_iterator(active_trades):
-        next_book: BookState | OwnedValue[BookState] | BookBoundary | None = None
+        next_book: BookState | BookBoundary | None = None
         next_trade: TradeEvent | None = None
         current_state: BookState | None = None
-        current_owned: OwnedValue[BookState] | None = None
         previous_bbo: tuple[tuple[int, float], tuple[int, float]] | None = None
         previous_book_time: int | None = None
         previous_trade_time: int | None = None
-        try:
-            next_book = next(active_books, None)
-            next_trade = next(active_trades, None)
-            interval_ns = HFT_GRID_MS * _NANOSECONDS_PER_MILLISECOND
-            last_grid_ms = start_ms + (end_ms - start_ms) // HFT_GRID_MS * HFT_GRID_MS
-            grid_time = start_ms - HFT_GRID_MS
-            while grid_time < last_grid_ms:
-                grid_time += HFT_GRID_MS
-                interval_start = max(0, grid_time - HFT_GRID_MS)
-                grid_time_ns = grid_time * _NANOSECONDS_PER_MILLISECOND
-                interval_start_ns = interval_start * _NANOSECONDS_PER_MILLISECOND
-                book_ofi = 0.0
-                trade_count = 0
-                trade_volume = 0.0
-                signed_trade_volume = 0.0
-                taker_buy_volume = 0.0
-                taker_sell_volume = 0.0
-                trade_source_sequence_min: int | None = None
-                trade_source_sequence_max: int | None = None
-                trade_connections = trade_coverage(interval_start_ns, grid_time_ns)
-                while (
-                    next_book is not None
-                    and _book_observed_time(next_book) <= grid_time_ns
-                ):
-                    event_time = _book_observed_time(next_book)
-                    if (
-                        previous_book_time is not None
-                        and event_time < previous_book_time
-                    ):
-                        raise ValueError("hft_book_time_non_monotonic")
-                    previous_book_time = event_time
-                    event = next_book
-                    next_book = next(active_books, None)
-                    if isinstance(event, BookBoundary):
-                        if current_owned is not None:
-                            current_owned.release(owner="crypto.hft.book")
-                        current_owned = None
-                        current_state = None
-                        previous_bbo = None
-                        book_ofi = 0.0
-                        continue
-                    state = _book_value(event)
-                    if (
-                        current_state is None
-                        or state.segment_id != current_state.segment_id
-                    ):
-                        previous_bbo = None
-                        book_ofi = 0.0
-                    if (
-                        previous_bbo is not None
-                        and state.best_bid is not None
-                        and state.best_ask is not None
-                        and event_time > interval_start_ns
-                    ):
-                        book_ofi += l1_ofi(
-                            previous_bbo[0],
-                            state.best_bid,
-                            previous_bbo[1],
-                            state.best_ask,
-                        )
-                    if current_owned is not None:
-                        current_owned.release(owner="crypto.hft.book")
-                    current_owned = event if isinstance(event, OwnedValue) else None
-                    current_state = state
-                    if state.best_bid is not None and state.best_ask is not None:
-                        previous_bbo = (state.best_bid, state.best_ask)
-                while next_trade is not None:
-                    if not isinstance(next_trade, TradeEvent):
-                        raise TypeError("hft_trade_event_invalid")
-                    if next_trade.observed_time_ns > grid_time_ns:
-                        break
-                    trade_time = next_trade.observed_time_ns
-                    if (
-                        previous_trade_time is not None
-                        and trade_time < previous_trade_time
-                    ):
-                        raise ValueError("hft_trade_time_non_monotonic")
-                    previous_trade_time = trade_time
-                    trade = next_trade
-                    next_trade = next(active_trades, None)
-                    quantity = strict_finite_float(
-                        trade.quantity,
-                        error="hft_trade_quantity_invalid",
-                    )
-                    if trade.visible_quantity is not None:
-                        visible = strict_finite_float(
-                            trade.visible_quantity,
-                            error="hft_trade_visible_quantity_invalid",
-                        )
-                        if visible < 0 or visible > quantity:
-                            raise ValueError("hft_trade_values_invalid")
-                    if quantity <= 0 or not isinstance(trade.buyer_is_maker, bool):
-                        raise ValueError("hft_trade_values_invalid")
-                    if (
-                        current_state is not None
-                        and len(trade_connections) == 1
-                        and trade.observation_id == trade_connections[0]
-                        and trade.observed_time_ns > interval_start_ns
-                        and trade.observed_time_ns <= grid_time_ns
-                    ):
-                        trade_count += 1
-                        trade_volume += quantity
-                        trade_source_sequence_min = (
-                            trade.source_sequence
-                            if trade_source_sequence_min is None
-                            else min(trade_source_sequence_min, trade.source_sequence)
-                        )
-                        trade_source_sequence_max = (
-                            trade.source_sequence
-                            if trade_source_sequence_max is None
-                            else max(trade_source_sequence_max, trade.source_sequence)
-                        )
-                        if trade.buyer_is_maker:
-                            signed_trade_volume -= quantity
-                            taker_sell_volume += quantity
-                        else:
-                            signed_trade_volume += quantity
-                            taker_buy_volume += quantity
-                book_bounds = (
-                    None
-                    if current_state is None
-                    else book_coverage.get(current_state.segment_id)
-                )
+        next_book = next(active_books, None)
+        next_trade = next(active_trades, None)
+        interval_ns = HFT_GRID_MS * _NANOSECONDS_PER_MILLISECOND
+        last_grid_ms = start_ms + (end_ms - start_ms) // HFT_GRID_MS * HFT_GRID_MS
+        grid_time = start_ms - HFT_GRID_MS
+        while grid_time < last_grid_ms:
+            grid_time += HFT_GRID_MS
+            interval_start = max(0, grid_time - HFT_GRID_MS)
+            grid_time_ns = grid_time * _NANOSECONDS_PER_MILLISECOND
+            interval_start_ns = interval_start * _NANOSECONDS_PER_MILLISECOND
+            book_ofi = 0.0
+            trade_count = 0
+            trade_volume = 0.0
+            signed_trade_volume = 0.0
+            taker_buy_volume = 0.0
+            taker_sell_volume = 0.0
+            trade_source_sequence_min: int | None = None
+            trade_source_sequence_max: int | None = None
+            trade_connections = trade_coverage(interval_start_ns, grid_time_ns)
+            while (
+                next_book is not None and _book_observed_time(next_book) <= grid_time_ns
+            ):
+                event_time = _book_observed_time(next_book)
+                if previous_book_time is not None and event_time < previous_book_time:
+                    raise ValueError("hft_book_time_non_monotonic")
+                previous_book_time = event_time
+                event = next_book
+                next_book = next(active_books, None)
+                if isinstance(event, BookBoundary):
+                    current_state = None
+                    previous_bbo = None
+                    book_ofi = 0.0
+                    continue
+                state = _book_value(event)
                 if (
-                    book_bounds is None
-                    or book_bounds[0] > interval_start_ns
-                    or book_bounds[1] <= grid_time_ns
+                    current_state is None
+                    or state.segment_id != current_state.segment_id
                 ):
-                    # No row can appear before a stream event or book coverage opens.
-                    next_time_ns = last_grid_ms * _NANOSECONDS_PER_MILLISECOND
-                    if next_book is not None:
-                        next_time_ns = min(next_time_ns, _book_observed_time(next_book))
-                    if next_trade is not None:
-                        next_time_ns = min(next_time_ns, next_trade.observed_time_ns)
-                    if book_bounds is not None and book_bounds[0] > interval_start_ns:
-                        next_time_ns = min(next_time_ns, book_bounds[0] + interval_ns)
-                    grid_time += (
-                        max(0, (next_time_ns - grid_time_ns - 1) // interval_ns)
-                        * HFT_GRID_MS
+                    previous_bbo = None
+                    book_ofi = 0.0
+                if (
+                    previous_bbo is not None
+                    and state.best_bid is not None
+                    and state.best_ask is not None
+                    and event_time > interval_start_ns
+                ):
+                    book_ofi += l1_ofi(
+                        previous_bbo[0],
+                        state.best_bid,
+                        previous_bbo[1],
+                        state.best_ask,
                     )
-                    continue
-                if len(trade_connections) != 1:
-                    continue
-                _append_panel_columns(
-                    buffers,
-                    current_state,
-                    grid_time,
-                    market_id=market_id,
-                    asset_id=asset_id,
-                    trade_observation_id=trade_connections[0],
-                    trade_source_sequence_min=trade_source_sequence_min,
-                    trade_source_sequence_max=trade_source_sequence_max,
-                    book_ofi=book_ofi,
-                    trade_count=trade_count,
-                    trade_volume=trade_volume,
-                    signed_trade_volume=signed_trade_volume,
-                    taker_buy_volume=taker_buy_volume,
-                    taker_sell_volume=taker_sell_volume,
+                current_state = state
+                if state.best_bid is not None and state.best_ask is not None:
+                    previous_bbo = (state.best_bid, state.best_ask)
+            while next_trade is not None:
+                if not isinstance(next_trade, TradeEvent):
+                    raise TypeError("hft_trade_event_invalid")
+                if next_trade.observed_time_ns > grid_time_ns:
+                    break
+                trade_time = next_trade.observed_time_ns
+                if previous_trade_time is not None and trade_time < previous_trade_time:
+                    raise ValueError("hft_trade_time_non_monotonic")
+                previous_trade_time = trade_time
+                trade = next_trade
+                next_trade = next(active_trades, None)
+                quantity = strict_finite_float(
+                    trade.quantity,
+                    error="hft_trade_quantity_invalid",
                 )
-                if len(buffers["timestamp"]) >= batch_rows:
-                    yield _panel_frame(buffers)
-                    buffers = _panel_column_buffers()
-            if buffers["timestamp"]:
-                yield _panel_frame(buffers)
-        finally:
-            if current_owned is not None:
-                current_owned.release(owner="crypto.hft.book")
-            if isinstance(next_book, OwnedValue):
-                next_book.release(owner="crypto.hft.book")
+                if trade.visible_quantity is not None:
+                    visible = strict_finite_float(
+                        trade.visible_quantity,
+                        error="hft_trade_visible_quantity_invalid",
+                    )
+                    if visible < 0 or visible > quantity:
+                        raise ValueError("hft_trade_values_invalid")
+                if quantity <= 0 or not isinstance(trade.buyer_is_maker, bool):
+                    raise ValueError("hft_trade_values_invalid")
+                if (
+                    current_state is not None
+                    and len(trade_connections) == 1
+                    and trade.observation_id == trade_connections[0]
+                    and trade.observed_time_ns > interval_start_ns
+                    and trade.observed_time_ns <= grid_time_ns
+                ):
+                    trade_count += 1
+                    trade_volume += quantity
+                    trade_source_sequence_min = (
+                        trade.source_sequence
+                        if trade_source_sequence_min is None
+                        else min(trade_source_sequence_min, trade.source_sequence)
+                    )
+                    trade_source_sequence_max = (
+                        trade.source_sequence
+                        if trade_source_sequence_max is None
+                        else max(trade_source_sequence_max, trade.source_sequence)
+                    )
+                    if trade.buyer_is_maker:
+                        signed_trade_volume -= quantity
+                        taker_sell_volume += quantity
+                    else:
+                        signed_trade_volume += quantity
+                        taker_buy_volume += quantity
+            book_bounds = (
+                None
+                if current_state is None
+                else book_coverage.get(current_state.segment_id)
+            )
+            if (
+                book_bounds is None
+                or book_bounds[0] > interval_start_ns
+                or book_bounds[1] <= grid_time_ns
+            ):
+                # No row can appear before a stream event or book coverage opens.
+                next_time_ns = last_grid_ms * _NANOSECONDS_PER_MILLISECOND
+                if next_book is not None:
+                    next_time_ns = min(next_time_ns, _book_observed_time(next_book))
+                if next_trade is not None:
+                    next_time_ns = min(next_time_ns, next_trade.observed_time_ns)
+                if book_bounds is not None and book_bounds[0] > interval_start_ns:
+                    next_time_ns = min(next_time_ns, book_bounds[0] + interval_ns)
+                grid_time += (
+                    max(0, (next_time_ns - grid_time_ns - 1) // interval_ns)
+                    * HFT_GRID_MS
+                )
+                continue
+            if len(trade_connections) != 1:
+                continue
+            _append_panel_columns(
+                buffers,
+                current_state,
+                grid_time,
+                market_id=market_id,
+                asset_id=asset_id,
+                trade_observation_id=trade_connections[0],
+                trade_source_sequence_min=trade_source_sequence_min,
+                trade_source_sequence_max=trade_source_sequence_max,
+                book_ofi=book_ofi,
+                trade_count=trade_count,
+                trade_volume=trade_volume,
+                signed_trade_volume=signed_trade_volume,
+                taker_buy_volume=taker_buy_volume,
+                taker_sell_volume=taker_sell_volume,
+            )
+            if len(buffers["timestamp"]) >= batch_rows:
+                _yield_value = _panel_frame(buffers)
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
+                buffers = _panel_column_buffers()
+        if buffers["timestamp"]:
+            _yield_value = _panel_frame(buffers)
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
 
 
-def _book_value(event: BookState | OwnedValue[BookState]) -> BookState:
-    value = event.value if isinstance(event, OwnedValue) else event
+def _book_value(event: BookState) -> BookState:
+    value = event
     if not isinstance(value, BookState):
         raise TypeError("hft_book_event_invalid")
     return value
 
 
 def _book_observed_time(
-    event: BookState | OwnedValue[BookState] | BookBoundary,
+    event: BookState | BookBoundary,
 ) -> int:
-    return (
-        event.value.observed_time_ns
-        if isinstance(event, OwnedValue)
-        else event.observed_time_ns
-    )
+    return event.observed_time_ns
 
 
 def _panel_frame(buffers):
@@ -844,7 +827,11 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
                     if channel in fresh:
                         values[name][row] = float(fresh[channel][field])
                 count += 1
-            yield result.assign(**values)
+            _yield_value = result.assign(**values)
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
             active_segment, previous_time = str(segments[-1]), int(timestamps[-1])
 
 
@@ -894,7 +881,7 @@ def _microstructure_context_rows(frames):
                     columns,
                     strict=True,
                 ):
-                    yield {
+                    _yield_value = {
                         "timestamp": int(timestamp),
                         "mid": float(mid),
                         "return_100ms": value[0],
@@ -905,6 +892,10 @@ def _microstructure_context_rows(frames):
                         "book_observed_at": int(book_time),
                         "segment": segment,
                     }
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
 
 
 def iter_spot_perp_factor_frames(
@@ -972,10 +963,18 @@ def iter_spot_perp_factor_frames(
                         )
             records.append(row)
             if len(records) == batch_rows:
-                yield pd.DataFrame.from_records(records)
+                _yield_value = pd.DataFrame.from_records(records)
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
                 records.clear()
         if records:
-            yield pd.DataFrame.from_records(records)
+            _yield_value = pd.DataFrame.from_records(records)
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
 
 
 def iter_cross_asset_factor_frames(
@@ -987,13 +986,17 @@ def iter_cross_asset_factor_frames(
         with closing_iterator(iter(frames)) as source:
             for frame in source:
                 for row in frame.itertuples(index=False):
-                    yield (
+                    _yield_value = (
                         pd.Timestamp(row.timestamp).value,
                         row.return_100ms,
                         row.return_500ms,
                         row.depth_normalized_ofi_500ms,
                         row.trade_flow_imbalance_500ms,
                     )
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
 
     records = []
     with ExitStack() as readers:
@@ -1053,10 +1056,18 @@ def iter_cross_asset_factor_frames(
                         row[prefix + "lagged_tfi_500ms"] = prior[4]
                 records.append(row)
                 if len(records) == batch_rows:
-                    yield pd.DataFrame.from_records(records)
+                    _yield_value = pd.DataFrame.from_records(records)
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
                     records.clear()
         if records:
-            yield pd.DataFrame.from_records(records)
+            _yield_value = pd.DataFrame.from_records(records)
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
 
 
 def iter_external_context_frames(
@@ -1185,7 +1196,13 @@ def iter_external_context_frames(
                     {venue + "_" + name: value for name, value in row.items()}
                 )
             result = _identity_frame(frame)
-            yield pd.concat((result, pd.DataFrame.from_records(records)), axis=1)
+            _yield_value = pd.concat(
+                (result, pd.DataFrame.from_records(records)), axis=1
+            )
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
             active_segment, previous_time = str(segments[-1]), int(timestamps[-1])
 
 

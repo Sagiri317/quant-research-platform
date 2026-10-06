@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import sys
 from bisect import bisect_left, bisect_right
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import replace
+from itertools import chain
 from statistics import mean
 
 import numpy as np
@@ -21,7 +22,6 @@ from quant_research_platform.contracts.time import (
     time_window_timestamp_interval,
 )
 from quant_research_platform.contracts.validation import (
-    clear_exception_frames,
     strict_finite_numeric_series,
     strict_integer_series,
 )
@@ -57,19 +57,13 @@ from quant_research_platform.research.factors.expectations.calculations import (
 )
 from quant_research_platform.research.labels import engine as label_engine
 from quant_research_platform.research.protocols import a_share
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    RuntimeResourcePolicy,
-    pandas_frame_payload_bytes,
-)
+from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
-    materialize_dataset_session_owned,
+    materialize_dataset_session,
     open_dataset_session,
 )
-from quant_research_platform.storage.identity import (
-    filesystem_exists,
-)
+from quant_research_platform.storage.identity import filesystem_exists
 from quant_research_platform.storage.layout import StorageLayout
 
 _OPTIONAL_SOURCE_IDS = frozenset(
@@ -99,7 +93,6 @@ def produce_a_share_processed_data(
     time_window: TimeWindow,
     processed_catalog: ProcessedDataCatalog | None = None,
     source_catalog: InterimDataCatalog,
-    resource_policy: RuntimeResourcePolicy,
 ):
     """Publish chronological blocks while retaining input and output owners."""
     processed = processed_catalog or a_share_processed_catalog()
@@ -107,189 +100,128 @@ def produce_a_share_processed_data(
     source_sessions = {}
     dependencies = {}
     try:
-        with ExitStack() as readers:
-            source_sessions = {}
-            source = {}
-            for data_id in spec.source_input_data_ids:
-                source_spec = source_catalog.get(data_id)
-                root = layout.target_root(
-                    data_id,
-                    layout.interim_data_root(source_spec.source_id, data_id),
-                )
-                if not filesystem_exists(root):
-                    if data_id in _OPTIONAL_SOURCE_IDS:
-                        source[data_id] = pd.DataFrame(
-                            columns=source_spec.required_columns
-                        )
-                        continue
+        source_sessions = {}
+        source = {}
+        for data_id in spec.source_input_data_ids:
+            source_spec = source_catalog.get(data_id)
+            root = layout.target_root(
+                data_id, layout.interim_data_root(source_spec.source_id, data_id)
+            )
+            if not filesystem_exists(root):
+                if data_id in _OPTIONAL_SOURCE_IDS:
+                    source[data_id] = pd.DataFrame(columns=source_spec.required_columns)
                     continue
-                source_sessions[data_id] = readers.enter_context(
-                    open_dataset_session(
-                        root,
-                        columns=None,
-                        time_window=None
-                        if data_id in _FULL_HISTORY_SOURCE_IDS
-                        else a_share.source_history_window(source_spec, time_window),
-                        resource_policy=resource_policy,
-                    )
-                )
-            if spec.data_id == "market_panel_1d":
-                missing = {
-                    "market_bars_1d",
-                    "stock_master",
-                    "market_cap",
-                    "trading_calendar",
-                    "trading_no_limit",
-                    "special_treatment_changes",
-                    "a_share_industry_snapshots",
-                }.difference(source_sessions)
-                if missing:
-                    raise ValueError(
-                        "a_share_panel_source_data_missing: "
-                        + ", ".join(sorted(missing))
-                    )
-            dependencies = {}
-            factor_definitions = (
-                tuple(
-                    definition
-                    for definition in a_share.factor_catalog().list()
-                    if definition.output_column in spec.required_columns
-                )
-                if spec.kind is ProcessedDataKind.FACTOR
-                else ()
+                continue
+            source_sessions[data_id] = open_dataset_session(
+                root,
+                columns=None,
+                time_window=None
+                if data_id in _FULL_HISTORY_SOURCE_IDS
+                else a_share.source_history_window(source_spec, time_window),
             )
-            for data_id in spec.processed_input_data_ids:
-                dependency = processed.get(data_id)
-                root = layout.target_root(
-                    data_id,
-                    layout.processed_data_root(
-                        dependency.market_id, dependency.kind, data_id
-                    ),
+        if spec.data_id == "market_panel_1d":
+            missing = {
+                "market_bars_1d",
+                "stock_master",
+                "market_cap",
+                "trading_calendar",
+                "trading_no_limit",
+                "special_treatment_changes",
+                "a_share_industry_snapshots",
+            }.difference(source_sessions)
+            if missing:
+                raise ValueError(
+                    "a_share_panel_source_data_missing: " + ", ".join(sorted(missing))
                 )
-                if not filesystem_exists(root):
-                    raise ValueError(f"missing_processed_dependency: {data_id}")
-                columns = None
-                if spec.data_id == "fundamental_pit":
-                    columns = ("market_id", "asset_id", "timestamp")
-                elif factor_definitions:
-                    requested = {
-                        *factor_engine.factor_panel_input_columns(factor_definitions),
-                        "has_legal_fundamental_pit",
-                    }
-                    if any(
-                        definition.family == "expectations"
-                        for definition in factor_definitions
-                    ):
-                        requested.add("close")
-                    columns = tuple(
-                        column
-                        for column in dependency.required_columns
-                        if column in requested
-                    )
-                elif spec.kind is ProcessedDataKind.LABEL:
-                    requested = set(
-                        label_engine.label_panel_input_columns(
-                            a_share.label_catalog().list()
-                        )
-                    )
-                    columns = tuple(
-                        column
-                        for column in dependency.required_columns
-                        if column in requested
-                    )
-                dependencies[data_id] = readers.enter_context(
-                    open_dataset_session(
-                        root,
-                        columns=columns,
-                        time_window=a_share.processed_input_window(spec, time_window),
-                        resource_policy=resource_policy,
-                    )
-                )
-            for data_id, session in source_sessions.items():
-                if data_id not in {"market_bars_1d", "index_weights"}:
-                    source[data_id] = _owned_frame(session, readers)
-
-            def verify(_receipt):
-                for session in (*source_sessions.values(), *dependencies.values()):
-                    session.verify()
-
-            data = _processed_frames(
-                spec,
-                time_window=time_window,
-                source=source,
-                source_sessions=source_sessions,
-                dependencies=dependencies,
-                policy=resource_policy,
-                retained=readers,
+        dependencies = {}
+        factor_definitions = (
+            tuple(
+                definition
+                for definition in a_share.factor_catalog().list()
+                if definition.output_column in spec.required_columns
             )
-            with closing_iterator(data):
-                first = None
-                while first is None:
-                    try:
-                        bound = next(data)
-                    except StopIteration:
-                        yield pd.DataFrame(), {}, verify
-                        return
-                    resource_policy.require_working_set(
-                        bound,
-                        error="a_share_processed_output_exceeds_task_memory_budget",
+            if spec.kind is ProcessedDataKind.FACTOR
+            else ()
+        )
+        for data_id in spec.processed_input_data_ids:
+            dependency = processed.get(data_id)
+            root = layout.target_root(
+                data_id,
+                layout.processed_data_root(
+                    dependency.market_id, dependency.kind, data_id
+                ),
+            )
+            if not filesystem_exists(root):
+                raise ValueError(f"missing_processed_dependency: {data_id}")
+            columns = None
+            if spec.data_id == "fundamental_pit":
+                columns = ("market_id", "asset_id", "timestamp")
+            elif factor_definitions:
+                requested = {
+                    *factor_engine.factor_panel_input_columns(factor_definitions),
+                    "has_legal_fundamental_pit",
+                }
+                if any(
+                    definition.family == "expectations"
+                    for definition in factor_definitions
+                ):
+                    requested.add("close")
+                columns = tuple(
+                    column
+                    for column in dependency.required_columns
+                    if column in requested
+                )
+            elif spec.kind is ProcessedDataKind.LABEL:
+                requested = set(
+                    label_engine.label_panel_input_columns(
+                        a_share.label_catalog().list()
                     )
-                    lease = readers.enter_context(
-                        resource_policy.lease("a_share.processed.output", bound)
-                    )
-                    try:
-                        owned = data.send(lease)
-                    except StopIteration:
-                        yield pd.DataFrame(), {}, verify
-                        return
-                    if owned.value.empty:
-                        owned.release(owner="a_share.processed.empty")
-                    else:
-                        first = owned
-                        readers.callback(
-                            first.release, owner="a_share.processed.output"
-                        )
+                )
+                columns = tuple(
+                    column
+                    for column in dependency.required_columns
+                    if column in requested
+                )
+            dependencies[data_id] = open_dataset_session(
+                root,
+                columns=columns,
+                time_window=a_share.processed_input_window(spec, time_window),
+            )
+        for data_id, session in source_sessions.items():
+            if data_id not in {"market_bars_1d", "index_weights"}:
+                source[data_id] = materialize_dataset_session(session)
 
-                def frames():
-                    yield first.lease.reserved_bytes, first.lease
-                    try:
-                        yield first
-                    finally:
-                        first.release(owner="a_share.processed.output")
-                    yield from data
+        def verify(_receipt):
+            for session in (*source_sessions.values(), *dependencies.values()):
+                session.verify()
 
-                with closing_iterator(frames()) as output:
-                    yield output, {}, verify
+        data = _processed_frames(
+            spec,
+            time_window=time_window,
+            source=source,
+            source_sessions=source_sessions,
+            dependencies=dependencies,
+        )
+        with closing_iterator(data):
+            first = next((frame for frame in data if not frame.empty), None)
+            if first is None:
+                yield (pd.DataFrame(), {}, verify)
+                return
+            yield (chain((first,), data), {}, verify)
     finally:
         primary = sys.exception()
         if primary is not None:
-            clear_exception_frames(primary)
+            pass
         source.clear()
         source_sessions.clear()
         dependencies.clear()
-        first = owned = output = data = None
+        first = data = None
 
 
-def _owned_frame(session, retained):
-    owned = materialize_dataset_session_owned(
-        session,
-        target_chunk_bytes=max(
-            1, min(8 * 1024**2, session.resource_policy.planning_headroom_bytes // 8)
-        ),
-    )
-    retained.callback(owned.release, owner="a_share.processed.input")
-    return owned.value
-
-
-def _processed_frames(
-    spec, *, time_window, source, source_sessions, dependencies, policy, retained
-):
+def _processed_frames(spec, *, time_window, source, source_sessions, dependencies):
     if spec.data_id == "benchmark_weights":
-        yield from _benchmark_frames(
-            source, source_sessions["index_weights"], policy, retained
-        )
+        yield from _benchmark_frames(source, source_sessions["index_weights"])
         return
-
     panel_source = spec.data_id == "market_panel_1d"
     reference = (
         source_sessions["market_bars_1d"]
@@ -302,7 +234,6 @@ def _processed_frames(
     sessions, asset_types = _processed_axis(
         reference,
         panel_source=panel_source,
-        retained=retained,
         calendar=calendar,
         validation_window=time_window if panel_source else None,
     )
@@ -312,7 +243,7 @@ def _processed_frames(
         sessions = tuple(
             calendar[
                 (calendar >= history_start)
-                & ((calendar <= upper) if closed else (calendar < upper))
+                & (calendar <= upper if closed else calendar < upper)
             ]
         )
     definitions = (
@@ -334,212 +265,109 @@ def _processed_frames(
     if spec.data_id == "execution_mask":
         lookahead = EXECUTION_LOOKAHEAD_SESSIONS
     if spec.data_id == "fundamental_pit":
-        event_rows = sum(
-            len(source[data_id]) * len(columns)
-            for data_id, columns in FINANCIAL_VALUE_COLUMNS.items()
-            if data_id in source
-        )
-        event_bytes = 1024**2 + event_rows * 1024
-        policy.require_working_set(
-            event_bytes, error="a_share_financial_events_exceeds_task_memory_budget"
-        )
-        event_lease = retained.enter_context(
-            policy.lease("a_share.financial.events", event_bytes)
-        )
         events = _financial_pit_events(source)
-        event_lease.shrink_to(pandas_frame_payload_bytes(events))
-    # Factor values, rolling workspaces and joins scale with the selected library.
-    per_row = (
-        14 * 1024
-        if events is not None
-        else (max(2048, len(definitions) * 128) if definitions else 4096)
-    )
-    price_volume = bool(definitions) and all(
-        definition.family == "price_volume" for definition in definitions
-    )
     asset_count = max(1, len(asset_types))
-    block_sessions = max(
-        1,
-        min(
-            len(sessions),
-            (policy.planning_headroom_bytes - 1024**2) // (3 * asset_count * per_row)
-            - (0 if price_volume else lookback)
-            - lookahead,
-        ),
-    )
-    # The same bounded slabs establish suspension state before public output.
+    block_sessions = max(1, DEFAULT_BATCH_ROWS // asset_count)
     first = 0 if panel_source else bisect_left(sessions, lower)
     stop = bisect_right(sessions, upper) if closed else bisect_left(sessions, upper)
     history = None
-    with ExitStack() as history_owner:
-        for start in range(first, stop, block_sessions):
-            end = min(stop, start + block_sessions)
-            core = sessions[start:end]
-            read_window = TimeWindow(
-                sessions[max(0, start - lookback)],
-                sessions[min(len(sessions) - 1, end - 1 + lookahead)],
+    for start in range(first, stop, block_sessions):
+        end = min(stop, start + block_sessions)
+        core = sessions[start:end]
+        read_window = TimeWindow(
+            sessions[max(0, start - lookback)],
+            sessions[min(len(sessions) - 1, end - 1 + lookahead)],
+        )
+        frames = {}
+        for data_id, session in dependencies.items():
+            view = session.filtered_view(read_window)
+            frames[data_id] = materialize_dataset_session(view)
+        current_source = dict(source)
+        if panel_source:
+            view = reference.filtered_view(read_window)
+            current_source["market_bars_1d"] = materialize_dataset_session(view)
+        output = _compute_processed_frame(
+            spec,
+            source=current_source,
+            dependencies=frames,
+            trading_sessions=sessions,
+            panel_sessions=pd.DatetimeIndex(core),
+            asset_market_types=asset_types if panel_source else None,
+            suspension_history=history,
+            financial_events=events,
+        )
+        output = (
+            output.loc[output["timestamp"].between(core[0], core[-1])]
+            .sort_values(["timestamp", "market_id", "asset_id"], kind="mergesort")
+            .reset_index(drop=True)
+        )
+        if panel_source and (not output.empty):
+            combined = (
+                output
+                if history is None
+                else pd.concat([history, output], ignore_index=True)
             )
-            with ExitStack() as inputs:
-                frames = {}
-                for data_id, session in dependencies.items():
-                    view = inputs.enter_context(session.filtered_view(read_window))
-                    frames[data_id] = _owned_frame(view, inputs)
-                current_source = dict(source)
-                if panel_source:
-                    view = inputs.enter_context(reference.filtered_view(read_window))
-                    current_source["market_bars_1d"] = _owned_frame(view, inputs)
-                input_bytes = sum(
-                    pandas_frame_payload_bytes(frame) for frame in frames.values()
-                )
-                if panel_source:
-                    input_bytes += pandas_frame_payload_bytes(
-                        current_source["market_bars_1d"]
-                    )
-                rows = max(
+            keys = ["asset_id", "timestamp"]
+            ordered = combined.sort_values(keys, kind="mergesort")
+            history = (
+                pd.concat(
                     [
-                        asset_count * len(core),
-                        *(len(frame) for frame in frames.values()),
+                        ordered.groupby("asset_id", sort=False).tail(1),
+                        ordered.loc[ordered["is_trading"]]
+                        .groupby("asset_id", sort=False)
+                        .tail(1),
+                        ordered.loc[ordered["adj_close"].notna()]
+                        .groupby("asset_id", sort=False)
+                        .tail(1),
+                        ordered.loc[
+                            ~ordered["filling_flag"].isin((0, 1))
+                            | ordered["is_trading"]
+                            & ordered[["close", "adj_close"]].isna().any(axis=1)
+                        ]
+                        .groupby("asset_id", sort=False)
+                        .tail(1),
                     ]
                 )
-                bound = 1024**2 + input_bytes * 4 + rows * per_row
-                if price_volume:
-                    # History copies/sorts share the input workspace reserve; all
-                    # factor outputs retain only core rows. Rolling matrices and
-                    # exact sums belong to one asset and one factor at a time.
-                    bound = (
-                        1024**2
-                        + input_bytes * 4
-                        + asset_count * len(core) * per_row
-                        + (lookback + len(core)) * 2048
-                        + len(core) * lookback * 8 * 8
-                    )
-                lease = yield bound
-                output = _compute_processed_frame(
-                    spec,
-                    source=current_source,
-                    dependencies=frames,
-                    trading_sessions=sessions,
-                    panel_sessions=pd.DatetimeIndex(core),
-                    asset_market_types=asset_types if panel_source else None,
-                    suspension_history=history,
-                    financial_events=events,
-                )
-                output = (
-                    output.loc[output["timestamp"].between(core[0], core[-1])]
-                    .sort_values(
-                        ["timestamp", "market_id", "asset_id"],
-                        kind="mergesort",
-                    )
-                    .reset_index(drop=True)
-                )
-                if panel_source and not output.empty:
-                    with ExitStack() as next_owner:
-                        history_lease = next_owner.enter_context(
-                            policy.lease(
-                                "a_share.panel.suspension_history",
-                                65536 + asset_count * 4 * 4096,
-                            )
-                        )
-                        combined = (
-                            output
-                            if history is None
-                            else pd.concat([history, output], ignore_index=True)
-                        )
-                        keys = ["asset_id", "timestamp"]
-                        ordered = combined.sort_values(keys, kind="mergesort")
-                        history = (
-                            pd.concat(
-                                [
-                                    ordered.groupby("asset_id", sort=False).tail(1),
-                                    ordered.loc[ordered["is_trading"]]
-                                    .groupby("asset_id", sort=False)
-                                    .tail(1),
-                                    ordered.loc[ordered["adj_close"].notna()]
-                                    .groupby("asset_id", sort=False)
-                                    .tail(1),
-                                    ordered.loc[
-                                        ~ordered["filling_flag"].isin((0, 1))
-                                        | (
-                                            ordered["is_trading"]
-                                            & ordered[["close", "adj_close"]]
-                                            .isna()
-                                            .any(axis=1)
-                                        )
-                                    ]
-                                    .groupby("asset_id", sort=False)
-                                    .tail(1),
-                                ]
-                            )
-                            .drop_duplicates(keys)
-                            .sort_values(keys)
-                            .reset_index(drop=True)
-                        )
-                        history_lease.shrink_to(pandas_frame_payload_bytes(history))
-                        history_owner.close()
-                        history_owner.enter_context(next_owner.pop_all())
-                        del combined, ordered
-                if panel_source:
-                    output = output.loc[output["timestamp"].ge(lower)].reset_index(
-                        drop=True
-                    )
-                lease.shrink_to(pandas_frame_payload_bytes(output))
-                yield OwnedValue(output, lease)
-                del output, frames, current_source
+                .drop_duplicates(keys)
+                .sort_values(keys)
+                .reset_index(drop=True)
+            )
+            del combined, ordered
+        if panel_source:
+            output = output.loc[output["timestamp"].ge(lower)].reset_index(drop=True)
+        yield output
+        del output, frames, current_source
 
 
-def _benchmark_frames(source, session, policy, retained):
+def _benchmark_frames(source, session):
     sessions, assets = _processed_axis(
-        session,
-        panel_source=False,
-        retained=retained,
-        asset_column="constituent_asset_id",
+        session, panel_source=False, asset_column="constituent_asset_id"
     )
-    rows_per_day = max(1, 2 * len(assets))
-    block_size = max(
-        1,
-        min(
-            len(sessions),
-            (policy.planning_headroom_bytes - 1024**2) // (3 * rows_per_day * 4096),
-        ),
-    )
-    bound = 1024**2 + rows_per_day * block_size * 4096
+    block_size = max(1, DEFAULT_BATCH_ROWS // max(1, 2 * len(assets)))
 
     def inputs():
         for start in range(0, len(sessions), block_size):
             window = TimeWindow(
                 sessions[start], sessions[min(len(sessions), start + block_size) - 1]
             )
-            with ExitStack() as owner:
-                view = owner.enter_context(session.filtered_view(window))
-                frame = _owned_frame(view, owner)
-                yield frame
-                del frame
+            view = session.filtered_view(window)
+            frame = materialize_dataset_session(view)
+            yield frame
+            del frame
 
-    with (
-        closing_iterator(inputs()) as frames,
-        closing_iterator(
+    with closing_iterator(inputs()) as frames:
+        with closing_iterator(
             iter_benchmark_weight_snapshots(source["index_info"], frames)
-        ) as normalized,
-    ):
-        while True:
-            lease = yield bound
-            try:
-                output = next(normalized)
-            except StopIteration:
-                return
-            lease.shrink_to(pandas_frame_payload_bytes(output))
-            yield OwnedValue(output, lease)
-            del output
+        ) as normalized:
+            for _yield_value in normalized:
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
 
 
 def _processed_axis(
-    session,
-    *,
-    panel_source,
-    retained,
-    asset_column=None,
-    calendar=None,
-    validation_window=None,
+    session, *, panel_source, asset_column=None, calendar=None, validation_window=None
 ):
     if asset_column is None:
         asset_column = "source_asset_id" if panel_source else "asset_id"
@@ -548,70 +376,44 @@ def _processed_axis(
         if panel_source
         else (asset_column, "timestamp")
     )
-    view = replace(
-        session,
-        logical_columns=columns,
-        physical_columns=columns,
-        owns_inventory=False,
-        owns_lease=False,
-    )
+    view = replace(session, logical_columns=columns, physical_columns=columns)
     dates = set()
     assets = {}
-    lease = retained.enter_context(
-        session.resource_policy.lease("a_share.processed.axis", 65536)
-    )
-    with closing_iterator(
-        iter_dataset_chunks(view, target_chunk_bytes=8 * 1024**2)
-    ) as chunks:
+    with closing_iterator(iter_dataset_chunks(view, batch_rows=65536)) as chunks:
         for frame in chunks:
-            with session.resource_policy.lease(
-                "a_share.processed.axis_workspace",
-                65536 + 4 * pandas_frame_payload_bytes(frame),
-            ):
-                if panel_source:
-                    frame["market_type"] = strict_integer_series(
-                        frame["market_type"],
-                        error="invalid_market_type",
-                        allow_null=True,
+            if panel_source:
+                frame["market_type"] = strict_integer_series(
+                    frame["market_type"], error="invalid_market_type", allow_null=True
+                )
+                frame = frame.loc[frame["market_type"].isin(CURRENT_MARKET_TYPES)]
+                observed = frame
+                if validation_window is not None:
+                    lower, upper, closed = time_window_timestamp_interval(
+                        validation_window
                     )
-                    frame = frame.loc[frame["market_type"].isin(CURRENT_MARKET_TYPES)]
-                    observed = frame
-                    if validation_window is not None:
-                        lower, upper, closed = time_window_timestamp_interval(
-                            validation_window
+                    observed = frame.loc[
+                        frame["timestamp"].ge(lower)
+                        & (
+                            frame["timestamp"].le(upper)
+                            if closed
+                            else frame["timestamp"].lt(upper)
                         )
-                        observed = frame.loc[
-                            frame["timestamp"].ge(lower)
-                            & (
-                                frame["timestamp"].le(upper)
-                                if closed
-                                else frame["timestamp"].lt(upper)
-                            )
-                        ]
-                    if not observed.empty:
-                        validate_market_bar_calendar(observed, calendar)
-                    del observed
-                    frame = frame.loc[frame["filling_flag"].ne(2)]
-                new_dates = set(pd.to_datetime(frame["timestamp"]).unique()) - dates
-                first = frame.drop_duplicates(asset_column)
-                new_assets = first.loc[~first[asset_column].isin(assets)]
-                lease.grow((len(new_dates) + len(new_assets)) * 256)
-                dates.update(new_dates)
-                for row in new_assets.itertuples(index=False, name=None):
-                    assets[row[0]] = row[2] if panel_source else 0
-                del frame, first, new_assets, new_dates
+                    ]
+                if not observed.empty:
+                    validate_market_bar_calendar(observed, calendar)
+                del observed
+                frame = frame.loc[frame["filling_flag"].ne(2)]
+            new_dates = set(pd.to_datetime(frame["timestamp"]).unique()) - dates
+            first = frame.drop_duplicates(asset_column)
+            new_assets = first.loc[~first[asset_column].isin(assets)]
+            dates.update(new_dates)
+            for row in new_assets.itertuples(index=False, name=None):
+                assets[row[0]] = row[2] if panel_source else 0
+            del frame, first, new_assets, new_dates
     sessions = tuple(sorted(pd.Timestamp(value) for value in dates))
     asset_types = pd.Series(assets)
     del dates, assets
-    # Materialize the index lookup cache before measuring retained axis state.
-    _ = asset_types.index.is_unique
-    lease.shrink_to(
-        sys.getsizeof(sessions)
-        + sum(sys.getsizeof(value) for value in sessions)
-        + sys.getsizeof(asset_types)
-        + sys.getsizeof(asset_types.index)
-    )
-    return sessions, asset_types
+    return (sessions, asset_types)
 
 
 def _compute_processed_frame(
@@ -720,12 +522,7 @@ def _compute_processed_frame(
             calculated = calculated.merge(
                 input_frame.loc[
                     :,
-                    [
-                        "market_id",
-                        "asset_id",
-                        "timestamp",
-                        "has_legal_fundamental_pit",
-                    ],
+                    ["market_id", "asset_id", "timestamp", "has_legal_fundamental_pit"],
                 ],
                 on=["market_id", "asset_id", "timestamp"],
                 how="left",
@@ -741,9 +538,7 @@ def _compute_processed_frame(
         )
         definitions = a_share.label_catalog().list()
         return label_engine.calculate_labels_for_panel(
-            panel,
-            definitions=definitions,
-            sessions=trading_sessions,
+            panel, definitions=definitions, sessions=trading_sessions
         ).loc[:, list(spec.required_columns)]
     raise ValueError(f"unsupported_a_share_processed_kind: {spec.kind}")
 
@@ -792,10 +587,7 @@ def _fundamental_pit_frame(
         raise ValueError("fundamental_pit_market_panel_required")
     if events is None:
         events = _financial_pit_events(source)
-    pit = materialize_pit_fundamentals(
-        panel.loc[:, ["asset_id", "timestamp"]],
-        events,
-    )
+    pit = materialize_pit_fundamentals(panel.loc[:, ["asset_id", "timestamp"]], events)
     values = pit.pivot_table(
         index=["asset_id", "timestamp"],
         columns="metric_id",
@@ -831,11 +623,9 @@ def _fundamental_pit_frame(
     )
     prior_year = prior_year.rename(
         columns={
-            column: (
-                f"prior_year_{column}_ttm"
-                if column in FLOW_METRIC_IDS
-                else f"prior_year_{column}"
-            )
+            column: f"prior_year_{column}_ttm"
+            if column in FLOW_METRIC_IDS
+            else f"prior_year_{column}"
             for column in prior_year.columns
             if column not in {"asset_id", "timestamp"}
         }
@@ -844,16 +634,10 @@ def _fundamental_pit_frame(
         panel.loc[:, ["market_id", "asset_id", "timestamp"]]
         .merge(values, on=["asset_id", "timestamp"], how="left", validate="one_to_one")
         .merge(
-            beginning,
-            on=["asset_id", "timestamp"],
-            how="left",
-            validate="one_to_one",
+            beginning, on=["asset_id", "timestamp"], how="left", validate="one_to_one"
         )
         .merge(
-            prior_year,
-            on=["asset_id", "timestamp"],
-            how="left",
-            validate="one_to_one",
+            prior_year, on=["asset_id", "timestamp"], how="left", validate="one_to_one"
         )
     )
     pit_value_columns = tuple(

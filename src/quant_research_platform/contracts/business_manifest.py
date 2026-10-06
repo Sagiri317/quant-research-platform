@@ -3,14 +3,13 @@
 from __future__ import annotations
 
 import re
-from collections.abc import Callable, Mapping
+from collections.abc import Mapping
 from dataclasses import dataclass
 from types import MappingProxyType
 
 from quant_research_platform.contracts.json_codec import (
     bounded_qrp_json_object_snapshot,
     canonical_json_hash,
-    json_record_working_set_bytes,
 )
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 
@@ -64,9 +63,7 @@ class BusinessManifestEnvelope:
         )
         validate_business_manifest_envelope(self.payload())
 
-    def payload(
-        self, *, _admit: Callable[[int], None] | None = None
-    ) -> dict[str, object]:
+    def payload(self) -> dict[str, object]:
         """Return the strict JSON-shaped envelope payload."""
 
         return {
@@ -75,14 +72,10 @@ class BusinessManifestEnvelope:
             "schema_identity": self.schema_identity,
             "protocol_or_spec_identity": self.protocol_or_spec_identity,
             "software_identity": self.software_identity,
-            "research_window": _plain_json_value(self.research_window, _admit=_admit),
-            "upstream_identities": _plain_json_value(
-                self.upstream_identities, _admit=_admit
-            ),
+            "research_window": _plain_json_value(self.research_window),
+            "upstream_identities": _plain_json_value(self.upstream_identities),
             "status": self.status,
-            "semantic_metadata": _plain_json_value(
-                self.semantic_metadata, _admit=_admit
-            ),
+            "semantic_metadata": _plain_json_value(self.semantic_metadata),
         }
 
 
@@ -123,66 +116,44 @@ def build_business_manifest_envelope(
     )
 
 
-def validate_business_manifest_envelope(
-    value: object,
-    *,
-    _admit: Callable[[int], None] | None = None,
-) -> dict[str, object]:
+def validate_business_manifest_envelope(value: object) -> dict[str, object]:
     """Validate one persisted, publishable common envelope."""
 
-    try:
-        if isinstance(value, BusinessManifestEnvelope):
-            value = value.payload(_admit=_admit)
-        if type(value) is not dict or set(value) != _ENVELOPE_FIELDS:
-            raise ValueError("business_manifest_envelope_fields_invalid")
-        payload = bounded_qrp_json_object_snapshot(
-            value,
-            max_bytes=_MAX_ENVELOPE_BYTES,
-            _admit=_admit,
-        )
-        _require_identifier(
-            payload["logical_artifact_id"], "logical_artifact_id_invalid"
-        )
-        _require_hash(payload["instance_identity"], "instance_identity_invalid")
-        _require_hash(payload["schema_identity"], "schema_identity_invalid")
-        _require_hash(
-            payload["protocol_or_spec_identity"],
-            "protocol_or_spec_identity_invalid",
-        )
-        _require_hash(payload["software_identity"], "software_identity_invalid")
-        _validate_research_window(payload["research_window"])
-        payload["research_window"] = _normalise_research_window(
-            payload["research_window"]
-        )
-        _validate_upstream_identities(payload["upstream_identities"])
-        if _admit is not None:
-            _admit(
-                json_record_working_set_bytes(
-                    2 + 2 * len(payload["upstream_identities"])
-                )
-            )
-        payload["upstream_identities"] = dict(
-            sorted(payload["upstream_identities"].items())
-        )
-        if payload["status"] != "COMPLETE":
-            raise ValueError("business_manifest_status_invalid")
-        if type(payload["semantic_metadata"]) is not dict:
-            raise ValueError("business_manifest_semantic_metadata_invalid")
-        expected = _identity_payload(
-            logical_artifact_id=payload["logical_artifact_id"],
-            schema_identity=payload["schema_identity"],
-            protocol_or_spec_identity=payload["protocol_or_spec_identity"],
-            software_identity=payload["software_identity"],
-            research_window=payload["research_window"],
-            upstream_identities=payload["upstream_identities"],
-            semantic_metadata=payload["semantic_metadata"],
-            _admit=_admit,
-        )
-        if canonical_json_hash(expected) != payload["instance_identity"]:
-            raise ValueError("business_manifest_instance_identity_mismatch")
-        return {key: payload[key] for key in sorted(payload)}
-    finally:
-        value = payload = expected = None
+    if isinstance(value, BusinessManifestEnvelope):
+        value = value.payload()
+    if type(value) is not dict or set(value) != _ENVELOPE_FIELDS:
+        raise ValueError("business_manifest_envelope_fields_invalid")
+    payload = bounded_qrp_json_object_snapshot(value, max_bytes=_MAX_ENVELOPE_BYTES)
+    _require_identifier(payload["logical_artifact_id"], "logical_artifact_id_invalid")
+    _require_hash(payload["instance_identity"], "instance_identity_invalid")
+    _require_hash(payload["schema_identity"], "schema_identity_invalid")
+    _require_hash(
+        payload["protocol_or_spec_identity"],
+        "protocol_or_spec_identity_invalid",
+    )
+    _require_hash(payload["software_identity"], "software_identity_invalid")
+    _validate_research_window(payload["research_window"])
+    payload["research_window"] = _normalise_research_window(payload["research_window"])
+    _validate_upstream_identities(payload["upstream_identities"])
+    payload["upstream_identities"] = dict(
+        sorted(payload["upstream_identities"].items())
+    )
+    if payload["status"] != "COMPLETE":
+        raise ValueError("business_manifest_status_invalid")
+    if type(payload["semantic_metadata"]) is not dict:
+        raise ValueError("business_manifest_semantic_metadata_invalid")
+    expected = _identity_payload(
+        logical_artifact_id=payload["logical_artifact_id"],
+        schema_identity=payload["schema_identity"],
+        protocol_or_spec_identity=payload["protocol_or_spec_identity"],
+        software_identity=payload["software_identity"],
+        research_window=payload["research_window"],
+        upstream_identities=payload["upstream_identities"],
+        semantic_metadata=payload["semantic_metadata"],
+    )
+    if canonical_json_hash(expected) != payload["instance_identity"]:
+        raise ValueError("business_manifest_instance_identity_mismatch")
+    return {key: payload[key] for key in sorted(payload)}
 
 
 def _identity_payload(
@@ -194,16 +165,15 @@ def _identity_payload(
     research_window: object,
     upstream_identities: object,
     semantic_metadata: object,
-    _admit: Callable[[int], None] | None = None,
 ) -> dict[str, object]:
     return {
         "logical_artifact_id": logical_artifact_id,
         "schema_identity": schema_identity,
         "protocol_or_spec_identity": protocol_or_spec_identity,
         "software_identity": software_identity,
-        "research_window": _plain_json_value(research_window, _admit=_admit),
-        "upstream_identities": _plain_json_value(upstream_identities, _admit=_admit),
-        "semantic_metadata": _plain_json_value(semantic_metadata, _admit=_admit),
+        "research_window": _plain_json_value(research_window),
+        "upstream_identities": _plain_json_value(upstream_identities),
+        "semantic_metadata": _plain_json_value(semantic_metadata),
     }
 
 
@@ -240,20 +210,11 @@ def _freeze_json_value(value: object) -> object:
     return value
 
 
-def _plain_json_value(
-    value: object, *, _admit: Callable[[int], None] | None = None
-) -> object:
+def _plain_json_value(value: object) -> object:
     if isinstance(value, Mapping):
-        if _admit is not None:
-            _admit(json_record_working_set_bytes(2 + 2 * len(value)))
-        return {
-            str(key): _plain_json_value(child, _admit=_admit)
-            for key, child in value.items()
-        }
+        return {str(key): _plain_json_value(child) for key, child in value.items()}
     if type(value) in {list, tuple}:
-        if _admit is not None:
-            _admit(json_record_working_set_bytes(2 + len(value)))
-        return [_plain_json_value(child, _admit=_admit) for child in value]
+        return [_plain_json_value(child) for child in value]
     return value
 
 

@@ -12,8 +12,6 @@ from quant_research_platform.research.features.transforms import (
 from quant_research_platform.research.signals.materialization import (
     normalize_signal_frame,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
-from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_winsorize_clips_by_timestamp_quantiles_instead_of_zscore() -> None:
@@ -30,9 +28,7 @@ def test_winsorize_clips_by_timestamp_quantiles_instead_of_zscore() -> None:
         output_columns=("momentum_20d_winsorized",),
         winsorize_quantiles=(0.2, 0.8),
     )
-
     result = apply_feature_transforms(frame, (spec,))
-
     assert result["momentum_20d_winsorized"].tolist() == pytest.approx(
         [4.0, 10.0, 64.0]
     )
@@ -57,20 +53,15 @@ def test_fillna_transform_names_apply_their_fill_policy() -> None:
         transform="fillna_median",
         output_columns=("factor_median",),
     )
-
     zero_result = apply_feature_transforms(frame, (zero_spec,))
     median_result = apply_feature_transforms(frame, (median_spec,))
-
     assert zero_result["factor_zero"].tolist() == pytest.approx([1.0, 0.0, 3.0])
     assert median_result["factor_median"].tolist() == pytest.approx([1.0, 2.0, 3.0])
 
 
 def test_zero_variance_zscore_keeps_numeric_output() -> None:
     frame = pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2024-01-02")] * 3,
-            "factor": [1.0, 1.0, 1.0],
-        }
+        {"timestamp": [pd.Timestamp("2024-01-02")] * 3, "factor": [1.0, 1.0, 1.0]}
     )
     result = apply_feature_transforms(
         frame,
@@ -83,7 +74,6 @@ def test_zero_variance_zscore_keeps_numeric_output() -> None:
             ),
         ),
     )
-
     assert result["factor_zscore"].dtype == "float64"
     assert result["factor_zscore"].tolist() == [0.0, 0.0, 0.0]
 
@@ -107,10 +97,8 @@ def test_tiny_nonconstant_zscores_remain_valid() -> None:
         source_column="factor",
         transform="zscore",
     )
-
     feature_result = apply_feature_transforms(frame, (feature,))
     signal_result = normalize_signal_frame(frame, (signal,))
-
     expected = [-1.224744871391589, 0.0, 1.224744871391589]
     assert feature_result["factor_zscore"].tolist() == pytest.approx(expected)
     assert signal_result["factor_signal"].tolist() == pytest.approx(expected)
@@ -118,58 +106,15 @@ def test_tiny_nonconstant_zscores_remain_valid() -> None:
 
 @pytest.mark.parametrize("value", ["not-a-number", float("inf"), float("-inf")])
 def test_feature_transforms_reject_invalid_numeric_sources(value: object) -> None:
-    frame = pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2024-01-02")],
-            "factor": [value],
-        }
-    )
+    frame = pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")], "factor": [value]})
     spec = FeatureTransformSpec(
         transform_id="factor_rank",
         source_columns=("factor",),
         transform="cross_sectional_rank",
         output_columns=("factor_rank",),
     )
-
     with pytest.raises(ValueError, match="invalid_feature_transform_source"):
         apply_feature_transforms(frame, (spec,))
-
-
-def test_feature_transform_admits_before_result_copy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            "factor": [1.0, 2.0],
-        }
-    )
-    spec = FeatureTransformSpec(
-        transform_id="factor_rank",
-        source_columns=("factor",),
-        transform="cross_sectional_rank",
-        output_columns=("factor_rank",),
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 1,
-    )
-    monkeypatch.setattr(
-        pd.DataFrame,
-        "copy",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("feature result copied before admission")
-        ),
-    )
-
-    with runtime_resource_policy_scope(policy):
-        with policy.lease("test.feature.blocker", policy.memory_budget_bytes):
-            with pytest.raises(
-                MemoryError,
-                match="runtime_memory_budget_exceeded",
-            ):
-                apply_feature_transforms(frame, (spec,))
-    assert policy.used_memory_bytes == 0
 
 
 def test_signal_materialization_normalizes_direction_and_transform() -> None:
@@ -186,96 +131,38 @@ def test_signal_materialization_normalizes_direction_and_transform() -> None:
         direction="lower_is_better",
         transform="rank",
     )
-
     result = normalize_signal_frame(frame, (signal,))
-
     assert result["risk_signal"].tolist() == pytest.approx([-1.0, -2.0, -3.0])
     assert "risk" not in result.columns
 
 
 def test_signal_materialization_rejects_invalid_numeric_source() -> None:
     frame = pd.DataFrame(
-        {
-            "timestamp": [pd.Timestamp("2024-01-02")],
-            "risk": ["not-a-number"],
-        }
+        {"timestamp": [pd.Timestamp("2024-01-02")], "risk": ["not-a-number"]}
     )
     signal = SignalSpec(
-        signal_id="risk_signal",
-        source_kind="factor",
-        source_column="risk",
+        signal_id="risk_signal", source_kind="factor", source_column="risk"
     )
-
     with pytest.raises(ValueError, match="invalid_signal_values"):
         normalize_signal_frame(frame, (signal,))
     with pytest.raises(ValueError, match="invalid_signal_values"):
-        normalize_signal_frame(
-            frame.assign(risk=["1.0"]),
-            (signal,),
-        )
+        normalize_signal_frame(frame.assign(risk=["1.0"]), (signal,))
 
 
 @pytest.mark.parametrize(
     "timestamps",
-    [
-        [pd.NaT, pd.Timestamp("2024-01-02")],
-        ["not-a-timestamp", "2024-01-02"],
-    ],
+    [[pd.NaT, pd.Timestamp("2024-01-02")], ["not-a-timestamp", "2024-01-02"]],
 )
 def test_signal_materialization_rejects_invalid_group_timestamps(timestamps) -> None:
-    frame = pd.DataFrame(
-        {
-            "timestamp": timestamps,
-            "risk": [1.0, 2.0],
-        }
-    )
+    frame = pd.DataFrame({"timestamp": timestamps, "risk": [1.0, 2.0]})
     signal = SignalSpec(
         signal_id="risk_signal",
         source_kind="factor",
         source_column="risk",
         transform="rank",
     )
-
     with pytest.raises(ValueError, match="invalid_signal_timestamps"):
         normalize_signal_frame(frame, (signal,))
-
-
-def test_signal_materialization_admits_before_result_copy(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02"]),
-            "risk": [1.0, 2.0],
-        }
-    )
-    signal = SignalSpec(
-        signal_id="risk_signal",
-        source_kind="factor",
-        source_column="risk",
-        transform="zscore",
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=128 * 1024,
-        explicit_cap_bytes=64 * 1024 + 1,
-    )
-
-    monkeypatch.setattr(
-        pd.DataFrame,
-        "copy",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            AssertionError("signal result copied before admission")
-        ),
-    )
-
-    with runtime_resource_policy_scope(policy):
-        with policy.lease("test.signal.blocker", policy.memory_budget_bytes):
-            with pytest.raises(
-                MemoryError,
-                match="runtime_memory_budget_exceeded",
-            ):
-                normalize_signal_frame(frame, (signal,))
-    assert policy.used_memory_bytes == 0
 
 
 def test_signal_materialization_enforces_source_kind_column_ownership() -> None:
@@ -291,7 +178,6 @@ def test_signal_materialization_enforces_source_kind_column_ownership() -> None:
         source_kind="feature",
         source_column="raw_factor",
     )
-
     with pytest.raises(ValueError, match="invalid_signal_source_kind_column"):
         normalize_signal_frame(
             frame,

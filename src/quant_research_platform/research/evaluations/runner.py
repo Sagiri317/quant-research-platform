@@ -31,11 +31,6 @@ from quant_research_platform.research.predictions.alignment import (
     _iter_common_prediction_chunks,
     _iter_prediction_joined_chunks,
 )
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    pandas_frame_payload_bytes,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.storage.datasets.reading import (
     iter_dataset_chunks,
     open_dataset_session,
@@ -50,7 +45,6 @@ def build_crypto_evaluation_result(
     evaluation_catalog,
     evaluation_id,
     time_window,
-    resource_policy,
     protocol_manifest,
     read_prediction_bundle,
 ):
@@ -66,19 +60,20 @@ def build_crypto_evaluation_result(
     if access == "development" and spec.signals[0].source_kind == "prediction":
         raise PermissionError("crypto_prediction_evaluation_requires_frozen_test")
     windows = tuple(
-        window
-        for _fold, window in (
-            validation_windows(protocol_manifest["research_plan"], time_window)
-            if access == "development"
-            else execution_windows(
-                protocol_manifest["research_plan"],
-                time_window,
-                access_window=access,
+        (
+            window
+            for _fold, window in (
+                validation_windows(protocol_manifest["research_plan"], time_window)
+                if access == "development"
+                else execution_windows(
+                    protocol_manifest["research_plan"],
+                    time_window,
+                    access_window=access,
+                )
             )
         )
     )
     operation = ExitStack()
-    policy = operation.enter_context(runtime_resource_policy_scope(resource_policy))
     try:
         prediction = spec.signals[0].source_kind == "prediction"
         input_columns = tuple(signal.source_column for signal in spec.signals)
@@ -129,45 +124,33 @@ def build_crypto_evaluation_result(
                 )
             )
         )
-
         dataset_root = layout.target_root(
             dataset.data_id,
             layout.research_dataset_root(dataset.market_id, dataset.data_id),
         )
-        session = operation.enter_context(
-            open_dataset_session(
-                dataset_root,
-                columns=columns,
-                time_window=_research_dataset_access_window(
-                    dataset.market_id, time_window
-                ),
-                resource_policy=policy,
-            )
+        session = open_dataset_session(
+            dataset_root,
+            columns=columns,
+            time_window=_research_dataset_access_window(dataset.market_id, time_window),
         )
 
         def source():
             for window in windows:
-                with session.filtered_view(window) as view:
-                    chunks = iter_dataset_chunks(
-                        view, target_chunk_bytes=max(1, policy.planning_headroom_bytes)
-                    )
-                    with closing_iterator(chunks):
-                        for chunk in chunks:
+                view = session.filtered_view(window)
+                chunks = iter_dataset_chunks(view)
+                with closing_iterator(chunks):
+                    for chunk in chunks:
+                        if assets:
+                            yielded_value = chunk.loc[chunk.asset_id.isin(assets)]
                             try:
-                                if assets:
-                                    with policy.lease(
-                                        "research.evaluation.asset_scope",
-                                        max(
-                                            1,
-                                            pandas_frame_payload_bytes(chunk)
-                                            + len(chunk),
-                                        ),
-                                    ):
-                                        yield chunk.loc[chunk.asset_id.isin(assets)]
-                                else:
-                                    yield chunk
-                            finally:
-                                chunk = None
+                                yield yielded_value
+                            except GeneratorExit:
+                                return
+                        else:
+                            try:
+                                yield chunk
+                            except GeneratorExit:
+                                return
 
         chunks = source()
         if common:
@@ -186,36 +169,22 @@ def build_crypto_evaluation_result(
 
         def mature_chunks():
             for chunk in chunks:
-                with policy.lease(
-                    "research.evaluation.label_maturity",
-                    max(
-                        1,
-                        (len(spec.label_columns) + 3)
-                        * pandas_frame_payload_bytes(chunk),
-                    ),
-                ):
-                    try:
-                        prepared = chunk.copy()
-                        for window in windows:
-                            scoped = chunk.loc[
-                                chunk.timestamp.between(
-                                    pd.Timestamp(window.start), pd.Timestamp(window.end)
-                                )
-                            ]
-                            for (
-                                label,
-                                availability,
-                            ) in spec.label_availability_columns.items():
-                                mature = label_maturity_mask(
-                                    scoped,
-                                    fitting_cutoff=window.end,
-                                    availability_column=availability,
-                                    target_column=label,
-                                )
-                                prepared.loc[scoped.index[~mature], label] = pd.NA
-                        yield prepared
-                    finally:
-                        prepared = scoped = mature = chunk = None
+                prepared = chunk.copy()
+                for window in windows:
+                    scoped = chunk.loc[
+                        chunk.timestamp.between(
+                            pd.Timestamp(window.start), pd.Timestamp(window.end)
+                        )
+                    ]
+                    for label, availability in spec.label_availability_columns.items():
+                        mature = label_maturity_mask(
+                            scoped,
+                            fitting_cutoff=window.end,
+                            availability_column=availability,
+                            target_column=label,
+                        )
+                        prepared.loc[scoped.index[~mature], label] = pd.NA
+                yield prepared
 
         result = build_evaluation_result_from_frames(
             mature_chunks(),
@@ -231,7 +200,6 @@ def build_crypto_evaluation_result(
                 if prediction
                 else (),
             },
-            resource_policy=policy,
         )
         operation.enter_context(result)
     except BaseException as primary:
@@ -254,7 +222,6 @@ def build_evaluation_result_from_research_dataset(
     evaluation_id: str,
     time_window: TimeWindow | None = None,
     n_groups: int | None = None,
-    resource_policy: RuntimeResourcePolicy | None = None,
     access_window: str = "development",
 ) -> EvaluationResult:
     spec = evaluation_catalog.get(evaluation_id)
@@ -270,7 +237,6 @@ def build_evaluation_result_from_research_dataset(
     effective_groups = spec.n_groups if n_groups is None else n_groups
     operation = ExitStack()
     try:
-        policy = operation.enter_context(runtime_resource_policy_scope(resource_policy))
         chunks = operation.enter_context(
             closing_iterator(
                 iter_research_dataset_chunks(
@@ -297,24 +263,16 @@ def build_evaluation_result_from_research_dataset(
                     continue
                 if time_window is None:
                     raise ValueError("evaluation_fitting_cutoff_required")
-                with policy.lease(
-                    "research.evaluation.label_maturity",
-                    max(
-                        1,
-                        (len(spec.label_availability_columns) + 2)
-                        * pandas_frame_payload_bytes(chunk),
-                    ),
-                ):
-                    prepared = chunk.copy()
-                    for label, availability in spec.label_availability_columns.items():
-                        mature = label_maturity_mask(
-                            chunk,
-                            fitting_cutoff=time_window.end,
-                            availability_column=availability,
-                            target_column=label,
-                        )
-                        prepared.loc[~mature, label] = pd.NA
-                    yield prepared
+                prepared = chunk.copy()
+                for label, availability in spec.label_availability_columns.items():
+                    mature = label_maturity_mask(
+                        chunk,
+                        fitting_cutoff=time_window.end,
+                        availability_column=availability,
+                        target_column=label,
+                    )
+                    prepared.loc[~mature, label] = pd.NA
+                yield prepared
 
         result = build_evaluation_result_from_frames(
             validated_chunks(),
@@ -328,7 +286,6 @@ def build_evaluation_result_from_research_dataset(
                 "feature": tuple(dataset_spec.feature_columns),
                 "prediction": tuple(dataset_spec.context_columns),
             },
-            resource_policy=policy,
         )
         operation.enter_context(result)
     except BaseException as primary:

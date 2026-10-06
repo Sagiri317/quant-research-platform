@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
-from contextlib import nullcontext
 
 import pandas as pd
 
@@ -11,7 +10,6 @@ from quant_research_platform.contracts.columns import PLATFORM_ASSET_TIME_KEY
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import current_runtime_resource_policy
 
 
 def validate_research_dataset(
@@ -37,30 +35,16 @@ def validate_research_dataset(
     if missing:
         raise ValueError(f"missing_research_required_fields: {', '.join(missing)}")
 
-    policy = current_runtime_resource_policy()
-    mask_bytes = int(frame.index.memory_usage(deep=True)) + len(frame)
-    if (
-        policy is not None
-        and policy.explicit_memory_cap_bytes is not None
-        and policy.used_memory_bytes + mask_bytes > policy.explicit_memory_cap_bytes
-    ):
-        raise ValueError("research_validation_working_set_exceeds_task_memory_budget")
-    reservation = (
-        policy.lease("research.dataset.validation", mask_bytes)
-        if policy is not None
-        else nullcontext()
-    )
-    with reservation:
-        null_key_columns = [
-            column for column in spec.primary_key if bool(frame[column].isna().any())
-        ]
-        if null_key_columns:
-            joined = ", ".join(null_key_columns)
-            raise ValueError(f"null_research_dataset_key_columns: {joined}")
+    null_key_columns = [
+        column for column in spec.primary_key if bool(frame[column].isna().any())
+    ]
+    if null_key_columns:
+        joined = ", ".join(null_key_columns)
+        raise ValueError(f"null_research_dataset_key_columns: {joined}")
 
-        duplicates = frame.duplicated(list(spec.primary_key))
-        if bool(duplicates.any()):
-            raise ValueError("duplicate_research_dataset_keys")
+    duplicates = frame.duplicated(list(spec.primary_key))
+    if bool(duplicates.any()):
+        raise ValueError("duplicate_research_dataset_keys")
 
 
 def validate_evaluation_input(
@@ -124,7 +108,10 @@ def iter_validated_research_input_chunks(
                 dataset_spec,
                 input_columns=input_columns,
             )
-            yield chunk
+            try:
+                yield chunk
+            except GeneratorExit:
+                return
 
 
 def _require_declared_columns(

@@ -9,7 +9,6 @@ from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
-    json_record_working_set_bytes,
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.portfolios import (
@@ -19,7 +18,6 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     RESEARCH_SYMBOLS,
@@ -29,7 +27,6 @@ from quant_research_platform.sources.binance.validation import (
     strict_non_negative_integer,
     strict_positive_float,
 )
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
     filesystem_is_file,
@@ -38,7 +35,6 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.manifests import read_manifest
 from quant_research_platform.storage.raw_snapshots import (
-    MAX_RECORD_BYTES,
     iter_csv_snapshot,
 )
 
@@ -260,14 +256,7 @@ def _manifest(root, symbol):
             error="binance_funding_settlement_source_invalid",
         )
         before = dataset_file_identity(path)
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease(
-                "binance.funding.settlement_source",
-                json_record_working_set_bytes(before.size) + 64 * 1024,
-            ),
-            handle_preserving_primary(open_filesystem_file(path, "rb")) as handle,
-        ):
+        with closing_iterator(open_filesystem_file(path, "rb")) as handle:
             digest = hashlib.file_digest(handle, "sha256").hexdigest()
             if (
                 before != dataset_file_identity(path)
@@ -321,22 +310,30 @@ def _records(root, manifest):
                 ):
                     raise ValueError("binance_funding_settlement_invalid")
                 settlement_count += 1
-                yield FundingEvent(timestamp, rate, mark)
+                _yield_value = FundingEvent(timestamp, rate, mark)
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
             else:
                 if rate is not None or mark is not None or type(cashflows) is not list:
                     raise ValueError("binance_funding_forecast_invalid")
                 if any(type(item) is not list or len(item) != 2 for item in cashflows):
                     raise ValueError("binance_funding_forecast_invalid")
-                yield FundingForecast(
+                _yield_value = FundingForecast(
                     timestamp, known_until, tuple(tuple(item) for item in cashflows)
                 )
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
     native = manifest["metadata"]["settlement_source"]
     if native is not None and settlement_count != native["settlement_count"]:
         raise ValueError("binance_funding_settlement_count_invalid")
 
 
 @contextmanager
-def read_funding_observations(funding_roots, *, symbol, resource_policy=None):
+def read_funding_observations(funding_roots, *, symbol):
     """Read ordered immutable sources without inventing coverage between them."""
     if symbol not in RESEARCH_SYMBOLS:
         raise ValueError("binance_funding_symbol_invalid")
@@ -344,89 +341,82 @@ def read_funding_observations(funding_roots, *, symbol, resource_policy=None):
         raise ValueError("binance_funding_roots_invalid")
     if not funding_roots:
         raise PortfolioTargetBlocked("binance_funding_input_missing")
-    with (
-        runtime_resource_policy_scope(resource_policy) as policy,
-        policy.lease(
-            "binance.funding.read", json_record_working_set_bytes(MAX_RECORD_BYTES)
-        ),
-        policy.lease("binance.funding.retained", 1) as retained,
-    ):
-        sources = []
-        coverage = []
-        for value in funding_roots:
-            retained.grow(4096 + len(str(value)) * 16)
-            root = Path(value)
+    sources = []
+    coverage = []
+    for value in funding_roots:
+        root = Path(value)
+        manifest = _manifest(root, symbol)
+        interval = manifest["metadata"]["coverage"]
+        start, end = interval["start_ns"], interval["end_ns"]
+        if coverage and start <= coverage[-1][1]:
+            raise ValueError("binance_funding_source_intervals_invalid")
+        coverage.append((start, end))
+        sources.append((root, canonical_json_hash(manifest)))
+        del manifest, interval
+    identity = canonical_json_hash({"sources": [item[1] for item in sources]})
+
+    def records():
+        previous = {FundingEvent: -1, FundingForecast: -1}
+        for root, expected in sources:
             manifest = _manifest(root, symbol)
-            interval = manifest["metadata"]["coverage"]
-            start, end = interval["start_ns"], interval["end_ns"]
-            if coverage and start <= coverage[-1][1]:
-                raise ValueError("binance_funding_source_intervals_invalid")
-            coverage.append((start, end))
-            sources.append((root, canonical_json_hash(manifest)))
-            del manifest, interval
-        identity = canonical_json_hash({"sources": [item[1] for item in sources]})
-
-        def records():
-            previous = {FundingEvent: -1, FundingForecast: -1}
-            for root, expected in sources:
-                manifest = _manifest(root, symbol)
-                if canonical_json_hash(manifest) != expected:
-                    raise ValueError("binance_funding_identity_changed")
-                rows = _records(root, manifest)
-                with closing_iterator(rows):
-                    for item in rows:
-                        kind = type(item)
-                        stamp = (
-                            item.timestamp_ns
-                            if kind is FundingEvent
-                            else item.available_at_ns
-                        )
-                        if stamp <= previous[kind]:
-                            raise ValueError("binance_funding_record_order_invalid")
-                        previous[kind] = stamp
+            if canonical_json_hash(manifest) != expected:
+                raise ValueError("binance_funding_identity_changed")
+            rows = _records(root, manifest)
+            with closing_iterator(rows):
+                for item in rows:
+                    kind = type(item)
+                    stamp = (
+                        item.timestamp_ns
+                        if kind is FundingEvent
+                        else item.available_at_ns
+                    )
+                    if stamp <= previous[kind]:
+                        raise ValueError("binance_funding_record_order_invalid")
+                    previous[kind] = stamp
+                    try:
                         yield item
-                if canonical_json_hash(_manifest(root, symbol)) != expected:
-                    raise ValueError("binance_funding_identity_changed")
+                    except GeneratorExit:
+                        return
+            if canonical_json_hash(_manifest(root, symbol)) != expected:
+                raise ValueError("binance_funding_identity_changed")
 
-        events = []
+    events = []
+    with closing_iterator(records()) as rows:
+        for item in rows:
+            if type(item) is FundingEvent:
+                events.append(item)
+
+    def forecasts():
         with closing_iterator(records()) as rows:
             for item in rows:
-                if type(item) is FundingEvent:
-                    retained.grow(256)
-                    events.append(item)
-
-        def forecasts():
-            with closing_iterator(records()) as rows:
-                for item in rows:
-                    if type(item) is FundingForecast:
+                if type(item) is FundingForecast:
+                    try:
                         yield item
+                    except GeneratorExit:
+                        return
 
+    try:
+        with closing_iterator(forecasts()) as source:
+            yield FundingObservations(identity, tuple(coverage), tuple(events), source)
+    finally:
+        primary = sys.exception()
         try:
-            with closing_iterator(forecasts()) as source:
-                yield FundingObservations(
-                    identity, tuple(coverage), tuple(events), source
-                )
-        finally:
-            primary = sys.exception()
-            try:
-                # Revalidate each source even if forecasts were only partly consumed.
-                with closing_iterator(records()) as rows:
-                    for _item in rows:
-                        pass
-            except BaseException as error:
-                if primary is None or isinstance(primary, GeneratorExit):
-                    raise
-                primary.add_note(
-                    "Funding source verification also failed: " + type(error).__name__
-                )
+            # Revalidate each source even if forecasts were only partly consumed.
+            with closing_iterator(records()) as rows:
+                for _item in rows:
+                    pass
+        except BaseException as error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "Funding source verification also failed: " + type(error).__name__
+            )
 
 
 def funding_source_identity(funding_roots, _target_id, *, symbol):
     try:
         with read_funding_observations(funding_roots, symbol=symbol) as observations:
             return observations.identity
-    except PortfolioTargetBlocked:
-        raise
     except (
         FileNotFoundError,
         NotADirectoryError,

@@ -24,7 +24,6 @@ from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
     render_qrp_json_object,
 )
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.datasets.inventory import DatasetSessionInventory
 from quant_research_platform.storage.datasets.paths import relative_partition_label
 from quant_research_platform.storage.datasets.schema import (
@@ -62,9 +61,7 @@ def make_default_dataset_frame(
 
 
 def make_time_window_dataset_frame(
-    *,
-    value_column: str = "value",
-    market_id: str = "a_share",
+    *, value_column: str = "value", market_id: str = "a_share"
 ) -> pd.DataFrame:
     return _make_dataset_frame(
         value_column=value_column,
@@ -74,9 +71,7 @@ def make_time_window_dataset_frame(
 
 
 def make_helper_edges_dataset_frame(
-    *,
-    value_column: str = "value",
-    market_id: str = "a_share",
+    *, value_column: str = "value", market_id: str = "a_share"
 ) -> pd.DataFrame:
     return _make_dataset_frame(
         value_column=value_column,
@@ -86,9 +81,7 @@ def make_helper_edges_dataset_frame(
 
 
 def make_correctness_dataset_frame(
-    *,
-    value_column: str = "value",
-    market_id: str = "a_share",
+    *, value_column: str = "value", market_id: str = "a_share"
 ) -> pd.DataFrame:
     return _make_dataset_frame(
         value_column=value_column,
@@ -184,14 +177,11 @@ def make_dataset_artifact_root(
 def fixture_dataset_content_hash(root: Path) -> str:
     """Give crafted physical fixtures an honest outer content binding."""
     spec = json.loads(filesystem_read_text(root / "spec.json", encoding="utf-8"))
-    with runtime_resource_policy_scope() as policy:
-        with DatasetSessionInventory(
-            data_root=root / "data", resource_policy=policy
-        ) as inventory:
-            inventory.discover(spec)
-            for path in inventory.iter_candidate_paths():
-                inventory.observe(path, inspect_dataset_part(path), selected=True)
-            return inventory.content_hash(resource_policy=policy)
+    inventory = DatasetSessionInventory(data_root=root / "data")
+    inventory.discover(spec)
+    for path in inventory.paths:
+        inventory.observe(path, inspect_dataset_part(path))
+    return inventory.content_hash()
 
 
 def write_low_level_parquet_artifact(
@@ -202,7 +192,6 @@ def write_low_level_parquet_artifact(
     partition_columns: Sequence[str],
 ) -> None:
     """Construct low-level parquet fixtures for storage-adjacent tests."""
-
     effective_primary_key = tuple(primary_key)
     if not effective_primary_key or any(
         type(column) is not str or not column for column in effective_primary_key
@@ -212,11 +201,9 @@ def write_low_level_parquet_artifact(
         "schema_id": "qrp-dataset-spec",
         "data_id": Path(artifact_root).name,
         "frequency": data_frequency_slug(DataFrequency.DAILY),
-        "grain": (
-            "asset_timestamp"
-            if "timestamp" in effective_primary_key
-            else "asset_reference"
-        ),
+        "grain": "asset_timestamp"
+        if "timestamp" in effective_primary_key
+        else "asset_reference",
         "primary_key": list(effective_primary_key),
         "partition_columns": list(partition_columns),
         "required_columns": [str(column) for column in frame.columns],
@@ -225,9 +212,7 @@ def write_low_level_parquet_artifact(
     root = Path(artifact_root)
     filesystem_mkdir(root, parents=True, exist_ok=True)
     filesystem_write_text(
-        root / "spec.json",
-        render_qrp_json_object(spec) + "\n",
-        encoding="utf-8",
+        root / "spec.json", render_qrp_json_object(spec) + "\n", encoding="utf-8"
     )
     data_root = root / "data"
     paths: list[Path] = []
@@ -238,10 +223,7 @@ def write_low_level_parquet_artifact(
             year_root = data_root / f"year={int(year)}"
             filesystem_mkdir(year_root, parents=True, exist_ok=True)
             path = year_root / "part-000.parquet"
-            _write_fixture_parquet(
-                year_frame.drop(columns=["_fixture_year"]),
-                path,
-            )
+            _write_fixture_parquet(year_frame.drop(columns=["_fixture_year"]), path)
             paths.append(path)
     else:
         filesystem_mkdir(data_root, parents=True, exist_ok=True)
@@ -298,16 +280,12 @@ def _write_runtime_manifest(
         "file_count": len(paths),
         "file_size_bytes": sum(filesystem_stat(path).st_size for path in paths),
         "row_count": row_count,
-        "date_min": (
-            None
-            if timestamp_values.empty
-            else timestamp_values.min().date().isoformat()
-        ),
-        "date_max": (
-            None
-            if timestamp_values.empty
-            else timestamp_values.max().date().isoformat()
-        ),
+        "date_min": None
+        if timestamp_values.empty
+        else timestamp_values.min().date().isoformat(),
+        "date_max": None
+        if timestamp_values.empty
+        else timestamp_values.max().date().isoformat(),
         "null_count_summary": {
             column: int(frame[column].isna().sum()) for column in primary_key
         },
@@ -320,9 +298,7 @@ def _write_runtime_manifest(
     manifest_path = root / "_manifest" / "manifest.json"
     filesystem_mkdir(manifest_path.parent, parents=True, exist_ok=True)
     filesystem_write_text(
-        manifest_path,
-        render_qrp_json_object(manifest) + "\n",
-        encoding="utf-8",
+        manifest_path, render_qrp_json_object(manifest) + "\n", encoding="utf-8"
     )
 
 
@@ -335,8 +311,7 @@ def _write_fixture_parquet(frame: pd.DataFrame, path: Path) -> None:
 
 
 def _column_roles(
-    columns: Sequence[object],
-    primary_key: Sequence[str],
+    columns: Sequence[object], primary_key: Sequence[str]
 ) -> dict[str, str]:
     primary_key_set = {str(column) for column in primary_key}
     roles = {}

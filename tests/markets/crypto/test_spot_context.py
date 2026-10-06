@@ -40,17 +40,14 @@ def panel(*, spot=False):
 def compute(perpetual, spot):
     return pd.concat(
         iter_spot_perp_factor_frames(
-            perpetual,
-            spot_frames=spot,
-            max_age_ms=200,
-            batch_rows=7,
+            perpetual, spot_frames=spot, max_age_ms=200, batch_rows=7
         ),
         ignore_index=True,
     )
 
 
 def test_spot_oracle_chunks_gaps_missing_source_and_future_invariance():
-    perpetual, spot = panel(), panel(spot=True)
+    perpetual, spot = (panel(), panel(spot=True))
     whole = compute([perpetual], [spot])
     split = compute(
         [perpetual.iloc[i : i + 3] for i in range(0, 20, 3)],

@@ -29,7 +29,6 @@ from quant_research_platform.profiles.research import (
     research_profile,
 )
 from quant_research_platform.research.protocols.crypto_hft import CryptoMakerCandidate
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from quant_research_platform.sources.tardis.raw import import_slices
 from quant_research_platform.storage.layout import StorageLayout
@@ -44,7 +43,7 @@ from tests.markets.crypto.test_hft_execution import _maker_config, _state
 from tests.sources.tardis.test_raw import _slices
 
 
-def _publish(root, date, policy, *, fine):
+def _publish(root, date, *, fine):
     midnight = pd.Timestamp(date).value // 1_000_000
     native = []
     for second, channel in ((1, "depth@0ms"), (2, "depthSnapshot"), (3, "aggTrade")):
@@ -100,7 +99,6 @@ def _publish(root, date, policy, *, fine):
         date=date,
         slices=_slices(root / ("native-" + date), "".join(native).encode(), count=1),
         byte_budget=1024**2,
-        resource_policy=policy,
     )
     return destination.relative_to(root).as_posix()
 
@@ -143,235 +141,222 @@ def test_frozen_archive_identity_and_persisted_maker_units(
     raw.mkdir()
     layout = StorageLayout(tmp_path / "project")
     symbol = {"btc_usdt": "BTCUSDT", "eth_usdt": "ETHUSDT"}[asset]
-    with runtime_resource_policy_scope() as policy:
-        config["source_archives"] = [
-            _publish(raw, day, policy, fine=index == 2)
-            for index, day in enumerate(("2026-07-01", "2026-08-01", "2026-09-01"))
-        ]
-        profiles = {
-            access: bind_research_configuration(
-                research_profile(config["profile_id"]),
-                config,
-                tardis_root=raw,
-                access_window=access,
-            )
-            for access in ("development", "holdout")
-        }
-        protocols = {
-            access: profile.protocol(config["scenario_id"], access_window=access)
-            for access, profile in profiles.items()
-        }
-        candidate = next(
-            item
-            for item in protocols["development"].portfolio_candidates()
-            if isinstance(item, CryptoMakerCandidate)
-            and item.calibrated
-            and item.asset_id == asset
+    config["source_archives"] = [
+        _publish(raw, day, fine=index == 2)
+        for index, day in enumerate(("2026-07-01", "2026-08-01", "2026-09-01"))
+    ]
+    profiles = {
+        access: bind_research_configuration(
+            research_profile(config["profile_id"]),
+            config,
+            tardis_root=raw,
+            access_window=access,
         )
-        target_id = candidate.calibration_target_id
-        specs = {
-            access: next(
-                item
-                for item in protocol.target_specs("research run")
-                if item.target_id == target_id
-            )
-            for access, protocol in protocols.items()
-        }
-        identities = {}
-        for access, profile in profiles.items():
-            binding = profile.producer_bindings[target_id]
-            identities[access] = binding.source_identity(raw, target_id)
-            with binding.producer.keywords["open_run"](raw, policy) as source:
-                assert len(source.archives) == 2
-                assert (
-                    source.market_metadata(FUTURES_MARKET_TYPE, symbol)["price_unit"]
-                    == unit
-                )
-        assert identities["development"] == identities["holdout"]
-        panel = profiles["holdout"].producer_bindings["binance_futures_l2_panel_100ms"]
-        with panel.producer.keywords["open_run"](raw, policy) as source:
-            assert len(source.archives) == 3
+        for access in ("development", "holdout")
+    }
+    protocols = {
+        access: profile.protocol(config["scenario_id"], access_window=access)
+        for access, profile in profiles.items()
+    }
+    candidate = next(
+        item
+        for item in protocols["development"].portfolio_candidates()
+        if isinstance(item, CryptoMakerCandidate)
+        and item.calibrated
+        and item.asset_id == asset
+    )
+    target_id = candidate.calibration_target_id
+    specs = {
+        access: next(
+            item
+            for item in protocol.target_specs("research run")
+            if item.target_id == target_id
+        )
+        for access, protocol in protocols.items()
+    }
+    identities = {}
+    for access, profile in profiles.items():
+        binding = profile.producer_bindings[target_id]
+        identities[access] = binding.source_identity(raw, target_id)
+        with binding.producer.keywords["open_run"](raw) as source:
+            assert len(source.archives) == 2
             assert (
                 source.market_metadata(FUTURES_MARKET_TYPE, symbol)["price_unit"]
-                == current_unit
+                == unit
             )
-        envelope = research._target_envelope_for_spec(
-            profile=profiles["development"],
-            protocol=protocols["development"],
-            target_spec=specs["development"],
-            data_spec=None,
-            research_window={
-                **config["windows"]["development"],
-                "access": "development",
-            },
-            upstream_identities={
-                key: "1" * 64 for key in specs["development"].dependencies
-            },
-            software_identity=production_software_identity(),
-            raw_content_identity=identities["development"],
+    assert identities["development"] == identities["holdout"]
+    panel = profiles["holdout"].producer_bindings["binance_futures_l2_panel_100ms"]
+    with panel.producer.keywords["open_run"](raw) as source:
+        assert len(source.archives) == 3
+        assert (
+            source.market_metadata(FUTURES_MARKET_TYPE, symbol)["price_unit"]
+            == current_unit
         )
+    envelope = research._target_envelope_for_spec(
+        profile=profiles["development"],
+        protocol=protocols["development"],
+        target_spec=specs["development"],
+        data_spec=None,
+        research_window={
+            **config["windows"]["development"],
+            "access": "development",
+        },
+        upstream_identities={
+            key: "1" * 64 for key in specs["development"].dependencies
+        },
+        software_identity=production_software_identity(),
+        raw_content_identity=identities["development"],
+    )
 
-        def produce(on_table):
-            for name, frame in tables.items():
-                on_table(name, frame)
+    def produce(on_table):
+        for name, frame in tables.items():
+            on_table(name, frame)
 
-        root = write_statistics_artifact(
-            research._target_logical_root(profiles["development"], layout, target_id),
-            envelope=envelope,
-            tables=produce,
-            table_group="crypto_maker_calibration",
-            validate_tables=validate_maker_calibration,
+    root = write_statistics_artifact(
+        research._target_logical_root(profiles["development"], layout, target_id),
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=validate_maker_calibration,
+    )
+
+    def fingerprints():
+        return {
+            path.relative_to(root): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in root.rglob("*")
+            if path.is_file()
+        }
+
+    before = fingerprints()
+    for access, profile in profiles.items():
+        result = research._reuse_target(
+            profile=profile,
+            protocol=protocols[access],
+            layout=layout,
+            spec=specs[access],
+            planned={
+                "requested_identity": envelope.instance_identity,
+                "matching_instance_identity": envelope.instance_identity,
+            },
+            raw_root=raw,
+            time_window=TimeWindow(
+                envelope.research_window["start"], envelope.research_window["end"]
+            ),
         )
+        assert result.status.value == "REUSED"
+    artifact = read_statistics_artifact(
+        root,
+        expected_identity=envelope.instance_identity,
+        validate_tables=validate_maker_calibration,
+    )
+    with artifact.table("crypto_maker_calibration.parquet") as summary:
+        frozen_unit = summary.price_unit.iloc[0]
+    samples = partial(_calibration_samples, artifact, "fold_1")
+    events = partial(_calibration_events, artifact, "fold_1")
 
-        def fingerprints():
-            return {
-                path.relative_to(root): hashlib.sha256(path.read_bytes()).hexdigest()
-                for path in root.rglob("*")
-                if path.is_file()
+    def fine_samples():
+        for sample in samples():
+            yield sample | {
+                key: sample[key] * 10
+                for key in ("initial_bid_index", "initial_ask_index")
             }
 
-        before = fingerprints()
-        for access, profile in profiles.items():
-            result = research._reuse_target(
-                profile=profile,
-                protocol=protocols[access],
-                layout=layout,
-                spec=specs[access],
-                planned={
-                    "requested_identity": envelope.instance_identity,
-                    "matching_instance_identity": envelope.instance_identity,
-                },
-                policy=policy,
-                raw_root=raw,
-                time_window=TimeWindow(
-                    envelope.research_window["start"], envelope.research_window["end"]
-                ),
-            )
-            assert result.status.value == "REUSED"
-        with policy.lease("tests.frozen_calibration", 0) as lease:
-            artifact = read_statistics_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                validate_tables=validate_maker_calibration,
-                lease=lease,
-            )
-            with artifact.table("crypto_maker_calibration.parquet") as summary:
-                frozen_unit = summary.price_unit.iloc[0]
-            samples = partial(_calibration_samples, artifact, "fold_1")
-            events = partial(_calibration_events, artifact, "fold_1")
-
-            def fine_samples():
-                for sample in samples():
-                    yield sample | {
-                        key: sample[key] * 10
-                        for key in ("initial_bid_index", "initial_ask_index")
-                    }
-
-            def fine_events():
-                for event in events():
-                    values = vars(event).copy()
-                    if event.kind == "book":
-                        values.update(
-                            {
-                                side: tuple(
-                                    (tick * 10, quantity)
-                                    for tick, quantity in values[side]
-                                )
-                                for side in ("bids", "asks")
-                            }
+    def fine_events():
+        for event in events():
+            values = vars(event).copy()
+            if event.kind == "book":
+                values.update(
+                    {
+                        side: tuple(
+                            (tick * 10, quantity) for tick, quantity in values[side]
                         )
-                    elif event.kind == "trade":
-                        values["price_index"] *= 10
-                    yield SimpleNamespace(**values)
+                        for side in ("bids", "asks")
+                    }
+                )
+            elif event.kind == "trade":
+                values["price_index"] *= 10
+            yield SimpleNamespace(**values)
 
-            historical = MakerCalibration(
-                samples, events, price_unit=frozen_unit, resource_policy=policy
+    historical = MakerCalibration(samples, events, price_unit=frozen_unit)
+    baseline = MakerCalibration(fine_samples, fine_events, price_unit=current_unit)
+    state = replace(
+        _state(0),
+        price_unit=current_unit,
+        bids=tuple((tick * 10, quantity) for tick, quantity in _state(0).bids),
+        asks=tuple((tick * 10, quantity) for tick, quantity in _state(0).asks),
+    )
+    new = _maker_new_order(
+        2,
+        "buy",
+        1.0,
+        state,
+        _quote(0, book_segment_id="s1"),
+        _maker_config().latency_ms,
+    )
+    new.effective_at_ns = 100_000_000
+    old = replace(
+        new,
+        order_id=1,
+        effective_at_ns=0,
+        price_index=new.price_index + 50,
+        queue_ahead=0,
+    )
+    pending = (
+        (
+            200_000_000,
+            "buy",
+            replace(new, order_id=3, effective_at_ns=200_000_000),
+        ),
+    )
+    try:
+        for commands in ((), pending):
+            query = dict(
+                state=state,
+                decision_ns=0,
+                new_order=new,
+                active_order=old,
+                commands=commands,
+                lifetime_ns=500_000_000,
+                prediction=0.02,
+                fee_bps=1.0,
+                funding=[],
             )
-            baseline = MakerCalibration(
-                fine_samples,
-                fine_events,
-                price_unit=current_unit,
-                resource_policy=policy,
-            )
-            state = replace(
-                _state(0),
-                price_unit=current_unit,
-                bids=tuple((tick * 10, quantity) for tick, quantity in _state(0).bids),
-                asks=tuple((tick * 10, quantity) for tick, quantity in _state(0).asks),
-            )
-            new = _maker_new_order(
-                2,
-                "buy",
-                1.0,
-                state,
-                _quote(0, book_segment_id="s1"),
-                _maker_config().latency_ms,
-            )
-            new.effective_at_ns = 100_000_000
-            old = replace(
-                new,
-                order_id=1,
-                effective_at_ns=0,
-                price_index=new.price_index + 50,
-                queue_ahead=0,
-            )
-            pending = (
-                (
-                    200_000_000,
-                    "buy",
-                    replace(new, order_id=3, effective_at_ns=200_000_000),
-                ),
-            )
-            try:
-                for commands in ((), pending):
-                    query = dict(
-                        state=state,
-                        decision_ns=0,
-                        new_order=new,
-                        active_order=old,
-                        commands=commands,
-                        lifetime_ns=500_000_000,
-                        prediction=0.02,
-                        fee_bps=1.0,
-                        funding=[],
-                    )
-                    expected = baseline.select(**query)
-                    actual = historical.select(**query)
-                    assert actual[:2] == expected[:2]
-                    assert actual[2] == pytest.approx(expected[2])
-                    for replacement in (None, 0.0, 1.0):
-                        outputs = []
-                        for model in (historical, baseline):
-                            sample_stream = model.samples("buy")
-                            try:
-                                sample = next(sample_stream)
-                                outputs.append(
-                                    list(
-                                        model._response(
-                                            sample,
-                                            state=state,
-                                            decision_ns=0,
-                                            new_order=new,
-                                            active_order=old,
-                                            commands=commands,
-                                            lifetime_ns=500_000_000,
-                                            replace_quantity=replacement,
-                                            events=model.events(
-                                                sample["event_start"],
-                                                sample["event_end"],
-                                            ),
-                                        )
-                                    )
+            expected = baseline.select(**query)
+            actual = historical.select(**query)
+            assert actual[:2] == expected[:2]
+            assert actual[2] == pytest.approx(expected[2])
+            for replacement in (None, 0.0, 1.0):
+                outputs = []
+                for model in (historical, baseline):
+                    sample_stream = model.samples("buy")
+                    try:
+                        sample = next(sample_stream)
+                        outputs.append(
+                            list(
+                                model._response(
+                                    sample,
+                                    state=state,
+                                    decision_ns=0,
+                                    new_order=new,
+                                    active_order=old,
+                                    commands=commands,
+                                    lifetime_ns=500_000_000,
+                                    replace_quantity=replacement,
+                                    events=model.events(
+                                        sample["event_start"],
+                                        sample["event_end"],
+                                    ),
                                 )
-                            finally:
-                                sample_stream.close()
-                        assert outputs[0] == outputs[1]
-                        assert outputs[0]
-            finally:
-                historical.close()
-                baseline.close()
-        assert fingerprints() == before
-        assert policy.used_memory_bytes == 0
+                            )
+                        )
+                    finally:
+                        sample_stream.close()
+                assert outputs[0] == outputs[1]
+                assert outputs[0]
+    finally:
+        historical.close()
+        baseline.close()
+    assert fingerprints() == before
 
 
 @pytest.mark.parametrize(
@@ -470,47 +455,44 @@ def test_final_maker_gate_uses_only_required_fold_but_validates_full_artifact(
             },
         },
     )
-    with runtime_resource_policy_scope() as policy:
 
-        def produce(on_table):
-            for name, frame in tables.items():
-                on_table(name, frame)
+    def produce(on_table):
+        for name, frame in tables.items():
+            on_table(name, frame)
 
-        root = write_statistics_artifact(
-            tmp_path / "calibration",
-            envelope=envelope,
-            tables=produce,
-            table_group="crypto_maker_calibration",
-            validate_tables=validate_maker_calibration,
+    root = write_statistics_artifact(
+        tmp_path / "calibration",
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=validate_maker_calibration,
+    )
+    with pytest.raises(
+        RawReached if last_defined else PortfolioTargetBlocked
+    ) as caught:
+        portfolio.produce_maker_ledger(
+            layout=SimpleNamespace(target_root=lambda *args: root),
+            candidate=candidate,
+            protocol_manifest=protocol_manifest,
+            dataset_catalog=SimpleNamespace(get=lambda *args: SimpleNamespace()),
+            output_window=TimeWindow(**plan["test"]),
+            upstream_identities={
+                candidate.calibration_target_id: envelope.instance_identity
+            },
+            expected_funding_identity="a" * 64,
+            raw_root=tmp_path,
+            execution_mode="continuous",
+            symbol="BTCUSDT",
+            market_type="usdm_perpetual",
+            open_run=open_run,
+            reconstruct_depth=None,
+            read_trades=None,
+            read_funding=None,
+            read_prediction_bundle=None,
+            read_statistics_artifact=read_statistics_artifact,
         )
-        with pytest.raises(
-            RawReached if last_defined else PortfolioTargetBlocked
-        ) as caught:
-            portfolio.produce_maker_ledger(
-                layout=SimpleNamespace(target_root=lambda *args: root),
-                candidate=candidate,
-                protocol_manifest=protocol_manifest,
-                dataset_catalog=SimpleNamespace(get=lambda *args: SimpleNamespace()),
-                output_window=TimeWindow(**plan["test"]),
-                upstream_identities={
-                    candidate.calibration_target_id: envelope.instance_identity
-                },
-                expected_funding_identity="a" * 64,
-                raw_root=tmp_path,
-                resource_policy=policy,
-                execution_mode="continuous",
-                symbol="BTCUSDT",
-                market_type="usdm_perpetual",
-                open_run=open_run,
-                reconstruct_depth=None,
-                read_trades=None,
-                read_funding=None,
-                read_prediction_bundle=None,
-                read_statistics_artifact=read_statistics_artifact,
-            )
-        if last_defined:
-            assert reached == [True]
-        else:
-            assert str(caught.value) == "maker_calibration_insufficient_samples"
-            assert not reached
-        assert policy.used_memory_bytes == 0
+    if last_defined:
+        assert reached == [True]
+    else:
+        assert str(caught.value) == "maker_calibration_insufficient_samples"
+        assert not reached

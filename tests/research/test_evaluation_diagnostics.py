@@ -9,79 +9,8 @@ import pytest
 
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.evaluations import engine as evaluation_engine
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from tests.helpers.output_frames import make_artifact_signal_spec
-from tests.helpers.runtime_resources import capture_test_policy
-
-
-@pytest.mark.parametrize("boundary", ["soft", "captured", "explicit"])
-def test_complete_cross_section_admits_kernel_against_capacity(monkeypatch, boundary):
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.Timestamp("2023-01-02"),
-            "asset_id": [f"asset_{i}" for i in range(500)],
-            "signal": np.arange(500, dtype=float),
-            "label": np.arange(500, dtype=float) * 0.1,
-        }
-    )
-    bound = evaluation_engine._evaluation_batch_peak_bytes(
-        frame,
-        compute_columns_by_label=(("timestamp", "asset_id", "signal", "label"),),
-        signal_count=1,
-        n_groups=2,
-    )
-    policy = capture_test_policy(
-        available_memory_bytes=bound - 1 if boundary == "captured" else bound * 5 // 4,
-        explicit_cap_bytes=bound - 1 if boundary == "explicit" else None,
-    )
-    calls = []
-    kernel = evaluation_engine.compute_ic_and_grouped_label_values
-
-    def observed_kernel(*args, **kwargs):
-        calls.append(True)
-        return kernel(*args, **kwargs)
-
-    monkeypatch.setattr(
-        evaluation_engine, "compute_ic_and_grouped_label_values", observed_kernel
-    )
-    with (
-        runtime_resource_policy_scope(policy),
-        closing_iterator(
-            evaluation_engine._iter_evaluation_filtered_chunks(
-                frame,
-                {
-                    "rows_input": len(frame),
-                    "rows_after_filter_mode": len(frame),
-                    "filter_columns_used": [],
-                    "filter_definition": "all",
-                },
-                signal_columns=("signal",),
-                label_columns=("label",),
-                n_groups=2,
-                asset_column="asset_id",
-                resource_policy=policy,
-            )
-        ) as outputs,
-    ):
-        if boundary == "soft":
-            assert bound > policy.memory_budget_bytes
-            owned = next(outputs)
-            assert owned.value[0].n_obs.tolist() == [500]
-            assert owned.value[0].ic.iloc[0] == pytest.approx(1.0)
-            owned.release(owner="research.evaluation.output")
-            with pytest.raises(StopIteration):
-                next(outputs)
-            assert calls == [True]
-        else:
-            with pytest.raises(
-                ValueError,
-                match="research_evaluation_working_set_exceeds_task_memory_budget",
-            ):
-                next(outputs)
-            assert calls == []
-        assert policy.used_memory_bytes == 0
 
 
 @pytest.mark.parametrize("valid_pairs", (None, 0, 1))
@@ -122,36 +51,32 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
     )
     if valid_pairs is None:
         frame = frame.iloc[:0]
-    with runtime_resource_policy_scope() as policy:
-        with evaluation_engine.build_evaluation_result_from_frames(
-            (frame,),
+    with evaluation_engine.build_evaluation_result_from_frames(
+        (frame,),
+        spec=spec,
+        signal_columns=("signal",),
+        label_columns=("label",),
+        n_groups=2,
+        asset_column="asset_id",
+        source_columns_by_kind={"feature": ("feature",)},
+    ) as result:
+        root = write_evaluation_outputs_from_chunks(
+            result.output_chunks,
+            summary_factory=result.summaries,
             spec=spec,
-            signal_columns=("signal",),
-            label_columns=("label",),
+            output_spec=output,
+            layout=StorageLayout(tmp_path),
             n_groups=2,
-            asset_column="asset_id",
-            source_columns_by_kind={"feature": ("feature",)},
-            resource_policy=policy,
-        ) as result:
-            root = write_evaluation_outputs_from_chunks(
-                result.output_chunks,
-                summary_factory=result.summaries,
-                spec=spec,
-                output_spec=output,
-                layout=StorageLayout(tmp_path),
-                n_groups=2,
-            )
-        metrics = pd.read_parquet(root / "metrics.parquet")
-        assert metrics.n_obs.tolist() == ([] if valid_pairs is None else [valid_pairs])
-        assert (
-            metrics.ic.isna().all()
-            and metrics.ic_reason.eq("insufficient_observations").all()
         )
-        assert (
-            metrics.rankic.isna().all()
-            and metrics.rankic_reason.eq("not_applicable").all()
-        )
-        assert policy.used_memory_bytes == 0
+    metrics = pd.read_parquet(root / "metrics.parquet")
+    assert metrics.n_obs.tolist() == ([] if valid_pairs is None else [valid_pairs])
+    assert (
+        metrics.ic.isna().all()
+        and metrics.ic_reason.eq("insufficient_observations").all()
+    )
+    assert (
+        metrics.rankic.isna().all() and metrics.rankic_reason.eq("not_applicable").all()
+    )
 
 
 def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
@@ -193,35 +118,29 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
         run_type="evaluation",
         scope=OutputScope.LOCAL_ONLY,
     )
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        with evaluation_engine.build_evaluation_result_from_frames(
-            (frame,),
+    with evaluation_engine.build_evaluation_result_from_frames(
+        (frame,),
+        spec=spec,
+        signal_columns=("signal",),
+        label_columns=("label",),
+        n_groups=2,
+        asset_column="asset_id",
+        source_columns_by_kind={"feature": ("feature",)},
+    ) as result:
+        root = write_evaluation_outputs_from_chunks(
+            result.output_chunks,
+            summary_factory=result.summaries,
             spec=spec,
-            signal_columns=("signal",),
-            label_columns=("label",),
+            output_spec=output,
+            layout=StorageLayout(tmp_path),
             n_groups=2,
-            asset_column="asset_id",
-            source_columns_by_kind={"feature": ("feature",)},
-            resource_policy=policy,
-        ) as result:
-            root = write_evaluation_outputs_from_chunks(
-                result.output_chunks,
-                summary_factory=result.summaries,
-                spec=spec,
-                output_spec=output,
-                layout=StorageLayout(tmp_path),
-                n_groups=2,
-            )
-        validate_output_bundle(root, lease=artifact_lease)
-        diagnostics = json.loads((root / "manifest.json").read_text(encoding="utf-8"))[
-            "metadata"
-        ]["evaluation_diagnostics"]
-        assert diagnostics["min_timestamp"] == times[0].isoformat()
-        assert diagnostics["max_timestamp"] == times[-1].isoformat()
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+        )
+    validate_output_bundle(root)
+    diagnostics = json.loads((root / "manifest.json").read_text(encoding="utf-8"))[
+        "metadata"
+    ]["evaluation_diagnostics"]
+    assert diagnostics["min_timestamp"] == times[0].isoformat()
+    assert diagnostics["max_timestamp"] == times[-1].isoformat()
 
 
 def test_evaluation_chunk_producer_does_not_terminal_concat(
@@ -242,21 +161,17 @@ def test_evaluation_chunk_producer_does_not_terminal_concat(
             "single_label_managed_evaluation_must_not_concat"
         ),
     )
-    policy = capture_test_policy(available_memory_bytes=256 * 1024)
-    with runtime_resource_policy_scope(policy):
-        chunks = evaluation_engine._iter_evaluation_output_chunks(
-            (_evaluation_frame(),),
-            spec=spec,
-            signal_columns=("signal",),
-            label_columns=("label",),
-            n_groups=2,
-            asset_column="asset_id",
-            resource_policy=policy,
-        )
-        owned = next(chunks)
-        metrics, grouped, _ = owned.value
-        chunks.close()
-
+    chunks = evaluation_engine._iter_evaluation_output_chunks(
+        (_evaluation_frame(),),
+        spec=spec,
+        signal_columns=("signal",),
+        label_columns=("label",),
+        n_groups=2,
+        asset_column="asset_id",
+    )
+    owned = next(chunks)
+    metrics, grouped, _ = owned
+    chunks.close()
     assert list(metrics.columns) == [
         "timestamp",
         "signal",
@@ -298,24 +213,21 @@ def test_single_asset_time_series_evaluation_is_exact_across_chunks() -> None:
     )
     outputs: list[pd.DataFrame] = []
     for frames in ((frame,), (frame.iloc[:2], frame.iloc[2:])):
-        policy = capture_test_policy(available_memory_bytes=256 * 1024)
-        with runtime_resource_policy_scope(policy):
-            with evaluation_engine.build_evaluation_result_from_frames(
-                frames,
-                spec=spec,
-                signal_columns=("signal",),
-                label_columns=("label",),
-                n_groups=2,
-                asset_column="asset_id",
-                source_columns_by_kind={"feature": ("feature",)},
-                resource_policy=policy,
-            ) as result:
-                chunks = iter(result.output_chunks)
-                owned = next(chunks)
-                metrics, grouped, metadata = owned.value
-                with pytest.raises(StopIteration):
-                    next(chunks)
-                summary = result.summaries()[1]
+        with evaluation_engine.build_evaluation_result_from_frames(
+            frames,
+            spec=spec,
+            signal_columns=("signal",),
+            label_columns=("label",),
+            n_groups=2,
+            asset_column="asset_id",
+            source_columns_by_kind={"feature": ("feature",)},
+        ) as result:
+            chunks = iter(result.output_chunks)
+            owned = next(chunks)
+            metrics, grouped, metadata = owned
+            with pytest.raises(StopIteration):
+                next(chunks)
+            summary = result.summaries()[1]
         assert grouped.empty
         assert metadata["timestamp_count"] == 4
         assert metrics.loc[0, "n_obs"] == 4
@@ -325,17 +237,16 @@ def test_single_asset_time_series_evaluation_is_exact_across_chunks() -> None:
         assert summary.loc[0, "valid_ic_count"] == 1
         assert summary.loc[0, "valid_rankic_count"] == 0
         outputs.append(metrics)
-
     pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
 
 
 @pytest.mark.parametrize("case", ("ordinary", "missing", "extreme"))
 def test_single_asset_time_series_values_are_chunk_exact(case: str) -> None:
-    row_count = 10_007
+    row_count = 10007
     random = np.random.default_rng(0)
     if case == "extreme":
-        feature = random.normal(1e9, 1e-3, size=row_count)
-        label = feature * 0.17 + random.normal(-1e8, 2e-3, size=row_count)
+        feature = random.normal(1000000000.0, 0.001, size=row_count)
+        label = feature * 0.17 + random.normal(-100000000.0, 0.002, size=row_count)
     else:
         feature = random.normal(size=row_count)
         label = random.normal(size=row_count)
@@ -344,11 +255,7 @@ def test_single_asset_time_series_values_are_chunk_exact(case: str) -> None:
             label[::613] = np.nan
     frame = pd.DataFrame(
         {
-            "timestamp": pd.date_range(
-                "2026-01-01",
-                periods=row_count,
-                freq="100ms",
-            ),
+            "timestamp": pd.date_range("2026-01-01", periods=row_count, freq="100ms"),
             "asset_id": ["btc_usdt"] * row_count,
             "feature": feature,
             "label": label,
@@ -365,23 +272,20 @@ def test_single_asset_time_series_values_are_chunk_exact(case: str) -> None:
         n_groups=2,
     )
 
-    def evaluate(frames) -> pd.DataFrame:  # noqa: ANN001
-        policy = capture_test_policy(available_memory_bytes=512 * 1024)
-        with runtime_resource_policy_scope(policy):
-            with evaluation_engine.build_evaluation_result_from_frames(
-                frames,
-                spec=spec,
-                signal_columns=("signal",),
-                label_columns=("label",),
-                n_groups=2,
-                asset_column="asset_id",
-                source_columns_by_kind={"feature": ("feature",)},
-                resource_policy=policy,
-            ) as result:
-                chunks = iter(result.output_chunks)
-                metrics = next(chunks).value[0].copy()
-                with pytest.raises(StopIteration):
-                    next(chunks)
+    def evaluate(frames) -> pd.DataFrame:
+        with evaluation_engine.build_evaluation_result_from_frames(
+            frames,
+            spec=spec,
+            signal_columns=("signal",),
+            label_columns=("label",),
+            n_groups=2,
+            asset_column="asset_id",
+            source_columns_by_kind={"feature": ("feature",)},
+        ) as result:
+            chunks = iter(result.output_chunks)
+            metrics = next(chunks)[0].copy()
+            with pytest.raises(StopIteration):
+                next(chunks)
         return metrics
 
     chunks_127 = evaluate(
@@ -390,14 +294,11 @@ def test_single_asset_time_series_values_are_chunk_exact(case: str) -> None:
     chunks_251 = evaluate(
         tuple(frame.iloc[start : start + 251] for start in range(0, row_count, 251))
     )
-
     pd.testing.assert_frame_equal(chunks_127, chunks_251, check_exact=True)
 
 
-@pytest.mark.parametrize("epsilon", (1e-7, 1e-8))
-def test_streaming_ic_summary_matches_stable_canonical_values(
-    epsilon: float,
-) -> None:
+@pytest.mark.parametrize("epsilon", (1e-07, 1e-08))
+def test_streaming_ic_summary_matches_stable_canonical_values(epsilon: float) -> None:
     values = (1.0 - epsilon, 1.0, 1.0 - 2 * epsilon)
     metrics = pd.DataFrame(
         {
@@ -418,29 +319,22 @@ def test_streaming_ic_summary_matches_stable_canonical_values(
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
     )
-    state = evaluation_engine._EvaluationStreamingState(
-        spec=spec,
-        n_groups=2,
+    state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
+    state.consume(
+        metrics,
+        pd.DataFrame(),
+        {
+            "rows_input": 6,
+            "rows_after_filter_mode": 6,
+            "filter_columns_used": ["eligible"],
+            "filter_definition": "eligible == True",
+            "timestamp_count": 3,
+            "min_timestamp": "2024-01-02",
+            "max_timestamp": "2024-01-04",
+            "skipped_timestamp_count": 0,
+        },
     )
-    try:
-        state.consume(
-            metrics,
-            pd.DataFrame(),
-            {
-                "rows_input": 6,
-                "rows_after_filter_mode": 6,
-                "filter_columns_used": ["eligible"],
-                "filter_definition": "eligible == True",
-                "timestamp_count": 3,
-                "min_timestamp": "2024-01-02",
-                "max_timestamp": "2024-01-04",
-                "skipped_timestamp_count": 0,
-            },
-        )
-        streaming = state.ic_summary().iloc[0]
-    finally:
-        state.close()
-
+    streaming = state.ic_summary().iloc[0]
     expected_mean = sum(values) / len(values)
     expected_std = (
         sum((value - expected_mean) ** 2 for value in values) / len(values)
@@ -453,17 +347,9 @@ def test_streaming_ic_summary_matches_stable_canonical_values(
             "mean_rankic": expected_mean,
             "std_rankic": expected_std,
         }[column]
-        assert streaming[column] == pytest.approx(
-            expected,
-            rel=0.0,
-            abs=1e-12,
-        )
+        assert streaming[column] == pytest.approx(expected, rel=0.0, abs=1e-12)
     for column in ("icir", "rankicir"):
-        assert streaming[column] == pytest.approx(
-            expected_ratio,
-            rel=1e-8,
-            abs=1e-12,
-        )
+        assert streaming[column] == pytest.approx(expected_ratio, rel=1e-08, abs=1e-12)
 
 
 def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
@@ -486,29 +372,22 @@ def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
     )
-    state = evaluation_engine._EvaluationStreamingState(
-        spec=spec,
-        n_groups=2,
+    state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
+    state.consume(
+        pd.DataFrame(),
+        grouped,
+        {
+            "rows_input": 4,
+            "rows_after_filter_mode": 4,
+            "filter_columns_used": ["eligible"],
+            "filter_definition": "eligible == True",
+            "timestamp_count": 2,
+            "min_timestamp": "2024-01-02",
+            "max_timestamp": "2024-01-03",
+            "skipped_timestamp_count": 0,
+        },
     )
-    try:
-        state.consume(
-            pd.DataFrame(),
-            grouped,
-            {
-                "rows_input": 4,
-                "rows_after_filter_mode": 4,
-                "filter_columns_used": ["eligible"],
-                "filter_definition": "eligible == True",
-                "timestamp_count": 2,
-                "min_timestamp": "2024-01-02",
-                "max_timestamp": "2024-01-03",
-                "skipped_timestamp_count": 0,
-            },
-        )
-        actual = state.group_spread_summary()
-    finally:
-        state.close()
-
+    actual = state.group_spread_summary()
     assert len(actual) == 1
     row = actual.iloc[0]
     assert row["signal"] == "signal"
@@ -558,39 +437,36 @@ def test_evaluation_writer_roundtrips_long_windows_path(tmp_path):
         run_type="evaluation",
         scope=OutputScope.LOCAL_ONLY,
     )
-    with runtime_resource_policy_scope() as policy:
-        with evaluation_engine.build_evaluation_result_from_frames(
-            (_evaluation_frame(),),
+    with evaluation_engine.build_evaluation_result_from_frames(
+        (_evaluation_frame(),),
+        spec=spec,
+        signal_columns=("signal",),
+        label_columns=("label",),
+        n_groups=2,
+        asset_column="asset_id",
+        source_columns_by_kind={"feature": ("feature",)},
+    ) as result:
+        root = write_evaluation_outputs_from_chunks(
+            result.output_chunks,
+            summary_factory=result.summaries,
             spec=spec,
-            signal_columns=("signal",),
-            label_columns=("label",),
+            output_spec=output,
+            layout=layout,
             n_groups=2,
-            asset_column="asset_id",
-            source_columns_by_kind={"feature": ("feature",)},
-            resource_policy=policy,
-        ) as result:
-            root = write_evaluation_outputs_from_chunks(
-                result.output_chunks,
-                summary_factory=result.summaries,
-                spec=spec,
-                output_spec=output,
-                layout=layout,
-                n_groups=2,
-            )
-        assert len(str(root / "grouped_label_values.parquet")) > 260
-        with pytest.raises(ValueError, match="output_already_exists"):
-            write_evaluation_outputs_from_chunks(
-                (),
-                summary_factory=lambda: pytest.fail("existing_output_was_rewritten"),
-                spec=spec,
-                output_spec=output,
-                layout=layout,
-                n_groups=2,
-            )
-        metrics = pd.read_parquet(native_filesystem_path(root / "metrics.parquet"))
-        assert metrics.n_obs.tolist() == [2]
-        assert metrics.ic.iloc[0] == pytest.approx(1.0)
-        assert policy.used_memory_bytes == 0
+        )
+    assert len(str(root / "grouped_label_values.parquet")) > 260
+    with pytest.raises(ValueError, match="output_already_exists"):
+        write_evaluation_outputs_from_chunks(
+            (),
+            summary_factory=lambda: pytest.fail("existing_output_was_rewritten"),
+            spec=spec,
+            output_spec=output,
+            layout=layout,
+            n_groups=2,
+        )
+    metrics = pd.read_parquet(native_filesystem_path(root / "metrics.parquet"))
+    assert metrics.n_obs.tolist() == [2]
+    assert metrics.ic.iloc[0] == pytest.approx(1.0)
 
 
 @pytest.mark.parametrize("cleanup_fails", (False, True))
@@ -602,9 +478,6 @@ def test_evaluation_initialization_error_releases_operation_with_traceback_retai
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.research.evaluations import runner
-    from quant_research_platform.runtime.resources import (
-        current_runtime_resource_policy,
-    )
     from quant_research_platform.storage.layout import StorageLayout
 
     if cleanup_fails:
@@ -617,38 +490,23 @@ def test_evaluation_initialization_error_releases_operation_with_traceback_retai
         monkeypatch.setattr(runner, "ExitStack", ClosingFailure)
     profile = research_profile()
     retained = None
-    try:
-        with pytest.raises(
-            PermissionError, match="research_dataset_access_window_forbidden"
-        ) as caught:
-            runner.build_evaluation_result_from_research_dataset(
-                layout=StorageLayout(tmp_path),
-                dataset_catalog=profile.research_datasets,
-                evaluation_catalog=profile.evaluations,
-                evaluation_id=profile.evaluations.list()[0].evaluation_id,
-                time_window=TimeWindow("2024-01-02", "2024-01-03"),
-            )
-        retained = caught.value
-        assert retained.__traceback__ is not None
-        assert current_runtime_resource_policy() is None
-        if cleanup_fails:
-            assert any(
-                "evaluation operation cleanup also failed" in note
-                for note in retained.__notes__
-            )
-        with runtime_resource_policy_scope() as policy:
-            assert policy.used_memory_bytes == 0
-    finally:
-        if current_runtime_resource_policy() is not None and retained is not None:
-            trace = retained.__traceback__
-            while trace is not None:
-                if (
-                    trace.tb_frame.f_code.co_name
-                    == "build_evaluation_result_from_research_dataset"
-                ):
-                    trace.tb_frame.f_locals["operation"].close()
-                    break
-                trace = trace.tb_next
+    with pytest.raises(
+        PermissionError, match="research_dataset_access_window_forbidden"
+    ) as caught:
+        runner.build_evaluation_result_from_research_dataset(
+            layout=StorageLayout(tmp_path),
+            dataset_catalog=profile.research_datasets,
+            evaluation_catalog=profile.evaluations,
+            evaluation_id=profile.evaluations.list()[0].evaluation_id,
+            time_window=TimeWindow("2024-01-02", "2024-01-03"),
+        )
+    retained = caught.value
+    assert retained.__traceback__ is not None
+    if cleanup_fails:
+        assert any(
+            "evaluation operation cleanup also failed" in note
+            for note in retained.__notes__
+        )
 
 
 @pytest.mark.parametrize(
@@ -688,25 +546,22 @@ def test_ic_summary_nonzero_variance_survives_rounding_and_persistence(
         label_columns=("label",),
     )
     state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
-    try:
-        for start in range(0, len(metrics), chunk_size):
-            state.consume(
-                metrics.iloc[start : start + chunk_size],
-                pd.DataFrame(),
-                {
-                    "rows_input": 2,
-                    "rows_after_filter_mode": 2,
-                    "filter_columns_used": ["eligible"],
-                    "filter_definition": "eligible",
-                    "timestamp_count": 1,
-                    "min_timestamp": "2024-01-02",
-                    "max_timestamp": "2024-01-04",
-                    "skipped_timestamp_count": 0,
-                },
-            )
-        summary = state.ic_summary()
-    finally:
-        state.close()
+    for start in range(0, len(metrics), chunk_size):
+        state.consume(
+            metrics.iloc[start : start + chunk_size],
+            pd.DataFrame(),
+            {
+                "rows_input": 2,
+                "rows_after_filter_mode": 2,
+                "filter_columns_used": ["eligible"],
+                "filter_definition": "eligible",
+                "timestamp_count": 1,
+                "min_timestamp": "2024-01-02",
+                "max_timestamp": "2024-01-04",
+                "skipped_timestamp_count": 0,
+            },
+        )
+    summary = state.ic_summary()
     path = tmp_path / "summary.parquet"
     summary.to_parquet(path, index=False)
     restored = pd.read_parquet(path)
@@ -766,65 +621,54 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
             "eligible": [True, False, True, True],
         }
     )
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        write_dataset(
-            layout.research_dataset_root(dataset.market_id, dataset.data_id),
-            frame,
-            spec=dataset,
-            resource_policy=policy,
-            borrowed_input=True,
-        )
-        for mode, expected_rows in (("unfiltered", 3), ("eligible", 2)):
-            spec = EvaluationSpec(
-                evaluation_id=mode,
-                market_id=dataset.market_id,
-                research_dataset_id=dataset.data_id,
-                signals=(
-                    SignalSpec(
-                        signal_id="signal", source_column="signal", source_kind="factor"
-                    ),
+    write_dataset(
+        layout.research_dataset_root(dataset.market_id, dataset.data_id),
+        frame,
+        spec=dataset,
+    )
+    for mode, expected_rows in (("unfiltered", 3), ("eligible", 2)):
+        spec = EvaluationSpec(
+            evaluation_id=mode,
+            market_id=dataset.market_id,
+            research_dataset_id=dataset.data_id,
+            signals=(
+                SignalSpec(
+                    signal_id="signal", source_column="signal", source_kind="factor"
                 ),
-                label_columns=("label",),
-                label_availability_columns={"label": "available_at"},
-                filter_mode=mode,
+            ),
+            label_columns=("label",),
+            label_availability_columns={"label": "available_at"},
+            filter_mode=mode,
+            n_groups=2,
+        )
+        with build_evaluation_result_from_research_dataset(
+            layout=layout,
+            dataset_catalog=ResearchDatasetCatalog((dataset,)),
+            evaluation_catalog=EvaluationCatalog((spec,)),
+            evaluation_id=mode,
+            time_window=TimeWindow("2023-01-02", "2023-01-03"),
+        ) as result:
+            output = write_evaluation_outputs_from_chunks(
+                result.output_chunks,
+                summary_factory=result.summaries,
+                spec=spec,
+                output_spec=OutputSpec(
+                    output_id=mode,
+                    output_definition_id="evaluation_outputs",
+                    run_id="test_run",
+                    market_id=dataset.market_id,
+                    run_type="evaluation",
+                    scope=OutputScope.LOCAL_ONLY,
+                ),
+                layout=layout,
                 n_groups=2,
             )
-            with build_evaluation_result_from_research_dataset(
-                layout=layout,
-                dataset_catalog=ResearchDatasetCatalog((dataset,)),
-                evaluation_catalog=EvaluationCatalog((spec,)),
-                evaluation_id=mode,
-                time_window=TimeWindow("2023-01-02", "2023-01-03"),
-                resource_policy=policy,
-            ) as result:
-                output = write_evaluation_outputs_from_chunks(
-                    result.output_chunks,
-                    summary_factory=result.summaries,
-                    spec=spec,
-                    output_spec=OutputSpec(
-                        output_id=mode,
-                        output_definition_id="evaluation_outputs",
-                        run_id="test_run",
-                        market_id=dataset.market_id,
-                        run_type="evaluation",
-                        scope=OutputScope.LOCAL_ONLY,
-                    ),
-                    layout=layout,
-                    n_groups=2,
-                )
-            validate_output_bundle(
-                output,
-                expected_output_id=mode,
-                expected_run_id="test_run",
-                lease=artifact_lease,
-            )
-            metrics = pd.read_parquet(output / "metrics.parquet")
-            assert metrics.n_obs.tolist() == [expected_rows]
-            assert metrics.ic.tolist() == pytest.approx([1.0])
-            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+        validate_output_bundle(
+            output, expected_output_id=mode, expected_run_id="test_run"
+        )
+        metrics = pd.read_parquet(output / "metrics.parquet")
+        assert metrics.n_obs.tolist() == [expected_rows]
+        assert metrics.ic.tolist() == pytest.approx([1.0])
 
 
 @pytest.mark.parametrize(
@@ -877,29 +721,24 @@ def test_evaluation_writer_rejects_unsafe_signal_before_publication(
             "eligible": True,
         }
     )
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(
-            ValueError, match=f"evaluation_summary_share_unsafe: {reason}"
-        ):
-            with evaluation_engine.build_evaluation_result_from_frames(
-                (frame,),
+    with pytest.raises(ValueError, match=f"evaluation_summary_share_unsafe: {reason}"):
+        with evaluation_engine.build_evaluation_result_from_frames(
+            (frame,),
+            spec=spec,
+            signal_columns=(signal_id,),
+            label_columns=("label",),
+            n_groups=2,
+            asset_column="asset_id",
+            source_columns_by_kind={"feature": ("feature",)},
+        ) as result:
+            write_evaluation_outputs_from_chunks(
+                result.output_chunks,
+                summary_factory=result.summaries,
                 spec=spec,
-                signal_columns=(signal_id,),
-                label_columns=("label",),
+                output_spec=output,
+                layout=StorageLayout(tmp_path),
                 n_groups=2,
-                asset_column="asset_id",
-                source_columns_by_kind={"feature": ("feature",)},
-                resource_policy=policy,
-            ) as result:
-                write_evaluation_outputs_from_chunks(
-                    result.output_chunks,
-                    summary_factory=result.summaries,
-                    spec=spec,
-                    output_spec=output,
-                    layout=StorageLayout(tmp_path),
-                    n_groups=2,
-                )
-        assert policy.used_memory_bytes == 0
+            )
     assert not list(tmp_path.rglob("summary.md"))
     assert not list(tmp_path.rglob("manifest.json"))
 
@@ -969,104 +808,94 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
         }
     )
     roots = []
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        software = production_software_identity()
-        for active in (old_profile, profile):
-            current = active.evaluations.get(spec.evaluation_id)
-            envelope = _target_envelope_for_spec(
-                profile=active,
-                protocol=protocol,
-                target_spec=target,
-                data_spec=None,
-                research_window={
-                    **config["windows"]["development"],
-                    "access": "development",
-                },
-                upstream_identities={config["scenario_id"]: "a" * 64},
-                software_identity=software,
-                raw_content_identity=None,
-            )
+    software = production_software_identity()
+    for active in (old_profile, profile):
+        current = active.evaluations.get(spec.evaluation_id)
+        envelope = _target_envelope_for_spec(
+            profile=active,
+            protocol=protocol,
+            target_spec=target,
+            data_spec=None,
+            research_window={
+                **config["windows"]["development"],
+                "access": "development",
+            },
+            upstream_identities={config["scenario_id"]: "a" * 64},
+            software_identity=software,
+            raw_content_identity=None,
+        )
 
-            def write(staging, current=current):
-                with evaluation_engine.build_evaluation_result_from_frames(
-                    (frame,),
+        def write(staging, current=current):
+            with evaluation_engine.build_evaluation_result_from_frames(
+                (frame,),
+                spec=current,
+                signal_columns=tuple(factors),
+                label_columns=(label,),
+                n_groups=current.n_groups,
+                asset_column="asset_id",
+                source_columns_by_kind={"factor": tuple(factors)},
+            ) as result:
+                write_evaluation_outputs_from_chunks(
+                    result.output_chunks,
+                    summary_factory=result.summaries,
                     spec=current,
-                    signal_columns=tuple(factors),
-                    label_columns=(label,),
+                    output_spec=OutputSpec(
+                        output_id=current.evaluation_id,
+                        output_definition_id="evaluation_outputs",
+                        run_id="test_run",
+                        market_id=current.market_id,
+                        run_type="evaluation",
+                        scope=OutputScope.LOCAL_ONLY,
+                    ),
+                    layout=StorageLayout(staging),
                     n_groups=current.n_groups,
-                    asset_column="asset_id",
-                    source_columns_by_kind={"factor": tuple(factors)},
-                    resource_policy=policy,
-                ) as result:
-                    write_evaluation_outputs_from_chunks(
-                        result.output_chunks,
-                        summary_factory=result.summaries,
-                        spec=current,
-                        output_spec=OutputSpec(
-                            output_id=current.evaluation_id,
-                            output_definition_id="evaluation_outputs",
-                            run_id="test_run",
-                            market_id=current.market_id,
-                            run_type="evaluation",
-                            scope=OutputScope.LOCAL_ONLY,
-                        ),
-                        layout=StorageLayout(staging),
-                        n_groups=current.n_groups,
-                    )
+                )
 
-            root = write_semantic_artifact(
-                layout.semantic_artifact_root("crypto", spec.evaluation_id),
-                envelope,
-                write,
+        root = write_semantic_artifact(
+            layout.semantic_artifact_root("crypto", spec.evaluation_id), envelope, write
+        )
+        roots.append(root)
+        restored = read_semantic_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        persisted = restored["semantic_metadata"]["target_contract"]["evaluation_spec"]
+        assert [item["direction"] for item in persisted["signals"]] == [
+            signal.direction for signal in current.signals
+        ]
+        bundle = root / "outputs" / spec.evaluation_id
+        validate_output_bundle(bundle)
+        metrics = pd.read_parquet(bundle / "metrics.parquet").set_index("signal")
+        expected = [1.0, 1.0, 1.0] if active is old_profile else [-1.0, -1.0, 1.0]
+        assert metrics.loc[factors, "ic"].tolist() == pytest.approx(expected)
+        assert metrics.loc[factors, "rankic"].tolist() == pytest.approx(expected)
+        summary = (bundle / "summary.md").read_text()
+        for factor, value in zip(factors, expected, strict=True):
+            row = next(
+                line
+                for line in summary.splitlines()
+                if line.startswith(f"| {factor} | {label} |")
             )
-            roots.append(root)
-            restored = read_semantic_artifact(
-                root, expected_identity=envelope.instance_identity, lease=artifact_lease
+            assert [float(cell) for cell in row.split("|")[3:5]] == pytest.approx(
+                [value, value]
             )
-            persisted = restored["semantic_metadata"]["target_contract"][
-                "evaluation_spec"
-            ]
-            assert [item["direction"] for item in persisted["signals"]] == [
-                signal.direction for signal in current.signals
-            ]
-            bundle = root / "outputs" / spec.evaluation_id
-            validate_output_bundle(bundle, lease=artifact_lease)
-            metrics = pd.read_parquet(bundle / "metrics.parquet").set_index("signal")
-            expected = [1.0, 1.0, 1.0] if active is old_profile else [-1.0, -1.0, 1.0]
-            assert metrics.loc[factors, "ic"].tolist() == pytest.approx(expected)
-            assert metrics.loc[factors, "rankic"].tolist() == pytest.approx(expected)
-            summary = (bundle / "summary.md").read_text()
-            for factor, value in zip(factors, expected, strict=True):
-                row = next(
-                    line
-                    for line in summary.splitlines()
-                    if line.startswith(f"| {factor} | {label} |")
-                )
-                assert [float(cell) for cell in row.split("|")[3:5]] == pytest.approx(
-                    [value, value]
-                )
-            if active is old_profile:
-                old_bytes = {
-                    p.relative_to(root): p.read_bytes()
-                    for p in root.rglob("*")
-                    if p.is_file()
-                }
-            else:
-                groups = pd.read_parquet(bundle / "grouped_label_values.parquet")
-                top = groups.loc[groups.group.eq(3)].set_index("signal")
-                assert top.loc[factors, "mean_label_value"].tolist() == pytest.approx(
-                    [0.1, 0.1, 0.3]
-                )
-            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-        assert roots[0] != roots[1]
-        assert {
-            p.relative_to(roots[0]): p.read_bytes()
-            for p in roots[0].rglob("*")
-            if p.is_file()
-        } == old_bytes
+        if active is old_profile:
+            old_bytes = {
+                p.relative_to(root): p.read_bytes()
+                for p in root.rglob("*")
+                if p.is_file()
+            }
+        else:
+            groups = pd.read_parquet(bundle / "grouped_label_values.parquet")
+            top = groups.loc[groups.group.eq(3)].set_index("signal")
+            assert top.loc[factors, "mean_label_value"].tolist() == pytest.approx(
+                [0.1, 0.1, 0.3]
+            )
+    assert roots[0] != roots[1]
+    assert {
+        p.relative_to(roots[0]): p.read_bytes()
+        for p in roots[0].rglob("*")
+        if p.is_file()
+    } == old_bytes
 
 
 @pytest.mark.parametrize("count", [99999, 100000, 303767, 400000, 500000, 600000])
@@ -1131,133 +960,53 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
         "skipped_timestamp_count": 0,
     }
     layout = StorageLayout(tmp_path)
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("test.artifact.metadata", 0) as artifact_lease,
-    ):
-        state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
-        try:
-            state.consume(metrics, grouped, metadata)
+    state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
+    state.consume(metrics, grouped, metadata)
 
-            def summaries():
-                return (
-                    state.diagnostics(),
-                    state.ic_summary(),
-                    state.group_spread_summary(),
-                    state.coverage_summary(),
-                )
+    def summaries():
+        return (
+            state.diagnostics(),
+            state.ic_summary(),
+            state.group_spread_summary(),
+            state.coverage_summary(),
+        )
 
-            root = write_evaluation_outputs_from_chunks(
-                [(metrics, grouped, metadata)],
-                summary_factory=summaries,
-                spec=spec,
-                output_spec=output,
-                layout=layout,
-                n_groups=2,
-            )
-            manifest, _ = validate_output_bundle(root, lease=artifact_lease)
-            diagnostics = manifest["metadata"]["evaluation_diagnostics"]
-            for field in ("rows_input", "rows_after_filter_mode", "timestamp_count"):
-                assert type(diagnostics[field]) is int and diagnostics[field] == count
-            assert pd.read_parquet(root / "metrics.parquet").n_obs.tolist() == [count]
-            summary = (root / "summary.md").read_text()
-            for field in ("rows_input", "rows_after_filter", "timestamp_count"):
-                assert f"- {field}: " + chr(96) + f"{count:,}" + chr(96) in summary
-            assert f"| signal | label | {float(count):,} | {count:,} | 1 |" in summary
-            old_bytes = {p.name: p.read_bytes() for p in root.iterdir()}
-            primary = RuntimeError("injected_report_failure")
-
-            def fail_render(**_kwargs):
-                raise primary
-
-            monkeypatch.setattr(report, "render_evaluation_summary", fail_render)
-            with pytest.raises(RuntimeError) as caught:
-                write_evaluation_outputs_from_chunks(
-                    [(metrics, grouped, metadata)],
-                    summary_factory=summaries,
-                    spec=spec,
-                    output_spec=replace(output, output_id="failed_summary"),
-                    layout=layout,
-                    n_groups=2,
-                )
-            assert caught.value is primary
-            assert {p.name: p.read_bytes() for p in root.iterdir()} == old_bytes
-            assert not (root.parent / "failed_summary").exists()
-        finally:
-            state.close()
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-
-
-def test_evaluation_writer_releases_previous_frames_before_next_output(tmp_path):
-    import gc
-    import weakref
-
-    from quant_research_platform.artifacts.outputs.evaluation import (
-        _write_evaluation_artifact_chunks,
-    )
-    from quant_research_platform.contracts.signals import SignalSpec
-
-    references = []
-    spec = EvaluationSpec(
-        evaluation_id="lifetime",
-        market_id=MarketId("a_share"),
-        research_dataset_id="fixture",
-        signals=(
-            SignalSpec(
-                signal_id="signal", source_column="signal", source_kind="factor"
-            ),
-        ),
-        label_columns=("label",),
+    root = write_evaluation_outputs_from_chunks(
+        [(metrics, grouped, metadata)],
+        summary_factory=summaries,
+        spec=spec,
+        output_spec=output,
+        layout=layout,
         n_groups=2,
     )
+    manifest, _ = validate_output_bundle(root)
+    diagnostics = manifest["metadata"]["evaluation_diagnostics"]
+    for field in ("rows_input", "rows_after_filter_mode", "timestamp_count"):
+        assert type(diagnostics[field]) is int and diagnostics[field] == count
+    assert pd.read_parquet(root / "metrics.parquet").n_obs.tolist() == [count]
+    summary = (root / "summary.md").read_text()
+    for field in ("rows_input", "rows_after_filter", "timestamp_count"):
+        assert f"- {field}: " + chr(96) + f"{count:,}" + chr(96) in summary
+    assert f"| signal | label | {float(count):,} | {count:,} | 1 |" in summary
+    old_bytes = {p.name: p.read_bytes() for p in root.iterdir()}
+    primary = RuntimeError("injected_report_failure")
 
-    def frames():
-        for day in range(4):
-            yield pd.DataFrame(
-                {
-                    "timestamp": pd.Timestamp("2023-01-01") + pd.Timedelta(days=day),
-                    "asset_id": ["a", "b", "c"],
-                    "signal": [1.0, 2.0, 3.0],
-                    "label": [2.0, 4.0, 6.0],
-                    "eligible": True,
-                }
-            )
+    def fail_render(**_kwargs):
+        raise primary
 
-    was_enabled = gc.isenabled()
-    gc.disable()
-    try:
-        with runtime_resource_policy_scope() as policy:
-            with evaluation_engine.build_evaluation_result_from_frames(
-                frames(),
-                spec=spec,
-                signal_columns=("signal",),
-                label_columns=("label",),
-                n_groups=2,
-                asset_column="asset_id",
-                source_columns_by_kind={"factor": ("signal",)},
-                resource_policy=policy,
-            ) as result:
-
-                def observed():
-                    for item in result.output_chunks:
-                        assert all(reference() is None for reference in references)
-                        references.extend(
-                            weakref.ref(frame) for frame in item.value[:2]
-                        )
-                        yield item
-                        item = None
-
-                _write_evaluation_artifact_chunks(
-                    observed(), temp_root=tmp_path, spec=spec, n_groups=2
-                )
-            assert policy.used_memory_bytes == 0
-        restored = pd.read_parquet(tmp_path / "metrics.parquet")
-        assert len(restored) == 4
-        assert restored.ic.tolist() == pytest.approx([1.0] * 4)
-        assert len(references) >= 4
-    finally:
-        if was_enabled:
-            gc.enable()
+    monkeypatch.setattr(report, "render_evaluation_summary", fail_render)
+    with pytest.raises(RuntimeError) as caught:
+        write_evaluation_outputs_from_chunks(
+            [(metrics, grouped, metadata)],
+            summary_factory=summaries,
+            spec=spec,
+            output_spec=replace(output, output_id="failed_summary"),
+            layout=layout,
+            n_groups=2,
+        )
+    assert caught.value is primary
+    assert {p.name: p.read_bytes() for p in root.iterdir()} == old_bytes
+    assert not (root.parent / "failed_summary").exists()
 
 
 @pytest.mark.parametrize("change_member", [False, True])
@@ -1309,31 +1058,20 @@ def test_evaluation_close_verifies_real_dataset_without_generator_finalization(
         label_availability_columns={"label": "available_at"},
         n_groups=2,
     )
-    with runtime_resource_policy_scope() as policy:
-        dataset_root = layout.research_dataset_root(dataset.market_id, dataset.data_id)
-        write_dataset(
-            dataset_root,
-            frame,
-            spec=dataset,
-            resource_policy=policy,
-            borrowed_input=True,
-        )
-        result = build_evaluation_result_from_research_dataset(
-            layout=layout,
-            dataset_catalog=ResearchDatasetCatalog((dataset,)),
-            evaluation_catalog=EvaluationCatalog((spec,)),
-            evaluation_id=spec.evaluation_id,
-            time_window=TimeWindow("2023-01-02", "2023-01-04"),
-            resource_policy=policy,
-        )
-        item = next(result.output_chunks)
-        item.release(owner="test.evaluation")
-        item = None
-        if change_member:
-            member = next(dataset_root.rglob("*.parquet"))
-            member.write_bytes(member.read_bytes() + b"changed")
-            with pytest.raises(ValueError, match="identity_changed"):
-                result.close()
-        else:
+    dataset_root = layout.research_dataset_root(dataset.market_id, dataset.data_id)
+    write_dataset(dataset_root, frame, spec=dataset)
+    result = build_evaluation_result_from_research_dataset(
+        layout=layout,
+        dataset_catalog=ResearchDatasetCatalog((dataset,)),
+        evaluation_catalog=EvaluationCatalog((spec,)),
+        evaluation_id=spec.evaluation_id,
+        time_window=TimeWindow("2023-01-02", "2023-01-04"),
+    )
+    next(result.output_chunks)
+    if change_member:
+        member = next(dataset_root.rglob("*.parquet"))
+        member.write_bytes(member.read_bytes() + b"changed")
+        with pytest.raises(ValueError, match="identity_changed"):
             result.close()
-        assert policy.used_memory_bytes == 0
+    else:
+        result.close()

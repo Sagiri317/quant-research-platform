@@ -18,7 +18,6 @@ from quant_research_platform.profiles.research import (
 from quant_research_platform.research.models import fitting, persisted, production
 from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.predictions.runner import build_crypto_predictions
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.datasets import write_dataset
 from quant_research_platform.storage.datasets.reading import open_dataset_session
 from quant_research_platform.storage.layout import StorageLayout
@@ -140,64 +139,54 @@ def crypto_rank_case(output, *, missing_rank_input=False):
         frame.loc[first, "imbalance_1"] = np.nan
     ids = tuple(model["model_id"] for model in models)
     write_dataset(dataset_root, frame, spec=dataset)
-    with runtime_resource_policy_scope() as policy:
-        with open_dataset_session(
-            dataset_root,
-            columns=None,
-            time_window=TimeWindow(
-                plan["folds"][0]["train"]["start"],
-                plan["folds"][0]["validation"]["end"],
-            ),
-            resource_policy=policy,
-        ) as session:
+    session = open_dataset_session(
+        dataset_root,
+        columns=None,
+        time_window=TimeWindow(
+            plan["folds"][0]["train"]["start"], plan["folds"][0]["validation"]["end"]
+        ),
+    )
 
-            def results(**callbacks):
-                return production.build_crypto_fold_models(
-                    layout=layout,
-                    dataset_session=session,
-                    dataset_catalog=profile.research_datasets,
-                    model_catalog=profile.models,
-                    dataset_id=dataset_id,
-                    model_ids=ids,
-                    time_window=window,
-                    resource_policy=policy,
-                    protocol_manifest=manifest,
-                    run_id="run_rank_roundtrip",
-                    research_protocol_identity=canonical_json_hash(manifest),
-                    model_target_id=target_id,
-                    backend_versions={"fixture": "1"},
-                    **callbacks,
-                )
+    def results(**callbacks):
+        return production.build_crypto_fold_models(
+            layout=layout,
+            dataset_session=session,
+            dataset_catalog=profile.research_datasets,
+            model_catalog=profile.models,
+            dataset_id=dataset_id,
+            model_ids=ids,
+            time_window=window,
+            protocol_manifest=manifest,
+            run_id="run_rank_roundtrip",
+            research_protocol_identity=canonical_json_hash(manifest),
+            model_target_id=target_id,
+            backend_versions={"fixture": "1"},
+            **callbacks,
+        )
 
-            root = persisted.write_crypto_model_artifact(
-                output / "models",
-                envelope=envelope,
-                model_results=results,
-                trial_layout=layout,
-                verify_source=session.verify,
-            )
-        with policy.lease("test.rank.metadata", 0) as lease:
-            saved = persisted.read_crypto_model_artifact(
-                root,
-                expected_identity=envelope.instance_identity,
-                trial_layout=layout,
-                lease=lease,
-            )
-            case = SimpleNamespace(
-                root=root,
-                dataset=dataset,
-                manifest=manifest,
-                saved=saved,
-                layout=layout,
-                profile=profile,
-                policy=policy,
-                lease=lease,
-                holdout=TimeWindow(**plan["test"]),
-            )
-            try:
-                yield case
-            finally:
-                case = saved = None
+    root = persisted.write_crypto_model_artifact(
+        output / "models",
+        envelope=envelope,
+        model_results=results,
+        trial_layout=layout,
+        verify_source=session.verify,
+    )
+    saved = persisted.read_crypto_model_artifact(
+        root, expected_identity=envelope.instance_identity, trial_layout=layout
+    )
+    case = SimpleNamespace(
+        root=root,
+        dataset=dataset,
+        manifest=manifest,
+        saved=saved,
+        layout=layout,
+        profile=profile,
+        holdout=TimeWindow(**plan["test"]),
+    )
+    try:
+        yield case
+    finally:
+        case = saved = None
 
 
 @pytest.mark.parametrize("missing_rank_input", (False, True))
@@ -208,42 +197,38 @@ def test_crypto_rank_roundtrip_and_frozen_holdout(tmp_path, missing_rank_input):
             expected = (
                 [-0.001, 0.001] if algorithm == "linear_regression" else [-0.25, 0.25]
             )
-            with persisted.read_crypto_model_member(
-                case.saved, entry, resource_policy=case.policy
-            ) as model:
-                probe = pd.DataFrame(
-                    {
-                        "timestamp": [pd.Timestamp(case.holdout.start)] * 2,
-                        "imbalance_1": [-1.0, 1.0],
-                    }
+            model = persisted.read_crypto_model_member(case.saved, entry)
+            probe = pd.DataFrame(
+                {
+                    "timestamp": [pd.Timestamp(case.holdout.start)] * 2,
+                    "imbalance_1": [-1.0, 1.0],
+                }
+            )
+            scores = fitting.prediction_callable(("imbalance_1",), model)(probe)
+            np.testing.assert_allclose(scores, expected, rtol=0, atol=1e-15)
+            if algorithm != "linear_regression":
+                parameter = (
+                    "directions"
+                    if algorithm == "equal_weight_rank_ensemble"
+                    else "weights"
                 )
-                scores = fitting.prediction_callable(("imbalance_1",), model)(probe)
-                np.testing.assert_allclose(scores, expected, rtol=0, atol=1e-15)
-                if algorithm != "linear_regression":
-                    parameter = (
-                        "directions"
-                        if algorithm == "equal_weight_rank_ensemble"
-                        else "weights"
-                    )
-                    assert entry["model_metadata"]["rank_parameters"] == {
-                        "columns": ["imbalance_1"],
-                        "label_calibration": pytest.approx([0.0, 0.004]),
-                        parameter: [1.0],
-                    }
-                    for changes in (
-                        {"columns": ("other",)},
-                        {parameter: (-1.0,)},
-                        {"label_calibration": (0.0, 1.0)},
+                assert entry["model_metadata"]["rank_parameters"] == {
+                    "columns": ["imbalance_1"],
+                    "label_calibration": pytest.approx([0.0, 0.004]),
+                    parameter: [1.0],
+                }
+                for changes in (
+                    {"columns": ("other",)},
+                    {parameter: (-1.0,)},
+                    {"label_calibration": (0.0, 1.0)},
+                ):
+                    changed = replace(model, **changes)
+                    with pytest.raises(
+                        ValueError, match="model_state_metadata_mismatch"
                     ):
-                        changed = replace(model, **changes)
-                        with pytest.raises(
-                            ValueError, match="model_state_metadata_mismatch"
-                        ):
-                            fitting.validate_model_state(
-                                changed, entry["model_metadata"]
-                            )
-                        changed = None
-                model = None
+                        fitting.validate_model_state(changed, entry["model_metadata"])
+                    changed = None
+            model = None
         observed = set()
         with closing_iterator(
             build_crypto_predictions(
@@ -251,7 +236,6 @@ def test_crypto_rank_roundtrip_and_frozen_holdout(tmp_path, missing_rank_input):
                 dataset_catalog=case.profile.research_datasets,
                 persisted_model=case.saved,
                 time_window=case.holdout,
-                resource_policy=case.policy,
                 access_window="holdout",
             )
         ) as results:
@@ -261,7 +245,7 @@ def test_crypto_rank_roundtrip_and_frozen_holdout(tmp_path, missing_rank_input):
                 with result:
                     for owned in result.output_chunks:
                         try:
-                            frame = owned.value
+                            frame = owned
                             scale = (
                                 0.001
                                 if result.spec.model_id.endswith("linear_regression")
@@ -280,10 +264,8 @@ def test_crypto_rank_roundtrip_and_frozen_holdout(tmp_path, missing_rank_input):
                             rows += len(frame)
                         finally:
                             frame = None
-                            owned.release(owner="test.crypto.rank.predictions")
                     assert rows == 10
         assert observed == {entry["model_id"] for entry in case.saved.final_models}
-        assert case.policy.used_memory_bytes == case.lease.reserved_bytes
 
 
 def test_rank_economic_consumers_use_frozen_training_label_units(tmp_path):
@@ -305,7 +287,6 @@ def test_rank_economic_consumers_use_frozen_training_label_units(tmp_path):
                 dataset_catalog=case.profile.research_datasets,
                 persisted_model=case.saved,
                 time_window=case.holdout,
-                resource_policy=case.policy,
                 access_window="holdout",
             )
         ) as results:
@@ -320,7 +301,6 @@ def test_rank_economic_consumers_use_frozen_training_label_units(tmp_path):
                         output_chunks=result.output_chunks,
                         model_metadata=result.model_metadata,
                         prediction_metadata_factory=result.prediction_metadata_factory,
-                        resource_policy=case.policy,
                     )
         layout = case.layout.with_target_roots(
             {case.dataset.data_id + "_predictions": prediction_root}
@@ -337,7 +317,6 @@ def test_rank_economic_consumers_use_frozen_training_label_units(tmp_path):
                         protocol_manifest=case.profile.protocol(
                             case.dataset.data_id
                         ).manifest(),
-                        resource_policy=case.policy,
                         read_prediction_bundle=read_prediction_output_bundle,
                         output_window=case.holdout,
                     )
@@ -358,4 +337,3 @@ def test_rank_economic_consumers_use_frozen_training_label_units(tmp_path):
                 assert [row.prediction_score for row in validation] == pytest.approx(
                     [expected] * len(validation)
                 )
-        assert case.policy.used_memory_bytes == case.lease.reserved_bytes

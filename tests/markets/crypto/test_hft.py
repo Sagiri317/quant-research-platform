@@ -21,10 +21,6 @@ from quant_research_platform.markets.implementations.crypto.hft import (
 from quant_research_platform.markets.implementations.crypto.processed.catalog import (
     hft_processed_catalog,
 )
-from quant_research_platform.runtime.resources import (
-    OwnedValue,
-    runtime_resource_policy_scope,
-)
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     SPOT_MARKET_TYPE,
@@ -35,12 +31,11 @@ from tests.helpers.binance_hft import (
     _row_timestamp_ms,
     coverage_lookup,
 )
-from tests.helpers.runtime_resources import capture_test_policy
 
 
 def test_panel_uses_exact_validated_receipt_nanoseconds() -> None:
     observed = pd.Timestamp("2023-01-01T00:00:00.000000123").value
-    origin_ms = observed // 1_000_000
+    origin_ms = observed // 1000000
     state = replace(
         _state(origin_ms),
         observed_time_ns=observed,
@@ -80,7 +75,7 @@ def _state(
         source_sequence=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
-        observed_time_ns=timestamp_ms * 1_000_000,
+        observed_time_ns=timestamp_ms * 1000000,
         receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
         receive_monotonic_ns=timestamp_ms + 1,
         update_id=timestamp_ms + 1,
@@ -98,7 +93,7 @@ def _boundary(timestamp_ms: int, *, segment_id: str = "s1") -> BookBoundary:
         source_sequence=timestamp_ms + 1,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
-        observed_time_ns=timestamp_ms * 1_000_000,
+        observed_time_ns=timestamp_ms * 1000000,
         receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
         receive_monotonic_ns=timestamp_ms + 1,
         segment_id=segment_id,
@@ -113,7 +108,7 @@ def _trade(timestamp_ms: int, quantity: float, *, maker_buyer: bool) -> TradeEve
         source_sequence=timestamp_ms + 10,
         event_time_ms=timestamp_ms + 1,
         transaction_time_ms=timestamp_ms,
-        observed_time_ns=timestamp_ms * 1_000_000,
+        observed_time_ns=timestamp_ms * 1000000,
         receive_time=pd.Timestamp(timestamp_ms, unit="ms").isoformat() + "Z",
         receive_monotonic_ns=timestamp_ms + 10,
         observation_id="trade-connection-1",
@@ -138,7 +133,6 @@ def test_panel_frames_build_from_column_buffers(
         "from_records",
         lambda *_args, **_kwargs: pytest.fail("hft_panel_row_graph_used"),
     )
-
     frames = list(
         iter_panel_frames(
             [_state(0), _state(200)],
@@ -152,7 +146,6 @@ def test_panel_frames_build_from_column_buffers(
             batch_rows=2,
         )
     )
-
     assert [len(frame) for frame in frames] == [2, 1]
     assert frames[0]["market_id"].tolist() == ["crypto", "crypto"]
     assert frames[0]["asset_id"].tolist() == ["btc_usdt", "btc_usdt"]
@@ -187,7 +180,6 @@ def test_panel_transaction_clock_is_nullable_integer(market_type) -> None:
             batch_rows=2,
         )
     )
-
     assert [len(frame) for frame in frames] == [2, 1]
     for frame in frames:
         assert str(frame["transaction_time_ms"].dtype) == "Int64"
@@ -228,70 +220,6 @@ def test_panel_releases_consumed_buffers_before_yield(close_early) -> None:
     pd.testing.assert_frame_equal(first, expected)
 
 
-def test_panel_first_trade_failure_releases_first_book_and_closes_children() -> None:
-    primary = KeyboardInterrupt("trade_primary")
-
-    class OneBook:
-        def __init__(self, value: OwnedValue[BookState]) -> None:
-            self.value = value
-            self.closed = False
-
-        def __iter__(self):  # noqa: ANN204
-            return self
-
-        def __next__(self):  # noqa: ANN204
-            if self.value is None:
-                raise StopIteration
-            value, self.value = self.value, None
-            return value
-
-        def close(self) -> None:
-            self.closed = True
-            raise OSError("book_close_secondary")
-
-    class FailingTrades:
-        closed = False
-
-        def __iter__(self):  # noqa: ANN204
-            return self
-
-        def __next__(self):  # noqa: ANN204
-            raise primary
-
-        def close(self) -> None:
-            self.closed = True
-            raise OSError("trade_close_secondary")
-
-    policy = capture_test_policy(available_memory_bytes=64 * 1024**2)
-    with runtime_resource_policy_scope(policy):
-        lease = policy.lease("test.crypto.hft.first_book", 2345)
-        owned = OwnedValue(_state(0), lease)
-        books = OneBook(owned)
-        trades = FailingTrades()
-        try:
-            with pytest.raises(KeyboardInterrupt) as raised:
-                next(
-                    iter_panel_frames(
-                        books,
-                        trades,
-                        market_id="crypto",
-                        asset_id="btc_usdt",
-                        batch_rows=2,
-                        start_ms=0,
-                        end_ms=100,
-                        book_coverage={},
-                        trade_coverage=coverage_lookup({}),
-                    )
-                )
-            assert raised.value is primary
-            assert not lease.active
-            assert books.closed and trades.closed
-            assert policy.used_memory_bytes == 0
-        finally:
-            if lease.active:
-                owned.release(owner="test.crypto.hft.first_book")
-
-
 def test_quiet_valid_book_persists_without_fabricated_gap() -> None:
     rows = list(
         _panel_rows(
@@ -303,7 +231,6 @@ def test_quiet_valid_book_persists_without_fabricated_gap() -> None:
             trade_coverage={"trade-connection-1": _coverage(0, 501)},
         )
     )
-
     assert [_row_timestamp_ms(row) for row in rows] == [0, 100, 200, 300, 400, 500]
     assert {row["segment_id"] for row in rows} == {"s1:trade-connection-1"}
 
@@ -319,7 +246,6 @@ def test_panel_excludes_pre_interval_trades_and_keeps_stream_clocks_separate() -
             trade_coverage={"trade-connection-1": _coverage(0, 601)},
         )
     )
-
     assert len(rows) == 1
     row = rows[0]
     assert row["trade_volume_100ms"] == 2.0
@@ -341,7 +267,6 @@ def test_panel_ofi_excludes_book_events_before_interval_lower_bound() -> None:
             trade_coverage={"trade-connection-1": _coverage(0, 301)},
         )
     )
-
     assert len(rows) == 1
     assert rows[0]["book_ofi_100ms"] == 0.0
 
@@ -357,7 +282,6 @@ def test_explicit_book_boundary_stops_panel_until_new_segment() -> None:
             trade_coverage={"trade-connection-1": _coverage(0, 500)},
         )
     )
-
     assert [(_row_timestamp_ms(row), row["segment_id"]) for row in rows] == [
         (0, "s1:trade-connection-1"),
         (100, "s1:trade-connection-1"),
@@ -431,7 +355,7 @@ def test_panel_uncovered_gap_keeps_events_ofi_labels_and_grid_phase(
     assert panel.book_segment_id.tolist() == ["s1"] * 3 + ["s2"] * 2
     assert str(panel.transaction_time_ms.dtype) == "Int64"
     assert queries == sorted(queries)
-    assert queries[-1][1] == (resume + 200) * 1_000_000
+    assert queries[-1][1] == (resume + 200) * 1000000
     labels = pd.concat(
         iter_label_frames((panel,), horizons_ms=(100, 500, 1000, 5000)),
         ignore_index=True,
@@ -550,10 +474,8 @@ def test_factor_rows_are_hand_calculated_from_panel_sufficient_statistics() -> N
         )
     )
     factors = pd.concat(
-        iter_factor_frames((pd.DataFrame(panel),)),
-        ignore_index=True,
+        iter_factor_frames((pd.DataFrame(panel),)), ignore_index=True
     ).to_dict("records")
-
     assert factors[1]["spread"] == 1.0
     assert math.isclose(factors[1]["imbalance_1"], 0.5)
     assert factors[1]["ofi_100ms"] == 4.0
@@ -577,15 +499,10 @@ def test_labels_are_exact_horizon_same_segment_and_keep_zero_distinct_from_nan()
         }
         for index in range(5)
     ]
-
     labels = pd.concat(
-        iter_label_frames(
-            (pd.DataFrame(rows),),
-            horizons_ms=(HFT_GRID_MS, 200),
-        ),
+        iter_label_frames((pd.DataFrame(rows),), horizons_ms=(HFT_GRID_MS, 200)),
         ignore_index=True,
     ).to_dict("records")
-
     assert math.isclose(labels[0]["future_mid_return_100ms"], 0.01)
     assert labels[0]["future_mid_direction_100ms"] == 1.0
     assert labels[3]["future_mid_direction_100ms"] == 0.0
@@ -597,9 +514,7 @@ def test_maker_bid_sell_pressure_proxy_uses_future_observed_sell_flow() -> None:
     frame = pd.DataFrame(
         {
             "timestamp": pd.date_range(
-                "1970-01-01",
-                periods=len(sell_volume),
-                freq="100ms",
+                "1970-01-01", periods=len(sell_volume), freq="100ms"
             ),
             "segment_id": ["s1"] * len(sell_volume),
             "mid": [100.0] * len(sell_volume),
@@ -609,12 +524,9 @@ def test_maker_bid_sell_pressure_proxy_uses_future_observed_sell_flow() -> None:
             "asset_id": ["btc_usdt"] * len(sell_volume),
         }
     )
-
     labels = pd.concat(
-        iter_label_frames((frame,), horizons_ms=(500,)),
-        ignore_index=True,
+        iter_label_frames((frame,), horizons_ms=(500,)), ignore_index=True
     )
-
     assert "maker_bid_sell_pressure_proxy_500ms" in labels
     assert set(column for column in labels if column.startswith("maker_bid_")) == {
         "maker_bid_sell_pressure_proxy_500ms",
@@ -643,16 +555,10 @@ def test_factor_and_label_rows_reject_non_grid_gap_in_same_segment() -> None:
         )
     )
     rows = [complete[0], complete[2]]
-
     with pytest.raises(ValueError, match="hft_grid_non_contiguous"):
         list(iter_factor_frames((pd.DataFrame(rows),)))
     with pytest.raises(ValueError, match="hft_grid_non_contiguous"):
-        list(
-            iter_label_frames(
-                (pd.DataFrame(rows),),
-                horizons_ms=(HFT_GRID_MS,),
-            )
-        )
+        list(iter_label_frames((pd.DataFrame(rows),), horizons_ms=(HFT_GRID_MS,)))
 
 
 def test_factor_and_label_frames_match_across_chunk_boundaries() -> None:
@@ -667,18 +573,14 @@ def test_factor_and_label_frames_match_across_chunk_boundaries() -> None:
         )
     )
     chunks = (panel.iloc[:7].copy(), panel.iloc[7:].copy())
-
     factor_full = pd.concat(iter_factor_frames((panel,)), ignore_index=True)
     factor_chunked = pd.concat(iter_factor_frames(chunks), ignore_index=True)
     label_full = pd.concat(
-        iter_label_frames((panel,), horizons_ms=(HFT_GRID_MS, 500)),
-        ignore_index=True,
+        iter_label_frames((panel,), horizons_ms=(HFT_GRID_MS, 500)), ignore_index=True
     )
     label_chunked = pd.concat(
-        iter_label_frames(chunks, horizons_ms=(HFT_GRID_MS, 500)),
-        ignore_index=True,
+        iter_label_frames(chunks, horizons_ms=(HFT_GRID_MS, 500)), ignore_index=True
     )
-
     pd.testing.assert_frame_equal(factor_chunked, factor_full, check_exact=True)
     pd.testing.assert_frame_equal(label_chunked, label_full, check_exact=True)
 
@@ -704,30 +606,27 @@ def test_persisted_tick_spread_preserves_constant_and_real_tick_changes(
         )
         for i in range(10)
     ]
-    with runtime_resource_policy_scope():
-        panel = pd.concat(
-            iter_panel_frames(
-                states,
-                [_trade(i * 100, 1.0, maker_buyer=False) for i in range(10)],
-                market_id="crypto",
-                asset_id="btc_usdt",
-                batch_rows=2,
-                start_ms=0,
-                end_ms=900,
-                book_coverage={"s1": _coverage(0, 1001)},
-                trade_coverage=coverage_lookup(
-                    {"trade-connection-1": _coverage(0, 1001)}
-                ),
-            ),
-            ignore_index=True,
-        )
+    panel = pd.concat(
+        iter_panel_frames(
+            states,
+            [_trade(i * 100, 1.0, maker_buyer=False) for i in range(10)],
+            market_id="crypto",
+            asset_id="btc_usdt",
+            batch_rows=2,
+            start_ms=0,
+            end_ms=900,
+            book_coverage={"s1": _coverage(0, 1001)},
+            trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 1001)}),
+        ),
+        ignore_index=True,
+    )
     spec = hft_processed_catalog().get("binance_futures_l2_panel_100ms")
     layout = StorageLayout(project_root=tmp_path)
     root = layout.target_root(
         spec.data_id,
         layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
     )
-    write_dataset(root, panel, spec=spec, resource_policy=None, borrowed_input=True)
+    write_dataset(root, panel, spec=spec)
     restored = read_dataset(root)
     factors = pd.concat(iter_factor_frames((restored,)), ignore_index=True)
     assert factors["spread"].iloc[:9].tolist() == [float(price_unit)] * 9
@@ -756,23 +655,20 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
             )
         )
         value = value * numerator // 10
-    with runtime_resource_policy_scope():
-        panel = pd.concat(
-            iter_panel_frames(
-                states,
-                [_trade(i * 100, 1.0, maker_buyer=False) for i in range(11)],
-                market_id="crypto",
-                asset_id="btc_usdt",
-                batch_rows=2,
-                start_ms=0,
-                end_ms=1000,
-                book_coverage={"s1": _coverage(0, 1101)},
-                trade_coverage=coverage_lookup(
-                    {"trade-connection-1": _coverage(0, 1101)}
-                ),
-            ),
-            ignore_index=True,
-        )
+    panel = pd.concat(
+        iter_panel_frames(
+            states,
+            [_trade(i * 100, 1.0, maker_buyer=False) for i in range(11)],
+            market_id="crypto",
+            asset_id="btc_usdt",
+            batch_rows=2,
+            start_ms=0,
+            end_ms=1000,
+            book_coverage={"s1": _coverage(0, 1101)},
+            trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 1101)}),
+        ),
+        ignore_index=True,
+    )
     layout = StorageLayout(project_root=tmp_path)
     catalog = hft_processed_catalog()
     restored = panel
@@ -797,7 +693,7 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
             )
         )
         frame = frame.loc[:, list(spec.column_roles)]
-        write_dataset(root, frame, spec=spec, resource_policy=None, borrowed_input=True)
+        write_dataset(root, frame, spec=spec)
         restored = read_dataset(root)
     returns = restored["return_100ms"].dropna()
     volatility = restored["realized_volatility_1s"]
@@ -806,14 +702,12 @@ def test_persisted_return_volatility_preserves_constant_windows_and_tick_changes
     assert volatility.iloc[:10].isna().all()
     if perturb:
         assert returns.iloc[-1] != returns.iloc[0]
-        # Nine equal observations and one delta have sample std abs(delta)/sqrt(10).
         expected = abs(returns.iloc[-1] - returns.iloc[0]) / math.sqrt(10)
         assert volatility.iloc[-1] == pytest.approx(expected, rel=1e-14, abs=0)
         assert volatility.iloc[-1] > 0
     else:
         assert returns.nunique() == 1
         assert volatility.iloc[-1] == 0.0
-
     reset_panel = panel.copy()
     reset_panel.loc[8:, "segment_id"] = "s2:trade-connection-1"
     reset_factors = pd.concat(
@@ -835,23 +729,27 @@ def test_price_unit_is_only_a_coordinate_for_panel_factors_and_all_labels():
         for stamp in range(0, 6200, 100):
             state = _state(
                 stamp,
-                bid_index=995 + (stamp // 100) % 4,
-                ask_index=1005 + (stamp // 100) % 3,
-                bid_qty=2 + (stamp // 100) % 3,
-                ask_qty=1 + (stamp // 100) % 2,
+                bid_index=995 + stamp // 100 % 4,
+                ask_index=1005 + stamp // 100 % 3,
+                bid_qty=2 + stamp // 100 % 3,
+                ask_qty=1 + stamp // 100 % 2,
             )
             states.append(
                 replace(
                     state,
                     price_unit=unit,
-                    bids=tuple((index * multiplier, qty) for index, qty in state.bids),
-                    asks=tuple((index * multiplier, qty) for index, qty in state.asks),
+                    bids=tuple(
+                        ((index * multiplier, qty) for index, qty in state.bids)
+                    ),
+                    asks=tuple(
+                        ((index * multiplier, qty) for index, qty in state.asks)
+                    ),
                 )
             )
         trades = []
         for stamp in range(40, 6050, 80):
             trade = _trade(
-                stamp, 0.2 + (stamp // 80) % 3, maker_buyer=(stamp // 80) % 2 == 0
+                stamp, 0.2 + stamp // 80 % 3, maker_buyer=stamp // 80 % 2 == 0
             )
             trades.append(
                 replace(
@@ -868,9 +766,9 @@ def test_price_unit_is_only_a_coordinate_for_panel_factors_and_all_labels():
                     start_ms=0,
                     end_ms=6000,
                     batch_rows=17,
-                    book_coverage={"s1": (0, 7_000_000_000)},
+                    book_coverage={"s1": (0, 7000000000)},
                     trade_coverage=coverage_lookup(
-                        {"trade-connection-1": (0, 7_000_000_000)}
+                        {"trade-connection-1": (0, 7000000000)}
                     ),
                 )
             ),
@@ -881,7 +779,7 @@ def test_price_unit_is_only_a_coordinate_for_panel_factors_and_all_labels():
             list(iter_label_frames([panel], horizons_ms=(100, 500, 1000, 5000))),
             ignore_index=True,
         )
-        actual = panel, factor, label
+        actual = (panel, factor, label)
         if baseline is None:
             baseline = actual
         else:
@@ -915,23 +813,20 @@ def test_persisted_depth_ratios_keep_scale_invariance_and_one_ulp_change(
                 asks=tuple((1005 + level * 10, ask) for level in range(10)),
             )
         )
-    with runtime_resource_policy_scope():
-        panel = pd.concat(
-            iter_panel_frames(
-                states,
-                [_trade(i * 100, 1.0, maker_buyer=False) for i in range(10)],
-                market_id="crypto",
-                asset_id="btc_usdt",
-                batch_rows=2,
-                start_ms=0,
-                end_ms=900,
-                book_coverage={"s1": _coverage(0, 1001)},
-                trade_coverage=coverage_lookup(
-                    {"trade-connection-1": _coverage(0, 1001)}
-                ),
-            ),
-            ignore_index=True,
-        )
+    panel = pd.concat(
+        iter_panel_frames(
+            states,
+            [_trade(i * 100, 1.0, maker_buyer=False) for i in range(10)],
+            market_id="crypto",
+            asset_id="btc_usdt",
+            batch_rows=2,
+            start_ms=0,
+            end_ms=900,
+            book_coverage={"s1": _coverage(0, 1001)},
+            trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 1001)}),
+        ),
+        ignore_index=True,
+    )
     catalog = hft_processed_catalog()
     layout = StorageLayout(project_root=tmp_path)
     restored = panel
@@ -956,7 +851,7 @@ def test_persisted_depth_ratios_keep_scale_invariance_and_one_ulp_change(
             )
         )
         frame = frame.loc[:, list(spec.column_roles)]
-        write_dataset(root, frame, spec=spec, resource_policy=None, borrowed_input=True)
+        write_dataset(root, frame, spec=spec)
         restored = read_dataset(root)
         if data_id == "binance_futures_l2_panel_100ms":
             for levels in (1, 5, 10):
@@ -1001,23 +896,20 @@ def test_panel_and_execution_midpoint_round_only_final_exact_price(
     if owner == "execution":
         assert _mid(state) == expected
         return
-    with runtime_resource_policy_scope():
-        panel = pd.concat(
-            iter_panel_frames(
-                [state],
-                [],
-                market_id="crypto",
-                asset_id="btc_usdt",
-                batch_rows=2,
-                start_ms=0,
-                end_ms=0,
-                book_coverage={"s1": _coverage(0, 1001)},
-                trade_coverage=coverage_lookup(
-                    {"trade-connection-1": _coverage(0, 1001)}
-                ),
-            ),
-            ignore_index=True,
-        )
+    panel = pd.concat(
+        iter_panel_frames(
+            [state],
+            [],
+            market_id="crypto",
+            asset_id="btc_usdt",
+            batch_rows=2,
+            start_ms=0,
+            end_ms=0,
+            book_coverage={"s1": _coverage(0, 1001)},
+            trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 1001)}),
+        ),
+        ignore_index=True,
+    )
     assert panel.mid.tolist() == [expected]
     spec = hft_processed_catalog().get("binance_futures_l2_panel_100ms")
     from quant_research_platform.storage.layout import StorageLayout
@@ -1073,7 +965,6 @@ def test_l0_full_windows_chunk_segments_assets_causality_and_persistence(tmp_pat
         pd.testing.assert_frame_equal(
             projected.loc[:, list(names)], full.loc[:, list(names)]
         )
-
     extreme = panel.iloc[:25].copy()
     extreme.loc[:, "mid"] = 100.0
     extreme.loc[12, "mid"] = np.finfo(float).tiny
@@ -1085,7 +976,6 @@ def test_l0_full_windows_chunk_segments_assets_causality_and_persistence(tmp_pat
         )["realized_volatility_1s"]
     assert extreme_vol.iloc[13:23].isna().all()
     assert extreme_vol.iloc[23] == 0.0
-
     chunked = pd.concat(
         iter_factor_frames([panel.iloc[i : i + 7] for i in range(0, size, 7)]),
         ignore_index=True,

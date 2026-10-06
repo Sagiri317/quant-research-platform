@@ -12,7 +12,6 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     HFT_RESEARCH_DATASET_ID,
 )
 from quant_research_platform.research.predictions import alignment
-from quant_research_platform.runtime.resources import runtime_resource_policy_scope
 from quant_research_platform.storage.identity import (
     filesystem_glob,
     filesystem_read_bytes,
@@ -42,7 +41,6 @@ class _PredictionLookup:
         self.values = values
         self.matched: set[tuple[pd.Timestamp, str]] = set()
 
-    @contextmanager
     def values_for_frame(self, frame, *, mark_matched: bool):  # noqa: ANN001
         values: list[float] = []
         found = bytearray()
@@ -57,7 +55,7 @@ class _PredictionLookup:
                 found.append(1)
                 if mark_matched:
                     self.matched.add(key)
-        yield values, found
+        return values, found
 
     def coverage_counts(self) -> tuple[int, int]:
         return len(set(self.values).difference(self.matched)), 0
@@ -120,44 +118,41 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
 
     monkeypatch.setattr(portfolio, "_iter_prediction_joined_chunks", dispatch)
     window = TimeWindow("1970-01-01T00:00:00.100", "1970-01-01T00:00:00.300")
-    with runtime_resource_policy_scope() as policy:
 
-        def rows():
-            return list(
-                portfolio._prediction_rows(
-                    layout=StorageLayout(Path("fixture")),
-                    dataset=build_hft_research_dataset_catalog().get(
-                        HFT_RESEARCH_DATASET_ID
-                    ),
-                    windows=(("fold", window),),
-                    model_id="model",
-                    asset_id="btc_usdt",
-                    protocol_manifest={
-                        "model_scopes": {
-                            "model": {
-                                "evaluation_asset_ids": ["btc_usdt"],
-                                "model_algorithm": "linear_regression",
-                            }
+    def rows():
+        return list(
+            portfolio._prediction_rows(
+                layout=StorageLayout(Path("fixture")),
+                dataset=build_hft_research_dataset_catalog().get(
+                    HFT_RESEARCH_DATASET_ID
+                ),
+                windows=(("fold", window),),
+                model_id="model",
+                asset_id="btc_usdt",
+                protocol_manifest={
+                    "model_scopes": {
+                        "model": {
+                            "evaluation_asset_ids": ["btc_usdt"],
+                            "model_algorithm": "linear_regression",
                         }
-                    },
-                    resource_policy=policy,
-                    read_prediction_bundle=bundle,
-                    output_window=window,
-                )
+                    }
+                },
+                read_prediction_bundle=bundle,
+                output_window=window,
             )
-
-        lookup = _PredictionLookup({})
-        with pytest.raises(ValueError, match="missing_required_prediction_keys"):
-            rows()
-        lookup = _PredictionLookup({(times[0], "btc_usdt"): 0.5})
-        actual = rows()
-        assert [row["prediction_score"] for row in actual] == [0.5, None, None]
-        lookup = _PredictionLookup(
-            {(times[0], "btc_usdt"): 0.5, (times[2], "btc_usdt"): 0.7}
         )
-        with pytest.raises(ValueError, match="misaligned_persisted_prediction_keys"):
-            rows()
-        assert len(dispatches) == 3 and policy.used_memory_bytes == 0
+
+    lookup = _PredictionLookup({})
+    with pytest.raises(ValueError, match="missing_required_prediction_keys"):
+        rows()
+    lookup = _PredictionLookup({(times[0], "btc_usdt"): 0.5})
+    actual = rows()
+    assert [row["prediction_score"] for row in actual] == [0.5, None, None]
+    lookup = _PredictionLookup(
+        {(times[0], "btc_usdt"): 0.5, (times[2], "btc_usdt"): 0.7}
+    )
+    with pytest.raises(ValueError, match="misaligned_persisted_prediction_keys"):
+        rows()
 
 
 @pytest.mark.parametrize("selected_folds", [22, 21, 1])
@@ -233,22 +228,18 @@ def test_crypto_valid_selected_windows_reach_training(tmp_path, selected_folds):
         calls.append(True)
         raise RuntimeError("training_entry_sentinel")
 
-    with runtime_resource_policy_scope() as policy:
-        with pytest.raises(
-            RuntimeError,
-            match="training_entry_sentinel",
-        ):
-            write_crypto_model_artifact(
-                tmp_path / "models",
-                envelope=envelope,
-                model_results=model_results,
-                trial_layout=None,
-                verify_source=lambda: pytest.fail(
-                    "training_failure_reached_verification"
-                ),
-            )
-        assert len(calls) == 1
-        assert policy.used_memory_bytes == 0
+    with pytest.raises(
+        RuntimeError,
+        match="training_entry_sentinel",
+    ):
+        write_crypto_model_artifact(
+            tmp_path / "models",
+            envelope=envelope,
+            model_results=model_results,
+            trial_layout=None,
+            verify_source=lambda: pytest.fail("training_failure_reached_verification"),
+        )
+    assert len(calls) == 1
     assert not tuple(filesystem_glob(tmp_path / "models" / "instances", "*"))
 
 
@@ -289,29 +280,12 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     validation_rows = {}
     write_models = research.write_crypto_model_artifact
     from quant_research_platform.storage import parquet as parquet_storage
-    from quant_research_platform.storage.parquet import (
-        _parquet_row_group_footer_upper_bound,
-    )
 
-    table_write_state = parquet_storage._parquet_table_write_state
-    expected_footer = 0
     multirow_callbacks = []
 
-    def small_row_groups(table, *, previous_metadata, retained_memory):
-        nonlocal expected_footer
-        if previous_metadata is None:
-            expected_footer = 0
-        assert retained_memory[1] == expected_footer
-        converted, state, _batch_rows, retained = table_write_state(
-            table,
-            previous_metadata=previous_metadata,
-            retained_memory=retained_memory,
-        )
-        expected_footer += (
-            (table.num_rows + 1) // 2
-        ) * _parquet_row_group_footer_upper_bound(converted.schema, rows=0)
-        multirow_callbacks.append(table.num_rows)
-        return converted, state, 2, retained
+    def small_row_groups(rows):
+        multirow_callbacks.append(rows)
+        return 2
 
     def write_fragmented_validation(*args, model_results, **kwargs):
         def fragmented_results(*, on_validation, on_selection):
@@ -327,7 +301,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
 
         with monkeypatch.context() as writing_patch:
             writing_patch.setattr(
-                parquet_storage, "_parquet_table_write_state", small_row_groups
+                parquet_storage, "_parquet_row_group_size", small_row_groups
             )
             return write_models(*args, model_results=fragmented_results, **kwargs)
 
@@ -386,143 +360,122 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         layout.semantic_artifact_root("crypto", model_id),
         targets[model_id]["instance_identity"],
     )
-    with (
-        runtime_resource_policy_scope() as artifact_policy,
-        artifact_policy.lease("tests.artifact_metadata", 0) as artifact_lease,
-    ):
-        saved = read_crypto_model_artifact(
-            root,
-            expected_identity=targets[model_id]["instance_identity"],
-            trial_layout=layout,
-            lease=artifact_lease,
-        )
-        import pyarrow.parquet as pq
+    saved = read_crypto_model_artifact(
+        root,
+        expected_identity=targets[model_id]["instance_identity"],
+        trial_layout=layout,
+    )
+    import pyarrow.parquet as pq
 
-        with runtime_resource_policy_scope() as policy:
-            for entry in saved.models:
-                key = (entry["fold_id"], entry["model_id"])
-                relative = entry["validation_prediction_path"]
-                assert "validation_prediction_parts" not in entry
-                assert key in validation_rows
-                assert relative is not None
-                expected_validation = pd.concat(validation_rows[key], ignore_index=True)
-                expected_validation["label_available_at"] = expected_validation[
-                    "label_available_at"
-                ].astype("datetime64[ns]")
-                actual_validation = pd.concat(
-                    saved.validation_chunks(
-                        fold_id=entry["fold_id"], model_id=entry["model_id"]
-                    ),
-                    ignore_index=True,
-                )
-                pd.testing.assert_frame_equal(
-                    actual_validation,
-                    expected_validation.loc[:, actual_validation.columns],
-                )
-                assert len(expected_validation) > 1
-                with pq.ParquetFile(native_filesystem_path(root / relative)) as parquet:
-                    expected_groups = (
-                        2 * (len(expected_validation) // 3)
-                        + (len(expected_validation) % 3 + 1) // 2
-                    )
-                    assert parquet.metadata.num_row_groups == expected_groups > 1
-                assert (
-                    sum(member["path"] == relative for member in saved.member_records)
-                    == 1
-                )
-            assert len(validation_rows) == len(saved.models) == 18
-            assert len(saved.final_models) == 9
-            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-        validation_rows.clear()
-
-        import numpy as np
-
-        from quant_research_platform.artifacts.outputs import (
-            read_prediction_output_bundle,
+    for entry in saved.models:
+        key = (entry["fold_id"], entry["model_id"])
+        relative = entry["validation_prediction_path"]
+        assert "validation_prediction_parts" not in entry
+        assert key in validation_rows
+        assert relative is not None
+        expected_validation = pd.concat(validation_rows[key], ignore_index=True)
+        expected_validation["label_available_at"] = expected_validation[
+            "label_available_at"
+        ].astype("datetime64[ns]")
+        actual_validation = pd.concat(
+            saved.validation_chunks(
+                fold_id=entry["fold_id"], model_id=entry["model_id"]
+            ),
+            ignore_index=True,
         )
-        from quant_research_platform.research.models import fitting
-        from quant_research_platform.storage.datasets.reading import (
-            DatasetReadMode,
-            read_dataset,
+        pd.testing.assert_frame_equal(
+            actual_validation,
+            expected_validation.loc[:, actual_validation.columns],
         )
+        assert len(expected_validation) > 1
+        with pq.ParquetFile(native_filesystem_path(root / relative)) as parquet:
+            expected_groups = (
+                2 * (len(expected_validation) // 3)
+                + (len(expected_validation) % 3 + 1) // 2
+            )
+            assert parquet.metadata.num_row_groups == expected_groups > 1
+        assert sum(member["path"] == relative for member in saved.member_records) == 1
+    assert len(validation_rows) == len(saved.models) == 18
+    assert len(saved.final_models) == 9
+    validation_rows.clear()
 
-        dataset_root = layout.instance_root(
-            layout.research_dataset_root("crypto", HFT_RESEARCH_DATASET_ID),
-            targets[HFT_RESEARCH_DATASET_ID]["instance_identity"],
-        )
-        prediction_root = layout.instance_root(
-            layout.semantic_artifact_root("crypto", prediction_id),
-            targets[prediction_id]["instance_identity"],
-        )
-        with runtime_resource_policy_scope() as policy:
-            frame = read_dataset(
-                dataset_root, mode=DatasetReadMode.MATERIALIZED, resource_policy=policy
-            )
-            oos = frame.timestamp.between(
-                pd.Timestamp(plan["test"]["start"]), pd.Timestamp(plan["test"]["end"])
-            )
-            for spec in profile.models.list():
-                entries = [
-                    entry
-                    for entry in saved.final_models
-                    if entry["model_id"] == spec.model_id
-                ]
-                expected = frame.loc[oos & frame.eligible].dropna(
-                    subset=list(spec.input_columns)
-                )
-                assets = entries[0]["evaluation_asset_ids"]
-                if assets:
-                    expected = expected.loc[expected.asset_id.isin(assets)]
-                output_id = f"{spec.model_id}_prediction"
-                with read_prediction_output_bundle(
-                    prediction_root / "outputs" / output_id,
-                    expected_output_id=output_id,
-                    expected_run_id=f"run_{output_id}",
-                ) as (manifest, lookup):
-                    assert manifest["metadata"][
-                        "model_metadata"
-                    ] == saved.prediction_lineage(
-                        spec.model_id,
-                        TimeWindow(**plan["test"]),
-                        access_window="holdout",
-                    )
-                    assert lookup.row_count == len(expected)
-                    with lookup.values_for_frame(expected, mark_matched=True) as (
-                        values,
-                        found,
-                    ):
-                        assert all(found) and np.isfinite(values).all()
-                    assert lookup.coverage_counts() == (0, 0)
-            assert (
-                frame.loc[
-                    frame.timestamp.eq(pd.Timestamp("1970-01-01T00:00:08.900000")),
-                    "future_mid_return_500ms",
-                ]
-                .isna()
-                .all()
-            )
-            from tests.research.crypto_evaluation_test_support import (
-                check_crypto_evaluation_readback,
-            )
+    import numpy as np
 
-            check_crypto_evaluation_readback(
-                layout=layout,
-                profile=profile,
-                targets=targets,
-                frame=frame,
-                plan=plan,
-                prediction_root=prediction_root,
+    from quant_research_platform.artifacts.outputs import (
+        read_prediction_output_bundle,
+    )
+    from quant_research_platform.research.models import fitting
+    from quant_research_platform.storage.datasets.reading import (
+        DatasetReadMode,
+        read_dataset,
+    )
+
+    dataset_root = layout.instance_root(
+        layout.research_dataset_root("crypto", HFT_RESEARCH_DATASET_ID),
+        targets[HFT_RESEARCH_DATASET_ID]["instance_identity"],
+    )
+    prediction_root = layout.instance_root(
+        layout.semantic_artifact_root("crypto", prediction_id),
+        targets[prediction_id]["instance_identity"],
+    )
+    frame = read_dataset(dataset_root, mode=DatasetReadMode.MATERIALIZED)
+    oos = frame.timestamp.between(
+        pd.Timestamp(plan["test"]["start"]), pd.Timestamp(plan["test"]["end"])
+    )
+    for spec in profile.models.list():
+        entries = [
+            entry for entry in saved.final_models if entry["model_id"] == spec.model_id
+        ]
+        expected = frame.loc[oos & frame.eligible].dropna(
+            subset=list(spec.input_columns)
+        )
+        assets = entries[0]["evaluation_asset_ids"]
+        if assets:
+            expected = expected.loc[expected.asset_id.isin(assets)]
+        output_id = f"{spec.model_id}_prediction"
+        with read_prediction_output_bundle(
+            prediction_root / "outputs" / output_id,
+            expected_output_id=output_id,
+            expected_run_id=f"run_{output_id}",
+        ) as (manifest, lookup):
+            assert manifest["metadata"]["model_metadata"] == saved.prediction_lineage(
+                spec.model_id,
+                TimeWindow(**plan["test"]),
+                access_window="holdout",
             )
-            frame = expected = None
-            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-        saved = entry = entries = assets = None
+            assert lookup.row_count == len(expected)
+            values, found = lookup.values_for_frame(expected, mark_matched=True)
+            assert all(found) and np.isfinite(values).all()
+            assert lookup.coverage_counts() == (0, 0)
+    assert (
+        frame.loc[
+            frame.timestamp.eq(pd.Timestamp("1970-01-01T00:00:08.900000")),
+            "future_mid_return_500ms",
+        ]
+        .isna()
+        .all()
+    )
+    from tests.research.crypto_evaluation_test_support import (
+        check_crypto_evaluation_readback,
+    )
+
+    check_crypto_evaluation_readback(
+        layout=layout,
+        profile=profile,
+        targets=targets,
+        frame=frame,
+        plan=plan,
+        prediction_root=prediction_root,
+    )
+    frame = expected = None
+    saved = entry = entries = assets = None
     before = _trial_records(layout.project_root)
 
     def no_fit(*args, **kwargs):
         raise AssertionError("REUSE must not fit")
 
     with monkeypatch.context() as patch:
-        patch.setattr(fitting, "_fit_model_result_owned_from_frames", no_fit)
+        patch.setattr(fitting, "_fit_model_result_from_frames", no_fit)
         reused = research.research_run(
             profile=profile,
             layout=layout,
@@ -580,7 +533,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         if item["candidate_id"] in selected_ids
     ]
     with monkeypatch.context() as patch:
-        patch.setattr(fitting, "_fit_model_result_owned_from_frames", no_fit)
+        patch.setattr(fitting, "_fit_model_result_from_frames", no_fit)
         mode_development = research.research_run(
             profile=profile,
             layout=layout,
@@ -625,47 +578,38 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     assert mode_results[taker_segmented.target_id]["status"] == "BUILT"
     assert mode_results[maker_continuous.target_id]["status"] == "REUSED"
     assert mode_results[maker_segmented.target_id]["status"] == "BUILT"
-    with (
-        runtime_resource_policy_scope() as policy,
-        policy.lease("tests.artifact_metadata", 0) as artifact_lease,
-    ):
-        continuous_result = mode_results[taker_continuous.target_id]
-        continuous_root = layout.instance_root(
-            layout.semantic_artifact_root("crypto", taker_continuous.target_id),
-            continuous_result["instance_identity"],
-        )
-        continuous_ledger = read_portfolio_ledger_artifact(
-            continuous_root,
-            expected_identity=continuous_result["instance_identity"],
-            lease=artifact_lease,
-        )
-        continuous_economics = summarize_portfolio_ledger(
-            continuous_ledger.capital, continuous_ledger.iter_chunks()
-        )
-        segmented_result = mode_results[taker_segmented.target_id]
-        segmented_root = layout.instance_root(
-            layout.semantic_artifact_root("crypto", taker_segmented.target_id),
-            segmented_result["instance_identity"],
-        )
-        collection = read_crypto_episode_artifact(
-            segmented_root,
-            expected_identity=segmented_result["instance_identity"],
-            lease=artifact_lease,
-        )
-        with closing_iterator(collection.iter_episodes()) as episodes:
-            segment_economics = [
-                (
-                    index,
-                    summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks()),
-                )
-                for index, ledger in episodes
-            ]
-        assert len(segment_economics) == 1
-        assert segment_economics[0][0]["termination"] == "PLANNED_END"
-        assert segment_economics[0][1]["initial_capital"] == 1000.0
-        assert segment_economics[0][1]["net_pnl"] == continuous_economics["net_pnl"]
-        assert policy.used_memory_bytes == artifact_lease.reserved_bytes
-        continuous_ledger = collection = None
+    continuous_result = mode_results[taker_continuous.target_id]
+    continuous_root = layout.instance_root(
+        layout.semantic_artifact_root("crypto", taker_continuous.target_id),
+        continuous_result["instance_identity"],
+    )
+    continuous_ledger = read_portfolio_ledger_artifact(
+        continuous_root, expected_identity=continuous_result["instance_identity"]
+    )
+    continuous_economics = summarize_portfolio_ledger(
+        continuous_ledger.capital, continuous_ledger.iter_chunks()
+    )
+    segmented_result = mode_results[taker_segmented.target_id]
+    segmented_root = layout.instance_root(
+        layout.semantic_artifact_root("crypto", taker_segmented.target_id),
+        segmented_result["instance_identity"],
+    )
+    collection = read_crypto_episode_artifact(
+        segmented_root, expected_identity=segmented_result["instance_identity"]
+    )
+    with closing_iterator(collection.iter_episodes()) as episodes:
+        segment_economics = [
+            (
+                index,
+                summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks()),
+            )
+            for index, ledger in episodes
+        ]
+    assert len(segment_economics) == 1
+    assert segment_economics[0][0]["termination"] == "PLANNED_END"
+    assert segment_economics[0][1]["initial_capital"] == 1000.0
+    assert segment_economics[0][1]["net_pnl"] == continuous_economics["net_pnl"]
+    continuous_ledger = collection = None
 
     from tests.interfaces.published_research_test_support import (
         check_published_evidence_views,
@@ -713,7 +657,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     filesystem_unlink(eth_metadata)
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(fitting, "_fit_model_result_owned_from_frames", no_fit)
+            patch.setattr(fitting, "_fit_model_result_from_frames", no_fit)
             missing_eth = research.research_run(
                 profile=profile,
                 layout=layout,
@@ -765,7 +709,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     }
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(fitting, "_fit_model_result_owned_from_frames", no_fit)
+            patch.setattr(fitting, "_fit_model_result_from_frames", no_fit)
             incomplete_run = research.research_run(
                 profile=profile,
                 layout=layout,
@@ -790,40 +734,32 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             incomplete_targets[target]["status"] == "REUSED"
             for target in (model_id, prediction_id, *evaluation_ids)
         )
-        with (
-            runtime_resource_policy_scope() as policy,
-            policy.lease("tests.artifact_metadata", 0) as artifact_lease,
-        ):
-            for candidate in takers:
-                incomplete_result = incomplete_targets[
-                    execution_targets[candidate.candidate_id].target_id
-                ]
-                assert incomplete_result["status"] == (
-                    "BLOCKED" if candidate.asset_id == "btc_usdt" else "REUSED"
-                )
-                if candidate.asset_id == "btc_usdt":
-                    assert (
-                        incomplete_result["reason"]
-                        == "binance_funding_coverage_incomplete"
-                    )
-                old_identity = targets[
-                    execution_targets[candidate.candidate_id].target_id
-                ]["instance_identity"]
-                old_root = layout.instance_root(
-                    layout.semantic_artifact_root(
-                        "crypto",
-                        execution_targets[candidate.candidate_id].target_id,
-                    ),
-                    old_identity,
-                )
+        for candidate in takers:
+            incomplete_result = incomplete_targets[
+                execution_targets[candidate.candidate_id].target_id
+            ]
+            assert incomplete_result["status"] == (
+                "BLOCKED" if candidate.asset_id == "btc_usdt" else "REUSED"
+            )
+            if candidate.asset_id == "btc_usdt":
                 assert (
-                    filesystem_read_bytes(old_root / "manifest.json")
-                    == old_good[execution_targets[candidate.candidate_id].target_id]
+                    incomplete_result["reason"] == "binance_funding_coverage_incomplete"
                 )
-                read_portfolio_ledger_artifact(
-                    old_root, expected_identity=old_identity, lease=artifact_lease
-                )
-            assert policy.used_memory_bytes == artifact_lease.reserved_bytes
+            old_identity = targets[execution_targets[candidate.candidate_id].target_id][
+                "instance_identity"
+            ]
+            old_root = layout.instance_root(
+                layout.semantic_artifact_root(
+                    "crypto",
+                    execution_targets[candidate.candidate_id].target_id,
+                ),
+                old_identity,
+            )
+            assert (
+                filesystem_read_bytes(old_root / "manifest.json")
+                == old_good[execution_targets[candidate.candidate_id].target_id]
+            )
+            read_portfolio_ledger_artifact(old_root, expected_identity=old_identity)
     finally:
         filesystem_write_bytes(btc_metadata, saved_metadata)
     from tests.research.crypto_report_test_support import (
@@ -847,35 +783,30 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         check_crypto_wide_fold_artifact,
     )
 
-    with (
-        runtime_resource_policy_scope() as artifact_policy,
-        artifact_policy.lease("tests.artifact_metadata", 0) as artifact_lease,
-    ):
-        saved = read_crypto_model_artifact(
-            root,
-            expected_identity=targets[model_id]["instance_identity"],
-            trial_layout=layout,
-            lease=artifact_lease,
-        )
-        check_crypto_fold_boundaries(
-            layout=layout,
-            dataset_root=development_dataset_root,
-            profile=profile,
-            saved=saved,
-            monkeypatch=monkeypatch,
-        )
-        check_crypto_wide_fold_artifact(
-            layout=layout,
-            dataset_root=development_dataset_root,
-            profile=profile,
-            saved=saved,
-            monkeypatch=monkeypatch,
-        )
-        check_crypto_model_staging(layout=layout, profile=profile, saved=saved)
-        check_crypto_prediction_staging(
-            layout=layout, prediction_root=prediction_root, saved=saved
-        )
-        saved = None
+    saved = read_crypto_model_artifact(
+        root,
+        expected_identity=targets[model_id]["instance_identity"],
+        trial_layout=layout,
+    )
+    check_crypto_fold_boundaries(
+        layout=layout,
+        dataset_root=development_dataset_root,
+        profile=profile,
+        saved=saved,
+        monkeypatch=monkeypatch,
+    )
+    check_crypto_wide_fold_artifact(
+        layout=layout,
+        dataset_root=development_dataset_root,
+        profile=profile,
+        saved=saved,
+        monkeypatch=monkeypatch,
+    )
+    check_crypto_model_staging(layout=layout, profile=profile, saved=saved)
+    check_crypto_prediction_staging(
+        layout=layout, prediction_root=prediction_root, saved=saved
+    )
+    saved = None
     from tests.research.crypto_evaluation_test_support import (
         check_crypto_evaluation_input_boundaries,
         check_crypto_evaluation_old_good,
@@ -1108,60 +1039,54 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(
             }:
                 continue
             assert target.status.value == "BUILT"
-            with (
-                runtime_resource_policy_scope() as artifact_policy,
-                artifact_policy.lease("tests.artifact_metadata", 0) as artifact_lease,
-            ):
-                artifact = read_portfolio_ledger_artifact(
-                    layout.instance_root(
-                        layout.project_root / target.artifact_root,
-                        target.instance_identity,
-                    ),
-                    expected_identity=target.instance_identity,
-                    lease=artifact_lease,
-                )
-                if artifact.capital.candidate_id in latency_candidates:
-                    latency = latency_candidates[artifact.capital.candidate_id]
-                    fills = []
-                    summaries = []
-                    for batch in artifact.iter_chunks():
-                        fills.extend(
-                            (row.timestamp_ns, row.quantity, row.notional)
-                            for row in batch.trades
-                        )
-                        summaries.extend(
-                            json.loads(row.text)
-                            for row in batch.diagnostics
-                            if row.name == "execution_summary"
-                        )
-                    assert len(summaries) == 1
-                    assert summaries[0]["latency_ms"] == latency
-                    assert summaries[0]["market_event_count"] > 0
-                    latency_fills[latency] = tuple(fills)
-                    continue
-                decisions = []
-                queue_assumptions = []
+            artifact = read_portfolio_ledger_artifact(
+                layout.instance_root(
+                    layout.project_root / target.artifact_root, target.instance_identity
+                ),
+                expected_identity=target.instance_identity,
+            )
+            if artifact.capital.candidate_id in latency_candidates:
+                latency = latency_candidates[artifact.capital.candidate_id]
+                fills = []
+                summaries = []
                 for batch in artifact.iter_chunks():
-                    queue_assumptions.extend(
-                        json.loads(row.text)["queue_assumption"]
+                    fills.extend(
+                        (row.timestamp_ns, row.quantity, row.notional)
+                        for row in batch.trades
+                    )
+                    summaries.extend(
+                        json.loads(row.text)
                         for row in batch.diagnostics
                         if row.name == "execution_summary"
                     )
-                    timestamp = max(
-                        (row.timestamp_ns for row in batch.valuations), default=0
-                    )
-                    if timestamp < 8_100_000_000:
-                        decisions.extend(
-                            (timestamp, row.asset_id, row.name, row.number, row.text)
-                            for row in batch.diagnostics
-                            if row.name.startswith("maker_")
-                        )
-                assert queue_assumptions == [expected_assumption]
-                assert (
-                    reported_assumptions[artifact.capital.candidate_id]
-                    == queue_assumptions[0]
+                assert len(summaries) == 1
+                assert summaries[0]["latency_ms"] == latency
+                assert summaries[0]["market_event_count"] > 0
+                latency_fills[latency] = tuple(fills)
+                continue
+            decisions = []
+            queue_assumptions = []
+            for batch in artifact.iter_chunks():
+                queue_assumptions.extend(
+                    json.loads(row.text)["queue_assumption"]
+                    for row in batch.diagnostics
+                    if row.name == "execution_summary"
                 )
-                observed[target.target_id] = decisions
+                timestamp = max(
+                    (row.timestamp_ns for row in batch.valuations), default=0
+                )
+                if timestamp < 8_100_000_000:
+                    decisions.extend(
+                        (timestamp, row.asset_id, row.name, row.number, row.text)
+                        for row in batch.diagnostics
+                        if row.name.startswith("maker_")
+                    )
+            assert queue_assumptions == [expected_assumption]
+            assert (
+                reported_assumptions[artifact.capital.candidate_id]
+                == queue_assumptions[0]
+            )
+            observed[target.target_id] = decisions
         assert len(observed) == 2 and all(observed.values())
         assert set(latency_fills) == {0, 100, 200}
         assert len(set(latency_fills.values())) > 1
@@ -1318,7 +1243,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
     def forbidden(*args, **kwargs):
         pytest.fail("holdout must not fit, select, or calibrate")
 
-    monkeypatch.setattr(fitting, "_fit_model_result_owned_from_frames", forbidden)
+    monkeypatch.setattr(fitting, "_fit_model_result_from_frames", forbidden)
     monkeypatch.setattr(portfolio, "produce_maker_calibration", forbidden)
     trials = {
         path: filesystem_read_bytes(path)

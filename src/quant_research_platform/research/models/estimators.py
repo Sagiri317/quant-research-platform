@@ -15,12 +15,10 @@ def linear_regression_estimator(
     spec: ModelSpec,
     params: dict[str, object],
 ) -> object:
-    del spec, params
     return object()
 
 
 def ridge_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
-    del spec
     from sklearn.linear_model import Ridge
 
     return Ridge(**params)
@@ -34,7 +32,6 @@ def lasso_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> ob
 
 
 def huber_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
-    del spec
     from sklearn.linear_model import HuberRegressor
 
     return HuberRegressor(**params)
@@ -72,12 +69,10 @@ def lightgbm_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
 
 
 def equal_weight_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> object:
-    del params
     return EqualWeightRankEnsembleFactory(spec.input_columns, spec.label_column)
 
 
 def ic_weighted_rank_ensemble(spec: ModelSpec, params: dict[str, object]) -> object:
-    del params
     return ICWeightedRankEnsembleFactory(spec.input_columns, spec.label_column)
 
 

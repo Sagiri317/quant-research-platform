@@ -1,48 +1,27 @@
-"""Spillable exact part inventory owned by Storage DatasetSession."""
+"""Exact part inventory owned by Storage DatasetSession."""
 
 from __future__ import annotations
 
 import hashlib
 import re
-import sqlite3
-import sys
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
+from dataclasses import dataclass
 from pathlib import Path
-from tempfile import gettempdir
 from typing import Any
-from uuid import uuid4
-
-import pyarrow as pa
 
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    RuntimeResourcePolicy,
-    require_free_disk_headroom,
-)
-from quant_research_platform.storage._scratch_ownership import (
-    ScratchReservation,
-    handle_preserving_primary,
-    owned_scratch_name,
-    remove_owned_scratch,
-)
 from quant_research_platform.storage.datasets.paths import parse_year_partition_label
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     _hash_file_content,
     dataset_file_identity,
-    filesystem_mkdir,
     filesystem_scandir,
-    native_filesystem_path,
     path_is_filesystem_alias,
     require_unaliased_path,
 )
 from quant_research_platform.storage.parquet import DatasetPartMetadata
 
-_PREFIX = ".i-"
-_PART_FILE_PATTERN = re.compile(r"^part-(\d+)\.parquet$")
-DATASET_INVENTORY_RESERVE_BYTES = 1024
-_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES = 32 * DATASET_INVENTORY_RESERVE_BYTES
+_PART_FILE_PATTERN = re.compile("^part-(\\d+)\\.parquet$")
 
 
 def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
@@ -51,7 +30,7 @@ def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
         entries = filesystem_scandir(directory)
     except (FileNotFoundError, NotADirectoryError) as error:
         raise ValueError("invalid_dataset_part_files") from error
-    with handle_preserving_primary(entries):
+    with closing_iterator(entries):
         while True:
             try:
                 entry = next(entries)
@@ -62,672 +41,141 @@ def _directory_entries(directory: Path) -> Iterator[tuple[Path, bool, bool]]:
                 return
             except (FileNotFoundError, NotADirectoryError) as error:
                 raise ValueError("invalid_dataset_part_files") from error
-            yield path, is_directory, is_alias
+            value = (path, is_directory, is_alias)
+            try:
+                yield value
+            except GeneratorExit:
+                return
 
 
-class DatasetInventoryPaths:
-    """Minimal ordered path view without slice or materialization semantics."""
-
-    def __init__(
-        self,
-        inventory: DatasetSessionInventory,
-        *,
-        selected: bool,
-        path_selection: int | None = None,
-    ) -> None:
-        self._inventory = inventory
-        self._selected = selected
-        self._path_selection = path_selection
-
-    def __len__(self) -> int:
-        return self._inventory.path_count(
-            selected=self._selected,
-            path_selection=self._path_selection,
-        )
-
-    def __iter__(self) -> Iterator[Path]:
-        yield from self._inventory.iter_paths(
-            selected=self._selected,
-            path_selection=self._path_selection,
-        )
-
-    def __getitem__(self, index: int) -> Path:
-        if isinstance(index, slice):
-            raise TypeError("dataset_inventory_path_slicing_unsupported")
-        if index < 0:
-            index += len(self)
-        return self._inventory.path_at(
-            index,
-            selected=self._selected,
-            path_selection=self._path_selection,
-        )
+@dataclass
+class _Part:
+    coordinates: tuple[int, int, int]
+    identity: DatasetFileIdentity
+    metadata: DatasetPartMetadata | None = None
 
 
 class DatasetSessionInventory:
-    """Disk-backed physical discovery and ordered part metadata owner."""
+    """Ordered physical members and exact identities."""
 
-    def __init__(
-        self,
-        *,
-        data_root: Path,
-        resource_policy: RuntimeResourcePolicy,
-    ) -> None:
+    def __init__(self, *, data_root: Path) -> None:
         self.data_root = Path(data_root)
-        self._scratch_parent = Path(gettempdir())
-        self._temporary_directory: Path | None = None
-        self._connection: sqlite3.Connection | None = None
-        self._scratch_reservation: ScratchReservation | None = None
-        self._next_selection_id = 0
-        self._lease = resource_policy.lease(
-            "storage.dataset.inventory",
-            _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
-        )
-        temporary_directory: Path | None = None
-        claimed_temporary = False
-        try:
-            require_unaliased_path(
-                self._scratch_parent, error="invalid_storage_scratch_path"
-            )
-            filesystem_mkdir(self._scratch_parent, parents=True, exist_ok=True)
-            require_unaliased_path(
-                self._scratch_parent, error="invalid_storage_scratch_path"
-            )
-            require_free_disk_headroom(
-                self._scratch_parent,
-                reserve_bytes=_DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES,
-            )
-            require_unaliased_path(
-                self._scratch_parent, error="invalid_storage_scratch_path"
-            )
-            temporary_directory = self._scratch_parent / owned_scratch_name(
-                _PREFIX, uuid4().hex[:8]
-            )
-            self._scratch_reservation = ScratchReservation(
-                self._scratch_parent, resource_policy=resource_policy
-            )
-            self._scratch_reservation.resize(
-                _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES
-            )
-            filesystem_mkdir(temporary_directory, mode=0o700)
-            claimed_temporary = True
-            self._temporary_directory = temporary_directory
-            require_unaliased_path(
-                temporary_directory,
-                error="invalid_storage_scratch_path",
-            )
-            self._connection = sqlite3.connect(
-                native_filesystem_path(temporary_directory / "i.db")
-            )
-            connection = self._connection
-            connection.execute(f"PRAGMA page_size={DATASET_INVENTORY_RESERVE_BYTES}")
-            sqlite_page_limit = (
-                _DATASET_INVENTORY_SQLITE_STARTUP_RESERVE_BYTES
-                // DATASET_INVENTORY_RESERVE_BYTES
-            )
-            connection.execute(f"PRAGMA main.max_page_count={sqlite_page_limit}")
-            connection.execute("PRAGMA journal_mode=DELETE")
-            # Operation-local scratch is rebuilt, never recovered after a crash.
-            connection.execute("PRAGMA synchronous=OFF")
-            connection.execute("PRAGMA temp_store=MEMORY")
-            connection.execute(
-                f"PRAGMA cache_size=-{DATASET_INVENTORY_RESERVE_BYTES // 1024}"
-            )
-            connection.execute(
-                "CREATE TABLE year_labels (year INTEGER PRIMARY KEY, "
-                "label TEXT UNIQUE NOT NULL)"
-            )
-            connection.execute(
-                "CREATE TABLE part_metadata (id INTEGER PRIMARY KEY, "
-                "schema BLOB NOT NULL, logical_dtypes BLOB NOT NULL, "
-                "UNIQUE(schema, logical_dtypes))"
-            )
-            connection.execute(
-                "CREATE TABLE parts (relative_path TEXT PRIMARY KEY, "
-                "partition_kind INTEGER NOT NULL, partition_year INTEGER NOT NULL, "
-                "part_index INTEGER NOT NULL, selected INTEGER NOT NULL, "
-                "device TEXT NOT NULL, inode TEXT NOT NULL, size TEXT NOT NULL, "
-                "modified_ns TEXT NOT NULL, metadata_id INTEGER, "
-                "row_count INTEGER, file_size_bytes INTEGER, "
-                "UNIQUE(partition_kind, partition_year, part_index), "
-                "UNIQUE(device, inode))"
-            )
-            connection.execute(
-                "CREATE TABLE path_selections ("
-                "selection_id INTEGER NOT NULL, relative_path TEXT NOT NULL, "
-                "PRIMARY KEY(selection_id, relative_path))"
-            )
-            self._scratch_reservation.resize(
-                int(connection.execute("PRAGMA main.page_count").fetchone()[0])
-                * DATASET_INVENTORY_RESERVE_BYTES
-            )
-            self._lease.shrink_to(DATASET_INVENTORY_RESERVE_BYTES)
-        except BaseException as primary:
-            if claimed_temporary and self._temporary_directory is None:
-                object.__setattr__(self, "_temporary_directory", temporary_directory)
-            try:
-                self.close()
-            except BaseException as cleanup_error:
-                primary.add_note(
-                    "dataset inventory construction cleanup also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-            raise
-
-    def __enter__(self) -> DatasetSessionInventory:
-        return self
-
-    def __exit__(
-        self,
-        _exception_type: object,
-        primary: BaseException | None,
-        _traceback: object,
-    ) -> None:
-        if primary is None:
-            self.close()
-            return
-        try:
-            self.close()
-        except BaseException as cleanup_error:
-            primary.add_note(
-                f"dataset inventory cleanup also failed: {type(cleanup_error).__name__}"
-            )
-
-    @contextmanager
-    def _transaction(self):
-        connection = self._require_connection()
-        try:
-            with connection:
-                yield
-        finally:
-            primary = sys.exception()
-            try:
-                if not connection.in_transaction:
-                    self._scratch_reservation.resize(
-                        int(connection.execute("PRAGMA main.page_count").fetchone()[0])
-                        * DATASET_INVENTORY_RESERVE_BYTES
-                    )
-            except BaseException as cleanup_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    f"scratch settlement also failed: {type(cleanup_error).__name__}"
-                )
-
-    def close(self) -> None:
-        primary = sys.exception()
-        first_error: BaseException | None = None
-        connection = self._connection
-        self._connection = None
-        connection_closed = True
-        if connection is not None:
-            try:
-                connection.close()
-            except BaseException as connection_error:
-                connection_closed = False
-                if primary is not None:
-                    primary.add_note(
-                        "dataset inventory connection close also failed: "
-                        f"{type(connection_error).__name__}"
-                    )
-                else:
-                    first_error = connection_error
-
-        temporary = self._temporary_directory
-        self._temporary_directory = None
-        removed = temporary is None
-        if temporary is not None:
-            try:
-                remove_owned_scratch(temporary)
-                removed = True
-            except BaseException as temporary_error:
-                if primary is not None:
-                    primary.add_note(
-                        "dataset inventory scratch cleanup also failed: "
-                        f"{type(temporary_error).__name__}"
-                    )
-                elif first_error is None:
-                    first_error = temporary_error
-                else:
-                    first_error.add_note(
-                        "dataset inventory scratch cleanup also failed: "
-                        f"{type(temporary_error).__name__}"
-                    )
-
-        if self._scratch_reservation is not None:
-            if connection_closed and removed:
-                self._scratch_reservation.resize(0)
-            try:
-                self._scratch_reservation.close()
-            except BaseException as cleanup_error:
-                if primary is not None:
-                    primary.add_note(
-                        "inventory scratch reservation close also failed: "
-                        f"{type(cleanup_error).__name__}"
-                    )
-                elif first_error is None:
-                    first_error = cleanup_error
-        try:
-            self._lease.close()
-        except BaseException as lease_error:
-            if primary is not None:
-                primary.add_note(
-                    "dataset inventory lease release also failed: "
-                    f"{type(lease_error).__name__}"
-                )
-            elif first_error is None:
-                first_error = lease_error
-            else:
-                first_error.add_note(
-                    "dataset inventory lease release also failed: "
-                    f"{type(lease_error).__name__}"
-                )
-        if first_error is not None:
-            raise first_error
-
-    @property
-    def scratch_path(self) -> Path:
-        if self._temporary_directory is None:
-            raise RuntimeError("dataset_inventory_closed")
-        return self._temporary_directory
+        self._parts: dict[Path, _Part] = {}
+        self._coordinates: set[tuple[int, int, int]] = set()
+        self._identities: set[tuple[int, int]] = set()
+        self._years: dict[int, str] = {}
 
     def discover(self, spec: Mapping[str, Any]) -> None:
-        """Stream the physical tree into the sole exact inventory owner."""
+        self._scan_filesystem(
+            spec, on_year=self._register_year, on_path=self._register_candidate
+        )
+        self.sort_parts()
 
-        with self._transaction():
-            self._scan_filesystem(
-                spec,
-                on_year=self._register_year,
-                on_path=self._register_candidate,
-            )
+    def _register_year(self, year: int, label: str) -> None:
+        if year in self._years and self._years[year] != label:
+            raise ValueError("invalid_dataset_part_files")
+        self._years[year] = label
+
+    def _register_candidate(
+        self, path: Path, coordinates: tuple[int, int, int]
+    ) -> None:
+        identity = dataset_file_identity(path)
+        file_key = (identity.device, identity.inode)
+        if (
+            path in self._parts
+            or coordinates in self._coordinates
+            or file_key in self._identities
+        ):
+            raise ValueError("invalid_dataset_part_files")
+        self._parts[path] = _Part(coordinates, identity)
+        self._coordinates.add(coordinates)
+        self._identities.add(file_key)
 
     def verify_filesystem(self, spec: Mapping[str, Any]) -> None:
-        """Stream-compare current paths and identities with frozen inventory."""
+        count = 0
 
-        observed_count = 0
-
-        def verify_year(year: int, label: str) -> None:
-            row = (
-                self._require_connection()
-                .execute("SELECT label FROM year_labels WHERE year = ?", (year,))
-                .fetchone()
-            )
-            if row is None or str(row[0]) != label:
+        def verify_year(year, label):
+            if self._years.get(year) != label:
                 raise ValueError("dataset_inventory_changed")
 
-        def verify_path(path: Path, coordinates: tuple[int, int, int]) -> None:
-            nonlocal observed_count
-            observed_count += 1
-            relative = path.relative_to(self.data_root).as_posix()
-            row = (
-                self._require_connection()
-                .execute(
-                    "SELECT partition_kind, partition_year, part_index, device, "
-                    "inode, size, modified_ns FROM parts WHERE relative_path = ?",
-                    (relative,),
-                )
-                .fetchone()
-            )
-            if row is None or tuple(int(value) for value in row[:3]) != coordinates:
+        def verify_path(path, coordinates):
+            nonlocal count
+            count += 1
+            part = self._parts.get(path)
+            if part is None or part.coordinates != coordinates:
                 raise ValueError("dataset_inventory_changed")
-            identity = dataset_file_identity(path)
-            if tuple(str(value) for value in row[3:]) != _identity_values(identity):
+            if dataset_file_identity(path) != part.identity:
                 raise ValueError("dataset_file_identity_changed")
 
         self._scan_filesystem(spec, on_year=verify_year, on_path=verify_path)
-        if observed_count != self.path_count(selected=False):
+        if count != len(self._parts):
             raise ValueError("dataset_inventory_changed")
 
-    def iter_candidate_paths(self) -> Iterator[Path]:
-        cursor = self._require_connection().execute(
-            "SELECT relative_path FROM parts "
-            "ORDER BY partition_kind, partition_year, part_index"
+    @property
+    def paths(self) -> tuple[Path, ...]:
+        return tuple(self._parts)
+
+    def sort_parts(self) -> None:
+        self._parts = dict(
+            sorted(self._parts.items(), key=lambda item: item[1].coordinates)
         )
-        try:
-            for row in cursor:
-                yield self.data_root / str(row[0])
-        finally:
-            _close_cursor_preserving_primary(cursor)
 
-    def add(self, path: Path, metadata: DatasetPartMetadata, *, selected: bool) -> None:
-        """Insert one writer-observed part using its exact numeric order key."""
+    def add(self, path: Path, metadata: DatasetPartMetadata) -> None:
+        path = Path(path)
+        coordinates = self._validated_coordinates(path, partitioned=None)
+        self._register_candidate(path, coordinates)
+        if coordinates[0]:
+            self._register_year(coordinates[1], path.parent.name)
+        self.observe(path, metadata)
 
-        coordinates = self._validated_coordinates(Path(path), partitioned=None)
-        partition_kind, partition_year, part_index = coordinates
-        if partition_kind:
-            self._register_year(partition_year, Path(path).parent.name)
-        relative = Path(path).relative_to(self.data_root).as_posix()
-        identity = metadata.identity
-        try:
-            with self._transaction():
-                values = (
-                    relative,
-                    partition_kind,
-                    partition_year,
-                    part_index,
-                    int(selected),
-                    *_identity_values(identity),
-                    self._metadata_id(metadata),
-                    metadata.row_count,
-                    metadata.file_size_bytes,
-                )
-                self._gate_row_write(values)
-                self._require_connection().execute(
-                    "INSERT INTO parts(relative_path, partition_kind, "
-                    "partition_year, part_index, selected, device, inode, size, "
-                    "modified_ns, metadata_id, row_count, file_size_bytes) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    values,
-                )
-        except sqlite3.IntegrityError as exc:
-            raise ValueError("invalid_dataset_part_files") from exc
-
-    def _metadata_id(self, metadata: DatasetPartMetadata) -> int:
-        values = (
-            metadata.schema.serialize().to_pybytes(),
-            metadata.logical_dtype_payload,
-        )
-        connection = self._require_connection()
-        existing = connection.execute(
-            "SELECT id FROM part_metadata WHERE schema = ? AND logical_dtypes = ?",
-            values,
-        ).fetchone()
-        if existing is not None:
-            return int(existing[0])
-        self._gate_row_write(values)
-        cursor = connection.execute(
-            "INSERT INTO part_metadata(schema, logical_dtypes) VALUES (?, ?)",
-            values,
-        )
-        return int(cursor.lastrowid)
-
-    def observe(
-        self,
-        path: Path,
-        metadata: DatasetPartMetadata,
-        *,
-        selected: bool,
-    ) -> None:
-        """Attach bounded Parquet metadata to one registered physical candidate."""
-
-        relative = Path(path).relative_to(self.data_root).as_posix()
-        identity = metadata.identity
-        row = (
-            self._require_connection()
-            .execute(
-                "SELECT partition_kind, partition_year, part_index, "
-                "device, inode, size, modified_ns FROM parts WHERE relative_path = ?",
-                (relative,),
-            )
-            .fetchone()
-        )
-        if row is None:
+    def observe(self, path: Path, metadata: DatasetPartMetadata) -> None:
+        part = self._parts.get(Path(path))
+        if part is None:
             raise ValueError("dataset_inventory_changed")
-        if tuple(str(value) for value in row[3:]) != _identity_values(identity):
+        if part.identity != metadata.identity:
             raise ValueError("dataset_file_identity_changed")
-        with self._transaction():
-            metadata_id = self._metadata_id(metadata)
-            prospective_row = (
-                relative,
-                *row[:3],
-                int(selected),
-                *row[3:],
-                metadata_id,
-                metadata.row_count,
-                metadata.file_size_bytes,
-            )
-            self._gate_row_write(prospective_row)
-            self._require_connection().execute(
-                "UPDATE parts SET selected = ?, metadata_id = ?, row_count = ?, "
-                "file_size_bytes = ? WHERE relative_path = ?",
-                (
-                    int(selected),
-                    metadata_id,
-                    metadata.row_count,
-                    metadata.file_size_bytes,
-                    relative,
-                ),
-            )
-
-    def new_path_selection(self) -> int:
-        self._next_selection_id += 1
-        return self._next_selection_id
-
-    def select_path(self, selection_id: int, path: Path) -> None:
-        if type(selection_id) is not int or selection_id <= 0:
-            raise ValueError("invalid_dataset_path_selection")
-        relative = Path(path).relative_to(self.data_root).as_posix()
-        connection = self._require_connection()
-        before = connection.total_changes
-        self._gate_row_write((selection_id, relative))
-        with self._transaction():
-            connection.execute(
-                "INSERT OR IGNORE INTO path_selections(selection_id, relative_path) "
-                "SELECT ?, relative_path FROM parts "
-                "WHERE relative_path = ? AND selected = 1",
-                (selection_id, relative),
-            )
-        if connection.total_changes == before:
-            row = connection.execute(
-                "SELECT 1 FROM path_selections "
-                "WHERE selection_id = ? AND relative_path = ?",
-                (selection_id, relative),
-            ).fetchone()
-            if row is None:
-                raise ValueError("dataset_path_not_selected")
-
-    def release_path_selection(self, selection_id: int) -> None:
-        connection = self._require_connection()
-        reserve = connection.execute(
-            "SELECT COALESCE(SUM(18 + length(CAST(selection_id AS BLOB)) "
-            "+ length(CAST(relative_path AS BLOB))), 0), COUNT(*) "
-            "FROM path_selections WHERE selection_id = ?",
-            (selection_id,),
-        ).fetchone()
-        assert reserve is not None
-        self._gate_physical_write(
-            logical_bytes=int(reserve[0]),
-            row_count=int(reserve[1]),
-        )
-        with self._transaction():
-            connection.execute(
-                "DELETE FROM path_selections WHERE selection_id = ?",
-                (selection_id,),
-            )
-
-    def iter_entries(
-        self,
-        *,
-        selected: bool = False,
-        path_selection: int | None = None,
-    ) -> Iterator[tuple[Path, DatasetPartMetadata]]:
-        join, where, parameters = self._path_selection_query(
-            selected=selected,
-            path_selection=path_selection,
-        )
-        cursor = self._require_connection().execute(
-            "SELECT parts.relative_path, device, inode, size, modified_ns, schema, "
-            "row_count, file_size_bytes, logical_dtypes FROM parts "
-            "LEFT JOIN part_metadata ON metadata_id = part_metadata.id"
-            f"{join}{where} ORDER BY partition_kind, partition_year, part_index",
-            parameters,
-        )
-        try:
-            for row in cursor:
-                relative = str(row[0])
-                yield (
-                    self.data_root / relative,
-                    _metadata_from_row(row[1:]),
-                )
-        finally:
-            _close_cursor_preserving_primary(cursor)
-
-    def content_hash(self, *, resource_policy: RuntimeResourcePolicy) -> str:
-        """Bind all ordered physical members without expanding the control manifest."""
-        digest = hashlib.sha256()
-        buffer_bytes = min(64 * 1024, max(1, resource_policy.operation_headroom_bytes))
-        with resource_policy.lease("storage.dataset.content_hash", buffer_bytes):
-            with closing_iterator(self.iter_entries()) as entries:
-                for path, metadata in entries:
-                    member_hash = _hash_file_content(
-                        path,
-                        metadata.identity,
-                        "dataset_content_identity_changed",
-                        chunk_size=buffer_bytes,
-                    )
-                    for text in (
-                        path.relative_to(self.data_root).as_posix(),
-                        member_hash,
-                    ):
-                        raw = text.encode("utf-8")
-                        digest.update(len(raw).to_bytes(8, "big"))
-                        digest.update(raw)
-        return digest.hexdigest()
-
-    def iter_paths(
-        self,
-        *,
-        selected: bool,
-        path_selection: int | None = None,
-    ) -> Iterator[Path]:
-        join, where, parameters = self._path_selection_query(
-            selected=selected,
-            path_selection=path_selection,
-        )
-        cursor = self._require_connection().execute(
-            "SELECT parts.relative_path FROM parts"
-            f"{join}{where} ORDER BY partition_kind, partition_year, part_index",
-            parameters,
-        )
-        try:
-            for (relative,) in cursor:
-                yield self.data_root / str(relative)
-        finally:
-            _close_cursor_preserving_primary(cursor)
-
-    def path_count(
-        self,
-        *,
-        selected: bool,
-        path_selection: int | None = None,
-    ) -> int:
-        if path_selection is not None:
-            row = (
-                self._require_connection()
-                .execute(
-                    "SELECT COUNT(*) FROM path_selections "
-                    "JOIN parts ON parts.relative_path = path_selections.relative_path "
-                    "WHERE path_selections.selection_id = ? AND parts.selected = 1",
-                    (path_selection,),
-                )
-                .fetchone()
-            )
-            assert row is not None
-            return int(row[0])
-        join, where, parameters = self._path_selection_query(
-            selected=selected,
-            path_selection=path_selection,
-        )
-        row = (
-            self._require_connection()
-            .execute(f"SELECT COUNT(*) FROM parts{join}{where}", parameters)
-            .fetchone()
-        )
-        assert row is not None
-        return int(row[0])
-
-    def path_at(
-        self,
-        index: int,
-        *,
-        selected: bool,
-        path_selection: int | None = None,
-    ) -> Path:
-        if index < 0:
-            raise IndexError(index)
-        join, where, parameters = self._path_selection_query(
-            selected=selected,
-            path_selection=path_selection,
-        )
-        row = (
-            self._require_connection()
-            .execute(
-                "SELECT parts.relative_path FROM parts"
-                f"{join}{where} ORDER BY partition_kind, partition_year, part_index "
-                "LIMIT 1 OFFSET ?",
-                (*parameters, index),
-            )
-            .fetchone()
-        )
-        if row is None:
-            raise IndexError(index)
-        return self.data_root / str(row[0])
-
-    @staticmethod
-    def _path_selection_query(
-        *,
-        selected: bool,
-        path_selection: int | None,
-    ) -> tuple[str, str, tuple[int, ...]]:
-        if path_selection is None:
-            return "", " WHERE selected = 1" if selected else "", ()
-        return (
-            "",
-            " WHERE selected = 1 AND EXISTS ("
-            "SELECT 1 FROM path_selections "
-            "WHERE path_selections.selection_id = ? "
-            "AND path_selections.relative_path = parts.relative_path)",
-            (path_selection,),
-        )
+        part.metadata = metadata
 
     def metadata_for(self, path: Path) -> DatasetPartMetadata:
-        relative = Path(path).relative_to(self.data_root).as_posix()
-        row = (
-            self._require_connection()
-            .execute(
-                "SELECT device, inode, size, modified_ns, schema, row_count, "
-                "file_size_bytes, logical_dtypes "
-                "FROM parts LEFT JOIN part_metadata ON metadata_id = part_metadata.id "
-                "WHERE relative_path = ?",
-                (relative,),
-            )
-            .fetchone()
-        )
-        if row is None:
+        part = self._parts.get(Path(path))
+        if part is None:
             raise ValueError("dataset_part_not_in_session")
-        return _metadata_from_row(row)
+        if part.metadata is None:
+            raise RuntimeError("dataset_inventory_metadata_missing")
+        return part.metadata
 
-    def schema_payload_bytes_for(self, path: Path) -> int:
-        relative = Path(path).relative_to(self.data_root).as_posix()
-        row = (
-            self._require_connection()
-            .execute(
-                "SELECT length(schema) FROM parts "
-                "LEFT JOIN part_metadata ON metadata_id = part_metadata.id "
-                "WHERE relative_path = ?",
-                (relative,),
-            )
-            .fetchone()
-        )
-        if row is None or row[0] is None:
-            raise ValueError("dataset_inventory_changed")
-        return int(row[0])
+    def iter_entries(self):
+        for path in self._parts:
+            yield path, self.metadata_for(path)
 
-    def _scan_filesystem(self, spec, *, on_year, on_path) -> None:  # noqa: ANN001
+    def content_hash(self) -> str:
+        """Bind ordered physical members without expanding the control manifest."""
+        digest = hashlib.sha256()
+        with closing_iterator(self.iter_entries()) as entries:
+            for path, metadata in entries:
+                member_hash = _hash_file_content(
+                    path, metadata.identity, "dataset_content_identity_changed"
+                )
+                for text in (path.relative_to(self.data_root).as_posix(), member_hash):
+                    raw = text.encode("utf-8")
+                    digest.update(len(raw).to_bytes(8, "big"))
+                    digest.update(raw)
+        return digest.hexdigest()
+
+    def _scan_filesystem(self, spec, *, on_year, on_path) -> None:
         partition_columns = tuple(
             str(column) for column in spec.get("partition_columns", ())
         )
         if partition_columns not in ((), ("year",)):
             raise ValueError("unsupported_partitioning")
         require_unaliased_path(self.data_root, error="invalid_dataset_part_files")
-        with handle_preserving_primary(_directory_entries(self.data_root)) as entries:
+        with closing_iterator(_directory_entries(self.data_root)) as entries:
             unpartitioned = any(
-                path.suffix.casefold() == ".parquet" for path, _, _ in entries
+                (path.suffix.casefold() == ".parquet" for path, _, _ in entries)
             )
-        partitioned = partition_columns == ("year",) and not unpartitioned
+        partitioned = partition_columns == ("year",) and (not unpartitioned)
         if partitioned:
-            with handle_preserving_primary(
-                _directory_entries(self.data_root)
-            ) as entries:
+            with closing_iterator(_directory_entries(self.data_root)) as entries:
                 for path, is_directory, _ in entries:
                     if not path.name.casefold().startswith("year="):
                         continue
@@ -763,10 +211,7 @@ class DatasetSessionInventory:
             raise
 
     def _validated_coordinates(
-        self,
-        path: Path,
-        *,
-        partitioned: bool | None,
+        self, path: Path, *, partitioned: bool | None
     ) -> tuple[int, int, int]:
         candidate = Path(path)
         relative = candidate.relative_to(self.data_root)
@@ -790,134 +235,3 @@ class DatasetSessionInventory:
         else:
             raise ValueError("invalid_dataset_part_files")
         return coordinates
-
-    def _register_year(self, year: int, label: str) -> None:
-        row = (
-            self._require_connection()
-            .execute("SELECT label FROM year_labels WHERE year = ?", (year,))
-            .fetchone()
-        )
-        if row is not None:
-            if str(row[0]) != label:
-                raise ValueError("invalid_dataset_part_files")
-            return
-        values = (year, label)
-        self._gate_row_write(values)
-        try:
-            self._require_connection().execute(
-                "INSERT INTO year_labels(year, label) VALUES (?, ?)", values
-            )
-        except sqlite3.IntegrityError as exc:
-            raise ValueError("invalid_dataset_part_files") from exc
-
-    def _register_candidate(
-        self,
-        path: Path,
-        coordinates: tuple[int, int, int],
-    ) -> None:
-        relative = path.relative_to(self.data_root).as_posix()
-        identity = dataset_file_identity(path)
-        values = (
-            relative,
-            *coordinates,
-            0,
-            *_identity_values(identity),
-        )
-        self._gate_row_write(values)
-        try:
-            self._require_connection().execute(
-                "INSERT INTO parts(relative_path, partition_kind, "
-                "partition_year, part_index, selected, device, inode, size, "
-                "modified_ns) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                values,
-            )
-        except sqlite3.IntegrityError as exc:
-            raise ValueError("invalid_dataset_part_files") from exc
-
-    def _gate_row_write(self, values: tuple[object, ...]) -> None:
-        logical_bytes = 0
-        for value in values:
-            if isinstance(value, bytes):
-                encoded_size = len(value)
-            elif isinstance(value, str):
-                encoded_size = len(value.encode("utf-8"))
-            elif isinstance(value, int):
-                encoded_size = len(str(value))
-            elif value is None:
-                encoded_size = 0
-            else:
-                raise TypeError("invalid_dataset_inventory_row_value")
-            logical_bytes += 1 + 8 + encoded_size
-
-        self._gate_physical_write(
-            logical_bytes=logical_bytes,
-            row_count=1,
-        )
-
-    def _gate_physical_write(self, *, logical_bytes: int, row_count: int) -> None:
-        if row_count == 0:
-            return
-        # Worst-case parts row: table plus three indexes, doubled for journal.
-        reserve_bytes = 2 * (
-            4 * logical_bytes + 8 * DATASET_INVENTORY_RESERVE_BYTES * row_count
-        )
-        require_free_disk_headroom(
-            self._scratch_parent,
-            reserve_bytes=reserve_bytes,
-        )
-        connection = self._require_connection()
-        current_pages = int(connection.execute("PRAGMA main.page_count").fetchone()[0])
-        growth_pages = (reserve_bytes + 2 * DATASET_INVENTORY_RESERVE_BYTES - 1) // (
-            2 * DATASET_INVENTORY_RESERVE_BYTES
-        )
-        pages = current_pages + growth_pages
-        self._scratch_reservation.resize(
-            max(
-                self._scratch_reservation.reserved_bytes,
-                2 * pages * DATASET_INVENTORY_RESERVE_BYTES,
-            )
-        )
-        connection.execute(f"PRAGMA main.max_page_count={pages}")
-
-    def _require_connection(self) -> sqlite3.Connection:
-        if self._connection is None:
-            raise RuntimeError("dataset_inventory_closed")
-        return self._connection
-
-
-def _close_cursor_preserving_primary(cursor: sqlite3.Cursor) -> None:
-    primary = sys.exception()
-    if primary is None:
-        cursor.close()
-        return
-    try:
-        cursor.close()
-    except BaseException as close_error:
-        primary.add_note(
-            f"dataset inventory cursor close also failed: {type(close_error).__name__}"
-        )
-
-
-def _identity_values(identity: DatasetFileIdentity) -> tuple[str, str, str, str]:
-    return (
-        str(identity.device),
-        str(identity.inode),
-        str(identity.size),
-        str(identity.modified_ns),
-    )
-
-
-def _metadata_from_row(
-    row: tuple[object, ...],
-) -> DatasetPartMetadata:
-    if any(value is None for value in row[4:]):
-        raise RuntimeError("dataset_inventory_metadata_missing")
-    return DatasetPartMetadata(
-        identity=DatasetFileIdentity(
-            int(row[0]), int(row[1]), int(row[2]), int(row[3])
-        ),
-        schema=pa.ipc.read_schema(pa.BufferReader(bytes(row[4]))),
-        row_count=int(row[5]),
-        file_size_bytes=int(row[6]),
-        logical_dtype_payload=bytes(row[7]),
-    )

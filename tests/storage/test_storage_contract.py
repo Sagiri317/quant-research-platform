@@ -11,9 +11,7 @@ from quant_research_platform.storage.datasets import (
     fingerprint_dataset,
     write_dataset,
 )
-from quant_research_platform.storage.manifests import (
-    write_manifest,
-)
+from quant_research_platform.storage.manifests import write_manifest
 from tests.storage.low_level_fixtures import (
     make_dataset_artifact_root,
     make_default_dataset_frame,
@@ -25,72 +23,42 @@ def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
     tmp_path: Path,
 ) -> None:
     frame = make_default_dataset_frame(
-        asset_ids=("asset_001",),
-        dates=("2014-01-02",),
-        values=(1.0,),
+        asset_ids=("asset_001",), dates=("2014-01-02",), values=(1.0,)
     )
-
     with pytest.raises(ValueError, match="outside_local_only_boundary"):
         write_dataset(
             tmp_path / "outside-local-only" / "x",
             frame,
             spec=make_processed_dataset_spec(),
         )
-
     assert not (tmp_path / "outside-local-only").exists()
-
-
-def test_public_dataset_writer_rejects_lazy_input_before_iteration(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "lazy_input")
-
-    class DangerousLazyInput:
-        iter_called = False
-
-        def __iter__(self) -> DangerousLazyInput:
-            self.iter_called = True
-            return self
-
-    data = DangerousLazyInput()
-    with pytest.raises(TypeError, match="invalid_dataset_write_input"):
-        write_dataset(root, data, spec=make_processed_dataset_spec("lazy_input"))  # type: ignore[arg-type]
-
-    assert data.iter_called is False
-    assert not root.exists()
 
 
 def test_public_dataset_writer_validates_concrete_sequence_elements(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "invalid_sequence")
-
-    with pytest.raises(TypeError, match="invalid_dataset_write_input"):
+    with pytest.raises(TypeError, match="invalid_dataset_chunk"):
         write_dataset(
             root,
-            [make_default_dataset_frame(), object()],  # type: ignore[list-item]
+            [make_default_dataset_frame(), object()],
             spec=make_processed_dataset_spec("invalid_sequence"),
         )
-
     assert not root.exists()
 
 
-def test_public_dataset_writer_accepts_exact_frame_sequences(
-    tmp_path: Path,
-) -> None:
+def test_public_dataset_writer_accepts_exact_frame_sequences(tmp_path: Path) -> None:
     frame = make_default_dataset_frame()
     roots = (
         make_dataset_artifact_root(tmp_path, "list_input"),
         make_dataset_artifact_root(tmp_path, "tuple_input"),
     )
-
     for root, data in zip(
         roots,
         ([frame.iloc[:2], frame.iloc[2:]], (frame.iloc[:2], frame.iloc[2:])),
         strict=True,
     ):
         write_dataset(root, data, spec=make_processed_dataset_spec(root.name))
-
     assert (
         fingerprint_dataset(roots[0]).content_hash
         == fingerprint_dataset(roots[1]).content_hash
@@ -99,17 +67,13 @@ def test_public_dataset_writer_accepts_exact_frame_sequences(
 
 def test_dataset_writer_accepts_private_processed_artifact_root(tmp_path: Path) -> None:
     root = make_dataset_artifact_root(tmp_path)
-
     write_dataset(
         root,
         make_default_dataset_frame(
-            asset_ids=("asset_001",),
-            dates=("2014-01-02",),
-            values=(1.0,),
+            asset_ids=("asset_001",), dates=("2014-01-02",), values=(1.0,)
         ),
         spec=make_processed_dataset_spec(),
     )
-
     assert (root / "spec.json").is_file()
     assert (root / "_manifest" / "manifest.json").is_file()
     assert (root / "data" / "year=2014" / "part-000.parquet").is_file()
@@ -121,24 +85,17 @@ def test_projected_dataset_fingerprint_includes_primary_key_columns(
     left = tmp_path / "data" / "processed" / "a_share" / "factor" / "left"
     right = tmp_path / "data" / "processed" / "a_share" / "factor" / "right"
     right_frame = make_default_dataset_frame(
-        asset_ids=("asset_001",),
-        dates=("2014-01-02",),
-        values=(1.0,),
+        asset_ids=("asset_001",), dates=("2014-01-02",), values=(1.0,)
     ).assign(asset_id="asset_002")
-
     write_dataset(
         left,
         make_default_dataset_frame(
-            asset_ids=("asset_001",),
-            dates=("2014-01-02",),
-            values=(1.0,),
+            asset_ids=("asset_001",), dates=("2014-01-02",), values=(1.0,)
         ),
         spec=make_processed_dataset_spec("left"),
     )
     write_dataset(right, right_frame, spec=make_processed_dataset_spec("right"))
-
     comparison = compare_datasets(left, right, columns=["value"])
-
     assert comparison.status == "CONTENT_MISMATCH"
     assert comparison.matches is False
 
@@ -147,9 +104,7 @@ def test_projected_compare_binds_only_selected_and_primary_key_schema(
     tmp_path: Path,
 ) -> None:
     base = make_default_dataset_frame(
-        asset_ids=("asset_001",),
-        dates=("2014-01-02",),
-        values=(1.0,),
+        asset_ids=("asset_001",), dates=("2014-01-02",), values=(1.0,)
     )
     spec = make_processed_dataset_spec("projected_left")
     projected_roles = {**spec.column_roles, "ignored": ColumnRole.CONTEXT}
@@ -158,9 +113,7 @@ def test_projected_compare_binds_only_selected_and_primary_key_schema(
     selected = make_dataset_artifact_root(tmp_path, "projected_selected")
     primary_key = make_dataset_artifact_root(tmp_path, "projected_primary_key")
     write_dataset(
-        left,
-        base.assign(ignored=1),
-        spec=replace(spec, column_roles=projected_roles),
+        left, base.assign(ignored=1), spec=replace(spec, column_roles=projected_roles)
     )
     for root, frame in (
         (ignored, base.assign(ignored="different")),
@@ -171,11 +124,9 @@ def test_projected_compare_binds_only_selected_and_primary_key_schema(
             root,
             frame,
             spec=replace(
-                make_processed_dataset_spec(root.name),
-                column_roles=projected_roles,
+                make_processed_dataset_spec(root.name), column_roles=projected_roles
             ),
         )
-
     assert compare_datasets(left, ignored, columns=["value"]).status == "MATCH"
     assert (
         compare_datasets(left, selected, columns=["value"]).status == "SCHEMA_MISMATCH"
@@ -190,10 +141,8 @@ def test_manifest_writer_rejects_existing_target_file(tmp_path: Path) -> None:
     manifest = tmp_path / "outputs" / "run" / "manifest.json"
     manifest.parent.mkdir(parents=True)
     manifest.write_text('{"existing": true}\n', encoding="utf-8")
-
     with pytest.raises(ValueError, match="output_already_exists"):
         write_manifest(manifest, {"schema_id": "qrp-output-manifest"})
-
     assert manifest.read_text(encoding="utf-8") == '{"existing": true}\n'
 
 

@@ -2,10 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-from collections.abc import Iterator
-from contextlib import contextmanager
-
 import pandas as pd
 from pandas.api.types import is_bool_dtype, is_integer_dtype
 
@@ -16,10 +12,6 @@ from quant_research_platform.contracts.filtering import (
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
     strict_finite_numeric_series,
-)
-from quant_research_platform.runtime.resources import (
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
 )
 
 
@@ -37,10 +29,9 @@ def apply_filter_mode(
         for column in columns[1:]:
             mask = _validated_bool_mask(frame, column)
             keep &= mask
-        if len(columns) > 1:
-            del mask
+
         filtered = frame.loc[keep]
-        del keep
+
     return filtered, {
         metadata_key: mode,
         "filter_columns_used": list(columns),
@@ -48,69 +39,6 @@ def apply_filter_mode(
         "rows_input": int(len(frame)),
         "rows_after_filter_mode": int(len(filtered)),
     }
-
-
-@contextmanager
-def _filter_mode_scope(
-    frame: pd.DataFrame,
-    *,
-    mode: str,
-    metadata_key: str,
-) -> Iterator[tuple[pd.DataFrame, dict[str, object]]]:
-    policy = current_runtime_resource_policy()
-    lease = None
-    if mode == "unfiltered":
-        filtered = frame
-    else:
-        working_bytes = _filter_working_set_bound(frame, mode=mode)
-        if policy is not None:
-            policy.require_working_set(
-                working_bytes,
-                error="research_filter_working_set_exceeds_task_memory_budget",
-            )
-            lease = policy.lease("research.filter", working_bytes)
-        try:
-            filtered, metadata = apply_filter_mode(
-                frame,
-                mode=mode,
-                metadata_key=metadata_key,
-            )
-            if lease is not None:
-                lease.shrink_to(pandas_frame_payload_bytes(filtered))
-                lease.transfer("research.filter.output")
-        except BaseException as exc:
-            filtered = None
-            if lease is not None:
-                try:
-                    lease.close()
-                except BaseException as close_error:
-                    exc.add_note(
-                        "research filter lease release also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-                lease = None
-            raise
-    try:
-        if mode == "unfiltered":
-            filtered, metadata = apply_filter_mode(
-                frame,
-                mode=mode,
-                metadata_key=metadata_key,
-            )
-        yield filtered, metadata
-    finally:
-        primary = sys.exception()
-        filtered = None
-        if lease is not None:
-            try:
-                lease.close()
-            except BaseException as close_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "research filter lease release also failed: "
-                    f"{type(close_error).__name__}"
-                )
 
 
 def _validated_bool_mask(frame: pd.DataFrame, column: str) -> pd.Series:
@@ -126,24 +54,6 @@ def _validated_bool_mask(frame: pd.DataFrame, column: str) -> pd.Series:
         if not bool(invalid.any()):
             return series.eq(1)
     raise ValueError(f"invalid_filter_column_dtype: {column}")
-
-
-def _filter_working_set_bound(frame: pd.DataFrame, *, mode: str) -> int:
-    """Bound the new mask and filtered-frame allocations before filtering."""
-
-    filter_count = len(required_filter_columns(mode))
-    if not filter_count:
-        return 0
-    index_bytes = int(frame.index.memory_usage(deep=True))
-    mask_bytes = index_bytes + len(frame)
-    output_index_expansion = 0
-    if isinstance(frame.index, pd.RangeIndex):
-        materialized_index_bytes = len(frame) * int(frame.index.dtype.itemsize)
-        output_index_expansion = max(0, materialized_index_bytes - index_bytes)
-    return max(
-        2 * mask_bytes if filter_count > 1 else mask_bytes,
-        pandas_frame_payload_bytes(frame) + mask_bytes + output_index_expansion,
-    )
 
 
 A_SHARE_ELIGIBILITY_FACTS = (

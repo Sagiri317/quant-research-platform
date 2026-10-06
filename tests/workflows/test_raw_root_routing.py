@@ -198,7 +198,6 @@ def test_crypto_semantic_source_identity_and_producer_share_one_root(
     from quant_research_platform.research.protocols.crypto_hft import (
         CryptoMakerCandidate,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.software_identity import (
         production_software_identity,
     )
@@ -286,36 +285,34 @@ def test_crypto_semantic_source_identity_and_producer_share_one_root(
     research_window = {**configuration["windows"]["holdout"], "access": "holdout"}
     upstream = {dependency: "1" * 64 for dependency in target.dependencies}
     software = production_software_identity()
-    with runtime_resource_policy_scope() as policy:
-        envelope = research._target_envelope_for_spec(
+    envelope = research._target_envelope_for_spec(
+        profile=profile,
+        protocol=protocol,
+        target_spec=target,
+        data_spec=None,
+        research_window=research_window,
+        upstream_identities=upstream,
+        software_identity=software,
+        raw_content_identity=source_identity(expected_root, target_id),
+    )
+    seen.clear()
+    with pytest.raises(RuntimeError) as caught:
+        research._build_semantic_target(
             profile=profile,
             protocol=protocol,
-            target_spec=target,
-            data_spec=None,
+            layout=layout,
+            spec=target,
+            planned={
+                "requested_identity": envelope.instance_identity,
+                "upstream_identities": upstream,
+            },
+            target_layout=layout,
+            time_window=window,
             research_window=research_window,
-            upstream_identities=upstream,
             software_identity=software,
-            raw_content_identity=source_identity(expected_root, target_id),
+            raw_root=common_root,
         )
-        seen.clear()
-        with pytest.raises(RuntimeError) as caught:
-            research._build_semantic_target(
-                profile=profile,
-                protocol=protocol,
-                layout=layout,
-                spec=target,
-                planned={
-                    "requested_identity": envelope.instance_identity,
-                    "upstream_identities": upstream,
-                },
-                target_layout=layout,
-                policy=policy,
-                time_window=window,
-                research_window=research_window,
-                software_identity=software,
-                raw_root=common_root,
-            )
-        assert caught.value is primary
+    assert caught.value is primary
     assert seen == [("identity", expected_root), ("producer", expected_root)]
 
 

@@ -16,18 +16,15 @@ from decimal import Decimal
 from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import (
-    json_record_working_set_bytes,
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.order_book import (
     price_decimal_places,
     validate_price_unit,
 )
-from quant_research_platform.contracts.validation import clear_exception_frames
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
-    runtime_resource_policy_scope,
 )
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
@@ -41,7 +38,6 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
     validate_market_payload,
 )
-from quant_research_platform.storage._scratch_ownership import handle_preserving_primary
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
     atomic_write_json,
@@ -202,7 +198,7 @@ def _filename(date: str, offset: int, *, exchange=EXCHANGE) -> str:
 def _verified_file(path: Path, *, expected_sha256=None):
     require_unaliased_path(path, error="tardis_raw_identity_changed")
     identity = dataset_file_identity(path)
-    with handle_preserving_primary(open_filesystem_file(path, "rb")) as handle:
+    with closing_iterator(open_filesystem_file(path, "rb")) as handle:
         if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != identity:
             raise ValueError("tardis_raw_identity_changed")
         reader = _DigestingReader(handle) if expected_sha256 is not None else handle
@@ -224,7 +220,7 @@ def _verified_file(path: Path, *, expected_sha256=None):
                 ):
                     raise ValueError("tardis_raw_identity_changed")
             except BaseException as error:
-                if primary is None or isinstance(primary, GeneratorExit):
+                if primary is None:
                     raise
                 primary.add_note(
                     "Tardis raw identity verification also failed: "
@@ -237,7 +233,6 @@ def iter_native_slice(
     *,
     date: str,
     offset_minutes: int,
-    resource_policy,
     expected_sha256=None,
     exchange=EXCHANGE,
     symbols=SYMBOLS,
@@ -251,96 +246,95 @@ def iter_native_slice(
     upper = lower + SLICE_MINUTES * 60 * 10**9
     previous = lower
     with (
-        resource_policy.lease("tardis.native_stream", _COPY_BYTES),
         _verified_file(path, expected_sha256=expected_sha256) as raw,
-        handle_preserving_primary(gzip.GzipFile(fileobj=raw, mode="rb")) as stream,
+        closing_iterator(gzip.GzipFile(fileobj=raw, mode="rb")) as stream,
     ):
         number = 0
         while True:
-            with resource_policy.lease(
-                "tardis.native_record",
-                json_record_working_set_bytes(MAX_RECORD_BYTES),
-            ) as record_lease:
-                line = value = payload = native = parts = timestamp = None
-                try:
-                    line = stream.readline(MAX_RECORD_BYTES + 1)
-                    if not line:
-                        return
-                    number += 1
-                    if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
-                        raise ValueError("tardis_native_record_invalid")
-                    record_lease.shrink_to(json_record_working_set_bytes(len(line)))
-                    if line in (b"\n", b"\r\n"):
-                        yield number, None, None
-                        continue
+            line = value = payload = native = parts = timestamp = None
+            try:
+                line = stream.readline(MAX_RECORD_BYTES + 1)
+                if not line:
+                    return
+                number += 1
+                if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
+                    raise ValueError("tardis_native_record_invalid")
+                if line in (b"\n", b"\r\n"):
+                    _yield_value = (number, None, None)
                     try:
-                        timestamp, payload = line.decode("utf-8").split(" ", 1)
-                    except (UnicodeDecodeError, ValueError):
-                        raise ValueError("tardis_native_record_invalid") from None
-                    observed = strict_iso_timestamp(
-                        timestamp, error="tardis_observed_time_invalid"
-                    ).value
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
+                    continue
+                try:
+                    timestamp, payload = line.decode("utf-8").split(" ", 1)
+                except (UnicodeDecodeError, ValueError):
+                    raise ValueError("tardis_native_record_invalid") from None
+                observed = strict_iso_timestamp(
+                    timestamp, error="tardis_observed_time_invalid"
+                ).value
+                if (
+                    not timestamp.endswith("Z")
+                    or not lower <= observed < upper
+                    or observed < previous
+                ):
+                    raise ValueError("tardis_observed_time_invalid")
+                previous = observed
+                value = parse_qrp_json_object(payload.encode("utf-8"))
+                if (
+                    set(value) - {"stream", "data", "generated"}
+                    or not isinstance(value.get("stream"), str)
+                    or type(value.get("data")) is not dict
+                ):
+                    raise ValueError("tardis_native_record_invalid")
+                parts = value["stream"].split("@")
+                if (
+                    len(parts) < 2
+                    or parts[0] not in symbols
+                    or parts[1] not in channels
+                ):
+                    raise ValueError("tardis_native_channel_invalid")
+                channel = parts[1]
+                suffix = _stream_suffix(channel, exchange)
+                if value["stream"] != parts[0] + "@" + suffix:
+                    raise ValueError("tardis_native_frequency_unsupported")
+                native = value["data"]
+                if "generated" in value and type(value["generated"]) is not bool:
+                    raise ValueError("tardis_generated_flag_invalid")
+                if channel in ("depth", "aggTrade"):
+                    validate_market_payload(
+                        FUTURES_MARKET_TYPE
+                        if exchange == EXCHANGE
+                        else SPOT_MARKET_TYPE,
+                        "depth" if channel == "depth" else "agg_trades",
+                        parts[0].upper(),
+                        native,
+                        source_schema=SCHEMA_ID,
+                        observed_time_ns=observed,
+                    )
+                elif channel == "depthSnapshot":
                     if (
-                        not timestamp.endswith("Z")
-                        or not lower <= observed < upper
-                        or observed < previous
+                        type(native.get("lastUpdateId")) is not int
+                        or native["lastUpdateId"] < 0
+                        or type(native.get("bids")) is not list
+                        or (type(native.get("asks")) is not list)
                     ):
-                        raise ValueError("tardis_observed_time_invalid")
-                    previous = observed
-                    value = parse_qrp_json_object(payload.encode("utf-8"))
-                    if (
-                        set(value) - {"stream", "data", "generated"}
-                        or not isinstance(value.get("stream"), str)
-                        or type(value.get("data")) is not dict
-                    ):
-                        raise ValueError("tardis_native_record_invalid")
-                    parts = value["stream"].split("@")
-                    if (
-                        len(parts) < 2
-                        or parts[0] not in symbols
-                        or parts[1] not in channels
-                    ):
-                        raise ValueError("tardis_native_channel_invalid")
-                    channel = parts[1]
-                    suffix = _stream_suffix(channel, exchange)
-                    if value["stream"] != parts[0] + "@" + suffix:
-                        raise ValueError("tardis_native_frequency_unsupported")
-                    native = value["data"]
-                    if "generated" in value and type(value["generated"]) is not bool:
-                        raise ValueError("tardis_generated_flag_invalid")
-                    if channel in ("depth", "aggTrade"):
-                        validate_market_payload(
-                            FUTURES_MARKET_TYPE
-                            if exchange == EXCHANGE
-                            else SPOT_MARKET_TYPE,
-                            "depth" if channel == "depth" else "agg_trades",
-                            parts[0].upper(),
-                            native,
-                            source_schema=SCHEMA_ID,
-                            observed_time_ns=observed,
-                        )
-                    elif channel == "depthSnapshot":
-                        if (
-                            type(native.get("lastUpdateId")) is not int
-                            or native["lastUpdateId"] < 0
-                            or type(native.get("bids")) is not list
-                            or type(native.get("asks")) is not list
-                        ):
-                            raise ValueError("tardis_snapshot_invalid")
-                    elif channel in STATE_CHANNELS:
-                        _validate_state(channel, parts[0].upper(), native)
-                    elif (
-                        native.get("s") != parts[0].upper()
-                        or native.get("e") != "markPriceUpdate"
-                    ):
-                        raise ValueError("tardis_mark_price_invalid")
-                    yield number, timestamp, value
-                    value = line = payload = native = None
-                except BaseException as error:
-                    clear_exception_frames(error)
-                    raise
-                finally:
-                    line = value = payload = native = parts = timestamp = None
+                        raise ValueError("tardis_snapshot_invalid")
+                elif channel in STATE_CHANNELS:
+                    _validate_state(channel, parts[0].upper(), native)
+                elif (
+                    native.get("s") != parts[0].upper()
+                    or native.get("e") != "markPriceUpdate"
+                ):
+                    raise ValueError("tardis_mark_price_invalid")
+                _yield_value = (number, timestamp, value)
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
+                value = line = payload = native = None
+            finally:
+                line = value = payload = native = parts = timestamp = None
 
 
 class _ObservedStreams:
@@ -447,7 +441,6 @@ def _publish_slices(
     offset_minutes,
     slice_count,
     byte_budget,
-    resource_policy,
     exchange,
     symbols,
     channels,
@@ -479,20 +472,13 @@ def _publish_slices(
             require_free_disk_headroom(root, reserve_bytes=4096)
             handle.write(json.dumps(row, separators=(",", ":")) + "\n")
 
-        with (
-            runtime_resource_policy_scope(resource_policy) as policy,
-            policy.lease("tardis.archive_metadata", 0) as metadata_lease,
-            native_trade_identities(policy) as observe_trade,
-            ExitStack() as streams,
-        ):
+        with native_trade_identities() as observe_trade, ExitStack() as streams:
             tracker = _ObservedStreams(exchange, observe_trade=observe_trade)
             gaps = streams.enter_context(
-                handle_preserving_primary(
-                    filesystem_gzip_open(gap_path, "wt", encoding="utf-8")
-                )
+                closing_iterator(filesystem_gzip_open(gap_path, "wt", encoding="utf-8"))
             )
             intervals = streams.enter_context(
-                handle_preserving_primary(
+                closing_iterator(
                     filesystem_gzip_open(interval_path, "wt", encoding="utf-8")
                 )
             )
@@ -504,22 +490,21 @@ def _publish_slices(
                 target = root / _filename(date, offset, exchange=exchange)
                 digest = hashlib.sha256()
                 size = 0
-                with policy.lease("tardis.raw_copy", 2 * _COPY_BYTES):
-                    with (
-                        open_slice(offset) as response,
-                        open_filesystem_file(target, "xb") as output,
-                    ):
-                        while block := response.read(min(_COPY_BYTES, remaining + 1)):
-                            if len(block) > remaining:
-                                raise ValueError("tardis_download_budget_exceeded")
-                            require_free_disk_headroom(root, reserve_bytes=len(block))
-                            output.write(block)
-                            digest.update(block)
-                            size += len(block)
-                            remaining -= len(block)
-                        block = None
-                        output.flush()
-                        os.fsync(output.fileno())
+                with (
+                    open_slice(offset) as response,
+                    open_filesystem_file(target, "xb") as output,
+                ):
+                    while block := response.read(min(_COPY_BYTES, remaining + 1)):
+                        if len(block) > remaining:
+                            raise ValueError("tardis_download_budget_exceeded")
+                        require_free_disk_headroom(root, reserve_bytes=len(block))
+                        output.write(block)
+                        digest.update(block)
+                        size += len(block)
+                        remaining -= len(block)
+                    block = None
+                    output.flush()
+                    os.fsync(output.fileno())
                 counts = {}
                 disconnects = rows = 0
                 first = last = None
@@ -527,7 +512,6 @@ def _publish_slices(
                     target,
                     date=date,
                     offset_minutes=offset,
-                    resource_policy=policy,
                     exchange=exchange,
                     symbols=symbols,
                     channels=channels,
@@ -591,9 +575,6 @@ def _publish_slices(
                                 write_row(gaps, gap)
                                 gap_count += 1
                             value = native = gap = interval = closed = None
-                    except BaseException as error:
-                        clear_exception_frames(error)
-                        raise
                     finally:
                         value = native = gap = interval = closed = level = None
                 member = {
@@ -615,9 +596,6 @@ def _publish_slices(
                         channels=channels,
                     ),
                 }
-                metadata_lease.grow(
-                    json_record_working_set_bytes(len(json.dumps(member).encode()))
-                )
                 members.append(member)
                 member = None
             for interval in tracker.finish():
@@ -627,10 +605,7 @@ def _publish_slices(
             streams.close()
 
             def descriptor(path, count):
-                with (
-                    policy.lease("tardis.metadata_hash", 4 * _COPY_BYTES),
-                    open_filesystem_file(path, "rb") as handle,
-                ):
+                with open_filesystem_file(path, "rb") as handle:
                     digest = hashlib.file_digest(handle, "sha256").hexdigest()
                 return {
                     "path": path.name,
@@ -671,7 +646,6 @@ def import_slices(
     slices: Sequence[Path],
     offset_minutes: int = 0,
     byte_budget: int,
-    resource_policy=None,
     exchange=EXCHANGE,
     symbols=SYMBOLS,
     channels=CHANNELS,
@@ -688,7 +662,6 @@ def import_slices(
         offset_minutes=offset_minutes,
         slice_count=len(slices),
         byte_budget=byte_budget,
-        resource_policy=resource_policy,
         exchange=exchange,
         symbols=symbols,
         channels=channels,
@@ -703,7 +676,6 @@ def download_slices(
     offset_minutes: int = 0,
     byte_budget: int,
     api_key: str | None = None,
-    resource_policy=None,
     exchange=EXCHANGE,
     symbols=SYMBOLS,
     channels=CHANNELS,
@@ -750,7 +722,6 @@ def download_slices(
         offset_minutes=offset_minutes,
         slice_count=slice_count,
         byte_budget=byte_budget,
-        resource_policy=resource_policy,
         exchange=exchange,
         symbols=symbols,
         channels=channels,

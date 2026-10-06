@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import sys
-from contextlib import nullcontext
 from fractions import Fraction
 
 import numpy as np
@@ -13,11 +11,6 @@ from quant_research_platform.compute.dataframe.cross_section import _stable_zsco
 from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
-from quant_research_platform.runtime.resources import (
-    MemoryLease,
-    current_runtime_resource_policy,
-    pandas_frame_payload_bytes,
-)
 
 _CANONICAL_FEATURE_PREFIXES = ("feature_", "feature_missing_", "feature_observed_")
 
@@ -50,158 +43,26 @@ def apply_feature_transforms(
     transforms: tuple[FeatureTransformSpec, ...],
     *,
     timestamp_column: str = "timestamp",
-    resource_lease: MemoryLease | None = None,
 ) -> pd.DataFrame:
     canonical = tuple(t for t in transforms if t.transform == "a_share_canonical")
     if canonical:
         if len(transforms) != 1:
             raise ValueError("canonical_feature_pipeline_must_be_exclusive")
-    working_bytes = _feature_transform_working_bytes(frame, transforms)
-    policy = current_runtime_resource_policy()
-    reservation = (
-        policy.lease("research.feature.transform", working_bytes)
-        if policy is not None and resource_lease is None
-        else nullcontext()
-    )
-    with reservation:
-        if canonical:
-            result = canonical_feature_pipeline(
-                frame, factor_columns=canonical[0].source_columns
-            )
-        else:
-            result = frame.copy()
-            for transform in transforms:
-                _apply_feature_transform_to_owned_frame(
-                    result, transform, timestamp_column=timestamp_column
-                )
-        if pandas_frame_payload_bytes(result) > _feature_transform_output_bytes(
-            frame,
-            transforms,
-        ):
-            raise ValueError("research_feature_working_set_exceeds_task_memory_budget")
-        return result
-
-
-def _feature_transform_working_bytes(
-    frame: pd.DataFrame,
-    transforms: tuple[FeatureTransformSpec, ...],
-) -> int:
-    row_count = len(frame)
-    index_bytes = int(frame.index.memory_usage(deep=True))
-    vector_bytes = index_bytes + row_count * 8
-    output_bound = _feature_transform_output_bytes(frame, transforms)
-    workspace_bound = max(
-        (
-            _feature_transform_workspace_bytes(
-                transform,
-                row_count=row_count,
-                vector_bytes=vector_bytes,
-            )
-            for transform in transforms
-        ),
-        default=0,
-    )
-    return output_bound + workspace_bound
-
-
-def _feature_transform_output_bytes(
-    frame: pd.DataFrame,
-    transforms: tuple[FeatureTransformSpec, ...],
-) -> int:
-    return pandas_frame_payload_bytes(frame) + len(frame) * 8 * sum(
-        len(transform.output_columns) for transform in transforms
-    )
-
-
-def _feature_transform_workspace_bytes(
-    transform: FeatureTransformSpec,
-    *,
-    row_count: int,
-    vector_bytes: int,
-) -> int:
-    group_codes = vector_bytes
-    numeric_values = vector_bytes
-    assignment_values = row_count * 8
-    if transform.transform == "a_share_canonical":
-        transform_state = vector_bytes * (8 * len(transform.source_columns) + 32)
-    elif transform.transform == "cross_sectional_zscore":
-        transform_state = sum(
-            (
-                vector_bytes,  # group means
-                vector_bytes,  # group standard deviations
-                vector_bytes,  # nonzero standard deviations
-                vector_bytes,  # centered values
-                vector_bytes,  # normalized values
-                row_count,  # zero-standard-deviation mask
-            )
+    if canonical:
+        return canonical_feature_pipeline(
+            frame, factor_columns=canonical[0].source_columns
         )
-    elif transform.transform == "cross_sectional_rank":
-        transform_state = vector_bytes + vector_bytes  # rank workspace + output
-    elif transform.transform == "winsorize":
-        transform_state = sum(
-            (vector_bytes, vector_bytes, vector_bytes)
-        )  # lower, upper, clipped
-    elif transform.transform == "winsorized_zscore":
-        transform_state = sum(
-            (
-                vector_bytes,  # lower quantile
-                vector_bytes,  # upper quantile
-                vector_bytes,  # clipped values
-                vector_bytes,  # group means
-                vector_bytes,  # group standard deviations
-                vector_bytes,  # nonzero standard deviations
-                vector_bytes,  # centered values
-                vector_bytes,  # normalized values
-                row_count,
-            )
-        )
-    elif transform.transform == "winsorized_rank":
-        transform_state = sum(
-            (
-                vector_bytes,  # lower quantile
-                vector_bytes,  # upper quantile
-                vector_bytes,  # clipped values
-                vector_bytes,  # rank workspace
-                vector_bytes,  # ranked values
-            )
-        )
-    elif transform.transform == "mad_winsorize":
-        transform_state = sum((vector_bytes, vector_bytes, vector_bytes))
-    elif transform.transform == "mad_winsorized_zscore":
-        transform_state = sum(
-            (
-                vector_bytes,
-                vector_bytes,
-                vector_bytes,
-                vector_bytes,
-                vector_bytes,
-                vector_bytes,
-                row_count,
-            )
-        )
-    elif transform.transform == "mad_winsorized_rank":
-        transform_state = sum((vector_bytes, vector_bytes, vector_bytes, vector_bytes))
-    elif transform.transform == "fillna_median":
-        transform_state = vector_bytes + vector_bytes  # medians + filled values
-    else:
-        transform_state = vector_bytes
-    if transform.fillna_policy == "median":
-        transform_state += vector_bytes + vector_bytes  # medians + filled values
-    elif transform.fillna_policy == "zero":
-        transform_state += vector_bytes
-    return numeric_values + group_codes + transform_state + assignment_values
+    result = frame.copy()
+    for transform in transforms:
+        _apply_feature_transform(result, transform, timestamp_column=timestamp_column)
+    return result
 
 
-def _apply_feature_transform_to_owned_frame(
-    result: pd.DataFrame,
-    transform: FeatureTransformSpec,
-    *,
-    timestamp_column: str,
+def _apply_feature_transform(
+    result: pd.DataFrame, transform: FeatureTransformSpec, *, timestamp_column: str
 ) -> None:
     for source_column, output_column in zip(
-        transform.source_columns,
-        transform.output_columns,
-        strict=True,
+        transform.source_columns, transform.output_columns, strict=True
     ):
         if source_column not in result:
             raise ValueError(f"missing_feature_transform_source: {source_column}")
@@ -211,9 +72,7 @@ def _apply_feature_transform_to_owned_frame(
             allow_null=True,
         ).astype("float64")
         transformed = _transform_values(
-            values,
-            timestamps=result[timestamp_column],
-            transform=transform,
+            values, timestamps=result[timestamp_column], transform=transform
         )
         result[output_column] = _apply_fillna(
             transformed,
@@ -223,10 +82,7 @@ def _apply_feature_transform_to_owned_frame(
 
 
 def _transform_values(
-    values: pd.Series,
-    *,
-    timestamps: pd.Series,
-    transform: FeatureTransformSpec,
+    values: pd.Series, *, timestamps: pd.Series, transform: FeatureTransformSpec
 ) -> pd.Series:
     grouped = values.groupby(timestamps, sort=False)
     if transform.transform == "cross_sectional_zscore":
@@ -241,8 +97,7 @@ def _transform_values(
     if transform.transform == "winsorized_rank":
         winsorized = _winsorize(values, grouped, transform.winsorize_quantiles)
         return winsorized.groupby(timestamps, sort=False).rank(
-            method="average",
-            pct=True,
+            method="average", pct=True
         )
     if transform.transform == "mad_winsorize":
         return _mad_winsorize(values, grouped)
@@ -276,8 +131,7 @@ def _winsorize(
 
 
 def _mad_winsorize(
-    values: pd.Series,
-    grouped: pd.core.groupby.SeriesGroupBy,
+    values: pd.Series, grouped: pd.core.groupby.SeriesGroupBy
 ) -> pd.Series:
     median = grouped.transform("median")
     mad = grouped.transform(lambda group: (group - group.median()).abs().median())
@@ -288,78 +142,56 @@ def _mad_winsorize(
 def _industry_size_residuals(target, industries, sizes):
     """Project binary64 inputs exactly onto industry intercepts and one size slope."""
     counts = industries.value_counts(sort=False)
-    nbits = len(target).bit_length()
-    # Binary64 dyadics span at most 1075 bits. Products/sums need at most
-    # four such spans; centering introduces group counts into denominators.
-    group_bits = 4 * 1075 + 2 * nbits
-    pooled_bits = group_bits + 2 * sum(int(count).bit_length() for count in counts)
-    residual_bits = 2 * pooled_bits + 2 * 1075
-    fraction_bytes = sys.getsizeof(Fraction()) + 2 * sys.getsizeof(1 << group_bits)
-    working_bytes = (
-        int(counts.memory_usage(deep=True))
-        + len(counts) * (4 * fraction_bytes + 256)
-        + 32 * (sys.getsizeof(Fraction()) + 2 * sys.getsizeof(1 << residual_bits))
-        + len(target) * 8
+    y_scale = max(float(value).as_integer_ratio()[1] for value in target)
+    x_scale = (
+        1
+        if sizes is None
+        else max(float(value).as_integer_ratio()[1] for value in sizes)
     )
-    policy = current_runtime_resource_policy()
-    reservation = (
-        policy.lease("research.neutralization.exact", working_bytes)
-        if policy is not None
-        else nullcontext()
-    )
-    with reservation:
-        y_scale = max(float(value).as_integer_ratio()[1] for value in target)
-        x_scale = (
-            1
-            if sizes is None
-            else max(float(value).as_integer_ratio()[1] for value in sizes)
+
+    def integer(value, scale):
+        numerator, denominator = float(value).as_integer_ratio()
+        return numerator * (scale // denominator)
+
+    sums = {group: [0, 0, 0, 0] for group in counts.index}
+    for index, (group, value) in enumerate(zip(industries, target, strict=True)):
+        y = integer(value, y_scale)
+        x = 0 if sizes is None else integer(sizes[index], x_scale)
+        totals = sums[group]
+        totals[0] += y
+        totals[1] += x
+        totals[2] += x * x
+        totals[3] += x * y
+    slope = Fraction()
+    if sizes is not None:
+        xx = sum(
+            (
+                Fraction(int(counts[group]) * v[2] - v[1] ** 2, int(counts[group]))
+                for group, v in sums.items()
+            ),
+            Fraction(),
         )
-
-        def integer(value, scale):
-            numerator, denominator = float(value).as_integer_ratio()
-            return numerator * (scale // denominator)
-
-        sums = {group: [0, 0, 0, 0] for group in counts.index}
-        for index, (group, value) in enumerate(zip(industries, target, strict=True)):
-            y = integer(value, y_scale)
-            x = 0 if sizes is None else integer(sizes[index], x_scale)
-            totals = sums[group]
-            totals[0] += y
-            totals[1] += x
-            totals[2] += x * x
-            totals[3] += x * y
-        slope = Fraction()
-        if sizes is not None:
-            xx = sum(
-                (
-                    Fraction(int(counts[group]) * v[2] - v[1] ** 2, int(counts[group]))
-                    for group, v in sums.items()
-                ),
-                Fraction(),
-            )
-            xy = sum(
-                (
-                    Fraction(
-                        int(counts[group]) * v[3] - v[0] * v[1], int(counts[group])
-                    )
-                    for group, v in sums.items()
-                ),
-                Fraction(),
-            )
-            if xx == 0:
-                return np.full(len(target), np.nan)
-            slope = xy / xx
-        residuals = np.empty(len(target), dtype="float64")
-        for index, (group, value) in enumerate(zip(industries, target, strict=True)):
-            count = int(counts[group])
-            y = integer(value, y_scale) * count - sums[group][0]
-            x = (
-                0
-                if sizes is None
-                else integer(sizes[index], x_scale) * count - sums[group][1]
-            )
-            residuals[index] = float((y - slope * x) / (count * y_scale))
-        return residuals
+        xy = sum(
+            (
+                Fraction(int(counts[group]) * v[3] - v[0] * v[1], int(counts[group]))
+                for group, v in sums.items()
+            ),
+            Fraction(),
+        )
+        if xx == 0:
+            return np.full(len(target), np.nan)
+        slope = xy / xx
+    residuals = np.empty(len(target), dtype="float64")
+    for index, (group, value) in enumerate(zip(industries, target, strict=True)):
+        count = int(counts[group])
+        y = integer(value, y_scale) * count - sums[group][0]
+        x = (
+            0
+            if sizes is None
+            else integer(sizes[index], x_scale) * count - sums[group][1]
+        )
+        residuals[index] = float((y - slope * x) / (count * y_scale))
+    return residuals
 
 
 def neutralize_cross_section(
@@ -371,7 +203,6 @@ def neutralize_cross_section(
     minimum_observations: int = 100,
 ) -> pd.DataFrame:
     """Equal-weight, no-intercept industry/size residualization by date."""
-
     required = {"timestamp", industry_column, *factor_columns}
     if not required.issubset(frame.columns):
         raise ValueError("neutralization_columns_invalid")
@@ -444,7 +275,6 @@ def canonical_feature_pipeline(
     industry_column: str = "industry_level1_code",
 ) -> pd.DataFrame:
     """Apply eligible -> MAD winsor -> neutralize -> population zscore."""
-
     if "eligible" not in frame:
         raise ValueError("feature_eligibility_required")
     universe = frame["eligible"]
@@ -465,8 +295,7 @@ def canonical_feature_pipeline(
             allow_null=True,
         )
         winsorized[factor] = _mad_winsorize(
-            values,
-            values.groupby(winsorized["timestamp"], sort=False),
+            values, values.groupby(winsorized["timestamp"], sort=False)
         )
     winsorized[industry_column] = _industry_group_codes(winsorized, industry_column)
     residualized = neutralize_cross_section(
@@ -505,10 +334,7 @@ def canonical_feature_pipeline(
 
 
 def _apply_fillna(
-    values: pd.Series,
-    *,
-    timestamps: pd.Series,
-    fillna_policy: str,
+    values: pd.Series, *, timestamps: pd.Series, fillna_policy: str
 ) -> pd.Series:
     if fillna_policy == "none":
         return values

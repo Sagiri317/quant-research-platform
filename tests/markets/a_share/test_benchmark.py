@@ -64,7 +64,7 @@ def _benchmark_facts() -> tuple[pd.DataFrame, pd.DataFrame]:
             "weight": 1.0,
         }
     )
-    return index_info, pd.DataFrame(rows)
+    return (index_info, pd.DataFrame(rows))
 
 
 def test_benchmark_filters_repeated_codes_and_exact_snapshots():
@@ -72,7 +72,6 @@ def test_benchmark_filters_repeated_codes_and_exact_snapshots():
     normalized = pd.concat(
         iter_benchmark_weight_snapshots(index_info, (weights,)), ignore_index=True
     )
-
     assert tuple(normalized.columns) == (
         "market_id",
         "benchmark_id",
@@ -86,12 +85,10 @@ def test_benchmark_filters_repeated_codes_and_exact_snapshots():
 
 
 def test_processed_benchmark_target_streams_exact_dates_and_requires_global_coverage(
-    tmp_path,
-    monkeypatch,
+    tmp_path, monkeypatch
 ):
     from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.runtime.dataframes import iter_complete_session_frames
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.datasets.reading import (
         DatasetReadMode,
         read_dataset,
@@ -99,7 +96,7 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
     from quant_research_platform.storage.datasets.writing import write_dataset
 
     slabs = []
-    read_frame = processed_producer._owned_frame
+    read_frame = processed_producer.materialize_dataset_session
 
     def observed_read(*args):
         frame = read_frame(*args)
@@ -107,7 +104,10 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
             slabs.append(frame["timestamp"].nunique())
         return frame
 
-    monkeypatch.setattr(processed_producer, "_owned_frame", observed_read)
+    monkeypatch.setattr(
+        processed_producer, "materialize_dataset_session", observed_read
+    )
+    monkeypatch.setattr(processed_producer, "DEFAULT_BATCH_ROWS", 256)
     profile = research_profile()
     layout = StorageLayout(tmp_path)
     index_info, _ = _benchmark_facts()
@@ -127,65 +127,48 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
             for asset, weight in (("000001", 0.4), ("000002", 0.6))
         ]
     )
-    with runtime_resource_policy_scope(explicit_cap_bytes=17 * 1024**2 // 2) as policy:
-        for data_id, frame in (("index_info", index_info), ("index_weights", weights)):
-            source_spec = profile.interim.get(data_id)
-            frame = frame.reindex(columns=source_spec.required_columns)
-            write_dataset(
-                layout.interim_data_root(source_spec.source_id, data_id),
-                frame,
-                spec=source_spec,
-                resource_policy=policy,
-                borrowed_input=True,
-            )
-        spec = processed_catalog().get("benchmark_weights")
-        root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
-        with processed_producer.produce_a_share_processed_data(
-            spec,
-            layout=layout,
-            time_window=TimeWindow(dates[0], dates[-1]),
-            processed_catalog=profile.processed,
-            source_catalog=profile.interim,
-            resource_policy=policy,
-        ) as (frames, metadata, verify):
-            write_dataset(
-                root,
-                frames,
-                spec=spec,
-                resource_policy=policy,
-                instance_metadata=metadata,
-                staged_validator=verify,
-            )
-        actual = read_dataset(root, resource_policy=policy)
-        expected = pd.DataFrame(
-            [
-                ("a_share", benchmark, asset, date, weight)
-                for benchmark, window in (
-                    ("csi500", dates[:64]),
-                    ("csi1000", dates[64:]),
-                )
-                for date in window
-                for asset, weight in (("000001", 0.4), ("000002", 0.6))
-            ],
-            columns=("market_id", "benchmark_id", "asset_id", "timestamp", "weight"),
+    for data_id, frame in (("index_info", index_info), ("index_weights", weights)):
+        source_spec = profile.interim.get(data_id)
+        frame = frame.reindex(columns=source_spec.required_columns)
+        write_dataset(
+            layout.interim_data_root(source_spec.source_id, data_id),
+            frame,
+            spec=source_spec,
         )
-        expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
-        expected["asset_id"] = expected["asset_id"].astype("object")
-        pd.testing.assert_frame_equal(actual, expected, check_exact=True)
-        assert len(tuple((root / "data").rglob("*.parquet"))) > 1
-        assert len(slabs) > 1 and sum(slabs) == len(dates)
-        streamed = list(
-            iter_complete_session_frames(
-                read_dataset(
-                    root, mode=DatasetReadMode.CHUNKED, resource_policy=policy
-                ),
-                timestamp_column="timestamp",
-                resource_policy=policy,
-            )
+    spec = processed_catalog().get("benchmark_weights")
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with processed_producer.produce_a_share_processed_data(
+        spec,
+        layout=layout,
+        time_window=TimeWindow(dates[0], dates[-1]),
+        processed_catalog=profile.processed,
+        source_catalog=profile.interim,
+    ) as (frames, metadata, verify):
+        write_dataset(
+            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
         )
-        pd.testing.assert_frame_equal(pd.concat(streamed, ignore_index=True), expected)
-        assert policy.used_memory_bytes == 0
-
+    actual = read_dataset(root)
+    expected = pd.DataFrame(
+        [
+            ("a_share", benchmark, asset, date, weight)
+            for benchmark, window in (("csi500", dates[:64]), ("csi1000", dates[64:]))
+            for date in window
+            for asset, weight in (("000001", 0.4), ("000002", 0.6))
+        ],
+        columns=("market_id", "benchmark_id", "asset_id", "timestamp", "weight"),
+    )
+    expected["timestamp"] = expected["timestamp"].astype("datetime64[ns]")
+    expected["asset_id"] = expected["asset_id"].astype("object")
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    assert len(tuple((root / "data").rglob("*.parquet"))) > 1
+    assert len(slabs) > 1 and sum(slabs) == len(dates)
+    streamed = list(
+        iter_complete_session_frames(
+            read_dataset(root, mode=DatasetReadMode.CHUNKED),
+            timestamp_column="timestamp",
+        )
+    )
+    pd.testing.assert_frame_equal(pd.concat(streamed, ignore_index=True), expected)
     with pytest.raises(ValueError, match="coverage_incomplete"):
         tuple(iter_benchmark_weight_snapshots(index_info, (weights.iloc[:128],)))
 
@@ -204,8 +187,7 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
     ),
 )
 def test_benchmark_normalization_rejects_fact_mutations(
-    mutation: str,
-    error: str,
+    mutation: str, error: str
 ) -> None:
     index_info, weights = _benchmark_facts()
     if mutation == "duplicate":
@@ -236,7 +218,6 @@ def test_rounded_benchmark_weights_publish_as_unit_portfolio(tmp_path, raw_weigh
     from quant_research_platform.research.portfolios.production import (
         _iter_benchmark_weights,
     )
-    from quant_research_platform.runtime.resources import runtime_resource_policy_scope
     from quant_research_platform.storage.datasets.writing import write_dataset
 
     info, _ = _benchmark_facts()
@@ -261,22 +242,17 @@ def test_rounded_benchmark_weights_publish_as_unit_portfolio(tmp_path, raw_weigh
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
     )
-    with runtime_resource_policy_scope(explicit_cap_bytes=64 * 1024**2) as policy:
-        write_dataset(
-            root, normalized, spec=spec, resource_policy=policy, borrowed_input=True
+    write_dataset(root, normalized, spec=spec)
+    for benchmark in ("csi500", "csi1000"):
+        (weights,) = _iter_benchmark_weights(
+            root, benchmark, pd.DatetimeIndex([timestamp])
         )
-        for benchmark in ("csi500", "csi1000"):
-            (weights,) = _iter_benchmark_weights(
-                root, benchmark, pd.DatetimeIndex([timestamp]), policy
-            )
-            # Three equal published weights imply one third, independently of units.
-            np.testing.assert_array_max_ulp(
-                weights.to_numpy(), np.full(3, 1.0 / 3.0), maxulp=1
-            )
-            np.testing.assert_array_max_ulp(
-                np.array([(weights * 100.0).sum()]), np.array([100.0]), maxulp=2
-            )
-        assert policy.used_memory_bytes == 0
+        np.testing.assert_array_max_ulp(
+            weights.to_numpy(), np.full(3, 1.0 / 3.0), maxulp=1
+        )
+        np.testing.assert_array_max_ulp(
+            np.array([(weights * 100.0).sum()]), np.array([100.0]), maxulp=2
+        )
     pd.testing.assert_frame_equal(raw, original, check_exact=True)
 
 
@@ -401,14 +377,16 @@ def test_complete_500_and_1000_source_rounding_preserves_relative_weights(direct
             [float(weight / total_percent) for weight in percentages]
         )
         rows.extend(
-            {
-                "Indexcd": code,
-                "Enddt": "2020-01-02",
-                "Stkcd": f"{position + 1:06d}",
-                "Constdnme": "synthetic",
-                "Weight": str(weight),
-            }
-            for position, weight in enumerate(percentages)
+            (
+                {
+                    "Indexcd": code,
+                    "Enddt": "2020-01-02",
+                    "Stkcd": f"{position + 1:06d}",
+                    "Constdnme": "synthetic",
+                    "Weight": str(weight),
+                }
+                for position, weight in enumerate(percentages)
+            )
         )
     raw = pd.DataFrame(rows)
     original = raw.copy(deep=True)
