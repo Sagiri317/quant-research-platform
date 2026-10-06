@@ -1315,7 +1315,8 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
         for item in configuration["models"]
     )
     preflight_model_specs(specs)
-    frame = shared_model_rows(specs, development_end="2019-03-31")
+    # The first mature fold needs enough rows for fractional RF bootstrapping.
+    frame = shared_model_rows(specs, development_end="2019-03-31", assets=12)
     for column in frame:
         if column.startswith("feature_missing_"):
             frame[column] = 0.0

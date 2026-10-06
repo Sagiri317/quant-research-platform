@@ -752,7 +752,7 @@ def _arrow_batch_to_bounded_pandas(
         frame = _arrow_slice_to_pandas(arrow_slice, dtype_overrides=overrides)
         if persisted_frame_observer is not None:
             persisted_frame_observer(frame)
-        output = frame.astype(ordinary, copy=False) if ordinary else frame
+        output = frame.astype(ordinary) if ordinary else frame
         for name, dtype in categorical.items():
             codes = dtype.categories.get_indexer(frame[name])
             if np.any((codes == -1) & frame[name].notna().to_numpy()):

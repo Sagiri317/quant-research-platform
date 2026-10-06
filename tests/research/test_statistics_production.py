@@ -109,7 +109,8 @@ def _statistics_models(layout, spec, protocol, window):
         dataset=spec,
         protocol=model_protocol,
         development_end=development_end,
-        frame=shared_model_rows(models, development_end=development_end),
+        # The first mature fold needs enough rows for fractional RF bootstrapping.
+        frame=shared_model_rows(models, development_end=development_end, assets=12),
     )
     return case.artifact
 
