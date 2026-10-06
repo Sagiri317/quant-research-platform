@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import datetime as dt
+import pickle
 import sys
 from contextlib import ExitStack, contextmanager
 from copy import deepcopy
@@ -10,6 +11,7 @@ from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import partial
 from pathlib import Path
+from tempfile import TemporaryFile
 
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
@@ -365,18 +367,24 @@ class TardisArchive:
         requested = symbol, data_kind
         position = 0
         while True:
-            buffered = self._records_by_stream.setdefault(requested, [])
-            if position < len(buffered):
-                record = buffered[position]
+            buffered = self._records_by_stream.get(requested)
+            if buffered is not None and position < buffered.seek(0, 2):
+                buffered.seek(position)
+                record = pickle.load(buffered)
             else:
                 item = next(self._native_records, None)
                 if item is None:
                     return
                 key, record = item
-                self._records_by_stream.setdefault(key, []).append(record)
+                buffered = self._records_by_stream.get(key)
+                if buffered is None:
+                    buffered = self._replay_resources.enter_context(TemporaryFile())
+                    self._records_by_stream[key] = buffered
+                buffered.seek(0, 2)
+                pickle.dump(record, buffered, protocol=pickle.HIGHEST_PROTOCOL)
                 if key != requested:
                     continue
-            position += 1
+            position = buffered.tell()
             if (
                 end_ns is not None
                 and strict_iso_timestamp(

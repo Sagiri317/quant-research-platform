@@ -830,6 +830,35 @@ def test_archive_tail_batches_raw_io_and_preserves_replay(tmp_path, monkeypatch)
         assert calls["native_scans"] == 1 and calls["native_rows"] == 514
 
 
+def test_archive_cursors_release_decoded_payloads_and_close_buffers(
+    tmp_path, monkeypatch
+):
+    import tracemalloc
+    from contextlib import ExitStack
+
+    import quant_research_platform.sources.tardis.replay as replay
+
+    def records(self):
+        for number in range(5000):
+            yield ("BTCUSDT", "agg_trades"), {"payload": "x" * 4096 + str(number)}
+
+    monkeypatch.setattr(replay.TardisArchive, "_iter_canonical_records", records)
+    tracemalloc.start()
+    try:
+        with ExitStack() as resources:
+            archive = replay.TardisArchive(tmp_path, {}, {}, None, resources)
+            assert (
+                sum(1 for _ in archive._stream_records("BTCUSDT", "agg_trades", None))
+                == 5000
+            )
+            retained, _peak = tracemalloc.get_traced_memory()
+            assert retained < 1024**2
+            buffers = tuple(archive._records_by_stream.values())
+        assert all(stream.closed for stream in buffers)
+    finally:
+        tracemalloc.stop()
+
+
 @pytest.mark.parametrize("snapshot_depths", [(12, 12), (12, 13), (13, 12), (12, 9)])
 def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
     tmp_path, snapshot_depths
