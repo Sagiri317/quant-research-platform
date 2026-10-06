@@ -759,7 +759,6 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(
             profile=profile,
             protocol=protocol,
             research_window=window,
-            software_identity="f" * 64,
             target_results=results,
             retained=retained,
         )
@@ -841,12 +840,6 @@ def test_holdout_evidence_uses_full_registered_window_and_actual_identities(
                 **{**arguments, "target_results": changed_output}
             )["qualification"]
             == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
-        )
-        assert (
-            research._holdout_evidence(
-                **{**arguments, "protocol": new_protocol, "software_identity": "2" * 64}
-            )["qualification"]
-            == "POST_HOLDOUT_CORRECTED"
         )
 
 
@@ -1434,11 +1427,6 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     assert_one_capture(previous)
     reused_record = read_research_run_record(layout.research_run_path(reused["run_id"]))
     assert reused_record.holdout_evidence["qualification"] == "REUSE"
-    from quant_research_platform.contracts.json_codec import canonical_json_hash
-    from quant_research_platform.storage.software_identity import (
-        ProductionSoftwareIdentity,
-    )
-
     previous = len(captured)
     new_development = research.research_run(
         profile=profile,
@@ -1448,16 +1436,49 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     assert new_development["status"] == "COMPLETE", new_development
     assert_one_capture(previous)
     assert new_development["run_id"] != development["run_id"]
+    import shutil
+
+    from quant_research_platform.storage.software_identity import (
+        production_software_identity,
+    )
+
+    software_root = tmp_path / "software"
+    shutil.copytree(
+        Path(research.__file__).resolve().parents[1],
+        software_root,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    resource_source = software_root / "runtime" / "resources.py"
+    resource_source.write_bytes(
+        resource_source.read_bytes() + b"\n# Operational change.\n"
+    )
+    operational_software = production_software_identity(package_root=software_root)
+    monkeypatch.setattr(
+        research, "production_software_identity", lambda: operational_software
+    )
+    previous = len(captured)
+    operational = research.research_run(**request)
+    assert operational["status"] == "COMPLETE", operational
+    assert_one_capture(previous)
+    operational_record = read_research_run_record(
+        layout.research_run_path(operational["run_id"])
+    )
+    assert operational_record.software_identity != record.software_identity
+    assert operational_record.holdout_evidence["qualification"] == "REUSE"
+    assert {
+        item.target_id: item.instance_identity
+        for item in operational_record.target_results
+    } == {item.target_id: item.instance_identity for item in record.target_results}
+
     future = frames["pv_all"].timestamp.ge("2019-09-02")
     frames["pv_all"].loc[
         future, ["label", "forward_return_1d", "forward_return_20d"]
     ] *= -100.0
-    software_payload = research.production_software_identity().payload
-    software_payload["package_content_hash"] = "f" * 64
-    corrected_software = ProductionSoftwareIdentity(
-        software_payload,
-        canonical_json_hash(software_payload),
+    scientific_source = software_root / "research" / "datasets" / "assembler.py"
+    scientific_source.write_bytes(
+        scientific_source.read_bytes() + b"\n# Scientific change.\n"
     )
+    corrected_software = production_software_identity(package_root=software_root)
     monkeypatch.setattr(
         research, "production_software_identity", lambda: corrected_software
     )
@@ -2457,7 +2478,6 @@ def test_holdout_prior_growth_is_admitted_before_append(tmp_path, monkeypatch):
                     profile=SimpleNamespace(profile_id="profile"),
                     protocol=protocol,
                     research_window=record.research_window,
-                    software_identity=record.software_identity,
                     target_results=(),
                     retained=retained,
                 )

@@ -76,6 +76,124 @@ def test_package_and_dependency_changes_invalidate_only_production_identity(
     assert changed_dependency.identity_hash != first.identity_hash
 
 
+@pytest.mark.parametrize("market", ("a_share", "crypto"))
+def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
+    tmp_path: Path, market: str
+) -> None:
+    import json
+    import shutil
+
+    from quant_research_platform.contracts.targets import ProducerKind
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.workflows import research
+
+    package = tmp_path / "package"
+    source = Path(research.__file__).resolve().parents[1]
+    shutil.copytree(
+        source, package, ignore=shutil.ignore_patterns("__pycache__", "*.pyc")
+    )
+    config_root = Path(__file__).resolve().parents[2] / "configs" / "research" / market
+    bindings = []
+    for path in sorted(config_root.glob("*.json")):
+        config = json.loads(path.read_text(encoding="utf-8"))
+        profile = bind_research_configuration(
+            research_profile(config["profile_id"]),
+            config,
+            tardis_root=tmp_path / "tardis",
+        )
+        protocol = profile.protocol(scenario_id=config["scenario_id"])
+        targets = research.resolve_target_graph(
+            research._target_specs(profile, action="research run", protocol=protocol),
+            protocol.terminal_targets("research run"),
+        )
+        bindings.extend(
+            profile.producer_bindings[target.producer_id] for target in targets
+        )
+        bindings.append(
+            profile.producer_bindings[config["scenario_id"] + "_report_artifact"]
+        )
+
+    def identities():
+        software = _identity(package)
+        return software.identity_hash, tuple(
+            research._target_software_identity(binding, software)
+            for binding in bindings
+        )
+
+    original_package, original = identities()
+    resource = package / "runtime" / "resources.py"
+    resource.write_bytes(
+        resource.read_bytes() + b"\n# Operational accounting change.\n"
+    )
+    changed_package, operational = identities()
+    assert changed_package != original_package
+    assert operational == original
+
+    fitting = package / "research" / "models" / "fitting.py"
+    fitting.write_bytes(fitting.read_bytes() + b"\n# Numerical model change.\n")
+    _, changed_models = identities()
+    for binding, before, after in zip(
+        bindings, operational, changed_models, strict=True
+    ):
+        if binding.kind in {
+            ProducerKind.INTERIM,
+            ProducerKind.PROCESSED,
+            ProducerKind.DATASET,
+            ProducerKind.EVALUATION,
+        }:
+            assert after == before
+        elif binding.kind is ProducerKind.MODEL:
+            assert after != before
+
+    helper = package / (
+        "markets/implementations/crypto/hft.py"
+        if market == "crypto"
+        else "research/labels/forward_returns.py"
+    )
+    helper.write_bytes(helper.read_bytes() + b"\n# Label helper change.\n")
+    _, changed_helpers = identities()
+    assert any(
+        after != before
+        for binding, before, after in zip(
+            bindings, changed_models, changed_helpers, strict=True
+        )
+        if binding.kind is ProducerKind.PROCESSED
+    )
+    initializer = (
+        package / "markets" / "implementations" / market / "processed" / "__init__.py"
+    )
+    initializer.write_bytes(
+        initializer.read_bytes() + b"\n# Producer package initializer change.\n"
+    )
+    _, changed_initializers = identities()
+    assert all(
+        after != before
+        for binding, before, after in zip(
+            bindings, changed_helpers, changed_initializers, strict=True
+        )
+        if binding.kind is ProducerKind.PROCESSED
+    )
+
+    # A real injected callback is part of the scope even when the producer
+    # imports neither its implementation nor its module.
+    callback = package / "sources" / "binance" / "replay.py"
+    if market == "crypto":
+        callback.write_bytes(
+            callback.read_bytes() + b"\n# Bound depth replay change.\n"
+        )
+        _, changed_callbacks = identities()
+        assert any(
+            after != before
+            for binding, before, after in zip(
+                bindings, changed_initializers, changed_callbacks, strict=True
+            )
+            if binding.kind is ProducerKind.PROCESSED
+        )
+
+
 def test_identity_rejects_incomplete_or_extra_dependency_versions(
     tmp_path: Path,
 ) -> None:

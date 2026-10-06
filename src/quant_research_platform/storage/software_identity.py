@@ -1,11 +1,15 @@
-"""One package-level production software identity."""
+"""Production provenance and conservative producer dependency identities."""
 
 from __future__ import annotations
 
+import ast
 import hashlib
+import inspect
 import stat
+import sys
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
@@ -41,14 +45,20 @@ class ProductionSoftwareIdentity:
 
     _payload: Mapping[str, object]
     identity_hash: str
+    _sources: Mapping[str, bytes]
+    _module_graph: Mapping[str, tuple[str, tuple[str, ...]]] | None
 
     def __init__(
         self,
         payload: Mapping[str, object],
         identity_hash: str,
+        *,
+        sources: Mapping[str, bytes] | None = None,
     ) -> None:
         object.__setattr__(self, "_payload", payload)
         object.__setattr__(self, "identity_hash", identity_hash)
+        object.__setattr__(self, "_sources", MappingProxyType(dict(sources or {})))
+        object.__setattr__(self, "_module_graph", None)
         self.__post_init__()
 
     def __post_init__(self) -> None:
@@ -80,17 +90,159 @@ def production_software_identity(
         if package_root is not None
         else Path(__file__).resolve().parents[1]
     )
+    sources: dict[str, bytes] = {}
     payload = {
-        "package_content_hash": _package_content_hash(root),
+        "package_content_hash": _package_content_hash(root, sources=sources),
         "dependency_versions": _dependency_versions(dependency_versions),
     }
     return ProductionSoftwareIdentity(
         payload=payload,
         identity_hash=canonical_json_hash(payload),
+        sources=sources,
     )
 
 
-def _package_content_hash(root: Path) -> str:
+def _artifact_software_identity(
+    software: ProductionSoftwareIdentity,
+    *producers: object,
+    composition_modules: tuple[str, ...],
+) -> str:
+    """Hash complete imported modules and actual injected callbacks, not run telemetry.
+
+    Module boundaries are conservative: a change within a consumed module also
+    invalidates callers that use another function in that module. Orchestration
+    is hashed directly; its dispatch imports are covered by the selected writers.
+    """
+
+    # ponytail: module-wide invalidation; split owners when false invalidation hurts.
+    if software._module_graph is None:
+        object.__setattr__(
+            software, "_module_graph", _source_module_graph(software._sources)
+        )
+    graph = software._module_graph
+    roots: set[str] = set()
+    callables: set[str] = set()
+    pending = list(producers)
+    while pending:
+        producer = pending.pop()
+        if isinstance(producer, partial):
+            pending.extend((producer.func, *producer.args, *producer.keywords.values()))
+        elif isinstance(producer, Mapping):
+            pending.extend(producer.values())
+        elif isinstance(producer, (tuple, list)):
+            pending.extend(producer)
+        elif callable(producer):
+            roots.add(producer.__module__)
+            callables.add(f"{producer.__module__}.{producer.__qualname__}")
+
+    # Only these owners are operational. Frame slicing and all numerical,
+    # storage, schema, source and protocol implementations remain dependencies.
+    operational = {
+        "quant_research_platform.runtime.resources",
+        "quant_research_platform.runtime.execution_metrics",
+    }
+    consumed: dict[str, str] = {}
+    pending = sorted(roots)
+    for module in (*roots, *composition_modules):
+        parts = module.split(".")
+        pending.extend(
+            parent
+            for length in range(1, len(parts))
+            if (parent := ".".join(parts[:length])) in graph
+        )
+    while pending:
+        module = pending.pop()
+        if module in consumed or module in operational:
+            continue
+        component = graph.get(module)
+        if component is None:
+            # Injected implementations outside the package still participate;
+            # their package imports use the same conservative module graph.
+            source_path = inspect.getsourcefile(sys.modules[module])
+            if source_path is None:
+                raise ValueError("producer_source_unavailable")
+            path = Path(source_path)
+            expected = DatasetFileIdentity(*_file_identity(path))
+            with (
+                handle_preserving_primary(open_filesystem_file(path)) as handle,
+                verified_file_handle(
+                    path,
+                    handle,
+                    expected_identity=expected,
+                    error="production_package_identity_changed",
+                ),
+            ):
+                source = handle.read()
+            component = (
+                hashlib.sha256(source).hexdigest(),
+                _source_imports(
+                    module, source, is_package=path.name == "__init__.py", modules=graph
+                ),
+            )
+        consumed[module] = component[0]
+        pending.extend(component[1])
+    for module in composition_modules:
+        component = graph.get(module)
+        if component is None:
+            raise ValueError("composition_source_unavailable")
+        consumed[module] = component[0]
+    return canonical_json_hash(
+        {
+            "producer_callables": sorted(callables),
+            "producer_modules": dict(sorted(consumed.items())),
+            "dependency_versions": software.payload["dependency_versions"],
+        }
+    )
+
+
+def _source_module_graph(sources: Mapping[str, bytes]):
+    modules = {}
+    for relative, source in sources.items():
+        parts = list(Path(relative).with_suffix("").parts)
+        is_package = parts[-1] == "__init__"
+        if is_package:
+            parts.pop()
+        modules[".".join(("quant_research_platform", *parts))] = (source, is_package)
+    return MappingProxyType(
+        {
+            name: (
+                hashlib.sha256(source).hexdigest(),
+                _source_imports(name, source, is_package=is_package, modules=modules),
+            )
+            for name, (source, is_package) in modules.items()
+        }
+    )
+
+
+def _source_imports(name, source, *, is_package, modules):
+    imports = set()
+    for node in ast.walk(ast.parse(source)):
+        candidates = []
+        if isinstance(node, ast.Import):
+            candidates = [alias.name for alias in node.names]
+        elif isinstance(node, ast.ImportFrom):
+            base = node.module or ""
+            if node.level:
+                parent = name if is_package else name.rpartition(".")[0]
+                parts = parent.split(".")
+                base = ".".join(
+                    parts[: len(parts) - node.level + 1] + ([base] if base else [])
+                )
+            candidates = [base, *(base + "." + alias.name for alias in node.names)]
+        for candidate in candidates:
+            if candidate in modules:
+                parts = candidate.split(".")
+                imports.update(
+                    parent
+                    for length in range(1, len(parts) + 1)
+                    if (parent := ".".join(parts[:length])) in modules
+                )
+    return tuple(sorted(imports))
+
+
+def _package_content_hash(
+    root: Path, *, sources: dict[str, bytes] | None = None
+) -> str:
     root = require_unaliased_path(
         Path(root),
         error="production_package_root_invalid",
@@ -102,6 +254,9 @@ def _package_content_hash(root: Path) -> str:
     digest = hashlib.sha256()
     for relative, path, expected_identity in files:
         relative_bytes = relative.encode("utf-8")
+        source = (
+            bytearray() if sources is not None and relative.endswith(".py") else None
+        )
         try:
             digest.update(len(relative_bytes).to_bytes(8, "big"))
             digest.update(relative_bytes)
@@ -117,10 +272,14 @@ def _package_content_hash(root: Path) -> str:
             ):
                 while content := handle.read(1024 * 1024):
                     digest.update(content)
+                    if source is not None:
+                        source.extend(content)
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("production_package_file_unreadable") from exc
         if _file_identity(path) != expected_identity:
             raise ValueError("production_package_identity_changed")
+        if source is not None:
+            sources[relative] = bytes(source)
     if _package_inventory(root) != (files, directories):
         raise ValueError("production_package_identity_changed")
     return digest.hexdigest()

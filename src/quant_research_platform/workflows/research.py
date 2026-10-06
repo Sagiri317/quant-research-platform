@@ -149,6 +149,7 @@ from quant_research_platform.storage.semantic_artifacts import (
 )
 from quant_research_platform.storage.software_identity import (
     ProductionSoftwareIdentity,
+    _artifact_software_identity,
     production_software_identity,
 )
 
@@ -2278,7 +2279,6 @@ def _write_research_run_record(
                     profile=profile,
                     protocol=protocol,
                     research_window=research_window,
-                    software_identity=software_identity.identity_hash,
                     target_results=tuple(references),
                     retained=retained,
                 )
@@ -2325,7 +2325,6 @@ def _holdout_evidence(
     profile: ResearchProfile,
     protocol: Any,
     research_window: Mapping[str, object],
-    software_identity: str,
     target_results: tuple[ResearchRunTargetResult, ...],
     retained,
 ) -> dict[str, object]:
@@ -2396,7 +2395,6 @@ def _holdout_evidence(
                     record.status is RunStatus.COMPLETE
                     and protocol.scenario_id in current
                     and all(key in current for key in protocol.frozen_target_ids())
-                    and record.software_identity == software_identity
                     and all(old.get(key) == current[key] for key in evidence_targets)
                 ):
                     if frozen_inputs(
@@ -2490,7 +2488,7 @@ def _build_report_from_run(
         logical_artifact_id=report_target,
         schema_identity=canonical_json_hash(contract),
         protocol_or_spec_identity=record.protocol_identity,
-        software_identity=software.identity_hash,
+        software_identity=_target_software_identity(binding, software),
         research_window=record.research_window,
         upstream_identities={"source_run": source_run_identity},
         semantic_metadata={
@@ -3021,6 +3019,69 @@ def _producer_kind(data_spec: DataSpec) -> ProducerKind:
     raise ValueError("unsupported_data_spec_type")
 
 
+def _target_software_identity(binding, software):
+    from quant_research_platform.artifacts import (
+        outputs,
+        portfolio_ledger,
+        statistics,
+    )
+    from quant_research_platform.artifacts import (
+        research as research_artifacts,
+    )
+    from quant_research_platform.artifacts.crypto_hft import (
+        read_crypto_episode_artifact,
+        write_crypto_episode_artifact,
+    )
+    from quant_research_platform.research.models import persisted
+    from quant_research_platform.storage import semantic_artifacts
+    from quant_research_platform.storage.datasets import inspection, writing
+
+    # Bind canonical persistence owners, independently of workflow instrumentation.
+    writers = {
+        ProducerKind.INTERIM: (writing.write_dataset, inspection.inspect_dataset),
+        ProducerKind.PROCESSED: (writing.write_dataset, inspection.inspect_dataset),
+        ProducerKind.DATASET: (writing.write_dataset, inspection.inspect_dataset),
+        ProducerKind.EVALUATION: (
+            outputs.write_evaluation_outputs_from_chunks,
+            validate_evaluation_output_metadata_shape,
+            semantic_artifacts.write_semantic_artifact,
+        ),
+        ProducerKind.MODEL: (
+            persisted.write_quarterly_model_artifact,
+            persisted.write_crypto_model_artifact,
+        ),
+        ProducerKind.PREDICTION: (
+            outputs.write_prediction_outputs,
+            persisted.read_quarterly_model_artifact,
+            persisted.read_crypto_model_artifact,
+            validate_prediction_output_metadata_shape,
+            semantic_artifacts.write_semantic_artifact,
+        ),
+        ProducerKind.STATISTIC: (
+            statistics.write_statistics_artifact,
+            semantic_artifacts.write_semantic_artifact,
+        ),
+        ProducerKind.PORTFOLIO: (
+            portfolio_ledger.write_portfolio_ledger_artifact,
+            read_crypto_episode_artifact,
+            write_crypto_episode_artifact,
+        ),
+        ProducerKind.REPORT: (
+            research_artifacts.write_research_report_artifact,
+            research_artifacts.read_research_report_artifact,
+            persisted.read_quarterly_model_artifact,
+            persisted.read_crypto_model_artifact,
+        ),
+    }
+    return _artifact_software_identity(
+        software,
+        binding.producer,
+        binding.source_identity,
+        writers[binding.kind],
+        composition_modules=(__name__, ResearchProfile.__module__),
+    )
+
+
 def _target_envelope(
     *,
     profile: ResearchProfile,
@@ -3043,7 +3104,7 @@ def _target_envelope(
         logical_artifact_id=data_spec.data_id,
         schema_identity=canonical_json_hash(spec_payload),
         protocol_or_spec_identity=canonical_json_hash(spec_payload),
-        software_identity=software_identity.identity_hash,
+        software_identity=_target_software_identity(binding, software_identity),
         research_window=artifact_window,
         upstream_identities=upstream_identities,
         semantic_metadata=semantic_metadata,
@@ -3086,7 +3147,7 @@ def _target_envelope_for_spec(
         logical_artifact_id=target_spec.target_id,
         schema_identity=spec_identity,
         protocol_or_spec_identity=spec_identity,
-        software_identity=software_identity.identity_hash,
+        software_identity=_target_software_identity(binding, software_identity),
         research_window=research_window,
         upstream_identities=upstream_identities,
         semantic_metadata={
