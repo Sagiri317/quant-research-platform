@@ -985,3 +985,31 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
         .all()
         .all()
     )
+
+
+@pytest.mark.parametrize("size", [64, 128])
+def test_ttm_annual_revisions_use_constant_time_known_period_lookup(size, monkeypatch):
+    from quant_research_platform.markets.implementations.a_share import fundamentals
+
+    events = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "metric_id": "operating_revenue",
+            "report_period": pd.Timestamp("2025-12-31"),
+            "available_at": pd.date_range("2026-01-01", periods=size, freq="D"),
+            "is_corrected": True,
+            "version_identity": [f"revision-{number}" for number in range(size)],
+            "value": [float(number) for number in range(size)],
+        }
+    )
+    original = fundamentals._ttm_value
+    sizes = []
+
+    def counted(known, period):
+        sizes.append(len(known))
+        return original(known, period)
+
+    monkeypatch.setattr(fundamentals, "_ttm_value", counted)
+    result = construct_ttm_events(events)
+    assert result.ttm_value.tolist() == events.value.tolist()
+    assert sizes == [1] * size

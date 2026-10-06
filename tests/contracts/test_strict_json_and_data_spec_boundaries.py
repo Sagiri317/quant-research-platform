@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-from collections.abc import Iterator, Mapping
 from dataclasses import replace
 from pathlib import Path
 from types import MappingProxyType
@@ -134,29 +133,6 @@ def test_data_spec_snapshots_caller_roles_as_an_immutable_mapping() -> None:
     assert replace(spec).column_roles == spec.column_roles
     with pytest.raises(TypeError):
         spec.column_roles["value"] = ColumnRole.FEATURE  # type: ignore[index]
-
-
-def test_data_spec_validates_schema_version_before_snapshotting_roles() -> None:
-    class ExplodingRoles(Mapping[str, ColumnRole]):
-        def __getitem__(self, key: str) -> ColumnRole:
-            raise KeyError(key)
-
-        def __iter__(self) -> Iterator[str]:
-            raise AssertionError("column_roles_snapshotted_before_schema_validation")
-
-        def __len__(self) -> int:
-            return 0
-
-    with pytest.raises(ValueError, match="unsupported_schema_version"):
-        DataSpec(
-            data_id="demo",
-            frequency=DataFrequency.DAILY,
-            grain=DataGrain.ASSET_TIMESTAMP,
-            column_roles=ExplodingRoles(),  # type: ignore[arg-type]
-            primary_key=(),
-            partition_columns=(),
-            schema_version="unsupported",
-        )
 
 
 def test_bounded_snapshot_accepts_only_exact_frozen_containers():

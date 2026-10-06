@@ -36,7 +36,6 @@ from quant_research_platform.sources.binance.replay import (
     open_recorder_run,
 )
 from quant_research_platform.storage.identity import (
-    filesystem_exists,
     filesystem_glob,
     filesystem_mkdir,
     filesystem_read_bytes,
@@ -66,33 +65,6 @@ def _raw(
         "segment_id": segment_id,
         "payload": payload,
     }
-
-
-def test_connection_coverage_cleanup_preserves_active_primary() -> None:
-
-    class FailingDatabase:
-        def close(self) -> None:
-            raise OSError("database_close")
-
-    class FailingScratch:
-        def cleanup(self) -> None:
-            raise OSError("scratch_cleanup")
-
-    index = object.__new__(replay.ObservationCoverageIndex)
-    from contextlib import ExitStack
-
-    index._coverage_readers = ExitStack()
-    index._database = FailingDatabase()
-    index._scratch = FailingScratch()
-    with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
-        try:
-            raise KeyboardInterrupt("body_primary")
-        finally:
-            index.close()
-    assert raised.value.__notes__ == [
-        "Binance connection coverage database close also failed: OSError",
-        "Binance connection coverage scratch cleanup also failed: OSError",
-    ]
 
 
 def test_connection_coverage_gzip_constructor_failure_closes_raw(
@@ -130,10 +102,6 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
             self.close_calls += 1
             super().close()
 
-    class FakeDatabase:
-        def commit(self) -> None:
-            return None
-
     class FakeGzip:
         close_calls = 0
 
@@ -158,32 +126,12 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
     index._path = Path("synthetic-coverage.gz")
     index.identity = object()
     index._descriptor = {"record_count": 0, "sha256": hashlib.sha256(b"").hexdigest()}
-    index._database = FakeDatabase()
     try:
         with pytest.raises(OSError, match="gzip-close-secondary"):
             index._load(markets={FUTURES_MARKET_TYPE})
         assert raw_handle.close_calls == 1
     finally:
         raw_handle.close()
-
-
-def test_recorder_run_close_failure_preserves_body_primary(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    root = tmp_path / "run"
-    _write_run(
-        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
-    )
-    real_close = replay.ObservationCoverageIndex.close
-
-    def fail_close(index: object) -> None:
-        real_close(index)
-        raise OSError("coverage-close-secondary")
-
-    monkeypatch.setattr(replay.ObservationCoverageIndex, "close", fail_close)
-    with pytest.raises(KeyboardInterrupt, match="body-primary"):
-        with open_recorder_run(root):
-            raise KeyboardInterrupt("body-primary")
 
 
 def test_replay_file_handle_cleanup_preserves_hash_primary(
@@ -482,37 +430,6 @@ def test_replay_merge_closes_all_streams_without_collecting_retained_error(
         assert handles and all(handle.closed for handle in handles)
 
 
-def test_connection_coverage_rejects_disk_before_scratch(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "run"
-    manifest = _write_run(
-        root, [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])]
-    )
-    monkeypatch.setattr(
-        replay,
-        "require_free_disk_headroom",
-        lambda *_args, **_kwargs: (_ for _ in ()).throw(
-            OSError("coverage_disk_headroom")
-        ),
-        raising=False,
-    )
-    monkeypatch.setattr(
-        replay.tempfile,
-        "TemporaryDirectory",
-        lambda **_kwargs: (_ for _ in ()).throw(
-            AssertionError("coverage_scratch_created_before_disk_preflight")
-        ),
-    )
-    with pytest.raises(OSError, match="coverage_disk_headroom"):
-        replay.ObservationCoverageIndex(
-            root,
-            manifest["capture"]["connection_intervals"],
-            markets={FUTURES_MARKET_TYPE},
-            decode_interval=replay._decode_recorder_interval,
-        )
-
-
 @pytest.mark.parametrize(
     ("status", "market_data_status"),
     (("UNKNOWN", "PASS"), ("PASS", "UNKNOWN"), ("PASS", "FAIL")),
@@ -767,14 +684,12 @@ def test_tick_conversion_is_exact_independently_of_decimal_context(
                 price_unit="0.1",
                 error="off_tick",
                 allow_zero=False,
-                max_levels=1,
             )
         assert replay._levels(
             [[price, "1"]],
             price_unit="0.000000001",
             error="off_tick",
             allow_zero=False,
-            max_levels=1,
         ) == {ticks: 1.0}
 
 
@@ -1283,7 +1198,7 @@ def test_recorder_run_checks_consumed_handle_identity_and_preserves_primary(
     assert filesystem_read_bytes(member) == original
 
 
-def test_connection_queries_do_not_materialize_long_history(tmp_path):
+def test_connection_queries_scan_each_interval_once(tmp_path):
     import gzip
     import hashlib
     import json
@@ -1330,17 +1245,25 @@ def test_connection_queries_do_not_materialize_long_history(tmp_path):
         sweep = run.observation_coverage(
             market_type=FUTURES_MARKET_TYPE, data_kind="agg_trades", symbol="BTCUSDT"
         )
-        steps = []
-        database = run._coverage_index._database
-        database.set_progress_handler(lambda: steps.append(1) or 0, 100)
-        try:
-            for index in range(100):
-                sweep.covering(
-                    first + index * 100000000, first + (index + 1) * 100000000
-                )
-        finally:
-            database.set_progress_handler(None, 0)
-        assert len(steps) < 1000
+
+        class CountedRows:
+            def __init__(self, rows):
+                self.rows = rows
+                self.reads = 0
+
+            def __len__(self):
+                return len(self.rows)
+
+            def __getitem__(self, position):
+                self.reads += 1
+                return self.rows[position]
+
+        rows = CountedRows(sweep.rows)
+        sweep.rows = rows
+        for index in range(100):
+            sweep.covering(first + index * 100000000, first + (index + 1) * 100000000)
+        assert sweep.position == 5
+        assert rows.reads <= 110
 
 
 def test_live_depth_advance_preserves_unknown_future_coverage_and_validity():
@@ -1368,37 +1291,33 @@ def test_live_depth_advance_preserves_unknown_future_coverage_and_validity():
         price_unit="1",
         snapshot_limit=1,
         required_levels=1,
-        max_book_levels=4,
         connection_close_ns=None,
         stats=stats,
     )
-    try:
-        book.bootstrap(replay.normalize_recorder_record(snapshot))
-        assert book.advance(replay.normalize_recorder_record(update)) is True
-        assert book.valid
-        assert stats.coverage_segments == {}
-        assert stats.emitted_states == 0
-        depleted = dict(
-            update,
-            capture_seq=3,
-            payload={
-                "U": 11,
-                "u": 11,
-                "pu": 10,
-                "E": 2,
-                "T": 2,
-                "b": [["100", "0"]],
-                "a": [],
-            },
-        )
-        boundary = book.advance(replay.normalize_recorder_record(depleted))
-        assert isinstance(boundary, BookBoundary)
-        assert boundary.reason == "one_sided_book"
-        assert boundary.source_sequence == 3
-        assert not book.valid
-        assert stats.coverage_segments == {}
-    finally:
-        book.close()
+    book.bootstrap(replay.normalize_recorder_record(snapshot))
+    assert book.advance(replay.normalize_recorder_record(update)) is True
+    assert book.valid
+    assert stats.coverage_segments == {}
+    assert stats.emitted_states == 0
+    depleted = dict(
+        update,
+        capture_seq=3,
+        payload={
+            "U": 11,
+            "u": 11,
+            "pu": 10,
+            "E": 2,
+            "T": 2,
+            "b": [["100", "0"]],
+            "a": [],
+        },
+    )
+    boundary = book.advance(replay.normalize_recorder_record(depleted))
+    assert isinstance(boundary, BookBoundary)
+    assert boundary.reason == "one_sided_book"
+    assert boundary.source_sequence == 3
+    assert not book.valid
+    assert stats.coverage_segments == {}
 
 
 def test_default_multisymbol_reader_merges_same_named_rest_streams(tmp_path):
@@ -1757,34 +1676,6 @@ def _write_coverage_history(root, count, width):
     }
 
 
-def test_coverage_short_records_fit_three_mib_disk_headroom(tmp_path, monkeypatch):
-    descriptor = _write_coverage_history(tmp_path / "source", 256, 64)
-    reservations = []
-
-    def gate(_path, *, reserve_bytes):
-        reservations.append(reserve_bytes)
-        free_bytes = 3 * 1024**2 if len(reservations) == 1 else 1024 * 1024
-        if reserve_bytes > free_bytes:
-            raise OSError("insufficient_disk_space")
-        return free_bytes
-
-    monkeypatch.setattr(replay, "require_free_disk_headroom", gate)
-    index = replay.ObservationCoverageIndex(
-        tmp_path / "source",
-        descriptor,
-        markets={FUTURES_MARKET_TYPE},
-        decode_interval=replay._decode_recorder_interval,
-    )
-    try:
-        assert (
-            index._database.execute("SELECT COUNT(*) FROM coverage").fetchone()[0]
-            == 256
-        )
-    finally:
-        index.close()
-    assert reservations and max(reservations) <= 3 * 1024**2
-
-
 @pytest.mark.parametrize(
     "bounds,expected",
     [
@@ -1833,24 +1724,18 @@ def test_coverage_empty_connections_keep_facts_without_sweep_contribution(
         markets={FUTURES_MARKET_TYPE},
         decode_interval=replay._decode_recorder_interval,
     )
-    scratch = Path(index._scratch.name)
     reader = replay.ObservationCoverage(
         index, FUTURES_MARKET_TYPE, "agg_trades", "BTCUSDT"
     )
-    try:
-        assert list(reader.intervals()) == [
-            (start.value + opened * 10**9, start.value + closed * 10**9)
-            for opened, closed in expected
-        ]
-        for position, (opened, closed) in enumerate(bounds):
-            assert reader[f"connection-{position}"] == (
-                start.value + opened * 10**9,
-                start.value + closed * 10**9,
-            )
-    finally:
-        reader.close()
-        index.close()
-    assert not filesystem_exists(scratch)
+    assert list(reader.intervals()) == [
+        (start.value + opened * 10**9, start.value + closed * 10**9)
+        for opened, closed in expected
+    ]
+    for position, (opened, closed) in enumerate(bounds):
+        assert reader[f"connection-{position}"] == (
+            start.value + opened * 10**9,
+            start.value + closed * 10**9,
+        )
     assert hashlib.sha256(filesystem_read_bytes(source)).hexdigest() == raw_hash
 
 
@@ -2033,7 +1918,7 @@ def test_manifest_growth_blocks_materialization_and_preserves_old_good(
     assert published_bytes() == old_good
 
 
-def test_same_utc_book_invalidation_drops_empty_coverage_and_reservation():
+def test_same_utc_book_invalidation_drops_empty_coverage():
     stats = replay.ReconstructionStats()
     snapshot = dict(
         _raw(
@@ -2071,21 +1956,100 @@ def test_same_utc_book_invalidation_drops_empty_coverage_and_reservation():
         price_unit="1",
         snapshot_limit=1,
         required_levels=1,
-        max_book_levels=4,
         connection_close_ns=snapshot["observed_time_ns"] + 100,
         stats=stats,
     )
-    try:
-        engine.bootstrap(replay.normalize_recorder_record(snapshot))
-        first = list(engine.feed(update(2, 10, [["100", "2"]])))
-        assert len(first) == 1 and isinstance(first[0], BookState)
-        boundary = list(engine.feed(update(3, 11, [["102", "1"]])))
-        assert len(boundary) == 1 and isinstance(boundary[0], BookBoundary)
-        assert stats.crossed_books == 1
-        assert stats.coverage_segments == {}
-        decoded = replay.ReconstructionStats.from_payload(
-            json.loads(json.dumps(__import__("dataclasses").asdict(stats)))
+    engine.bootstrap(replay.normalize_recorder_record(snapshot))
+    first = list(engine.feed(update(2, 10, [["100", "2"]])))
+    assert len(first) == 1 and isinstance(first[0], BookState)
+    boundary = list(engine.feed(update(3, 11, [["102", "1"]])))
+    assert len(boundary) == 1 and isinstance(boundary[0], BookBoundary)
+    assert stats.crossed_books == 1
+    assert stats.coverage_segments == {}
+    decoded = replay.ReconstructionStats.from_payload(
+        json.loads(json.dumps(__import__("dataclasses").asdict(stats)))
+    )
+    assert decoded.coverage_segments == {} and decoded.crossed_books == 1
+
+
+def test_continuous_book_growth_inside_known_snapshot_range():
+    snapshot = {
+        "market_type": FUTURES_MARKET_TYPE,
+        "segment_id": "segment",
+        "observation_id": "observation",
+        "payload": {
+            "lastUpdateId": 100,
+            "bids": [[str(price), "1"] for price in range(20000, 0, -20)],
+            "asks": [[str(price), "1"] for price in range(20001, 21001)],
+        },
+    }
+    engine = replay.DepthReconstructor(
+        FUTURES_MARKET_TYPE,
+        price_unit="1",
+        snapshot_limit=1000,
+        required_levels=10,
+        connection_close_ns=1_800_000_000_000_000_000,
+        stats=replay.ReconstructionStats(),
+        output_levels=10,
+    )
+    engine.bootstrap(snapshot)
+
+    def delta(sequence, prices):
+        return {
+            "market_type": FUTURES_MARKET_TYPE,
+            "segment_id": "segment",
+            "observation_id": "observation",
+            "source_sequence": sequence,
+            "receive_time": f"2026-08-01T00:00:0{sequence}+00:00",
+            "receive_monotonic_ns": sequence * 10**9,
+            "payload": {
+                "U": 99 + sequence,
+                "u": 100 + sequence,
+                "pu": 99 + sequence,
+                "E": sequence * 1000,
+                "T": sequence * 1000,
+                "b": [[str(price), "1"] for price in prices],
+                "a": [],
+            },
+        }
+
+    assert engine.advance(delta(1, [])) is True
+    prices = [price for price in range(20, 20001) if price % 20][:10001]
+    states = list(engine.feed(delta(2, prices)))
+    assert len(states) == 1 and isinstance(states[0], BookState)
+    assert engine.valid
+    assert len(prices) == 10001
+    assert len(engine._bids) == 11001
+    assert engine.stats.invalid_segments == 0
+
+
+@pytest.mark.parametrize("corruption", ["duplicate_id", "count", "hash"])
+def test_coverage_index_rejects_invalid_complete_source(tmp_path, corruption):
+    descriptor = _write_coverage_history(tmp_path, 1, 32)
+    path = tmp_path / descriptor["path"]
+    if corruption == "duplicate_id":
+        with gzip.open(path, "rb") as handle:
+            row = handle.read()
+        with gzip.open(path, "wb") as handle:
+            handle.write(row + row)
+        raw = path.read_bytes()
+        descriptor.update(
+            record_count=2,
+            compressed_bytes=len(raw),
+            sha256=hashlib.sha256(raw).hexdigest(),
         )
-        assert decoded.coverage_segments == {} and decoded.crossed_books == 1
-    finally:
-        engine.close()
+    elif corruption == "count":
+        descriptor["record_count"] = 2
+    else:
+        descriptor["sha256"] = "0" * 64
+    before = path.read_bytes()
+    with pytest.raises(
+        ValueError, match="^binance_replay_connection_intervals_invalid$"
+    ):
+        replay.ObservationCoverageIndex(
+            tmp_path,
+            descriptor,
+            markets={FUTURES_MARKET_TYPE},
+            decode_interval=replay._decode_recorder_interval,
+        )
+    assert path.read_bytes() == before

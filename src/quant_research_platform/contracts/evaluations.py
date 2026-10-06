@@ -111,11 +111,8 @@ class EvaluationSpec:
     filter_mode: EvaluationFilterMode = "eligible"
     n_groups: int = 5
     run_type: str = "evaluation"
-    contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if type(self.contract_version) is not str or self.contract_version != "0.1":
-            raise ValueError("unsupported_evaluation_contract_version")
         validate_run_id(self.evaluation_id)
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
         _validate_non_empty_string(
@@ -170,11 +167,8 @@ class EvaluationDiagnostics:
     max_timestamp: str | None
     n_groups: int
     skipped_timestamp_count: int
-    contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if type(self.contract_version) is not str or self.contract_version != "0.1":
-            raise ValueError("unsupported_evaluation_contract_version")
         validate_evaluation_filter_mode(self.filter_mode)
         _validate_column_tuple(
             self.filter_columns_used,

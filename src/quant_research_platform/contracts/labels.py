@@ -21,7 +21,6 @@ class LabelDefinition:
     entry_rule: str
     exit_rule: str
     horizon_unit: str = "market_sessions"
-    definition_version: str = "0.1"
 
     def __post_init__(self) -> None:
         if type(self.label_id) is not str or not self.label_id:
@@ -53,14 +52,9 @@ class LabelDefinition:
             raise ValueError("label_entry_rule_required")
         if type(self.exit_rule) is not str or not self.exit_rule:
             raise ValueError("label_exit_rule_required")
-        if type(self.definition_version) is not str or not self.definition_version:
-            raise ValueError("label_definition_version_required")
-        if self.definition_version != "0.1":
-            raise ValueError("unsupported_label_definition_version")
 
     def to_manifest(self) -> dict[str, Any]:
         return {
-            "definition_version": self.definition_version,
             "label_id": self.label_id,
             "market_id": str(self.market_id),
             "family": self.family,

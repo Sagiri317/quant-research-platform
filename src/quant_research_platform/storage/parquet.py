@@ -17,7 +17,6 @@ import pyarrow.parquet as pq
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     DEFAULT_BATCH_ROWS,
-    require_free_disk_headroom,
 )
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -295,7 +294,7 @@ def _filter_arrow_batch(
 
 @contextmanager
 def parquet_table_writer(
-    handle, *, parent: Path, compression: str, schema=None, statistics=(), **options
+    handle, *, compression: str, schema=None, statistics=(), **options
 ):
     """Own the native writer and preserve the primary failure during close."""
     with closing_iterator(ExitStack()) as native:
@@ -303,7 +302,6 @@ def parquet_table_writer(
 
         def write_table(table, *, row_group_size=None):
             nonlocal writer
-            require_free_disk_headroom(parent, reserve_bytes=table.nbytes)
             if writer is None:
                 writer = native.enter_context(
                     closing_iterator(

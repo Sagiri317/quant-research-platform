@@ -19,15 +19,9 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 
-MAX_DISCOVERED_INSTANCES = 1024
 
-
-def discover_dataset_instances(
-    logical_root: Path, *, max_instances: int = MAX_DISCOVERED_INSTANCES
-) -> tuple[Path, ...]:
+def discover_dataset_instances(logical_root: Path) -> tuple[Path, ...]:
     """Return valid immutable instance directories in canonical name order."""
-    if type(max_instances) is not int or max_instances <= 0:
-        raise ValueError("dataset_instance_limit_invalid")
     root = require_unaliased_path(
         Path(logical_root), error="dataset_instance_root_invalid"
     )
@@ -41,7 +35,7 @@ def discover_dataset_instances(
     instances_identity = _directory_identity(
         instances_root, "dataset_instance_root_invalid"
     )
-    names = _instance_names(instances_root, max_instances, instances_identity)
+    names = _instance_names(instances_root, instances_identity)
     result: list[Path] = []
     for name in names:
         entry = instances_root / name
@@ -72,7 +66,7 @@ def discover_dataset_instances(
         ):
             raise ValueError("dataset_instance_identity_changed")
         result.append(entry)
-    if _instance_names(instances_root, max_instances, instances_identity) != names:
+    if _instance_names(instances_root, instances_identity) != names:
         raise ValueError("dataset_instance_identity_changed")
     if _directory_identity(root, "dataset_instance_root_invalid") != root_identity:
         raise ValueError("dataset_instance_identity_changed")
@@ -81,15 +75,12 @@ def discover_dataset_instances(
 
 def _instance_names(
     instances_root: Path,
-    max_instances: int,
     expected_identity: tuple[int, int, int, int],
 ) -> tuple[str, ...]:
     names: list[str] = []
     try:
         with filesystem_scandir(instances_root) as entries:
             for entry in entries:
-                if len(names) >= max_instances:
-                    raise ValueError("dataset_instance_limit_exceeded")
                 names.append(entry.name)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_instance_root_invalid") from exc

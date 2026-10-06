@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import json
-from contextlib import contextmanager
 from pathlib import Path
 
 import pandas as pd
@@ -99,9 +98,8 @@ def test_hft_prediction_alignment_requires_usable_model_rows_and_rejects_extras(
         }
     }
 
-    @contextmanager
     def bundle(*_args, **_kwargs):
-        yield manifest, lookup
+        return manifest, lookup
 
     monkeypatch.setattr(
         portfolio,
@@ -433,20 +431,20 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         if assets:
             expected = expected.loc[expected.asset_id.isin(assets)]
         output_id = f"{spec.model_id}_prediction"
-        with read_prediction_output_bundle(
+        (manifest, lookup) = read_prediction_output_bundle(
             prediction_root / "outputs" / output_id,
             expected_output_id=output_id,
             expected_run_id=f"run_{output_id}",
-        ) as (manifest, lookup):
-            assert manifest["metadata"]["model_metadata"] == saved.prediction_lineage(
-                spec.model_id,
-                TimeWindow(**plan["test"]),
-                access_window="holdout",
-            )
-            assert lookup.row_count == len(expected)
-            values, found = lookup.values_for_frame(expected, mark_matched=True)
-            assert all(found) and np.isfinite(values).all()
-            assert lookup.coverage_counts() == (0, 0)
+        )
+        assert manifest["metadata"]["model_metadata"] == saved.prediction_lineage(
+            spec.model_id,
+            TimeWindow(**plan["test"]),
+            access_window="holdout",
+        )
+        assert lookup.row_count == len(expected)
+        values, found = lookup.values_for_frame(expected, mark_matched=True)
+        assert all(found) and np.isfinite(values).all()
+        assert lookup.coverage_counts() == (0, 0)
     assert (
         frame.loc[
             frame.timestamp.eq(pd.Timestamp("1970-01-01T00:00:08.900000")),

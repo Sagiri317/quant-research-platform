@@ -277,7 +277,6 @@ def write_quarterly_model_artifact(
                 validation_writer = validation_owner.enter_context(
                     parquet_table_writer(
                         handle,
-                        parent=target.parent,
                         compression="zstd",
                         schema=_A_SHARE_VALIDATION_SCHEMA,
                     )
@@ -553,7 +552,6 @@ def _select_a_share_models(
     scoring_window,
     member_identities,
     dataset_identity,
-    _retain=None,
 ):
     protocol = contract["protocol"]
     family_ids = tuple(value["model_id"] for value in contract["model_specs"])
@@ -1429,7 +1427,6 @@ def write_crypto_model_artifact(
                 validation_writer = validation_owner.enter_context(
                     parquet_table_writer(
                         handle,
-                        parent=path.parent,
                         compression="zstd",
                         schema=_CRYPTO_VALIDATION_SCHEMA,
                     )

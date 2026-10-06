@@ -88,6 +88,30 @@ def test_two_immutable_instances_round_trip_and_discover_deterministically(
     assert filesystem_is_dir(logical_root / "instances")
 
 
+def test_discovery_accepts_more_than_1024_published_dataset_instances(
+    tmp_path: Path,
+) -> None:
+    spec = make_processed_dataset_spec("history")
+    logical_root = make_dataset_artifact_root(tmp_path, "history")
+    frame = make_default_dataset_frame().iloc[:1]
+    expected = []
+    for seed in range(1025):
+        envelope = _envelope(spec, seed=seed)
+        instance_root = StorageLayout().instance_root(
+            logical_root, envelope.instance_identity
+        )
+        write_dataset(
+            instance_root,
+            frame,
+            spec=spec,
+            instance_metadata={"common_manifest": envelope},
+        )
+        expected.append(instance_root)
+    assert discover_dataset_instances(logical_root) == tuple(
+        sorted(expected, key=lambda path: path.name)
+    )
+
+
 @pytest.mark.parametrize("deep_root", (False, True))
 def test_research_instance_round_trip_discovery_and_inspect_at_variable_roots(
     tmp_path: Path, deep_root: bool

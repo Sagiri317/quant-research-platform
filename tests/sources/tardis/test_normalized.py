@@ -107,3 +107,34 @@ def test_normalized_manifest_mutation_during_iteration(tmp_path, monkeypatch):
     (root / "manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
     with pytest.raises(ValueError, match="manifest_changed"):
         rows.close()
+
+
+def test_source_identity_rejects_equal_length_changed_gzip(tmp_path, monkeypatch):
+    from quant_research_platform.sources.tardis.normalized import source_identity
+
+    csv = (
+        b"exchange,symbol,timestamp,local_timestamp,id,side,price,amount\n"
+        b"bybit,BTCUSDT,1785542400000000,1785542400000001,1,buy,100,2\n"
+    )
+    raw = gzip.compress(csv, mtime=0)
+    changed = gzip.compress(csv.replace(b",100,2\n", b",100,3\n"), mtime=0)
+    assert len(raw) == len(changed)
+    monkeypatch.setattr("urllib.request.urlopen", lambda *_a, **_k: Response(raw))
+    root = tmp_path / "archive"
+    download_dataset(
+        root,
+        exchange="bybit",
+        dataset_type="trades",
+        symbol="BTCUSDT",
+        date="2026-08-01",
+        byte_budget=1024**2,
+    )
+    scope = dict(
+        exchange="bybit",
+        archives={"BTCUSDT": {"trades": [root.name]}},
+        time_window=TimeWindow("2026-08-01", "2026-08-01"),
+    )
+    assert source_identity(tmp_path, "synthetic", **scope) is not None
+    (root / "data.csv.gz").write_bytes(changed)
+    with pytest.raises(ValueError, match="^tardis_raw_identity_changed$"):
+        source_identity(tmp_path, "synthetic", **scope)

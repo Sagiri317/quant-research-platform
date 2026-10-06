@@ -99,7 +99,6 @@ def synthetic_prediction_model_metadata(
         "dependency_status": {
             "status": "available",
             "package": "internal",
-            "version": "1",
         },
         "feature_importance": {column: 1.0 for column in input_columns},
     }

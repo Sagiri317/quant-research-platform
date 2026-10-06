@@ -5,8 +5,7 @@ from __future__ import annotations
 import os
 import stat
 import sys
-from collections.abc import Callable, Iterator, Mapping, Sequence
-from contextlib import ExitStack, contextmanager
+from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
 import pandas as pd
@@ -29,7 +28,6 @@ from quant_research_platform.contracts.time import (
     is_datetime_value,
     time_value_isoformat,
 )
-from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     filesystem_scandir,
@@ -209,7 +207,6 @@ class _PredictionLookup:
         )
 
 
-@contextmanager
 def read_prediction_output_bundle(
     root: Path,
     *,
@@ -218,9 +215,8 @@ def read_prediction_output_bundle(
     expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
     time_window=None,
     family_selection: str | None = None,
-) -> Iterator[tuple[dict[str, object], _PredictionLookup]]:
+) -> tuple[dict[str, object], _PredictionLookup]:
     lookup: _PredictionLookup | None = None
-    stack = ExitStack()
 
     def read_prediction(
         manifest: dict[str, object],
@@ -389,17 +385,16 @@ def read_prediction_output_bundle(
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("prediction_output_unreadable") from exc
 
-    with closing_iterator(stack):
-        manifest, _members = validate_output_bundle(
-            root,
-            expected_output_id=expected_output_id,
-            expected_run_id=expected_run_id,
-            expected_member_identities=expected_member_identities,
-            observer=read_prediction,
-        )
-        if lookup is None:
-            raise ValueError("prediction_output_unreadable")
-        yield (manifest, lookup)
+    manifest, _members = validate_output_bundle(
+        root,
+        expected_output_id=expected_output_id,
+        expected_run_id=expected_run_id,
+        expected_member_identities=expected_member_identities,
+        observer=read_prediction,
+    )
+    if lookup is None:
+        raise ValueError("prediction_output_unreadable")
+    return (manifest, lookup)
 
 
 def _require_exact_member_set(root: Path, expected_names: tuple[str, ...]) -> None:

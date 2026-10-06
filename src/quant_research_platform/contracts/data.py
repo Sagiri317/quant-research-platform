@@ -118,12 +118,9 @@ class DataSpec:
     column_roles: Mapping[str, ColumnRole | str]
     primary_key: tuple[str, ...]
     partition_columns: tuple[str, ...]
-    schema_version: str = "0.1"
     required_columns: tuple[str, ...] = field(init=False)
 
     def __post_init__(self) -> None:
-        if type(self.schema_version) is not str or self.schema_version != "0.1":
-            raise ValueError("unsupported_schema_version")
         _validate_non_empty_string(self.data_id, "data_id_required")
         frequency = normalize_data_frequency(self.frequency)
         grain = normalize_data_grain(self.grain)

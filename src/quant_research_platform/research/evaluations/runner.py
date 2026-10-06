@@ -86,13 +86,11 @@ def build_crypto_evaluation_result(
             root = layout.target_root(prediction_target, Path("__missing_prediction__"))
             for signal in spec.signals:
                 output_id = signal.signal_id + "_prediction"
-                _manifest, lookup = operation.enter_context(
-                    read_prediction_bundle(
-                        root / "outputs" / output_id,
-                        expected_output_id=output_id,
-                        expected_run_id=f"run_{output_id}",
-                        time_window=time_window,
-                    )
+                _manifest, lookup = read_prediction_bundle(
+                    root / "outputs" / output_id,
+                    expected_output_id=output_id,
+                    expected_run_id=f"run_{output_id}",
+                    time_window=time_window,
                 )
                 lookups[signal.source_column] = lookup
         elif prediction:
@@ -100,13 +98,11 @@ def build_crypto_evaluation_result(
             prediction_target = f"{dataset.data_id}_predictions"
             root = layout.target_root(prediction_target, Path("__missing_prediction__"))
             output_id = f"{model_id}_prediction"
-            manifest, lookup = operation.enter_context(
-                read_prediction_bundle(
-                    root / "outputs" / output_id,
-                    expected_output_id=output_id,
-                    expected_run_id=f"run_{output_id}",
-                    time_window=time_window,
-                )
+            manifest, lookup = read_prediction_bundle(
+                root / "outputs" / output_id,
+                expected_output_id=output_id,
+                expected_run_id=f"run_{output_id}",
+                time_window=time_window,
             )
             metadata = manifest["metadata"]["prediction_metadata"]
             input_columns = tuple(metadata["input_columns"])

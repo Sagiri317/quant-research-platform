@@ -186,118 +186,100 @@ class ChoiceRawSession:
             if filesystem_exists(root):
                 manifest = read_manifest(root / "response.metadata.json")
                 metadata = manifest["metadata"]
-                try:
-                    deque(
-                        _validated_rows(root, request, metadata, manifest=manifest),
-                        maxlen=0,
-                    )
-                    return root
-                finally:
-                    metadata = None
-            response = response_metadata = metadata = None
-            try:
-                response = getattr(self.sdk, request.endpoint)(*request.arguments)
-                response_metadata = {
-                    name: getattr(response, name) for name in _RESPONSE_FIELDS
-                }
-                _validate_response_metadata(response_metadata)
-                metadata = {
-                    "request": payload,
-                    "response": response_metadata,
-                    "collected_at": datetime.now(UTC).isoformat(),
-                    "status": "COMPLETE" if response.ErrorCode == 0 else "FAILED",
-                    "scope": _empty_scope(),
-                    "units": "provider_native_no_conversion",
-                    "types": "JSON_cell_types; SDK_null=None; bytes_hex_for_char",
-                    "data_container": type(response.Data).__name__,
-                }
-                target = (
-                    root
-                    if response.ErrorCode == 0
-                    else root.parent / "failed" / identity / uuid4().hex
+                deque(
+                    _validated_rows(root, request, metadata, manifest=manifest),
+                    maxlen=0,
                 )
-
-                def observed_rows() -> Iterator[tuple[object, ...]]:
-                    for row in _response_rows(request.endpoint, response):
-                        _observe_scope(
-                            metadata["scope"],
-                            response.Indicators,
-                            row[2:],
-                            request.cutoff,
-                        )
-                        yield row
-
-                write_csv_snapshot(
-                    target,
-                    columns=(*_PREFIX, *response.Indicators),
-                    rows=observed_rows(),
-                    metadata=metadata,
-                    max_bytes=request.max_response_bytes,
-                    validate=lambda staging: deque(
-                        _validated_rows(
-                            staging, request, metadata, require_complete=False
-                        ),
-                        maxlen=0,
-                    ),
-                )
-                if response.ErrorCode != 0:
-                    raise RuntimeError(f"choice_query_failed:{response.ErrorCode}")
                 return root
-            finally:
-                response = response_metadata = metadata = None
+            response = response_metadata = metadata = None
+            response = getattr(self.sdk, request.endpoint)(*request.arguments)
+            response_metadata = {
+                name: getattr(response, name) for name in _RESPONSE_FIELDS
+            }
+            _validate_response_metadata(response_metadata)
+            metadata = {
+                "request": payload,
+                "response": response_metadata,
+                "collected_at": datetime.now(UTC).isoformat(),
+                "status": "COMPLETE" if response.ErrorCode == 0 else "FAILED",
+                "scope": _empty_scope(),
+                "units": "provider_native_no_conversion",
+                "types": "JSON_cell_types; SDK_null=None; bytes_hex_for_char",
+                "data_container": type(response.Data).__name__,
+            }
+            target = (
+                root
+                if response.ErrorCode == 0
+                else root.parent / "failed" / identity / uuid4().hex
+            )
+
+            def observed_rows() -> Iterator[tuple[object, ...]]:
+                for row in _response_rows(request.endpoint, response):
+                    _observe_scope(
+                        metadata["scope"],
+                        response.Indicators,
+                        row[2:],
+                        request.cutoff,
+                    )
+                    yield row
+
+            write_csv_snapshot(
+                target,
+                columns=(*_PREFIX, *response.Indicators),
+                rows=observed_rows(),
+                metadata=metadata,
+                max_bytes=request.max_response_bytes,
+                validate=lambda staging: deque(
+                    _validated_rows(staging, request, metadata, require_complete=False),
+                    maxlen=0,
+                ),
+            )
+            if response.ErrorCode != 0:
+                raise RuntimeError(f"choice_query_failed:{response.ErrorCode}")
+            return root
 
         finally:
             self._request_lock.release()
 
 
-@contextmanager
 def read_choice_response(
     root: Path, request: ChoiceRequest, *, expected_metadata_identity=None
-) -> Iterator[dict[str, object]]:
-    """Restore a fully verified SDK response; payload is borrowed in this scope."""
+) -> dict[str, object]:
+    """Restore a fully verified SDK response."""
     request.payload()
     metadata = response = header = {}
     data = [] if request.endpoint == "sector" else {}
     row = value = None
-    try:
-        manifest = read_bounded_qrp_json(
-            root / "response.metadata.json",
-            expected_identity=expected_metadata_identity,
-        )[1]
-        metadata = manifest["metadata"]
-        with closing_iterator(
-            _validated_rows(root, request, metadata, manifest=manifest)
-        ) as rows:
-            for count, row in enumerate(rows):
-                header = metadata["response"]
-                dates, width = len(header["Dates"]), len(header["Indicators"])
-                if request.endpoint == "ctr":
-                    data[row[0]] = list(row[2:])
-                else:
-                    if request.endpoint == "css" and row[1] == 0:
-                        data[row[0]] = [None] * (width * dates)
-                    elif request.endpoint == "sector" and count == 0:
-                        data = [None] * (len(header["Codes"]) * width * dates)
-                    for field, value in enumerate(row[2:]):
-                        if request.endpoint == "css":
-                            data[row[0]][field * dates + row[1]] = value
-                        else:
-                            data[
-                                (count // dates) * width * dates
-                                + field * dates
-                                + row[1]
-                            ] = value
-        response = dict(metadata["response"])
-        if request.endpoint == "css" and not response["Dates"]:
-            data.update((code, []) for code in response["Codes"])
-        response["Data"] = data
-        yield response
-    finally:
-        row = value = None
-        data.clear()
-        response.clear()
-        header.clear()
-        metadata = None
+    manifest = read_bounded_qrp_json(
+        root / "response.metadata.json",
+        expected_identity=expected_metadata_identity,
+    )[1]
+    metadata = manifest["metadata"]
+    with closing_iterator(
+        _validated_rows(root, request, metadata, manifest=manifest)
+    ) as rows:
+        for count, row in enumerate(rows):
+            header = metadata["response"]
+            dates, width = len(header["Dates"]), len(header["Indicators"])
+            if request.endpoint == "ctr":
+                data[row[0]] = list(row[2:])
+            else:
+                if request.endpoint == "css" and row[1] == 0:
+                    data[row[0]] = [None] * (width * dates)
+                elif request.endpoint == "sector" and count == 0:
+                    data = [None] * (len(header["Codes"]) * width * dates)
+                for field, value in enumerate(row[2:]):
+                    if request.endpoint == "css":
+                        data[row[0]][field * dates + row[1]] = value
+                    else:
+                        data[
+                            (count // dates) * width * dates + field * dates + row[1]
+                        ] = value
+    response = dict(metadata["response"])
+    if request.endpoint == "css" and not response["Dates"]:
+        data.update((code, []) for code in response["Codes"])
+    response["Data"] = data
+    return response
 
 
 def _validate_response_metadata(value: dict[str, object]) -> None:

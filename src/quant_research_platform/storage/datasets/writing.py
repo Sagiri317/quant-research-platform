@@ -24,7 +24,6 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     DEFAULT_BATCH_ROWS,
-    require_free_disk_headroom,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.datasets.inspection import (
@@ -496,7 +495,6 @@ def _validate_persisted_categorical_values(
 
 def write_parquet_file(table: pa.Table, path: Path) -> Path:
     filesystem_mkdir(path.parent, parents=True, exist_ok=True)
-    require_free_disk_headroom(path.parent, reserve_bytes=table.nbytes)
     pq.write_table(
         table,
         native_filesystem_path(path),

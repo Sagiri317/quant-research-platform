@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from contextlib import ExitStack
 
 import numpy as np
 import pandas as pd
@@ -156,232 +155,227 @@ def build_a_share_statistics_tables(
     comparison_records: list[dict[str, object]] = []
     loss_records: list[dict[str, object]] = []
     fmb_period_records: list[dict[str, object]] = []
-    with ExitStack() as ownership:
-        chunks = iter_complete_session_frames(
-            iter_research_dataset_chunks(
-                layout,
-                market_id=dataset_spec.market_id,
-                dataset_id=dataset_id,
-                time_window=factor_window,
-                columns=read_columns,
-                access_window=protocol_manifest["access_window"],
-            ),
-            timestamp_column="timestamp",
-        )
-        with closing_iterator(chunks):
-            for session in chunks:
-                mature = legal_training_rows(
-                    session,
-                    fitting_cutoff=factor_window.end,
-                    availability_column=availability,
-                    target_column=primary_label,
-                )
-                timestamp = pd.Timestamp(session["timestamp"].iloc[0])
-                if (
-                    pd.Timestamp(model_window.start)
-                    <= timestamp
-                    <= pd.Timestamp(model_window.end)
-                ):
-                    quarter_id = str(timestamp.to_period("Q"))
-                    selection = persisted_model.selection(
-                        selection_group,
-                        quarter_id,
-                        access_window=protocol_manifest["access_window"],
-                    )
-                    for family_id in family_ids:
-                        entry = model_entries[quarter_id, family_id]
-                        metadata = entry["model_metadata"]
-                        inputs = model_input_validity_columns(
-                            metadata["input_columns"], metadata["model_algorithm"]
-                        )
-                        eligible = session["eligible"].eq(True) & session.loc[
-                            :, list(inputs)
-                        ].notna().all(axis=1)
-                        keys = session.loc[eligible, ["timestamp", "asset_id"]].copy()
-                        keys["family_id"] = family_id
-                        values, found = prediction_lookup.values_for_frame(
-                            keys, mark_matched=True
-                        )
-                        if not all(found):
-                            raise ValueError("missing_required_prediction_keys")
-                        scores = pd.Series(
-                            np.asarray(values, dtype="float64"), index=keys.index
-                        )
-                        mature[family_columns[family_id]] = scores.reindex(mature.index)
-                    if mature.empty:
-                        continue
-                    mature[_PREDICTION_COLUMN] = mature[
-                        family_columns[selection["selected_family_id"]]
-                    ]
-                    rank = cross_sectional_rank_ic(
-                        mature,
-                        value_columns=(
-                            *factors,
-                            _PREDICTION_COLUMN,
-                            *prediction_columns,
-                        ),
-                        label_column=primary_label,
-                    )
-                    rank_records.extend(rank.to_dict("records"))
-                    daily = rank.iloc[0]
-                    paired_rank, paired_count = _common_model_rank_ic(
-                        mature,
-                        family_ids=prediction_columns,
-                        label_column=primary_label,
-                    )
-                    comparison_records.extend(paired_rank.to_dict("records"))
-                    common = bool(
-                        np.isfinite(
-                            paired_rank.loc[:, list(prediction_columns)].to_numpy(
-                                dtype="float64"
-                            )
-                        ).all()
-                    )
-                    for family_id in family_ids:
-                        column = family_columns[family_id]
-                        value = daily[column]
-                        defined = bool(np.isfinite(value))
-                        paired_assets = (
-                            mature.loc[
-                                mature[[column, primary_label]].notna().all(axis=1),
-                                "asset_id",
-                            ]
-                            .astype(str)
-                            .sort_values()
-                        )
-                        loss_records.append(
-                            {
-                                "timestamp": timestamp,
-                                "access_window": protocol_manifest["access_window"],
-                                "quarter_id": quarter_id,
-                                "family_id": family_id,
-                                "config_id": model_entries[quarter_id, family_id][
-                                    "model_id"
-                                ],
-                                "loss": -float(value) if defined else np.nan,
-                                "observation_count": len(paired_assets),
-                                "asset_coverage_id": canonical_json_hash(
-                                    paired_assets.tolist()
-                                ),
-                                "status": "DEFINED" if defined else "UNDEFINED",
-                                "reason": None
-                                if defined
-                                else "cross_sectional_rankic_undefined",
-                                "common_date": int(common),
-                                "common_observation_count": paired_count,
-                            }
-                        )
-                else:
-                    if mature.empty:
-                        continue
-                    rank = cross_sectional_rank_ic(
-                        mature, value_columns=factors, label_column=primary_label
-                    )
-                    rank_records.extend(rank.to_dict("records"))
-                fmb_period_records.extend(
-                    _fama_macbeth_period_records(
-                        mature,
-                        return_column=primary_label,
-                        factors=factors,
-                        core_factors=core,
-                    )
-                )
-        if prediction_lookup.coverage_counts() != (0, 0):
-            raise ValueError("prediction_dataset_coverage_mismatch")
-        rank_by_date = pd.DataFrame.from_records(
-            rank_records, columns=["timestamp", *factors, _PREDICTION_COLUMN]
-        )
-        factor_summary = _factor_summary(
-            rank_by_date,
-            factors=factors,
-            families=families,
-            methods=fdr_methods
-            if protocol_manifest["access_window"] == "development"
-            else (None,),
-            max_lags=max_lags,
-        )
-        prediction_summary = _prediction_summary(
-            rank_by_date,
-            prediction_id=prediction_id,
-            inference_blocker=inference_blocker,
-            max_lags=max_lags,
-            block_size=block_size,
-            repetitions=repetitions,
-            seed=derive_seed(
-                root_seed,
-                "a_share_statistics_bootstrap",
-                protocol_manifest.get("scenario_id"),
-                prediction_id,
-            ),
-        )
-        model_trials = _model_trials(persisted_model, selection_group)
-        model_losses = pd.DataFrame.from_records(
-            loss_records,
-            columns=(
-                "timestamp",
-                "access_window",
-                "quarter_id",
-                "family_id",
-                "config_id",
-                "loss",
-                "observation_count",
-                "status",
-                "reason",
-                "common_date",
-                "common_observation_count",
-                "asset_coverage_id",
-            ),
-        )
-        comparison_by_date = (
-            pd.DataFrame.from_records(
-                comparison_records, columns=["timestamp", *prediction_columns]
-            )
-            .set_index("timestamp")
-            .rename(
-                columns={column: family for family, column in family_columns.items()}
-            )
-        )
-        int(comparison_by_date.loc[:, list(family_ids)].notna().all(axis=1).sum())
-        comparison, tests, robustness = _model_comparison(
-            comparison_by_date,
-            family_ids=family_ids,
-            benchmark_id=benchmark_id,
-            access_window=protocol_manifest["access_window"],
-            inference_blocker=inference_blocker,
-            max_lags=max_lags,
-            block_size=block_size,
-            repetitions=repetitions,
-            root_seed=root_seed,
+    chunks = iter_complete_session_frames(
+        iter_research_dataset_chunks(
+            layout,
+            market_id=dataset_spec.market_id,
             dataset_id=dataset_id,
+            time_window=factor_window,
+            columns=read_columns,
+            access_window=protocol_manifest["access_window"],
+        ),
+        timestamp_column="timestamp",
+    )
+    with closing_iterator(chunks):
+        for session in chunks:
+            mature = legal_training_rows(
+                session,
+                fitting_cutoff=factor_window.end,
+                availability_column=availability,
+                target_column=primary_label,
+            )
+            timestamp = pd.Timestamp(session["timestamp"].iloc[0])
+            if (
+                pd.Timestamp(model_window.start)
+                <= timestamp
+                <= pd.Timestamp(model_window.end)
+            ):
+                quarter_id = str(timestamp.to_period("Q"))
+                selection = persisted_model.selection(
+                    selection_group,
+                    quarter_id,
+                    access_window=protocol_manifest["access_window"],
+                )
+                for family_id in family_ids:
+                    entry = model_entries[quarter_id, family_id]
+                    metadata = entry["model_metadata"]
+                    inputs = model_input_validity_columns(
+                        metadata["input_columns"], metadata["model_algorithm"]
+                    )
+                    eligible = session["eligible"].eq(True) & session.loc[
+                        :, list(inputs)
+                    ].notna().all(axis=1)
+                    keys = session.loc[eligible, ["timestamp", "asset_id"]].copy()
+                    keys["family_id"] = family_id
+                    values, found = prediction_lookup.values_for_frame(
+                        keys, mark_matched=True
+                    )
+                    if not all(found):
+                        raise ValueError("missing_required_prediction_keys")
+                    scores = pd.Series(
+                        np.asarray(values, dtype="float64"), index=keys.index
+                    )
+                    mature[family_columns[family_id]] = scores.reindex(mature.index)
+                if mature.empty:
+                    continue
+                mature[_PREDICTION_COLUMN] = mature[
+                    family_columns[selection["selected_family_id"]]
+                ]
+                rank = cross_sectional_rank_ic(
+                    mature,
+                    value_columns=(
+                        *factors,
+                        _PREDICTION_COLUMN,
+                        *prediction_columns,
+                    ),
+                    label_column=primary_label,
+                )
+                rank_records.extend(rank.to_dict("records"))
+                daily = rank.iloc[0]
+                paired_rank, paired_count = _common_model_rank_ic(
+                    mature,
+                    family_ids=prediction_columns,
+                    label_column=primary_label,
+                )
+                comparison_records.extend(paired_rank.to_dict("records"))
+                common = bool(
+                    np.isfinite(
+                        paired_rank.loc[:, list(prediction_columns)].to_numpy(
+                            dtype="float64"
+                        )
+                    ).all()
+                )
+                for family_id in family_ids:
+                    column = family_columns[family_id]
+                    value = daily[column]
+                    defined = bool(np.isfinite(value))
+                    paired_assets = (
+                        mature.loc[
+                            mature[[column, primary_label]].notna().all(axis=1),
+                            "asset_id",
+                        ]
+                        .astype(str)
+                        .sort_values()
+                    )
+                    loss_records.append(
+                        {
+                            "timestamp": timestamp,
+                            "access_window": protocol_manifest["access_window"],
+                            "quarter_id": quarter_id,
+                            "family_id": family_id,
+                            "config_id": model_entries[quarter_id, family_id][
+                                "model_id"
+                            ],
+                            "loss": -float(value) if defined else np.nan,
+                            "observation_count": len(paired_assets),
+                            "asset_coverage_id": canonical_json_hash(
+                                paired_assets.tolist()
+                            ),
+                            "status": "DEFINED" if defined else "UNDEFINED",
+                            "reason": None
+                            if defined
+                            else "cross_sectional_rankic_undefined",
+                            "common_date": int(common),
+                            "common_observation_count": paired_count,
+                        }
+                    )
+            else:
+                if mature.empty:
+                    continue
+                rank = cross_sectional_rank_ic(
+                    mature, value_columns=factors, label_column=primary_label
+                )
+                rank_records.extend(rank.to_dict("records"))
+            fmb_period_records.extend(
+                _fama_macbeth_period_records(
+                    mature,
+                    return_column=primary_label,
+                    factors=factors,
+                    core_factors=core,
+                )
+            )
+    if prediction_lookup.coverage_counts() != (0, 0):
+        raise ValueError("prediction_dataset_coverage_mismatch")
+    rank_by_date = pd.DataFrame.from_records(
+        rank_records, columns=["timestamp", *factors, _PREDICTION_COLUMN]
+    )
+    factor_summary = _factor_summary(
+        rank_by_date,
+        factors=factors,
+        families=families,
+        methods=fdr_methods
+        if protocol_manifest["access_window"] == "development"
+        else (None,),
+        max_lags=max_lags,
+    )
+    prediction_summary = _prediction_summary(
+        rank_by_date,
+        prediction_id=prediction_id,
+        inference_blocker=inference_blocker,
+        max_lags=max_lags,
+        block_size=block_size,
+        repetitions=repetitions,
+        seed=derive_seed(
+            root_seed,
+            "a_share_statistics_bootstrap",
+            protocol_manifest.get("scenario_id"),
+            prediction_id,
+        ),
+    )
+    model_trials = _model_trials(persisted_model, selection_group)
+    model_losses = pd.DataFrame.from_records(
+        loss_records,
+        columns=(
+            "timestamp",
+            "access_window",
+            "quarter_id",
+            "family_id",
+            "config_id",
+            "loss",
+            "observation_count",
+            "status",
+            "reason",
+            "common_date",
+            "common_observation_count",
+            "asset_coverage_id",
+        ),
+    )
+    comparison_by_date = (
+        pd.DataFrame.from_records(
+            comparison_records, columns=["timestamp", *prediction_columns]
         )
-        group_comparison = _paired_group_rankic(
-            model_losses,
-            global_statistics=global_statistics,
-            selection_group=selection_group,
-            family_ids=family_ids,
-            protocol_manifest=protocol_manifest,
-        )
-        fmb_periods = pd.DataFrame.from_records(
-            fmb_period_records, columns=_FAMA_MACBETH_PERIOD_COLUMNS
-        )
+        .set_index("timestamp")
+        .rename(columns={column: family for family, column in family_columns.items()})
+    )
+    comparison, tests, robustness = _model_comparison(
+        comparison_by_date,
+        family_ids=family_ids,
+        benchmark_id=benchmark_id,
+        access_window=protocol_manifest["access_window"],
+        inference_blocker=inference_blocker,
+        max_lags=max_lags,
+        block_size=block_size,
+        repetitions=repetitions,
+        root_seed=root_seed,
+        dataset_id=dataset_id,
+    )
+    group_comparison = _paired_group_rankic(
+        model_losses,
+        global_statistics=global_statistics,
+        selection_group=selection_group,
+        family_ids=family_ids,
+        protocol_manifest=protocol_manifest,
+    )
+    fmb_periods = pd.DataFrame.from_records(
+        fmb_period_records, columns=_FAMA_MACBETH_PERIOD_COLUMNS
+    )
 
-        fmb_summary = _fama_macbeth_summary(
-            fmb_periods, factors=factors, core_factors=core, max_lags=max_lags
-        )
-        tables = {
-            "factor_diagnostics": factor_summary,
-            "prediction_diagnostics": prediction_summary,
-            "model_trials": model_trials,
-            "robustness": robustness,
-            "fama_macbeth": fmb_summary,
-            "fama_macbeth_periods": fmb_periods,
-            "model_losses": model_losses,
-            "model_comparison": comparison,
-            "model_group_comparison": group_comparison,
-            "model_reality_checks": tests,
-        }
-        ownership.pop_all()
-        return tables
+    fmb_summary = _fama_macbeth_summary(
+        fmb_periods, factors=factors, core_factors=core, max_lags=max_lags
+    )
+    tables = {
+        "factor_diagnostics": factor_summary,
+        "prediction_diagnostics": prediction_summary,
+        "model_trials": model_trials,
+        "robustness": robustness,
+        "fama_macbeth": fmb_summary,
+        "fama_macbeth_periods": fmb_periods,
+        "model_losses": model_losses,
+        "model_comparison": comparison,
+        "model_group_comparison": group_comparison,
+        "model_reality_checks": tests,
+    }
+    return tables
 
 
 def _paired_group_rankic(

@@ -71,20 +71,17 @@ def test_late_snapshot_has_no_early_book_or_coverage(tmp_path, bridge):
             source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
         ):
             if isinstance(event, BookState):
-                try:
-                    book = event
-                    assert isinstance(book, BookState)
-                    books.append(
-                        (
-                            book.source_sequence,
-                            book.observed_time_ns,
-                            book.receive_monotonic_ns,
-                            book.best_bid,
-                            book.update_id,
-                        )
+                book = event
+                assert isinstance(book, BookState)
+                books.append(
+                    (
+                        book.source_sequence,
+                        book.observed_time_ns,
+                        book.receive_monotonic_ns,
+                        book.best_bid,
+                        book.update_id,
                     )
-                finally:
-                    book = None
+                )
         if bridge:
             assert books == [
                 (3, pd.Timestamp("2026-09-01T00:00:03Z").value, None, (100, 4.0), 102)
@@ -963,20 +960,17 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
             source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
         ):
             if isinstance(event, BookState):
-                try:
-                    book = event
-                    books.append(
-                        (
-                            pd.Timestamp(book.observed_time_ns, tz="UTC").strftime(
-                                "%Y-%m-%d"
-                            ),
-                            len(book.bids),
-                            len(book.asks),
-                            book.update_id,
-                        )
+                book = event
+                books.append(
+                    (
+                        pd.Timestamp(book.observed_time_ns, tz="UTC").strftime(
+                            "%Y-%m-%d"
+                        ),
+                        len(book.bids),
+                        len(book.asks),
+                        book.update_id,
                     )
-                finally:
-                    book = None
+                )
             else:
                 boundaries.append(event.reason)
         expected_books = [
@@ -1210,19 +1204,16 @@ def test_archive_actual_spans_sort_equivalent_cross_midnight_slices(tmp_path):
                 source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
             ):
                 if isinstance(event, BookState):
-                    try:
-                        book = event
-                        books.append(
-                            (
-                                book.observed_time_ns,
-                                book.update_id,
-                                book.bids,
-                                book.asks,
-                            )
+                    book = event
+                    books.append(
+                        (
+                            book.observed_time_ns,
+                            book.update_id,
+                            book.bids,
+                            book.asks,
                         )
-                        identities.append(book.observation_id)
-                    finally:
-                        book = None
+                    )
+                    identities.append(book.observation_id)
                 else:
                     boundaries.append((event.observed_time_ns, event.reason))
             assert [(row[0], row[1]) for row in books] == [

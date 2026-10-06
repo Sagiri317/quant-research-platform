@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from dataclasses import replace
@@ -99,123 +98,105 @@ def produce_a_share_processed_data(
     source = {}
     source_sessions = {}
     dependencies = {}
-    try:
-        source_sessions = {}
-        source = {}
-        for data_id in spec.source_input_data_ids:
-            source_spec = source_catalog.get(data_id)
-            root = layout.target_root(
-                data_id, layout.interim_data_root(source_spec.source_id, data_id)
-            )
-            if not filesystem_exists(root):
-                if data_id in _OPTIONAL_SOURCE_IDS:
-                    source[data_id] = pd.DataFrame(columns=source_spec.required_columns)
-                    continue
+    source_sessions = {}
+    source = {}
+    for data_id in spec.source_input_data_ids:
+        source_spec = source_catalog.get(data_id)
+        root = layout.target_root(
+            data_id, layout.interim_data_root(source_spec.source_id, data_id)
+        )
+        if not filesystem_exists(root):
+            if data_id in _OPTIONAL_SOURCE_IDS:
+                source[data_id] = pd.DataFrame(columns=source_spec.required_columns)
                 continue
-            source_sessions[data_id] = open_dataset_session(
-                root,
-                columns=None,
-                time_window=None
-                if data_id in _FULL_HISTORY_SOURCE_IDS
-                else a_share.source_history_window(source_spec, time_window),
-            )
-        if spec.data_id == "market_panel_1d":
-            missing = {
-                "market_bars_1d",
-                "stock_master",
-                "market_cap",
-                "trading_calendar",
-                "trading_no_limit",
-                "special_treatment_changes",
-                "a_share_industry_snapshots",
-            }.difference(source_sessions)
-            if missing:
-                raise ValueError(
-                    "a_share_panel_source_data_missing: " + ", ".join(sorted(missing))
-                )
-        dependencies = {}
-        factor_definitions = (
-            tuple(
-                definition
-                for definition in a_share.factor_catalog().list()
-                if definition.output_column in spec.required_columns
-            )
-            if spec.kind is ProcessedDataKind.FACTOR
-            else ()
+            continue
+        source_sessions[data_id] = open_dataset_session(
+            root,
+            columns=None,
+            time_window=None
+            if data_id in _FULL_HISTORY_SOURCE_IDS
+            else a_share.source_history_window(source_spec, time_window),
         )
-        for data_id in spec.processed_input_data_ids:
-            dependency = processed.get(data_id)
-            root = layout.target_root(
-                data_id,
-                layout.processed_data_root(
-                    dependency.market_id, dependency.kind, data_id
-                ),
+    if spec.data_id == "market_panel_1d":
+        missing = {
+            "market_bars_1d",
+            "stock_master",
+            "market_cap",
+            "trading_calendar",
+            "trading_no_limit",
+            "special_treatment_changes",
+            "a_share_industry_snapshots",
+        }.difference(source_sessions)
+        if missing:
+            raise ValueError(
+                "a_share_panel_source_data_missing: " + ", ".join(sorted(missing))
             )
-            if not filesystem_exists(root):
-                raise ValueError(f"missing_processed_dependency: {data_id}")
-            columns = None
-            if spec.data_id == "fundamental_pit":
-                columns = ("market_id", "asset_id", "timestamp")
-            elif factor_definitions:
-                requested = {
-                    *factor_engine.factor_panel_input_columns(factor_definitions),
-                    "has_legal_fundamental_pit",
-                }
-                if any(
-                    definition.family == "expectations"
-                    for definition in factor_definitions
-                ):
-                    requested.add("close")
-                columns = tuple(
-                    column
-                    for column in dependency.required_columns
-                    if column in requested
-                )
-            elif spec.kind is ProcessedDataKind.LABEL:
-                requested = set(
-                    label_engine.label_panel_input_columns(
-                        a_share.label_catalog().list()
-                    )
-                )
-                columns = tuple(
-                    column
-                    for column in dependency.required_columns
-                    if column in requested
-                )
-            dependencies[data_id] = open_dataset_session(
-                root,
-                columns=columns,
-                time_window=a_share.processed_input_window(spec, time_window),
-            )
-        for data_id, session in source_sessions.items():
-            if data_id not in {"market_bars_1d", "index_weights"}:
-                source[data_id] = materialize_dataset_session(session)
-
-        def verify(_receipt):
-            for session in (*source_sessions.values(), *dependencies.values()):
-                session.verify()
-
-        data = _processed_frames(
-            spec,
-            time_window=time_window,
-            source=source,
-            source_sessions=source_sessions,
-            dependencies=dependencies,
+    dependencies = {}
+    factor_definitions = (
+        tuple(
+            definition
+            for definition in a_share.factor_catalog().list()
+            if definition.output_column in spec.required_columns
         )
-        with closing_iterator(data):
-            first = next((frame for frame in data if not frame.empty), None)
-            if first is None:
-                yield (pd.DataFrame(), {}, verify)
-                return
-            yield (chain((first,), data), {}, verify)
-    finally:
-        primary = sys.exception()
-        if primary is not None:
-            pass
-        source.clear()
-        source_sessions.clear()
-        dependencies.clear()
-        first = data = None
+        if spec.kind is ProcessedDataKind.FACTOR
+        else ()
+    )
+    for data_id in spec.processed_input_data_ids:
+        dependency = processed.get(data_id)
+        root = layout.target_root(
+            data_id,
+            layout.processed_data_root(dependency.market_id, dependency.kind, data_id),
+        )
+        if not filesystem_exists(root):
+            raise ValueError(f"missing_processed_dependency: {data_id}")
+        columns = None
+        if spec.data_id == "fundamental_pit":
+            columns = ("market_id", "asset_id", "timestamp")
+        elif factor_definitions:
+            requested = {
+                *factor_engine.factor_panel_input_columns(factor_definitions),
+                "has_legal_fundamental_pit",
+            }
+            if any(
+                definition.family == "expectations" for definition in factor_definitions
+            ):
+                requested.add("close")
+            columns = tuple(
+                column for column in dependency.required_columns if column in requested
+            )
+        elif spec.kind is ProcessedDataKind.LABEL:
+            requested = set(
+                label_engine.label_panel_input_columns(a_share.label_catalog().list())
+            )
+            columns = tuple(
+                column for column in dependency.required_columns if column in requested
+            )
+        dependencies[data_id] = open_dataset_session(
+            root,
+            columns=columns,
+            time_window=a_share.processed_input_window(spec, time_window),
+        )
+    for data_id, session in source_sessions.items():
+        if data_id not in {"market_bars_1d", "index_weights"}:
+            source[data_id] = materialize_dataset_session(session)
+
+    def verify(_receipt):
+        for session in (*source_sessions.values(), *dependencies.values()):
+            session.verify()
+
+    data = _processed_frames(
+        spec,
+        time_window=time_window,
+        source=source,
+        source_sessions=source_sessions,
+        dependencies=dependencies,
+    )
+    with closing_iterator(data):
+        first = next((frame for frame in data if not frame.empty), None)
+        if first is None:
+            yield (pd.DataFrame(), {}, verify)
+            return
+        yield (chain((first,), data), {}, verify)
 
 
 def _processed_frames(spec, *, time_window, source, source_sessions, dependencies):

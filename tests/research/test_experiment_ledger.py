@@ -152,13 +152,10 @@ def test_trial_record_deep_snapshots_and_ledger_rejects_backfill(
 def test_retired_fourth_role_trial_fields_are_rejected(field, value):
     record = _record(_plan(), event_id="event-1", attempt_index=1, status="completed")
     payload = record.payload()
-    assert payload["contract_version"] == "3.0"
     assert field not in payload
     payload[field] = value
     with pytest.raises(TypeError, match="unexpected keyword argument"):
         TrialRecord.from_payload(payload)
-    with pytest.raises(ValueError, match="^trial_contract_version_invalid$"):
-        replace(record, contract_version="2.0")
 
 
 def test_trial_ledger_uses_exact_bounded_storage_membership(tmp_path: Path) -> None:

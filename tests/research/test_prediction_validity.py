@@ -153,25 +153,25 @@ def test_transform_prediction_publication_and_consumers_share_exact_validity(
         selection_group="global",
     )
     bundle = write_prediction_result(layout, result)
-    with read_prediction_output_bundle(
+    _manifest, lookup = read_prediction_output_bundle(
         bundle,
         expected_output_id="prediction",
         expected_run_id="test_run",
         family_selection="champion",
-    ) as (_manifest, lookup):
-        assert lookup.row_count == len(expected) - int(missing_required)
-        validity = model_input_validity_columns(spec.input_columns, algorithm)
-        session = _session_frame(
-            frame, tuple(dict.fromkeys((*_DATASET_COLUMNS, *validity)))
-        )
-        if missing_required:
-            with pytest.raises(ValueError, match="^missing_required_prediction_keys$"):
-                _prediction_alpha(session, lookup, validity)
-        else:
-            alpha = _prediction_alpha(session, lookup, validity)
-            assert alpha.dropna().index.tolist() == expected
-            assert alpha.index.tolist() == frame.asset_id.tolist()
-            assert lookup.coverage_counts() == (0, 0)
+    )
+    assert lookup.row_count == len(expected) - int(missing_required)
+    validity = model_input_validity_columns(spec.input_columns, algorithm)
+    session = _session_frame(
+        frame, tuple(dict.fromkeys((*_DATASET_COLUMNS, *validity)))
+    )
+    if missing_required:
+        with pytest.raises(ValueError, match="^missing_required_prediction_keys$"):
+            _prediction_alpha(session, lookup, validity)
+    else:
+        alpha = _prediction_alpha(session, lookup, validity)
+        assert alpha.dropna().index.tolist() == expected
+        assert alpha.index.tolist() == frame.asset_id.tolist()
+        assert lookup.coverage_counts() == (0, 0)
     statistics_protocol = deepcopy(a_share.protocol("pv_all").manifest())
     statistics_protocol.update(
         selection_group="global",
@@ -185,51 +185,51 @@ def test_transform_prediction_publication_and_consumers_share_exact_validity(
         "evaluation": {"factors": ["x"], "primary_label": "forward_return_20d"},
         "comparison_model_id": spec.model_id,
     }
-    with read_prediction_output_bundle(
+    _manifest, lookup = read_prediction_output_bundle(
         bundle, expected_output_id="prediction", expected_run_id="test_run"
-    ) as (_manifest, lookup):
+    )
 
-        def statistics():
-            return statistics_production.build_a_share_statistics_tables(
-                layout=layout,
-                dataset_catalog=ResearchDatasetCatalog((dataset,)),
-                dataset_id=dataset.data_id,
-                prediction_id="prediction",
-                persisted_model=artifact,
-                protocol_manifest=statistics_protocol,
-                time_window=window,
-                prediction_lookup=lookup,
-                global_statistics=None,
-            )
+    def statistics():
+        return statistics_production.build_a_share_statistics_tables(
+            layout=layout,
+            dataset_catalog=ResearchDatasetCatalog((dataset,)),
+            dataset_id=dataset.data_id,
+            prediction_id="prediction",
+            persisted_model=artifact,
+            protocol_manifest=statistics_protocol,
+            time_window=window,
+            prediction_lookup=lookup,
+            global_statistics=None,
+        )
 
-        if missing_required:
-            with pytest.raises(ValueError, match="^missing_required_prediction_keys$"):
-                statistics()
-        else:
-            tables = statistics()
-            assert lookup.coverage_counts() == (0, 0)
-            assert tables["model_losses"].observation_count.tolist() == [len(expected)]
-            envelope = build_business_manifest_envelope(
-                logical_artifact_id="statistics",
-                schema_identity="a" * 64,
-                protocol_or_spec_identity="b" * 64,
-                software_identity="c" * 64,
-                research_window={
-                    "start": "2019-01-01",
-                    "end": "2019-03-31",
-                    "access": "development",
-                },
-                upstream_identities={},
-                semantic_metadata={},
-            )
-            root = write_statistics_artifact(
-                tmp_path / "statistics", envelope=envelope, tables=tables
-            )
-            restored = read_statistics_artifact(
-                root, expected_identity=envelope.instance_identity
-            )
-            with restored.table("model_losses.parquet") as saved:
-                assert saved.observation_count.tolist() == [len(expected)]
+    if missing_required:
+        with pytest.raises(ValueError, match="^missing_required_prediction_keys$"):
+            statistics()
+    else:
+        tables = statistics()
+        assert lookup.coverage_counts() == (0, 0)
+        assert tables["model_losses"].observation_count.tolist() == [len(expected)]
+        envelope = build_business_manifest_envelope(
+            logical_artifact_id="statistics",
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity="c" * 64,
+            research_window={
+                "start": "2019-01-01",
+                "end": "2019-03-31",
+                "access": "development",
+            },
+            upstream_identities={},
+            semantic_metadata={},
+        )
+        root = write_statistics_artifact(
+            tmp_path / "statistics", envelope=envelope, tables=tables
+        )
+        restored = read_statistics_artifact(
+            root, expected_identity=envelope.instance_identity
+        )
+        with restored.table("model_losses.parquet") as saved:
+            assert saved.observation_count.tolist() == [len(expected)]
 
 
 def test_frozen_prediction_alpha_is_permutation_invariant_and_reader_uses_alpha(
@@ -299,32 +299,32 @@ def test_frozen_prediction_alpha_is_permutation_invariant_and_reader_uses_alpha(
             selected.loc[0, "asset_id"] = "missing_asset"
         if mutation == "timestamp":
             selected.loc[0, "timestamp"] += pd.Timedelta(days=1)
-        with read_prediction_output_bundle(
+        _manifest, lookup = read_prediction_output_bundle(
             bundle,
             expected_output_id="prediction",
             expected_run_id="test_run",
             family_selection="champion",
-        ) as (_manifest, lookup):
-            assert lookup.prediction_column == "alpha_score"
-            joined = _iter_prediction_joined_chunks(
-                (selected.iloc[:1], selected.iloc[1:]),
-                prediction_lookup=lookup,
-                input_columns=("x",),
-                model_algorithm="linear_regression",
-                sample_filter_mode=prediction_spec.sample_filter_mode,
-                test_start=prediction_spec.test_start,
-                test_end=prediction_spec.test_end,
-            )
-            if mutation is None:
-                matched = pd.concat(joined, ignore_index=True)
-                assert matched.asset_id.tolist() == requested.asset_id.tolist()
-                assert matched.alpha_score.tolist() == pytest.approx([1 / 3, -1 / 3, 0])
-                assert lookup.coverage_counts() == (0, 0)
-            else:
-                with pytest.raises(
-                    ValueError, match="misaligned_persisted_prediction_keys"
-                ):
-                    list(joined)
+        )
+        assert lookup.prediction_column == "alpha_score"
+        joined = _iter_prediction_joined_chunks(
+            (selected.iloc[:1], selected.iloc[1:]),
+            prediction_lookup=lookup,
+            input_columns=("x",),
+            model_algorithm="linear_regression",
+            sample_filter_mode=prediction_spec.sample_filter_mode,
+            test_start=prediction_spec.test_start,
+            test_end=prediction_spec.test_end,
+        )
+        if mutation is None:
+            matched = pd.concat(joined, ignore_index=True)
+            assert matched.asset_id.tolist() == requested.asset_id.tolist()
+            assert matched.alpha_score.tolist() == pytest.approx([1 / 3, -1 / 3, 0])
+            assert lookup.coverage_counts() == (0, 0)
+        else:
+            with pytest.raises(
+                ValueError, match="misaligned_persisted_prediction_keys"
+            ):
+                list(joined)
 
 
 def test_mixed_rank_and_linear_trials_share_score_keys_but_keep_own_predictions(

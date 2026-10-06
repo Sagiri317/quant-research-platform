@@ -159,17 +159,17 @@ def check_published_evidence_views(
                 base_url="http://testserver",
             ) as client:
                 params = {"profile": profile.profile_id}
-                directory = await client.get("/api/0.1/status", params=params)
+                directory = await client.get("/api/status", params=params)
                 assert directory.status_code == 200 and "status" not in directory.json()
                 assert run_id in {row["run_id"] for row in directory.json()["runs"]}
                 selected = await client.get(
-                    "/api/0.1/status", params={**params, "run_id": run_id}
+                    "/api/status", params={**params, "run_id": run_id}
                 )
                 assert (
                     selected.status_code == 200 and selected.json() == record.payload()
                 )
                 inspection = await client.get(
-                    f"/api/0.1/inspect/{target_id}",
+                    f"/api/inspect/{target_id}",
                     params={**params, "run_id": run_id},
                 )
                 assert inspection.status_code == 200
@@ -181,7 +181,7 @@ def check_published_evidence_views(
                 }
                 assert inspection.json()["blocker"] == "report_identity_required"
                 view = await client.get(
-                    f"/api/0.1/runs/{run_id}/reports/{report_identity}",
+                    f"/api/runs/{run_id}/reports/{report_identity}",
                     params=params,
                 )
                 assert view.status_code == 200 and view.json()["report"] == payload
@@ -194,7 +194,7 @@ def check_published_evidence_views(
                 assert archived["markdown"] == archived_markdown
                 assert archived["report"] == archived_payload
                 large_view = await client.get(
-                    f"/api/0.1/runs/{run_id}/reports/{previous.instance_identity}",
+                    f"/api/runs/{run_id}/reports/{previous.instance_identity}",
                     params=params,
                 )
                 assert large_view.status_code == 200
@@ -205,7 +205,7 @@ def check_published_evidence_views(
                     if row.producer_kind.value == "PORTFOLIO"
                 )
                 curve = await client.get(
-                    f"/api/0.1/runs/{run_id}/portfolios/{portfolio_target}",
+                    f"/api/runs/{run_id}/portfolios/{portfolio_target}",
                     params=params,
                 )
                 assert curve.status_code == 200 and curve.json()["status"] == "DEFINED"
@@ -224,18 +224,18 @@ def check_published_evidence_views(
                 )
                 failures = [
                     await client.get(
-                        f"/api/0.1/runs/{other_run_id}/reports/{report_identity}",
+                        f"/api/runs/{other_run_id}/reports/{report_identity}",
                         params=params,
                     ),
                     await client.get(
-                        f"/api/0.1/runs/{run_id}/reports/{'0' * 64}", params=params
+                        f"/api/runs/{run_id}/reports/{'0' * 64}", params=params
                     ),
                     await client.get(
-                        f"/api/0.1/runs/{run_id}/reports/{report_identity}",
+                        f"/api/runs/{run_id}/reports/{report_identity}",
                         params={"profile": wrong_profile},
                     ),
                     await client.get(
-                        f"/api/0.1/runs/{run_id}/portfolios/not_in_run",
+                        f"/api/runs/{run_id}/portfolios/not_in_run",
                         params=params,
                     ),
                 ]
@@ -247,7 +247,7 @@ def check_published_evidence_views(
                     )
                     failures.append(
                         await client.get(
-                            f"/api/0.1/runs/{run_id}/reports/{report_identity}",
+                            f"/api/runs/{run_id}/reports/{report_identity}",
                             params=params,
                         )
                     )
@@ -270,7 +270,7 @@ def check_published_evidence_views(
                             changed_after_validation,
                         )
                         failed = await client.get(
-                            f"/api/0.1/runs/{run_id}/reports/{report_identity}",
+                            f"/api/runs/{run_id}/reports/{report_identity}",
                             params=params,
                         )
                         assert failed.status_code == 422

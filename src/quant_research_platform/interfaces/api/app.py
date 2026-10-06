@@ -46,7 +46,7 @@ def create_app(*, project_root: Path | None = None) -> FastAPI:
 
     app = FastAPI(
         title="Quant Research Platform",
-        version="0.1.0",
+        version="unversioned",
         description=(
             "Read-only local catalog and explicitly selected "
             "published research evidence."
@@ -92,27 +92,23 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
             raise ApiError("published_evidence_invalid", status_code=422) from exc
         except OSError as exc:
             raise ApiError("published_evidence_unavailable", status_code=422) from exc
-        except RuntimeError as exc:
-            if str(exc) == "runtime_data_scale_lock_busy":
-                raise ApiError("runtime_data_scale_lock_busy", status_code=503) from exc
-            raise
 
     @app.get(
-        "/api/0.1/catalog/factors",
+        "/api/catalog/factors",
         operation_id="list_catalog_factors",
     )
     def catalog_factors(profile: str = A_SHARE_PROFILE_ID) -> FactorCatalogResponse:
         return queries.list_factors(selected_profile(profile))
 
     @app.get(
-        "/api/0.1/catalog/labels",
+        "/api/catalog/labels",
         operation_id="list_catalog_labels",
     )
     def catalog_labels(profile: str = A_SHARE_PROFILE_ID) -> LabelCatalogResponse:
         return queries.list_labels(selected_profile(profile))
 
     @app.get(
-        "/api/0.1/research-datasets/{dataset_id}/requirements",
+        "/api/research-datasets/{dataset_id}/requirements",
         operation_id="describe_research_dataset_requirements",
     )
     def describe_research_dataset_requirements(
@@ -131,7 +127,7 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
                 field="dataset_id",
             ) from exc
 
-    @app.get("/api/0.1/status", operation_id="read_run_status")
+    @app.get("/api/status", operation_id="read_run_status")
     def run_status(
         profile: str = A_SHARE_PROFILE_ID, run_id: str | None = None
     ) -> dict[str, object]:
@@ -139,7 +135,7 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
             research.status, profile=selected_profile(profile), run_id=run_id
         )
 
-    @app.get("/api/0.1/inspect/{target_id}", operation_id="inspect_published_target")
+    @app.get("/api/inspect/{target_id}", operation_id="inspect_published_target")
     def inspect_target(
         target_id: str, profile: str = A_SHARE_PROFILE_ID, run_id: str | None = None
     ) -> dict[str, object]:
@@ -151,7 +147,7 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
         )
 
     @app.get(
-        "/api/0.1/runs/{run_id}/reports/{report_identity}",
+        "/api/runs/{run_id}/reports/{report_identity}",
         operation_id="read_published_report",
     )
     def report(
@@ -165,7 +161,7 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
         )
 
     @app.get(
-        "/api/0.1/runs/{run_id}/portfolios/{target_id}",
+        "/api/runs/{run_id}/portfolios/{target_id}",
         operation_id="read_portfolio_curve",
     )
     def portfolio(

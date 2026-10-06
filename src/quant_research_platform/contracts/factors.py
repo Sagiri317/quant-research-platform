@@ -41,11 +41,8 @@ class FactorDefinition:
     source_layer: str = "processed"
     required_input_data_id: str = ""
     window: int | None = None
-    definition_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if type(self.definition_version) is not str or self.definition_version != "0.1":
-            raise ValueError("unsupported_factor_definition_version")
         _validate_non_empty_string(self.factor_id, "factor_id_required")
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
         try:
@@ -111,7 +108,6 @@ class FactorDefinition:
 
     def to_manifest(self) -> dict[str, Any]:
         payload: dict[str, Any] = {
-            "definition_version": self.definition_version,
             "factor_id": self.factor_id,
             "market_id": str(self.market_id),
             "factor_set": self.factor_set.value,

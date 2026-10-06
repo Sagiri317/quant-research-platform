@@ -1724,134 +1724,129 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
                 layout.semantic_artifact_root("a_share", group_prediction_id),
                 results[group_prediction_id]["instance_identity"],
             )
-            with read_prediction_output_bundle(
+            (_manifest, lookup) = read_prediction_output_bundle(
                 group_root / "outputs" / group_prediction_id,
                 expected_output_id=group_prediction_id,
                 time_window=narrow_window,
-            ) as (_manifest, lookup):
-                narrow = build_a_share_statistics_tables(
-                    layout=data_layout,
-                    dataset_catalog=profile.research_datasets,
-                    dataset_id="pv_all",
-                    prediction_id=group_prediction_id,
-                    persisted_model=model,
-                    protocol_manifest=protocol.target_manifest(
-                        group_statistics_id, "STATISTIC"
-                    ),
-                    time_window=narrow_window,
-                    prediction_lookup=lookup,
-                    global_statistics=narrow_global,
+            )
+            narrow = build_a_share_statistics_tables(
+                layout=data_layout,
+                dataset_catalog=profile.research_datasets,
+                dataset_id="pv_all",
+                prediction_id=group_prediction_id,
+                persisted_model=model,
+                protocol_manifest=protocol.target_manifest(
+                    group_statistics_id, "STATISTIC"
+                ),
+                time_window=narrow_window,
+                prediction_lookup=lookup,
+                global_statistics=narrow_global,
+            )
+            prediction_diagnostics = narrow["prediction_diagnostics"].iloc[0]
+            assert prediction_diagnostics["status"] == "UNDEFINED"
+            if end_date == "2019-01-15":
+                assert prediction_diagnostics["observation_count"] == 0
+            else:
+                assert 0 < prediction_diagnostics["observation_count"] < 20
+            robustness = narrow["robustness"]
+            assert robustness.status.eq("UNDEFINED").all()
+            assert robustness.observation_count.lt(20).all()
+            if group == "global":
+                reason = "global_development_selection_reuses_validation"
+                assert prediction_diagnostics["reason"] == reason
+                assert robustness.reason.eq(reason).all()
+                narrow_envelope = build_business_manifest_envelope(
+                    **{
+                        key: value
+                        for key, value in read_semantic_artifact(
+                            statistics_root
+                        ).items()
+                        if key
+                        not in {
+                            "instance_identity",
+                            "status",
+                            "logical_artifact_id",
+                            "research_window",
+                        }
+                    },
+                    logical_artifact_id=f"pv_all_global_narrow_{end_date}_statistics",
+                    research_window={
+                        "start": "2019-01-02",
+                        "end": end_date,
+                        "access": "development",
+                    },
                 )
-                prediction_diagnostics = narrow["prediction_diagnostics"].iloc[0]
-                assert prediction_diagnostics["status"] == "UNDEFINED"
+                narrow_root = write_statistics_artifact(
+                    tmp_path / f"narrow_global_statistics_{end_date}",
+                    envelope=narrow_envelope,
+                    tables=narrow,
+                )
+                narrow_global = research.read_statistics_artifact(
+                    narrow_root, expected_identity=narrow_envelope.instance_identity
+                )
+            else:
+                assert (
+                    prediction_diagnostics["reason"] == "hac_lag_exceeds_observations"
+                )
+                assert robustness.reason.eq(
+                    "bootstrap_block_exceeds_common_observations"
+                ).all()
+                paired = narrow["model_group_comparison"]
+                assert set(paired.family_id) == {
+                    item["model_id"] for item in configuration["models"]
+                }
                 if end_date == "2019-01-15":
-                    assert prediction_diagnostics["observation_count"] == 0
-                else:
-                    assert 0 < prediction_diagnostics["observation_count"] < 20
-                robustness = narrow["robustness"]
-                assert robustness.status.eq("UNDEFINED").all()
-                assert robustness.observation_count.lt(20).all()
-                if group == "global":
-                    reason = "global_development_selection_reuses_validation"
-                    assert prediction_diagnostics["reason"] == reason
-                    assert robustness.reason.eq(reason).all()
-                    narrow_envelope = build_business_manifest_envelope(
+                    assert paired.observation_count.eq(0).all()
+                    assert paired.reason.eq("no_common_observations").all()
+                    assert paired.bootstrap_reason.eq("no_common_observations").all()
+                    assert paired.status.eq("UNDEFINED").all()
+                    narrow_payload = narrow_envelope.payload()
+                    quarter_envelope = build_business_manifest_envelope(
                         **{
                             key: value
-                            for key, value in read_semantic_artifact(
-                                statistics_root
-                            ).items()
+                            for key, value in narrow_payload.items()
                             if key
                             not in {
                                 "instance_identity",
                                 "status",
                                 "logical_artifact_id",
-                                "research_window",
                             }
                         },
-                        logical_artifact_id=f"pv_all_global_narrow_{end_date}_statistics",
-                        research_window={
-                            "start": "2019-01-02",
-                            "end": end_date,
-                            "access": "development",
-                        },
+                        logical_artifact_id="pv_all_quarterly_zero_mature_statistics",
                     )
-                    narrow_root = write_statistics_artifact(
-                        tmp_path / f"narrow_global_statistics_{end_date}",
-                        envelope=narrow_envelope,
+                    quarterly_root = write_statistics_artifact(
+                        tmp_path / "quarterly_zero_mature_statistics",
+                        envelope=quarter_envelope,
                         tables=narrow,
                     )
-                    narrow_global = research.read_statistics_artifact(
-                        narrow_root, expected_identity=narrow_envelope.instance_identity
+                    saved_quarter = research.read_statistics_artifact(
+                        quarterly_root,
+                        expected_identity=quarter_envelope.instance_identity,
                     )
-                else:
-                    assert (
-                        prediction_diagnostics["reason"]
-                        == "hac_lag_exceeds_observations"
-                    )
-                    assert robustness.reason.eq(
-                        "bootstrap_block_exceeds_common_observations"
-                    ).all()
-                    paired = narrow["model_group_comparison"]
-                    assert set(paired.family_id) == {
-                        item["model_id"] for item in configuration["models"]
-                    }
-                    if end_date == "2019-01-15":
-                        assert paired.observation_count.eq(0).all()
-                        assert paired.reason.eq("no_common_observations").all()
-                        assert paired.bootstrap_reason.eq(
-                            "no_common_observations"
-                        ).all()
-                        assert paired.status.eq("UNDEFINED").all()
-                        narrow_payload = narrow_envelope.payload()
-                        quarter_envelope = build_business_manifest_envelope(
-                            **{
-                                key: value
-                                for key, value in narrow_payload.items()
-                                if key
-                                not in {
-                                    "instance_identity",
-                                    "status",
-                                    "logical_artifact_id",
-                                }
-                            },
-                            logical_artifact_id="pv_all_quarterly_zero_mature_statistics",
-                        )
-                        quarterly_root = write_statistics_artifact(
-                            tmp_path / "quarterly_zero_mature_statistics",
-                            envelope=quarter_envelope,
-                            tables=narrow,
-                        )
-                        saved_quarter = research.read_statistics_artifact(
-                            quarterly_root,
-                            expected_identity=quarter_envelope.instance_identity,
-                        )
-                        with saved_quarter.table(
-                            "model_group_comparison.parquet"
-                        ) as saved:
-                            assert saved.observation_count.eq(0).all()
-                            assert saved.status.eq("UNDEFINED").all()
-                            assert saved.reason.eq("no_common_observations").all()
+                    with saved_quarter.table("model_group_comparison.parquet") as saved:
+                        assert saved.observation_count.eq(0).all()
+                        assert saved.status.eq("UNDEFINED").all()
+                        assert saved.reason.eq("no_common_observations").all()
         model = narrow_global = saved_quarter = None
         narrow_envelope = quarter_envelope = narrow_payload = None
     model = research.read_quarterly_model_artifact(model_root, trial_layout=layout)
-    with read_prediction_output_bundle(
+    (_manifest, lookup) = read_prediction_output_bundle(
         damaged,
         expected_output_id=prediction_id,
         time_window=TimeWindow(request["start"], request["end"]),
-    ) as (_manifest, lookup):
-        with pytest.raises(ValueError, match="missing_required_prediction_keys"):
-            build_a_share_statistics_tables(
-                layout=data_layout,
-                dataset_catalog=profile.research_datasets,
-                dataset_id="pv_all",
-                prediction_id=prediction_id,
-                persisted_model=model,
-                protocol_manifest=protocol.target_manifest(statistics_id, "STATISTIC"),
-                time_window=TimeWindow(request["start"], request["end"]),
-                prediction_lookup=lookup,
-                global_statistics=None,
-            )
+    )
+    with pytest.raises(ValueError, match="missing_required_prediction_keys"):
+        build_a_share_statistics_tables(
+            layout=data_layout,
+            dataset_catalog=profile.research_datasets,
+            dataset_id="pv_all",
+            prediction_id=prediction_id,
+            persisted_model=model,
+            protocol_manifest=protocol.target_manifest(statistics_id, "STATISTIC"),
+            time_window=TimeWindow(request["start"], request["end"]),
+            prediction_lookup=lookup,
+            global_statistics=None,
+        )
     model = None
 
     def forged_writer(staging):
@@ -1910,16 +1905,11 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
             return native_write(frames, path, **kwargs)
 
         def interrupted_frames():
-            first = None
             with closing_iterator(iter(frames)) as stream:
-                try:
-                    first = next(stream)
-                    observed.append(len(first))
-                    yield first
-                    first = None
-                    raise primary
-                finally:
-                    first = None
+                first = next(stream)
+                observed.append(len(first))
+                yield first
+                raise primary
 
         return native_write(interrupted_frames(), path, **kwargs)
 

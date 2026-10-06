@@ -243,113 +243,94 @@ def iter_index_info_rows(
         complete_bytes = 0
         row_number = 1
         header: list[str] | None = None
-        try:
-            while True:
-                try:
-                    header, record, source_bytes = next(rows)
-                except StopIteration:
-                    break
-                row_number += 1
-                if pending_row is not None:
-                    if _record_starts_index_info(record):
-                        raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
-                    remaining_columns = len(header) - len(pending_row)
-                    completes_row = (
-                        len(pending_row) <= 6 and len(record) >= remaining_columns
-                    )
-                    next_bytes = pending_bytes + source_bytes
-                    if next_bytes > record_limit_bytes:
-                        raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
-                    suffix = _append_continuation_fields(
-                        continuations,
-                        iter(record),
-                        field_count=len(record),
-                        suffix_count=remaining_columns if completes_row else 0,
-                        include_empty=False,
-                    )
-                    pending_bytes = next_bytes
-                    if completes_row:
-                        pending_row[-1] = _join_continuations(
-                            pending_row[-1], continuations
-                        )
-                        pending_row.extend(suffix)
-                        complete_row = _normalize_index_info_row(
-                            pending_row, len(header), pending_start
-                        )
-                        complete_bytes = pending_bytes
-                        continuations.clear()
-                        pending_row = None
-                        pending_start = None
-                        pending_bytes = 0
-                    del record, suffix
-                    continue
-                if len(record) > len(header):
-                    if _record_starts_index_info(record):
-                        row = _normalize_bounded_index_info_record(
-                            record, row_number, continuation_spool=continuations
-                        )
-                    elif complete_row is not None:
-                        if complete_bytes + source_bytes > record_limit_bytes:
-                            raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
-                        _append_continuation_fields(
-                            continuations, iter(record), field_count=len(record)
-                        )
-                        complete_bytes += source_bytes
-                        del record
-                        continue
-                    else:
-                        raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-                else:
-                    row = record
-                if len(row) < len(header):
-                    if _looks_like_index_info_record_start(row):
-                        if complete_row is not None:
-                            if continuations:
-                                complete_row[-1] = _join_continuations(
-                                    complete_row[-1], continuations
-                                )
-                            _yield_value = (header, complete_row, complete_bytes)
-                            try:
-                                yield _yield_value
-                            except GeneratorExit:
-                                return
-                            complete_row = None
-                        pending_row = row
-                        pending_start = row_number
-                        continuations.clear()
-                        pending_bytes = source_bytes
-                        complete_row = None
-                        complete_bytes = 0
-                        del row
-                        continue
-                    if complete_row is not None:
-                        if complete_bytes + source_bytes > record_limit_bytes:
-                            raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
-                        _append_continuation_fields(
-                            continuations, row, field_count=len(row)
-                        )
-                        complete_bytes += source_bytes
-                        del row
-                        continue
-                    raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-                if complete_row is not None:
-                    if continuations:
-                        complete_row[-1] = _join_continuations(
-                            complete_row[-1], continuations
-                        )
-                    _yield_value = (header, complete_row, complete_bytes)
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
-                    complete_row = None
-                complete_row = _normalize_index_info_row(row, len(header), row_number)
-                del row
-                continuations.clear()
-                complete_bytes = source_bytes
-                del record
+        while True:
+            try:
+                header, record, source_bytes = next(rows)
+            except StopIteration:
+                break
+            row_number += 1
             if pending_row is not None:
-                raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
+                if _record_starts_index_info(record):
+                    raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
+                remaining_columns = len(header) - len(pending_row)
+                completes_row = (
+                    len(pending_row) <= 6 and len(record) >= remaining_columns
+                )
+                next_bytes = pending_bytes + source_bytes
+                if next_bytes > record_limit_bytes:
+                    raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
+                suffix = _append_continuation_fields(
+                    continuations,
+                    iter(record),
+                    field_count=len(record),
+                    suffix_count=remaining_columns if completes_row else 0,
+                    include_empty=False,
+                )
+                pending_bytes = next_bytes
+                if completes_row:
+                    pending_row[-1] = _join_continuations(
+                        pending_row[-1], continuations
+                    )
+                    pending_row.extend(suffix)
+                    complete_row = _normalize_index_info_row(
+                        pending_row, len(header), pending_start
+                    )
+                    complete_bytes = pending_bytes
+                    continuations.clear()
+                    pending_row = None
+                    pending_start = None
+                    pending_bytes = 0
+                del record, suffix
+                continue
+            if len(record) > len(header):
+                if _record_starts_index_info(record):
+                    row = _normalize_bounded_index_info_record(
+                        record, row_number, continuation_spool=continuations
+                    )
+                elif complete_row is not None:
+                    if complete_bytes + source_bytes > record_limit_bytes:
+                        raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
+                    _append_continuation_fields(
+                        continuations, iter(record), field_count=len(record)
+                    )
+                    complete_bytes += source_bytes
+                    del record
+                    continue
+                else:
+                    raise ValueError(f"malformed_csmar_csv_row: {row_number}")
+            else:
+                row = record
+            if len(row) < len(header):
+                if _looks_like_index_info_record_start(row):
+                    if complete_row is not None:
+                        if continuations:
+                            complete_row[-1] = _join_continuations(
+                                complete_row[-1], continuations
+                            )
+                        _yield_value = (header, complete_row, complete_bytes)
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
+                        complete_row = None
+                    pending_row = row
+                    pending_start = row_number
+                    continuations.clear()
+                    pending_bytes = source_bytes
+                    complete_row = None
+                    complete_bytes = 0
+                    del row
+                    continue
+                if complete_row is not None:
+                    if complete_bytes + source_bytes > record_limit_bytes:
+                        raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
+                    _append_continuation_fields(
+                        continuations, row, field_count=len(row)
+                    )
+                    complete_bytes += source_bytes
+                    del row
+                    continue
+                raise ValueError(f"malformed_csmar_csv_row: {row_number}")
             if complete_row is not None:
                 if continuations:
                     complete_row[-1] = _join_continuations(
@@ -361,8 +342,22 @@ def iter_index_info_rows(
                 except GeneratorExit:
                     return
                 complete_row = None
-        finally:
-            header = pending_row = complete_row = row = record = suffix = None
+            complete_row = _normalize_index_info_row(row, len(header), row_number)
+            del row
+            continuations.clear()
+            complete_bytes = source_bytes
+            del record
+        if pending_row is not None:
+            raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
+        if complete_row is not None:
+            if continuations:
+                complete_row[-1] = _join_continuations(complete_row[-1], continuations)
+            _yield_value = (header, complete_row, complete_bytes)
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
+            complete_row = None
 
 
 def _normalize_index_info_row(
@@ -504,68 +499,60 @@ def _iter_csv_records(
     rows = iter(iter_export_csv_records(path, expected_identity=expected_identity))
     with closing_iterator(rows):
         header = physical_header = row = record = None
-        try:
-            header_record = next(rows, None)
-            if header_record is None:
-                return
-            physical_header = materialize_header_record(header_record[0])
-            physical_width = len(physical_header)
-            selected_positions: frozenset[int] | None = None
-            header = physical_header
-            if require_exact_width and dataset is not None:
-                from quant_research_platform.sources.csmar.field_mappings import (
-                    COLUMN_ALIASES,
-                    COLUMN_MAPPINGS,
-                    validate_raw_column_names,
-                )
+        header_record = next(rows, None)
+        if header_record is None:
+            return
+        physical_header = materialize_header_record(header_record[0])
+        physical_width = len(physical_header)
+        selected_positions: frozenset[int] | None = None
+        header = physical_header
+        if require_exact_width and dataset is not None:
+            from quant_research_platform.sources.csmar.field_mappings import (
+                COLUMN_ALIASES,
+                COLUMN_MAPPINGS,
+                validate_raw_column_names,
+            )
 
-                validate_raw_column_names(tuple(physical_header), dataset)
-                selected_columns = set(COLUMN_MAPPINGS[dataset])
-                selected_columns.update(
-                    alias
-                    for aliases in COLUMN_ALIASES.get(dataset, {}).values()
-                    for alias in aliases
+            validate_raw_column_names(tuple(physical_header), dataset)
+            selected_columns = set(COLUMN_MAPPINGS[dataset])
+            selected_columns.update(
+                alias
+                for aliases in COLUMN_ALIASES.get(dataset, {}).values()
+                for alias in aliases
+            )
+            selected_positions = frozenset(
+                (
+                    index
+                    for index, column in enumerate(physical_header)
+                    if column in selected_columns
                 )
-                selected_positions = frozenset(
-                    (
-                        index
-                        for index, column in enumerate(physical_header)
-                        if column in selected_columns
-                    )
-                )
-                header = [
-                    physical_header[index] for index in sorted(selected_positions)
-                ]
-                del physical_header
-            del header_record
+            )
+            header = [physical_header[index] for index in sorted(selected_positions)]
+            del physical_header
+        del header_record
+        while True:
             try:
-                while True:
-                    try:
-                        record, source_bytes = next(rows)
-                    except StopIteration:
-                        break
-                    row: list[str] = record
-                    if require_exact_width:
-                        if len(record) != physical_width:
-                            raise ValueError("malformed_csmar_csv_row")
-                        row = [
-                            value
-                            for position, value in enumerate(record)
-                            if position in selected_positions
-                        ]
-                        del record
-                    _yield_value = (header, row, source_bytes)
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
-                    del row
-                    if not require_exact_width:
-                        del record
-            finally:
-                header = physical_header = row = record = None
-        finally:
-            header = physical_header = row = record = None
+                record, source_bytes = next(rows)
+            except StopIteration:
+                break
+            row: list[str] = record
+            if require_exact_width:
+                if len(record) != physical_width:
+                    raise ValueError("malformed_csmar_csv_row")
+                row = [
+                    value
+                    for position, value in enumerate(record)
+                    if position in selected_positions
+                ]
+                del record
+            _yield_value = (header, row, source_bytes)
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
+            del row
+            if not require_exact_width:
+                del record
 
 
 def _raw_frame(rows: list[list[str]], header: list[str]) -> pd.DataFrame:

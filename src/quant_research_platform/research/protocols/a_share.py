@@ -121,7 +121,7 @@ class AShareProtocol:
     access_window: str = "development"
     root_seed: int = ROOT_SEED
     frozen_development: dict[str, object] | None = None
-    frozen_alpha: tuple[tuple[tuple[str, str], AlphaCalibration], ...] = ()
+    frozen_alpha: tuple[tuple[tuple[str, str, str], AlphaCalibration], ...] = ()
     configuration_json: str | None = None
     risk_config: FactorRiskConfig = FactorRiskConfig()
     optimizer_config: OptimizerConfig = OptimizerConfig()
@@ -457,7 +457,11 @@ class AShareProtocol:
                 except PortfolioTargetBlocked as exc:
                     blocker = str(exc)
                     break
-                key = (group, candidate.rebalance_schedule)
+                key = (
+                    group,
+                    candidate.prediction_selector,
+                    candidate.rebalance_schedule,
+                )
                 if key in calibrations and calibrations[key] != (current, observed_at):
                     raise ValueError("holdout_alpha_sources_disagree")
                 calibrations[key] = (current, observed_at)

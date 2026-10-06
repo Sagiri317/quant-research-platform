@@ -372,13 +372,17 @@ def source_identity(root, _target_id, *, exchange, archives, time_window=None):
             identities[symbol] = {}
             for kind, paths in kinds.items():
                 identities[symbol][kind] = []
-                for _path, manifest in _selected_archives(root, paths, time_window):
+                for path, manifest in _selected_archives(root, paths, time_window):
                     if (
                         manifest["exchange"] != exchange
                         or manifest["symbol"] != symbol
                         or manifest["dataset_type"] != kind
                     ):
                         raise ValueError("tardis_normalized_scope_invalid")
+                    with _verified_file(
+                        path / "data.csv.gz", expected_sha256=manifest["sha256"]
+                    ):
+                        pass
                     identities[symbol][kind].append(canonical_json_hash(manifest))
     except FileNotFoundError:
         return None

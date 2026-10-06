@@ -74,11 +74,8 @@ class PredictionSpec:
     is_final_oos_window: bool = True
     training_asset_ids: tuple[str, ...] = ()
     evaluation_asset_ids: tuple[str, ...] = ()
-    contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if type(self.contract_version) is not str or self.contract_version != "0.1":
-            raise ValueError("unsupported_prediction_contract_version")
         validate_run_id(self.prediction_id)
         _validate_non_empty_string(self.model_id, "model_id_required")
         _validate_non_empty_string(

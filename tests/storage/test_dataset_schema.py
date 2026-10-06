@@ -356,10 +356,6 @@ def test_dataset_schema_validators_reject_mutated_runtime_contracts() -> None:
         dataset_schema.validate_dataset_manifest_instance_metadata({"unknown": True})
     with pytest.raises(ValueError, match="dataset_spec_type_invalid"):
         dataset_schema.validate_dataset_spec(object())
-    spec = make_processed_dataset_spec("mutated_schema_version")
-    object.__setattr__(spec, "schema_version", "0.2")
-    with pytest.raises(ValueError, match="unsupported_schema_version"):
-        dataset_schema.validate_dataset_spec(spec)
     for manifest in (
         {},
         {"primary_key": ["asset_id"], "null_count_summary": {}},

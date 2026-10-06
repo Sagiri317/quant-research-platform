@@ -680,7 +680,7 @@ def test_taker_depth_breakpoint_optimum_zero_and_unavailable_decision():
             )
 
 
-def test_taker_rejects_nonpositive_forecast_and_releases_pending_orders_on_primary():
+def test_taker_rejects_nonpositive_forecast_and_preserves_primary():
     for prediction in (-1.0, -2.0):
         with pytest.raises(ValueError, match="hft_prediction_price_invalid"):
             simulate_taker(

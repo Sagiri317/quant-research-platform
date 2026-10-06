@@ -597,7 +597,6 @@ class StatisticsArtifact:
     def _batches(self, member, *, filters=None):
         if member not in self._members:
             raise ValueError("statistics_table_member_invalid")
-        max(1, min(1024**2, 67108864 // 8))
         with closing_iterator(
             iter_declared_parquet_member_batches(
                 self.root / member,
@@ -676,7 +675,6 @@ def write_statistics_artifact(
                     writers[member] = output.enter_context(
                         parquet_table_writer(
                             handle,
-                            parent=staging,
                             compression="zstd",
                             schema=_ARROW_SCHEMAS[member],
                             statistics=tuple(

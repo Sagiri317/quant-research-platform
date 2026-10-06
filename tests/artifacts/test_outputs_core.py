@@ -45,6 +45,45 @@ def test_output_manifest_builder_validates_current_business_envelope() -> None:
     assert validate_output_manifest_business_envelope(payload) is payload
 
 
+def test_output_manifest_preserves_actual_external_dependency_version() -> None:
+    from sklearn import __version__
+
+    payload = _prediction_manifest_payload()
+    model = payload["metadata"]["model_metadata"]
+    model["model_algorithm"] = "ridge_regression"
+    model["dependency_status"] = {
+        "status": "available",
+        "package": "sklearn",
+        "version": __version__,
+    }
+    assert validate_output_manifest_business_envelope(payload) is payload
+    assert model["dependency_status"]["version"] == __version__
+
+
+@pytest.mark.parametrize(
+    "algorithm,dependency",
+    (
+        (
+            "linear_regression",
+            {"status": "available", "package": "internal", "version": "1"},
+        ),
+        ("ridge_regression", {"status": "available", "package": "sklearn"}),
+        (
+            "ridge_regression",
+            {"status": "available", "package": "sklearn", "version": ""},
+        ),
+        ("linear_regression", {"status": "available", "package": "sklearn"}),
+    ),
+)
+def test_output_manifest_rejects_dependency_contract_drift(algorithm, dependency):
+    payload = _prediction_manifest_payload()
+    model = payload["metadata"]["model_metadata"]
+    model["model_algorithm"] = algorithm
+    model["dependency_status"] = dependency
+    with pytest.raises(ValueError, match="^output_manifest_metadata_invalid$"):
+        validate_output_manifest_business_envelope(payload)
+
+
 def test_output_manifest_preserves_typed_identifier_values() -> None:
     output_spec = replace(
         make_prediction_report_spec(),
@@ -81,9 +120,12 @@ def test_output_manifest_rejects_unsafe_free_form_metadata_before_publish(
     payload = _prediction_manifest_payload()
     model_metadata = payload["metadata"]["model_metadata"]
     if mutation == "absolute_path":
-        model_metadata["dependency_status"]["version"] = (
-            "C:" + chr(92) + "private" + chr(92) + "environment"
-        )
+        model_metadata["model_algorithm"] = "ridge_regression"
+        model_metadata["dependency_status"] = {
+            "status": "available",
+            "package": "sklearn",
+            "version": "C:" + chr(92) + "private" + chr(92) + "environment",
+        }
     else:
         marker = {
             "provider_marker": "csmar",

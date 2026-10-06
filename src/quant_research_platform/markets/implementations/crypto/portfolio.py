@@ -108,84 +108,81 @@ def _prediction_rows(
     target = f"{dataset.data_id}_predictions"
     output_id = f"{model_id}_prediction"
     root = layout.target_root(target, Path("__missing_prediction__"))
-    with read_prediction_bundle(
+    manifest, lookup = read_prediction_bundle(
         root / "outputs" / output_id,
         expected_output_id=output_id,
         expected_run_id=f"run_{output_id}",
         time_window=output_window,
-    ) as (manifest, lookup):
-        metadata = manifest["metadata"]["prediction_metadata"]
-        calibration = manifest["metadata"]["model_metadata"]["score_to_label"]
-        inputs = tuple(metadata["input_columns"])
-        scope = protocol_manifest["model_scopes"][model_id]
-        rank_score = scope["model_algorithm"] in {
-            "equal_weight_rank_ensemble",
-            "ic_weighted_rank_ensemble",
-        }
-        if rank_score != (calibration is not None):
-            raise ValueError("crypto_prediction_score_units_invalid")
-        assets = tuple(scope["evaluation_asset_ids"])
-        columns = tuple(
-            dict.fromkeys(
-                (
-                    *dataset.primary_key,
-                    *inputs,
-                    *required_filter_columns(metadata["sample_filter_mode"]),
-                    *HFT_EXECUTION_CONTEXT_COLUMNS,
-                )
+    )
+    metadata = manifest["metadata"]["prediction_metadata"]
+    calibration = manifest["metadata"]["model_metadata"]["score_to_label"]
+    inputs = tuple(metadata["input_columns"])
+    scope = protocol_manifest["model_scopes"][model_id]
+    rank_score = scope["model_algorithm"] in {
+        "equal_weight_rank_ensemble",
+        "ic_weighted_rank_ensemble",
+    }
+    if rank_score != (calibration is not None):
+        raise ValueError("crypto_prediction_score_units_invalid")
+    assets = tuple(scope["evaluation_asset_ids"])
+    columns = tuple(
+        dict.fromkeys(
+            (
+                *dataset.primary_key,
+                *inputs,
+                *required_filter_columns(metadata["sample_filter_mode"]),
+                *HFT_EXECUTION_CONTEXT_COLUMNS,
             )
         )
+    )
 
-        def frames():
-            for fold_id, window in windows:
-                source = iter_research_dataset_chunks(
-                    layout,
-                    market_id=dataset.market_id,
-                    dataset_id=dataset.data_id,
-                    time_window=window,
-                    columns=columns,
-                )
-                with closing_iterator(source):
-                    for frame in source:
-                        scoped = (
-                            frame.loc[frame.asset_id.isin(assets)] if assets else frame
-                        )
-                        scoped = scoped.assign(fold_id=fold_id)
-                        try:
-                            yield scoped
-                        except GeneratorExit:
-                            return
-                        del scoped
+    def frames():
+        for fold_id, window in windows:
+            source = iter_research_dataset_chunks(
+                layout,
+                market_id=dataset.market_id,
+                dataset_id=dataset.data_id,
+                time_window=window,
+                columns=columns,
+            )
+            with closing_iterator(source):
+                for frame in source:
+                    scoped = frame.loc[frame.asset_id.isin(assets)] if assets else frame
+                    scoped = scoped.assign(fold_id=fold_id)
+                    try:
+                        yield scoped
+                    except GeneratorExit:
+                        return
+                    del scoped
 
-        joined = _iter_prediction_joined_chunks(
-            frames(),
-            prediction_lookup=lookup,
-            model_algorithm=scope["model_algorithm"],
-            input_columns=inputs,
-            sample_filter_mode=metadata["sample_filter_mode"],
-            test_start=pd.Timestamp(output_window.start).isoformat(),
-            test_end=pd.Timestamp(output_window.end).isoformat(),
-        )
-        with closing_iterator(joined):
-            for frame in joined:
-                for row in frame.itertuples(index=False):
-                    if row.asset_id == asset_id:
-                        _yield_value = {
-                            "timestamp_ms": pd.Timestamp(row.timestamp).value
-                            // 1_000_000,
-                            "asset_id": asset_id,
-                            "book_segment_id": row.book_segment_id,
-                            "trade_observation_id": row.trade_observation_id,
-                            "segment_id": row.segment_id,
-                            "fold_id": row.fold_id,
-                            "prediction_score": _score_in_label_units(
-                                row.prediction_score, calibration
-                            ),
-                        }
-                        try:
-                            yield _yield_value
-                        except GeneratorExit:
-                            return
+    joined = _iter_prediction_joined_chunks(
+        frames(),
+        prediction_lookup=lookup,
+        model_algorithm=scope["model_algorithm"],
+        input_columns=inputs,
+        sample_filter_mode=metadata["sample_filter_mode"],
+        test_start=pd.Timestamp(output_window.start).isoformat(),
+        test_end=pd.Timestamp(output_window.end).isoformat(),
+    )
+    with closing_iterator(joined):
+        for frame in joined:
+            for row in frame.itertuples(index=False):
+                if row.asset_id == asset_id:
+                    _yield_value = {
+                        "timestamp_ms": pd.Timestamp(row.timestamp).value // 1_000_000,
+                        "asset_id": asset_id,
+                        "book_segment_id": row.book_segment_id,
+                        "trade_observation_id": row.trade_observation_id,
+                        "segment_id": row.segment_id,
+                        "fold_id": row.fold_id,
+                        "prediction_score": _score_in_label_units(
+                            row.prediction_score, calibration
+                        ),
+                    }
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
 
 
 def _market_coverage_check(coverage, trade_coverage, bounds):
@@ -264,9 +261,6 @@ class _EpisodeCursor:
                 self.retain(value)
             yield value
             self._next()
-
-    def close(self):
-        self.pending = self.carried = None
 
 
 def _episode_book_time(event):
@@ -368,7 +362,6 @@ def _execute_episodes(
             continue
         iterator = resources.enter_context(closing_iterator(iter(source)))
         cursor = _EpisodeCursor(iterator, key, sticky=sticky)
-        resources.callback(cursor.close)
         streams[name] = cursor
     count = 0
     for start, stop, termination, reasons in _qualified_episodes(
@@ -748,10 +741,7 @@ def produce_maker_calibration(
 
     def flush(name):
         output = frame(buffers[name], columns_by_table[name])
-        try:
-            on_table(name, output)
-        finally:
-            output = None
+        on_table(name, output)
         written.add(name)
         buffers[name] = empty(columns_by_table[name])
         buffer_rows[name] = 0
@@ -770,24 +760,45 @@ def produce_maker_calibration(
             buffer_rows[name] += take
             count -= take
 
-    try:
-        with open_run(raw_root) as run:
-            if run.source_identity != panel["source_artifact_identity"]:
-                raise ValueError("crypto_execution_recorder_identity_mismatch")
-            price_unit = run.market_metadata(market_type, symbol)["price_unit"]
-            coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
-                "coverage_segments"
-            ]
-            trade_coverage = run.observation_coverage(
-                market_type=market_type, data_kind="agg_trades", symbol=symbol
-            )
-            for fold in plan["folds"]:
-                if fold["fold_id"] not in selected_folds:
-                    continue
-                counts = {side: [0, 0, 0] for side in ("buy", "sell")}
+    with open_run(raw_root) as run:
+        if run.source_identity != panel["source_artifact_identity"]:
+            raise ValueError("crypto_execution_recorder_identity_mismatch")
+        price_unit = run.market_metadata(market_type, symbol)["price_unit"]
+        coverage = panel["producer_diagnostics"]["reconstruction"][symbol][
+            "coverage_segments"
+        ]
+        trade_coverage = run.observation_coverage(
+            market_type=market_type, data_kind="agg_trades", symbol=symbol
+        )
+        for fold in plan["folds"]:
+            if fold["fold_id"] not in selected_folds:
+                continue
+            counts = {side: [0, 0, 0] for side in ("buy", "sell")}
 
-                def observe(
-                    *,
+            def observe(
+                *,
+                side,
+                sample_id,
+                decision_ns,
+                prediction_end_ns,
+                available_ns,
+                prediction,
+                observed_return,
+                filled,
+                quote_quantity,
+                terminal_reason,
+                book_segment_id,
+                trade_observation_id,
+                initial_book_event_id,
+                initial_bid_index,
+                initial_ask_index,
+                event_start,
+                event_end,
+                fold_id=fold["fold_id"],
+                counts=counts,
+            ):
+                values = (
+                    fold_id,
                     side,
                     sample_id,
                     decision_ns,
@@ -795,6 +806,7 @@ def produce_maker_calibration(
                     available_ns,
                     prediction,
                     observed_return,
+                    observed_return - prediction,
                     filled,
                     quote_quantity,
                     terminal_reason,
@@ -805,136 +817,107 @@ def produce_maker_calibration(
                     initial_ask_index,
                     event_start,
                     event_end,
-                    fold_id=fold["fold_id"],
-                    counts=counts,
-                ):
-                    values = (
-                        fold_id,
-                        side,
-                        sample_id,
-                        decision_ns,
-                        prediction_end_ns,
-                        available_ns,
-                        prediction,
-                        observed_return,
-                        observed_return - prediction,
-                        filled,
-                        quote_quantity,
-                        terminal_reason,
-                        book_segment_id,
-                        trade_observation_id,
-                        initial_book_event_id,
-                        initial_bid_index,
-                        initial_ask_index,
-                        event_start,
-                        event_end,
-                    )
-                    append("crypto_maker_samples", (values,), 1)
-                    counts[side][0] += 1
-                    counts[side][1] += int(filled == 0)
-                    counts[side][2] += int(
-                        terminal_reason == "post_only_crossing_rejected"
-                    )
+                )
+                append("crypto_maker_samples", (values,), 1)
+                counts[side][0] += 1
+                counts[side][1] += int(filled == 0)
+                counts[side][2] += int(terminal_reason == "post_only_crossing_rejected")
 
-                def observe_event(*, event_id, event, fold_id=fold["fold_id"]):
-                    if isinstance(event, TradeEvent):
-                        if event.visible_quantity is None:
-                            raise PortfolioTargetBlocked(
-                                "hft_trade_visible_quantity_unknown"
-                            )
-                        kind, context = "trade", event.observation_id
-                        rows = (
-                            (
-                                "buy" if event.buyer_is_maker else "sell",
-                                0,
-                                event.price_index,
-                                event.visible_quantity,
-                            ),
+            def observe_event(*, event_id, event, fold_id=fold["fold_id"]):
+                if isinstance(event, TradeEvent):
+                    if event.visible_quantity is None:
+                        raise PortfolioTargetBlocked(
+                            "hft_trade_visible_quantity_unknown"
                         )
-                        count = 1
-                    elif isinstance(event, BookBoundary):
-                        kind, context = "boundary", event.segment_id
-                        rows = (("", 0, 0, 0.0),)
-                        count = 1
-                    else:
-                        kind, context = "book", event.segment_id
-                        rows = (
-                            (side, index, tick, quantity)
-                            for side, levels in (
-                                ("buy", event.bids),
-                                ("sell", event.asks),
-                            )
-                            for index, (tick, quantity) in enumerate(levels)
-                        )
-                        count = len(event.bids) + len(event.asks)
-                    append(
-                        "crypto_maker_events",
+                    kind, context = "trade", event.observation_id
+                    rows = (
                         (
-                            (
-                                fold_id,
-                                event_id,
-                                event.observed_time_ns,
-                                kind,
-                                context,
-                                side,
-                                level,
-                                tick,
-                                quantity,
-                            )
-                            for side, level, tick, quantity in rows
+                            "buy" if event.buyer_is_maker else "sell",
+                            0,
+                            event.price_index,
+                            event.visible_quantity,
                         ),
-                        count,
                     )
-
-                cutoff = pd.Timestamp(fold["validation"]["end"]).value
-                result = replay_maker_calibration(
-                    _books_until(
-                        run,
-                        reconstruct_depth=reconstruct_depth,
-                        symbol=symbol,
-                        end_ns=cutoff,
+                    count = 1
+                elif isinstance(event, BookBoundary):
+                    kind, context = "boundary", event.segment_id
+                    rows = (("", 0, 0, 0.0),)
+                    count = 1
+                else:
+                    kind, context = "book", event.segment_id
+                    rows = (
+                        (side, index, tick, quantity)
+                        for side, levels in (
+                            ("buy", event.bids),
+                            ("sell", event.asks),
+                        )
+                        for index, (tick, quantity) in enumerate(levels)
+                    )
+                    count = len(event.bids) + len(event.asks)
+                append(
+                    "crypto_maker_events",
+                    (
+                        (
+                            fold_id,
+                            event_id,
+                            event.observed_time_ns,
+                            kind,
+                            context,
+                            side,
+                            level,
+                            tick,
+                            quantity,
+                        )
+                        for side, level, tick, quantity in rows
                     ),
-                    read_trades(run, symbol=symbol, end_ms=cutoff // 1000000),
-                    _paired_validation(models, fold["fold_id"], asset_id, model_ids),
-                    order_quantity=calibration["order_quantity"],
-                    latency_ms=calibration["latency_ms"],
-                    observed_coverage=coverage,
-                    trade_coverage=trade_coverage,
-                    cutoff_ns=cutoff,
-                    on_sample=observe,
-                    on_event=observe_event,
+                    count,
                 )
-                minimum = plan["execution"]["maker"]["min_calibration_samples"]
-                summaries = []
-                for side, (count, zero, rejected) in counts.items():
-                    summaries.append(
-                        {
-                            "fold_id": fold["fold_id"],
-                            "side": side,
-                            "price_unit": price_unit,
-                            "sample_count": count,
-                            "zero_fill_count": zero,
-                            "post_only_rejection_count": rejected,
-                            "excluded_decisions": result["excluded_decisions"],
-                            "minimum_samples": minimum,
-                            "status": "DEFINED" if count >= minimum else "UNDEFINED",
-                            "reason": ""
-                            if count >= minimum
-                            else "insufficient_calibration_samples",
-                        }
-                    )
 
-                on_table(
-                    "crypto_maker_calibration", pd.DataFrame.from_records(summaries)
+            cutoff = pd.Timestamp(fold["validation"]["end"]).value
+            result = replay_maker_calibration(
+                _books_until(
+                    run,
+                    reconstruct_depth=reconstruct_depth,
+                    symbol=symbol,
+                    end_ns=cutoff,
+                ),
+                read_trades(run, symbol=symbol, end_ms=cutoff // 1000000),
+                _paired_validation(models, fold["fold_id"], asset_id, model_ids),
+                order_quantity=calibration["order_quantity"],
+                latency_ms=calibration["latency_ms"],
+                observed_coverage=coverage,
+                trade_coverage=trade_coverage,
+                cutoff_ns=cutoff,
+                on_sample=observe,
+                on_event=observe_event,
+            )
+            minimum = plan["execution"]["maker"]["min_calibration_samples"]
+            summaries = []
+            for side, (count, zero, rejected) in counts.items():
+                summaries.append(
+                    {
+                        "fold_id": fold["fold_id"],
+                        "side": side,
+                        "price_unit": price_unit,
+                        "sample_count": count,
+                        "zero_fill_count": zero,
+                        "post_only_rejection_count": rejected,
+                        "excluded_decisions": result["excluded_decisions"],
+                        "minimum_samples": minimum,
+                        "status": "DEFINED" if count >= minimum else "UNDEFINED",
+                        "reason": ""
+                        if count >= minimum
+                        else "insufficient_calibration_samples",
+                    }
                 )
-                for name in buffers:
-                    if buffer_rows[name]:
-                        flush(name)
-        for name in buffers:
-            if buffer_rows[name] or name not in written:
-                flush(name)
-    finally:
-        buffers.clear()
+
+            on_table("crypto_maker_calibration", pd.DataFrame.from_records(summaries))
+            for name in buffers:
+                if buffer_rows[name]:
+                    flush(name)
+    for name in buffers:
+        if buffer_rows[name] or name not in written:
+            flush(name)
 
 
 def produce_maker_ledger(
@@ -980,25 +963,18 @@ def produce_maker_ledger(
                 validate_tables=validate_maker_calibration,
             )
             with artifact.table("crypto_maker_calibration.parquet") as summary:
-                try:
-                    price_unit = summary.price_unit.iloc[0]
-                    required = {fold_id for fold_id, _window in windows}
-                    selected = summary.loc[summary.fold_id.isin(required)]
-                    if (
-                        set(zip(selected.fold_id, selected.side, strict=True))
-                        != {
-                            (fold, side)
-                            for fold in required
-                            for side in ("buy", "sell")
-                        }
-                        or not selected.status.eq("DEFINED").all()
-                    ):
-                        raise PortfolioTargetBlocked(
-                            "maker_calibration_insufficient_samples"
-                        )
-                    selected = None
-                finally:
-                    summary = None
+                price_unit = summary.price_unit.iloc[0]
+                required = {fold_id for fold_id, _window in windows}
+                selected = summary.loc[summary.fold_id.isin(required)]
+                if (
+                    set(zip(selected.fold_id, selected.side, strict=True))
+                    != {(fold, side) for fold in required for side in ("buy", "sell")}
+                    or not selected.status.eq("DEFINED").all()
+                ):
+                    raise PortfolioTargetBlocked(
+                        "maker_calibration_insufficient_samples"
+                    )
+                selected = None
             resources.callback(artifact._verify)
             calibrations = {}
             for fold_id, _window in windows:
@@ -1325,12 +1301,9 @@ def validate_maker_calibration(artifact, envelope):
     _positive(reference["order_quantity"], "hft_maker_order_quantity_invalid")
     _nonnegative_integer(reference["latency_ms"], "hft_maker_latency_invalid")
     with artifact.table("crypto_maker_calibration.parquet") as summary:
-        try:
-            price_unit = validate_price_unit(summary.price_unit.iloc[0])
-            if not summary.price_unit.eq(price_unit).all():
-                raise ValueError("crypto_calibration_price_unit_invalid")
-        finally:
-            summary = None
+        price_unit = validate_price_unit(summary.price_unit.iloc[0])
+        if not summary.price_unit.eq(price_unit).all():
+            raise ValueError("crypto_calibration_price_unit_invalid")
     totals = dict.fromkeys(("samples", "events", "calibration"), 0)
     paired_columns = tuple(
         column

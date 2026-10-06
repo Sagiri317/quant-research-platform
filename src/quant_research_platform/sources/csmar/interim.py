@@ -1409,8 +1409,6 @@ def _iter_pruned_interim_frames(
                                 f"conflicting_csmar_primary_key_duplicates: {data_id}"
                             ) from error
                         raise
-                    finally:
-                        del table
                     exact_duplicate_count += duplicate_count
                     if producer_diagnostics is not None:
                         producer_diagnostics["exact_duplicate_count"] = (

@@ -43,7 +43,7 @@ status 未指定 run_id 时只列已有运行；空目录返回空列表，不�
 
 本地 API 使用 create_app(project_root=Path("YOUR_PROJECT")) 绑定项目。
 HTTP 客户端不能传路径切换项目；未绑定时仅提供目录查询。
-已有 API 为 /api/0.1 下的 catalog/factors、catalog/labels、
+已有 API 为 /api 下的 catalog/factors、catalog/labels、
 research-datasets/{dataset_id}/requirements、status、inspect/{target_id}、
 runs/{run_id}/reports/{report_identity} 和 runs/{run_id}/portfolios/{target_id}。
 API 使用 profile 查询参数选择市场。报告查询核对 run 与 report_identity 来源关系，

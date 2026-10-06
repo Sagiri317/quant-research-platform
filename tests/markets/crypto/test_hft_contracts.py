@@ -534,7 +534,7 @@ def test_maker_requires_matching_book_and_trade_schedule_identity() -> None:
     assert result["created_orders"] == 0
 
 
-def test_book_state_lease_and_taker_timing_and_terminal_mark() -> None:
+def test_book_state_taker_timing_and_terminal_mark() -> None:
     fills: list[dict[str, object]] = []
     equities: list[dict[str, object]] = []
     simulate_taker(

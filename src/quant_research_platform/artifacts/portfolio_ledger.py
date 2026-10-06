@@ -151,9 +151,7 @@ def write_portfolio_ledger_artifact(
                     )
                 )
                 writers[name] = stack.enter_context(
-                    parquet_table_writer(
-                        handle, parent=staging, compression="zstd", schema=schema
-                    )
+                    parquet_table_writer(handle, compression="zstd", schema=schema)
                 )
             buffers = {name: [] for name in _TABLE_TYPES}
             written = set()
@@ -255,7 +253,7 @@ def read_portfolio_ledger_artifact(
             "upstream_identities",
             "calibration",
         }
-        or calibration["schema_id"] != "qrp-final-alpha-calibration-v1"
+        or calibration["schema_id"] != "qrp-final-alpha-calibration"
         or (
             calibration["selection_group"]
             != envelope["semantic_metadata"]["target_contract"]["portfolio_candidate"][

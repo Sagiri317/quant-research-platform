@@ -472,7 +472,7 @@ def test_episode_publication_cancel_preserves_old_and_parent_capture_rejects_chi
     assert consumed == 0
 
 
-def test_funding_cut_between_books_carries_only_information_not_account_or_lease():
+def test_funding_cut_between_books_carries_information_without_account_state():
     from functools import partial
     from types import SimpleNamespace
 

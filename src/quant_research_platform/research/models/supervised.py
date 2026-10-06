@@ -10,32 +10,18 @@ from quant_research_platform.contracts.models import (
     _PARALLEL_MODEL_ALGORITHMS,
     DEFAULT_MODEL_THREAD_COUNT,
     ModelSpec,
-    _model_algorithm_facts,
     _resolved_model_thread_count,
     _thaw_model_hyperparameters,
 )
 from quant_research_platform.runtime.resources import model_cpu_capacity
 
 
-def build_estimator_from_model_spec(spec: ModelSpec) -> object:
-    estimator = _build_estimator(spec)
-    facts = _model_algorithm_facts(spec.model_algorithm)
-    if facts.dependency_package is not None:
-        if not dependencies.model_dependency_preflighted(spec.model_algorithm):
-            dependencies.preflight_model_dependency(spec.model_algorithm)
-    return estimator
-
-
 def preflight_model_specs(specs: Iterable[ModelSpec]) -> None:
-    selected = tuple(specs)
-    for spec in selected:
-        _build_estimator(spec)
-    for algorithm in dict.fromkeys(spec.model_algorithm for spec in selected):
-        if _model_algorithm_facts(algorithm).dependency_package is not None:
-            dependencies.preflight_model_dependency(algorithm)
+    for spec in specs:
+        build_estimator_from_model_spec(spec)
 
 
-def _build_estimator(spec: ModelSpec) -> object:
+def build_estimator_from_model_spec(spec: ModelSpec) -> object:
     params = resolved_model_hyperparameters(spec)
     dependencies.require_model_dependency(spec.model_algorithm)
     factory = estimators._MODEL_ESTIMATOR_FACTORIES.get(spec.model_algorithm)

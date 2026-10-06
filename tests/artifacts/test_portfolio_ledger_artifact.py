@@ -1508,7 +1508,7 @@ def _alpha_payload(calibration, envelope):
     from quant_research_platform.contracts.targets import unmeasured_operation_evidence
 
     return {
-        "schema_id": "qrp-final-alpha-calibration-v1",
+        "schema_id": "qrp-final-alpha-calibration",
         "selection_group": "global",
         "cutoff": envelope.research_window["end"],
         "upstream_identities": dict(envelope.upstream_identities),

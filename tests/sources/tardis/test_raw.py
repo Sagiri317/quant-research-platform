@@ -283,59 +283,58 @@ def test_depth_repeats_preserve_high_water_and_raw_observation_boundaries():
     from quant_research_platform.sources.binance.replay import native_trade_identities
     from quant_research_platform.sources.tardis.raw import _ObservedStreams
 
-    with native_trade_identities() as observe_trade:
-        tracker = _ObservedStreams(exchange="binance", observe_trade=observe_trade)
+    observe_trade = native_trade_identities()
+    tracker = _ObservedStreams(exchange="binance", observe_trade=observe_trade)
 
-        def depth(last, first=None):
-            return {
-                "stream": "btcusdt@depth",
-                "data": {"U": last if first is None else first, "u": last},
-            }
+    def depth(last, first=None):
+        return {
+            "stream": "btcusdt@depth",
+            "data": {"U": last if first is None else first, "u": last},
+        }
 
-        first, _, gap = tracker.observe(0, 1, "2026-07-01T00:00:00Z", depth(10))
-        assert gap is None
-        for number, last in ((2, 10), (3, 9)):
-            identity, closed, gap = tracker.observe(
-                0, number, f"2026-07-01T00:00:0{number}Z", depth(last)
-            )
-            assert identity == first and closed == [] and (gap is None)
-            assert tracker.previous["btcusdt", "depth"][0] == 10
-        identity, _, gap = tracker.observe(0, 4, "2026-07-01T00:00:04Z", depth(11))
-        assert identity == first and gap is None
-        _, closed, gap = tracker.observe(0, 5, "2026-07-01T00:00:05Z", None)
-        assert len(closed) == 1 and gap["reason"] == "vendor_disconnect"
-        identity, _, gap = tracker.observe(0, 6, "2026-07-01T00:00:06Z", depth(11))
-        assert identity != first and gap is None
-        _, closed, gap = tracker.observe(0, 7, "2026-07-01T00:00:07Z", depth(14))
-        assert len(closed) == 1
-        assert gap["reason"] == "native_sequence_gap"
-        assert gap["previous_id"] == 11
-        trade = {"stream": "btcusdt@aggTrade", "data": {"a": 1}}
-        tracker.observe(0, 8, "2026-07-01T00:00:08Z", trade)
-        trade["data"]["q"] = "2"
-        with pytest.raises(ValueError, match="sequence_non_monotonic"):
-            tracker.observe(0, 9, "2026-07-01T00:00:09Z", trade)
+    first, _, gap = tracker.observe(0, 1, "2026-07-01T00:00:00Z", depth(10))
+    assert gap is None
+    for number, last in ((2, 10), (3, 9)):
+        identity, closed, gap = tracker.observe(
+            0, number, f"2026-07-01T00:00:0{number}Z", depth(last)
+        )
+        assert identity == first and closed == [] and (gap is None)
+        assert tracker.previous["btcusdt", "depth"][0] == 10
+    identity, _, gap = tracker.observe(0, 4, "2026-07-01T00:00:04Z", depth(11))
+    assert identity == first and gap is None
+    _, closed, gap = tracker.observe(0, 5, "2026-07-01T00:00:05Z", None)
+    assert len(closed) == 1 and gap["reason"] == "vendor_disconnect"
+    identity, _, gap = tracker.observe(0, 6, "2026-07-01T00:00:06Z", depth(11))
+    assert identity != first and gap is None
+    _, closed, gap = tracker.observe(0, 7, "2026-07-01T00:00:07Z", depth(14))
+    assert len(closed) == 1
+    assert gap["reason"] == "native_sequence_gap"
+    assert gap["previous_id"] == 11
+    trade = {"stream": "btcusdt@aggTrade", "data": {"a": 1}}
+    tracker.observe(0, 8, "2026-07-01T00:00:08Z", trade)
+    trade["data"]["q"] = "2"
+    with pytest.raises(ValueError, match="sequence_non_monotonic"):
+        tracker.observe(0, 9, "2026-07-01T00:00:09Z", trade)
 
 
 def test_native_trade_history_preserves_exact_identities():
     from quant_research_platform.sources.binance import replay
 
     count = 512
-    with replay.native_trade_identities() as observe:
-        for trade_id in range(count):
-            assert observe("future", "SYNTHETIC", {"a": trade_id, "q": "1"}) == (
-                True,
-                None if trade_id == 0 else trade_id - 1,
-            )
-        for trade_id in (0, count - 1):
-            assert observe(
-                "future", "SYNTHETIC", {"a": trade_id, "q": "1", "E": 99}
-            ) == (False, count - 1)
-            with pytest.raises(
-                ValueError, match="binance_native_sequence_non_monotonic"
-            ):
-                observe("future", "SYNTHETIC", {"a": trade_id, "q": "2"})
-        assert observe("future", "SYNTHETIC", {"a": count}) == (True, count - 1)
+    observe = replay.native_trade_identities()
+    for trade_id in range(count):
+        assert observe("future", "SYNTHETIC", {"a": trade_id, "q": "1"}) == (
+            True,
+            None if trade_id == 0 else trade_id - 1,
+        )
+    for trade_id in (0, count - 1):
+        assert observe("future", "SYNTHETIC", {"a": trade_id, "q": "1", "E": 99}) == (
+            False,
+            count - 1,
+        )
+        with pytest.raises(ValueError, match="binance_native_sequence_non_monotonic"):
+            observe("future", "SYNTHETIC", {"a": trade_id, "q": "2"})
+    assert observe("future", "SYNTHETIC", {"a": count}) == (True, count - 1)
 
 
 def test_trade_order_failure_retains_safe_source_coordinates(tmp_path):

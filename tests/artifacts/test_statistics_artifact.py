@@ -944,7 +944,6 @@ def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
     from tests.markets.crypto.test_hft_execution import _state
 
     count, depth = (1800, 512)
-    64 * 1024**2
     first, last = (2100, 2100 + (count - 1) * 1000)
 
     def iso(stamp):

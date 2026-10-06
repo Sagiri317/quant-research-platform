@@ -304,7 +304,6 @@ def check_crypto_model_staging(*, layout, profile, saved):
     import json
     import pickle
     import shutil
-    from pathlib import Path
     from types import SimpleNamespace
 
     from sklearn.dummy import DummyRegressor
@@ -461,7 +460,13 @@ def check_crypto_model_staging(*, layout, profile, saved):
         ignore_index=True,
     ).rename(columns={"label": validation_spec.label_column})
     for failure in ("disk", "primary"):
-        primary = KeyboardInterrupt("validation_training_primary")
+        import errno
+
+        primary = (
+            OSError(errno.ENOSPC, "validation_disk_full")
+            if failure == "disk"
+            else KeyboardInterrupt("validation_training_primary")
+        )
         opened = []
         closed = []
 
@@ -476,7 +481,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 opened.append(args[0])
                 self.writer = writer_type(*args, **kwargs)
 
-            def write_table(self, *args, **kwargs):
+            def write_table(self, *args, failure=failure, primary=primary, **kwargs):
+                if failure == "disk":
+                    raise primary
                 return self.writer.write_table(*args, **kwargs)
 
             def add_key_value_metadata(self, *args, **kwargs):
@@ -489,24 +496,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
 
         with pytest.MonkeyPatch.context() as patch:
             patch.setattr(parquet_storage.pq, "ParquetWriter", ClosingWriter)
-            if failure == "disk":
-                disk_admission = parquet_storage.require_free_disk_headroom
-
-                def reject_validation_disk(
-                    path, disk_admission=disk_admission, **kwargs
-                ):
-                    if Path(path).name == "validation":
-                        raise RuntimeError("validation_disk_admission")
-                    return disk_admission(path, **kwargs)
-
-                patch.setattr(
-                    parquet_storage,
-                    "require_free_disk_headroom",
-                    reject_validation_disk,
-                )
             with pytest.raises(
-                RuntimeError if failure == "disk" else KeyboardInterrupt,
-                match="validation_disk_admission"
+                OSError if failure == "disk" else KeyboardInterrupt,
+                match="validation_disk_full"
                 if failure == "disk"
                 else "validation_training_primary",
             ) as raised:
@@ -536,12 +528,9 @@ def check_crypto_model_staging(*, layout, profile, saved):
                         "invalid_model_reached_source_verification"
                     ),
                 )
-            if failure == "disk":
-                assert not opened and (not closed)
-            else:
-                assert raised.value is primary
-                assert len(opened) == len(closed) == 1
-                assert any("close" in note for note in primary.__notes__)
+            assert raised.value is primary
+            assert len(opened) == len(closed) == 1
+            assert any("close" in note for note in primary.__notes__)
         assert read_semantic_artifact_record(saved.instance_root) == original
         assert {
             p.name for p in filesystem_iterdir(saved.instance_root.parent)

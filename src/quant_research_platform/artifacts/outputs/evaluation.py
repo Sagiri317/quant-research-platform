@@ -192,7 +192,7 @@ def _write_evaluation_artifact_chunks(
                     closing_iterator(open_filesystem_file(paths[name], "xb"))
                 )
                 writers[name] = resources.enter_context(
-                    parquet_table_writer(handle, parent=temp_root, compression="zstd")
+                    parquet_table_writer(handle, compression="zstd")
                 )
             writers[name](pa.concat_tables(tables))
             row_counts[name] += pending_rows[name]

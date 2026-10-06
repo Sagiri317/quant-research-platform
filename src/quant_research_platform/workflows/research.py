@@ -957,20 +957,17 @@ def status(
     root = layout.research_run_path("index").parent
     records = []
     for path in filesystem_glob(root, "*.json"):
-        try:
-            record = read_research_run_record(path)
-            if record.profile_id != profile.profile_id:
-                continue
-            records.append(
-                {
-                    "run_id": record.run_id,
-                    "scenario_id": record.scenario_id,
-                    "status": record.status.value,
-                    "research_window": dict(record.research_window),
-                }
-            )
-        finally:
-            record = None
+        record = read_research_run_record(path)
+        if record.profile_id != profile.profile_id:
+            continue
+        records.append(
+            {
+                "run_id": record.run_id,
+                "scenario_id": record.scenario_id,
+                "status": record.status.value,
+                "research_window": dict(record.research_window),
+            }
+        )
     records.sort(key=lambda item: item["run_id"])
     return {"profile_id": profile.profile_id, "runs": records}
 
@@ -1055,19 +1052,16 @@ def _inspect_run_target(*, profile, layout, target_id, run_id):
             envelope = read_semantic_artifact(instance, expected_identity=instance.name)
             if envelope["semantic_metadata"].get("source_run_id") != run_id:
                 continue
-            try:
-                report = read_research_report_artifact(
-                    instance, expected_identity=instance.name, source_run=record
-                )
-                instances.append(
-                    {
-                        "instance_identity": instance.name,
-                        "schema_identity": envelope["schema_identity"],
-                        "report_status": report["report_status"],
-                    }
-                )
-            finally:
-                report = None
+            report = read_research_report_artifact(
+                instance, expected_identity=instance.name, source_run=record
+            )
+            instances.append(
+                {
+                    "instance_identity": instance.name,
+                    "schema_identity": envelope["schema_identity"],
+                    "report_status": report["report_status"],
+                }
+            )
         return {
             "profile_id": profile.profile_id,
             "run_id": run_id,
@@ -1934,31 +1928,28 @@ def _build_semantic_target(
                 ),
                 expected_identity=planned["upstream_identities"][global_target],
             )
-        with read_prediction_output_bundle(
+        (_manifest, prediction_lookup) = read_prediction_output_bundle(
             prediction_root / "outputs" / prediction_target,
             expected_output_id=prediction_target,
             expected_run_id=f"run_{prediction_target}",
             time_window=time_window,
-        ) as (_manifest, prediction_lookup):
-            try:
-                tables = binding.producer(
-                    layout=target_layout,
-                    dataset_catalog=profile.research_datasets,
-                    dataset_id=dataset_target,
-                    prediction_id=prediction_target,
-                    persisted_model=persisted,
-                    protocol_manifest=target_protocol,
-                    time_window=time_window,
-                    prediction_lookup=prediction_lookup,
-                    global_statistics=global_statistics,
-                )
-                write_statistics_artifact(
-                    logical_root,
-                    envelope=envelope,
-                    tables=tables,
-                )
-            finally:
-                _manifest = prediction_lookup = None
+        )
+        tables = binding.producer(
+            layout=target_layout,
+            dataset_catalog=profile.research_datasets,
+            dataset_id=dataset_target,
+            prediction_id=prediction_target,
+            persisted_model=persisted,
+            protocol_manifest=target_protocol,
+            time_window=time_window,
+            prediction_lookup=prediction_lookup,
+            global_statistics=global_statistics,
+        )
+        write_statistics_artifact(
+            logical_root,
+            envelope=envelope,
+            tables=tables,
+        )
     elif (
         binding.kind is ProducerKind.PORTFOLIO and protocol.protocol_id == "crypto_hft"
     ):
@@ -2006,67 +1997,68 @@ def _build_semantic_target(
             prediction_window = protocol.target_window(
                 "research run", None, time_window, candidate.prediction_target_id
             )
-        with read_prediction_output_bundle(
+        (prediction_manifest, prediction_lookup) = read_prediction_output_bundle(
             prediction_root / "outputs" / prediction_target,
             expected_output_id=prediction_target,
             expected_run_id=f"run_{prediction_target}",
             time_window=prediction_window,
             family_selection=candidate.prediction_selector,
-        ) as (prediction_manifest, prediction_lookup):
-            try:
-                lineage = prediction_manifest["metadata"]["model_metadata"]
-                persisted = read_quarterly_model_artifact(
-                    _target_instance_root(
-                        profile,
-                        target_layout,
-                        lineage["model_artifact_id"],
-                        lineage["model_artifact_identity"],
-                    ),
-                    expected_identity=lineage["model_artifact_identity"],
-                    trial_layout=target_layout,
+        )
+        lineage = prediction_manifest["metadata"]["model_metadata"]
+        persisted = read_quarterly_model_artifact(
+            _target_instance_root(
+                profile,
+                target_layout,
+                lineage["model_artifact_id"],
+                lineage["model_artifact_identity"],
+            ),
+            expected_identity=lineage["model_artifact_identity"],
+            trial_layout=target_layout,
+        )
+        final_calibrations = []
+        portfolio_chunks = binding.producer(
+            candidate=candidate,
+            layout=target_layout,
+            upstream_identities=planned["upstream_identities"],
+            output_window=time_window,
+            input_window=protocol.data_window,
+            formal_dataset_window=protocol.formal_dataset_window,
+            prediction_window=prediction_window,
+            frozen_calibration=dict(protocol.frozen_alpha).get(
+                (
+                    candidate.selection_group,
+                    candidate.prediction_selector,
+                    candidate.rebalance_schedule,
                 )
-                final_calibrations = []
-                portfolio_chunks = binding.producer(
-                    candidate=candidate,
-                    layout=target_layout,
-                    upstream_identities=planned["upstream_identities"],
-                    output_window=time_window,
-                    input_window=protocol.data_window,
-                    formal_dataset_window=protocol.formal_dataset_window,
-                    prediction_window=prediction_window,
-                    frozen_calibration=dict(protocol.frozen_alpha).get(
-                        (candidate.selection_group, candidate.rebalance_schedule)
-                    ),
-                    on_final_calibration=final_calibrations.append,
-                    prediction_lookup=prediction_lookup,
-                    persisted_model=persisted,
-                    access_window=target_protocol["access_window"],
-                    assumptions=protocol.execution_assumptions,
-                    risk_config=protocol.risk_config,
-                    optimizer_config=protocol.optimizer_config,
-                )
+            ),
+            on_final_calibration=final_calibrations.append,
+            prediction_lookup=prediction_lookup,
+            persisted_model=persisted,
+            access_window=target_protocol["access_window"],
+            assumptions=protocol.execution_assumptions,
+            risk_config=protocol.risk_config,
+            optimizer_config=protocol.optimizer_config,
+        )
 
-                def produce_ledger(emit):
-                    with closing_iterator(iter(portfolio_chunks)) as chunks:
-                        for chunk in chunks:
-                            emit(chunk)
+        def produce_ledger(emit):
+            with closing_iterator(iter(portfolio_chunks)) as chunks:
+                for chunk in chunks:
+                    emit(chunk)
 
-                def final_calibration():
-                    if len(final_calibrations) != 1:
-                        raise ValueError("portfolio_final_calibration_missing")
-                    return final_calibrations[0]
+        def final_calibration():
+            if len(final_calibrations) != 1:
+                raise ValueError("portfolio_final_calibration_missing")
+            return final_calibrations[0]
 
-                write_portfolio_ledger_artifact(
-                    logical_root,
-                    envelope=envelope,
-                    produce=produce_ledger,
-                    final_calibration=final_calibration
-                    if candidate.construction == "benchmark_enhanced"
-                    and target_protocol["access_window"] == "development"
-                    else None,
-                )
-            finally:
-                prediction_manifest = lineage = prediction_lookup = None
+        write_portfolio_ledger_artifact(
+            logical_root,
+            envelope=envelope,
+            produce=produce_ledger,
+            final_calibration=final_calibration
+            if candidate.construction == "benchmark_enhanced"
+            and target_protocol["access_window"] == "development"
+            else None,
+        )
     else:
         raise ValueError("producer_binding_kind_invalid")
     output_root = _target_instance_root(
@@ -2148,39 +2140,35 @@ def _write_research_run_record(
         )
     protocol_snapshot = protocol.manifest()
     trial_ledgers = research_run_trial_references(layout, run_id)
-    record = holdout = values = None
-    try:
-        holdout = (
-            {"qualification": "HOLDOUT_NOT_ACCESSED", "prior_runs": []}
-            if holdout_not_accessed
-            else _holdout_evidence(
-                layout=layout,
-                profile=profile,
-                protocol=protocol,
-                research_window=research_window,
-                target_results=tuple(references),
-            )
-        )
-        values = dict(
-            run_id=run_id,
-            trial_ledgers=trial_ledgers,
-            profile_id=profile.profile_id,
-            scenario_id=protocol.scenario_id,
-            protocol=protocol_snapshot,
-            protocol_identity=canonical_json_hash(protocol_snapshot),
+    holdout = (
+        {"qualification": "HOLDOUT_NOT_ACCESSED", "prior_runs": []}
+        if holdout_not_accessed
+        else _holdout_evidence(
+            layout=layout,
+            profile=profile,
+            protocol=protocol,
             research_window=research_window,
-            software_identity=software_identity.identity_hash,
-            terminal_targets=terminal_targets,
             target_results=tuple(references),
-            status=status,
-            operation_evidence=operation_evidence,
-            failure_reason=failure_reason,
-            holdout_evidence=holdout,
         )
-        record = ResearchRunRecord(**values)
-        write_research_run_record(layout.research_run_path(run_id), record)
-    finally:
-        record = holdout = values = references = trial_ledgers = None
+    )
+    values = dict(
+        run_id=run_id,
+        trial_ledgers=trial_ledgers,
+        profile_id=profile.profile_id,
+        scenario_id=protocol.scenario_id,
+        protocol=protocol_snapshot,
+        protocol_identity=canonical_json_hash(protocol_snapshot),
+        research_window=research_window,
+        software_identity=software_identity.identity_hash,
+        terminal_targets=terminal_targets,
+        target_results=tuple(references),
+        status=status,
+        operation_evidence=operation_evidence,
+        failure_reason=failure_reason,
+        holdout_evidence=holdout,
+    )
+    record = ResearchRunRecord(**values)
+    write_research_run_record(layout.research_run_path(run_id), record)
 
 
 def _holdout_evidence(
@@ -2223,44 +2211,39 @@ def _holdout_evidence(
         }
     )
     for path in filesystem_glob(layout.research_run_path("run_probe").parent, "*.json"):
-        record = old = None
-        try:
-            record = read_research_run_record(path)
-            if (
-                record.profile_id != profile.profile_id
-                or record.scenario_id != protocol.scenario_id
-                or record.research_window["access"] != "holdout"
-                or record.holdout_evidence.get("qualification")
-                == "HOLDOUT_NOT_ACCESSED"
-            ):
-                continue
-            prior.append(
-                {
-                    "run_id": record.run_id,
-                    "identity": canonical_json_hash(record.payload()),
-                }
-            )
-            old = {
-                item.target_id: item.instance_identity
-                for item in record.target_results
-                if item.status in {TargetStatus.BUILT, TargetStatus.REUSED}
+        record = read_research_run_record(path)
+        if (
+            record.profile_id != profile.profile_id
+            or record.scenario_id != protocol.scenario_id
+            or record.research_window["access"] != "holdout"
+            or record.holdout_evidence.get("qualification") == "HOLDOUT_NOT_ACCESSED"
+        ):
+            continue
+        prior.append(
+            {
+                "run_id": record.run_id,
+                "identity": canonical_json_hash(record.payload()),
             }
-            if (
-                record.status is RunStatus.COMPLETE
-                and protocol.scenario_id in current
-                and all(key in current for key in protocol.frozen_target_ids())
-                and all(old.get(key) == current[key] for key in evidence_targets)
-            ):
-                if frozen_inputs(
-                    record.payload()["protocol"]["frozen_development"]
-                ) == frozen_inputs(protocol.frozen_development):
-                    same_inputs = True
-                    same_evidence |= (
-                        dict(record.research_window) == dict(research_window)
-                        and old == current
-                    )
-        finally:
-            record = old = None
+        )
+        old = {
+            item.target_id: item.instance_identity
+            for item in record.target_results
+            if item.status in {TargetStatus.BUILT, TargetStatus.REUSED}
+        }
+        if (
+            record.status is RunStatus.COMPLETE
+            and protocol.scenario_id in current
+            and all(key in current for key in protocol.frozen_target_ids())
+            and all(old.get(key) == current[key] for key in evidence_targets)
+        ):
+            if frozen_inputs(
+                record.payload()["protocol"]["frozen_development"]
+            ) == frozen_inputs(protocol.frozen_development):
+                same_inputs = True
+                same_evidence |= (
+                    dict(record.research_window) == dict(research_window)
+                    and old == current
+                )
     prior.sort(key=lambda item: item["run_id"])
     return {
         "qualification": "REUSE"
@@ -2646,26 +2629,23 @@ def _validate_semantic_target_root(
             )
             for model_id in protocol.model_ids_for_target(model_target):
                 output_id = f"{model_id}_prediction"
-                with read_prediction_output_bundle(
+                (manifest, _lookup) = read_prediction_output_bundle(
                     root / "outputs" / output_id,
                     expected_output_id=output_id,
                     expected_run_id=f"run_{output_id}",
                     expected_member_identities=output_identities(output_id),
-                ) as (manifest, _lookup):
-                    try:
-                        if manifest["metadata"][
-                            "model_metadata"
-                        ] != persisted.prediction_lineage(
-                            model_id,
-                            TimeWindow(
-                                envelope["research_window"]["start"],
-                                envelope["research_window"]["end"],
-                            ),
-                            access_window=protocol.access_window,
-                        ):
-                            raise ValueError("crypto_prediction_model_lineage_invalid")
-                    finally:
-                        manifest = _lookup = None
+                )
+                if manifest["metadata"][
+                    "model_metadata"
+                ] != persisted.prediction_lineage(
+                    model_id,
+                    TimeWindow(
+                        envelope["research_window"]["start"],
+                        envelope["research_window"]["end"],
+                    ),
+                    access_window=protocol.access_window,
+                ):
+                    raise ValueError("crypto_prediction_model_lineage_invalid")
         return
     if binding.kind is ProducerKind.MODEL:
         persisted = read_quarterly_model_artifact(
@@ -2709,56 +2689,55 @@ def _validate_semantic_target_root(
         return
     if binding.kind is ProducerKind.PREDICTION:
         try:
-            with read_prediction_output_bundle(
+            (manifest, _lookup) = read_prediction_output_bundle(
                 root / "outputs" / spec.target_id,
                 expected_output_id=spec.target_id,
                 expected_run_id=f"run_{spec.target_id}",
                 expected_member_identities=output_identities(spec.target_id),
-            ) as (manifest, _lookup):
-                validate_prediction_output_metadata_shape(manifest["metadata"])
-                prediction_metadata = manifest["metadata"]
-                lineage = prediction_metadata["model_metadata"]
-                model_dependencies = tuple(
-                    dependency
-                    for dependency in spec.dependencies
-                    if (
-                        profile.producer_bindings.get(dependency) is not None
-                        and profile.producer_bindings[dependency].kind
-                        is ProducerKind.MODEL
-                    )
-                )
-                if len(model_dependencies) != 1:
-                    raise ValueError("prediction_model_dependency_invalid")
-                model_target = model_dependencies[0]
+            )
+            validate_prediction_output_metadata_shape(manifest["metadata"])
+            prediction_metadata = manifest["metadata"]
+            lineage = prediction_metadata["model_metadata"]
+            model_dependencies = tuple(
+                dependency
+                for dependency in spec.dependencies
                 if (
-                    lineage["model_artifact_id"] != model_target
-                    or lineage["model_artifact_identity"]
-                    != envelope["upstream_identities"].get(model_target)
-                    or lineage["model_artifact_schema"]
-                    != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
-                ):
-                    raise ValueError("prediction_model_lineage_mismatch")
-                if trial_layout is None:
-                    raise ValueError("prediction_model_layout_required")
-                model_artifact = read_quarterly_model_artifact(
-                    _target_instance_root(
-                        profile,
-                        trial_layout,
-                        model_target,
-                        lineage["model_artifact_identity"],
-                    ),
-                    expected_identity=lineage["model_artifact_identity"],
-                    trial_layout=trial_layout,
+                    profile.producer_bindings.get(dependency) is not None
+                    and profile.producer_bindings[dependency].kind is ProducerKind.MODEL
                 )
-                if lineage != model_artifact.prediction_lineage(
-                    TimeWindow(
-                        prediction_metadata["test_start"],
-                        prediction_metadata["test_end"],
-                    ),
-                    selection_group=protocol.selection_group_for_target(spec.target_id),
-                    access_window=protocol.access_window,
-                ):
-                    raise ValueError("prediction_model_lineage_mismatch")
+            )
+            if len(model_dependencies) != 1:
+                raise ValueError("prediction_model_dependency_invalid")
+            model_target = model_dependencies[0]
+            if (
+                lineage["model_artifact_id"] != model_target
+                or lineage["model_artifact_identity"]
+                != envelope["upstream_identities"].get(model_target)
+                or lineage["model_artifact_schema"]
+                != A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID
+            ):
+                raise ValueError("prediction_model_lineage_mismatch")
+            if trial_layout is None:
+                raise ValueError("prediction_model_layout_required")
+            model_artifact = read_quarterly_model_artifact(
+                _target_instance_root(
+                    profile,
+                    trial_layout,
+                    model_target,
+                    lineage["model_artifact_identity"],
+                ),
+                expected_identity=lineage["model_artifact_identity"],
+                trial_layout=trial_layout,
+            )
+            if lineage != model_artifact.prediction_lineage(
+                TimeWindow(
+                    prediction_metadata["test_start"],
+                    prediction_metadata["test_end"],
+                ),
+                selection_group=protocol.selection_group_for_target(spec.target_id),
+                access_window=protocol.access_window,
+            ):
+                raise ValueError("prediction_model_lineage_mismatch")
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
                 f"prediction_inner_artifact_invalid:{_semantic_failure_code(exc)}"
@@ -3086,7 +3065,7 @@ def _semantic_target_payload(
             "risk_style_columns": list(candidate.risk_style_columns),
             "risk_context_target_ids": list(candidate.risk_context_target_ids),
         }
-        payload["final_alpha_calibration_schema"] = "qrp-final-alpha-calibration-v1"
+        payload["final_alpha_calibration_schema"] = "qrp-final-alpha-calibration"
         payload["ledger_schema"] = {
             name: list(columns)
             for name, columns in PORTFOLIO_LEDGER_TABLE_COLUMNS.items()

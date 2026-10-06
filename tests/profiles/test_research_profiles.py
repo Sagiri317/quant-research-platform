@@ -1,7 +1,9 @@
 from __future__ import annotations
 
-from types import MappingProxyType
+from dataclasses import asdict
+from types import MappingProxyType, SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.targets import ProducerBinding
@@ -117,3 +119,108 @@ def test_expanded_pv_uses_existing_owners_and_keeps_formal_selections():
     for target in expanded.target_specs("research run"):
         assert "fundamental_factors" not in target.dependencies
         assert target.producer_id in expanded_profile.producer_bindings
+
+
+def test_holdout_freezes_alpha_for_each_prediction_source():
+    from quant_research_platform.profiles.research import bind_research_configuration
+    from quant_research_platform.research.portfolios.accounting import (
+        calibrate_expected_alpha,
+    )
+    from tests.helpers.research_configuration import research_configuration
+
+    configuration = research_configuration()
+    configuration["models"] = [
+        model
+        for model in configuration["models"]
+        if model["model_algorithm"]
+        in {"equal_weight_rank_ensemble", "linear_regression"}
+    ]
+    selectors = [model["model_id"] for model in configuration["models"]]
+    configuration["portfolios"] = [
+        {
+            "candidate_id": f"enhanced_{index}",
+            "prediction_selector": selector,
+            "top_quantile": None,
+            "rebalance_schedule": "weekly-last-trading-day",
+            "construction": "benchmark_enhanced",
+            "benchmark_id": "csi500",
+        }
+        for index, selector in enumerate(selectors)
+    ]
+    configuration["portfolios"].append(
+        {
+            **configuration["portfolios"][0],
+            "candidate_id": "same_prediction_other_benchmark",
+            "benchmark_id": "csi1000",
+        }
+    )
+    configuration["primary_portfolio_id"] = "enhanced_0"
+    protocol = bind_research_configuration(research_profile(), configuration).protocol(
+        configuration["scenario_id"]
+    )
+    cutoff = configuration["windows"]["development"]["end"]
+    dates = pd.date_range("2023-11-10", periods=6, freq="W-FRI")
+    intervals = pd.DataFrame(
+        {
+            "timestamp": dates,
+            "entry_at": dates + pd.Timedelta(days=3),
+            "available_at": dates + pd.Timedelta(days=10),
+        }
+    )
+    calibrations = {}
+    for index, selector in enumerate(selectors):
+        frame = pd.DataFrame(
+            [
+                {
+                    "timestamp": timestamp,
+                    "alpha_score": score,
+                    "holding_return": 0.01
+                    + (0.04 + 0.03 * index + day * 0.001) * score,
+                }
+                for day, timestamp in enumerate(dates)
+                for score in (-0.5, 0.0, 0.5)
+            ]
+        )
+        calibrations[selector] = calibrate_expected_alpha(
+            frame, as_of=pd.Timestamp(cutoff), scheduled_intervals=intervals
+        )
+    assert len({value.slope for value in calibrations.values()}) == 2
+    assert all(value.status == "DEFINED" for value in calibrations.values())
+    artifacts = {
+        protocol.model_selection_target_id: SimpleNamespace(
+            final_models=[
+                {"selection_group": group, "family_id": selector}
+                for group in ("global", "quarterly")
+                for selector in selectors
+            ]
+        )
+    }
+    references = {}
+    for candidate in protocol.portfolio_candidates():
+        target_id = f"{protocol.scenario_id}_{candidate.candidate_id}_ledger"
+        references[target_id] = SimpleNamespace(
+            target_id=target_id,
+            payload=lambda target_id=target_id: {"target_id": target_id},
+        )
+        payload = {
+            "schema_id": "qrp-final-alpha-calibration",
+            "selection_group": candidate.selection_group,
+            "cutoff": cutoff,
+            "upstream_identities": {},
+            "calibration": asdict(calibrations[candidate.prediction_selector]),
+        }
+        artifacts[target_id] = lambda payload=payload: SimpleNamespace(
+            final_alpha_calibration=payload
+        )
+    record = SimpleNamespace(research_window={"end": cutoff})
+    frozen, blocker = protocol.freeze_development(record, references, {}, artifacts)
+    assert blocker is None
+    assert frozen.access_window == "holdout"
+    assert dict(frozen.frozen_alpha) == {
+        (group, selector, "weekly-last-trading-day"): calibration
+        for group in ("global", "quarterly")
+        for selector, calibration in calibrations.items()
+    }
+    payload["calibration"]["slope"] += 1.0
+    with pytest.raises(ValueError, match="holdout_alpha_sources_disagree"):
+        protocol.freeze_development(record, references, {}, artifacts)

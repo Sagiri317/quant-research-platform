@@ -41,13 +41,13 @@ def test_api_routes_are_current_and_exact() -> None:
         if route.path.startswith("/api/")
     }
     assert routes == {
-        ("GET", "/api/0.1/catalog/factors"),
-        ("GET", "/api/0.1/catalog/labels"),
-        ("GET", "/api/0.1/research-datasets/{dataset_id}/requirements"),
-        ("GET", "/api/0.1/status"),
-        ("GET", "/api/0.1/inspect/{target_id}"),
-        ("GET", "/api/0.1/runs/{run_id}/reports/{report_identity}"),
-        ("GET", "/api/0.1/runs/{run_id}/portfolios/{target_id}"),
+        ("GET", "/api/catalog/factors"),
+        ("GET", "/api/catalog/labels"),
+        ("GET", "/api/research-datasets/{dataset_id}/requirements"),
+        ("GET", "/api/status"),
+        ("GET", "/api/inspect/{target_id}"),
+        ("GET", "/api/runs/{run_id}/reports/{report_identity}"),
+        ("GET", "/api/runs/{run_id}/portfolios/{target_id}"),
     }
 
 
@@ -125,12 +125,17 @@ async def test_api_catalog_and_requirements_use_current_a_share_protocol(
         transport=ASGITransport(app=create_app()), base_url="http://testserver"
     ) as client:
         responses = (
-            await client.get("/api/0.1/catalog/factors"),
-            await client.get("/api/0.1/catalog/labels"),
-            await client.get("/api/0.1/research-datasets/pv_all/requirements"),
+            await client.get("/api/catalog/factors"),
+            await client.get("/api/catalog/labels"),
+            await client.get("/api/research-datasets/pv_all/requirements"),
         )
         assert [response.status_code for response in responses] == [200, 200, 200]
         factor_items = responses[0].json()["items"]
+        assert all("api_version" not in response.json() for response in responses)
+        assert all("definition_version" not in item for item in factor_items)
+        assert all(
+            "definition_version" not in item for item in responses[1].json()["items"]
+        )
         assert len(factor_items) == len(list_factors(research_profile()).items)
         assert {item["output_column"] for item in factor_items} >= {
             "reversal_1d",
@@ -151,14 +156,15 @@ async def test_api_catalog_and_requirements_use_current_a_share_protocol(
 
 def test_openapi_has_closed_current_response_models() -> None:
     schema = create_app().openapi()
+    assert schema["info"]["version"] == "unversioned"
     assert set(schema["paths"]) == {
-        "/api/0.1/catalog/factors",
-        "/api/0.1/catalog/labels",
-        "/api/0.1/research-datasets/{dataset_id}/requirements",
-        "/api/0.1/status",
-        "/api/0.1/inspect/{target_id}",
-        "/api/0.1/runs/{run_id}/reports/{report_identity}",
-        "/api/0.1/runs/{run_id}/portfolios/{target_id}",
+        "/api/catalog/factors",
+        "/api/catalog/labels",
+        "/api/research-datasets/{dataset_id}/requirements",
+        "/api/status",
+        "/api/inspect/{target_id}",
+        "/api/runs/{run_id}/reports/{report_identity}",
+        "/api/runs/{run_id}/portfolios/{target_id}",
     }
     assert {
         name: schema["components"]["schemas"][name]["additionalProperties"]
@@ -192,6 +198,13 @@ def test_cli_exposes_only_current_research_surface(tmp_path, monkeypatch) -> Non
         "inspect",
     }
     runner = CliRunner()
+    for catalog, header in (
+        ("factors", "factor_id,market_id,factor_set"),
+        ("labels", "label_id,market_id,horizon,horizon_unit"),
+    ):
+        result = runner.invoke(app, ["catalog", catalog])
+        assert result.exit_code == 0
+        assert result.output.splitlines()[0] == header
     from tests.helpers.research_configuration import research_configuration
 
     configuration_path = tmp_path / "research.json"
@@ -299,7 +312,7 @@ async def test_read_only_status_never_plans_and_client_cannot_bind_a_project(
         base_url="http://testserver",
     ) as client:
         response = await client.get(
-            "/api/0.1/status", params={"project_root": str(outside)}
+            "/api/status", params={"project_root": str(outside)}
         )
         assert response.status_code == 200
         assert response.json() == {"profile_id": "a_share_csmar_choice", "runs": []}
@@ -307,13 +320,13 @@ async def test_read_only_status_never_plans_and_client_cannot_bind_a_project(
         async with AsyncClient(
             transport=ASGITransport(app=create_app()), base_url="http://testserver"
         ) as unbound:
-            assert (await unbound.get("/api/0.1/status")).status_code == 503
+            assert (await unbound.get("/api/status")).status_code == 503
         for params in (
             {"run_id": "../secret"},
             {"run_id": "missing"},
             {"profile": "../secret"},
         ):
-            failed = await client.get("/api/0.1/status", params=params)
+            failed = await client.get("/api/status", params=params)
             assert failed.status_code in {404, 422}
             assert "must_not_be_returned" not in failed.text
             assert str(tmp_path) not in failed.text
@@ -332,13 +345,13 @@ async def test_catalog_queries_support_both_existing_profiles(
     ) as client:
         profile = research_profile(CRYPTO_PROFILE_ID)
         response = await client.get(
-            "/api/0.1/catalog/factors", params={"profile": CRYPTO_PROFILE_ID}
+            "/api/catalog/factors", params={"profile": CRYPTO_PROFILE_ID}
         )
         assert response.status_code == 200
         assert len(response.json()["items"]) == len(profile.factors.list())
         dataset_id = profile.research_datasets.list()[0].data_id
         requirements = await client.get(
-            f"/api/0.1/research-datasets/{dataset_id}/requirements",
+            f"/api/research-datasets/{dataset_id}/requirements",
             params={"profile": CRYPTO_PROFILE_ID},
         )
         assert requirements.status_code == 200
@@ -407,7 +420,7 @@ async def test_overlapping_published_queries_complete_independently(
         ),
         base_url="http://testserver",
     ) as client:
-        url = "/api/0.1/runs/run_one/portfolios/portfolio"
+        url = "/api/runs/run_one/portfolios/portfolio"
         first_request = asyncio.create_task(client.get(url))
         try:
             assert await asyncio.to_thread(entered.wait, 5)

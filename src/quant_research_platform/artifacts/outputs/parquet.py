@@ -76,7 +76,7 @@ def write_parquet_chunks(
                     final_path.parent, error="invalid_output_write_path"
                 )
                 with parquet_table_writer(
-                    handle, parent=final_path.parent, compression=compression
+                    handle, compression=compression
                 ) as write_table:
                     key_index = ExactPrimaryKeyIndex(primary_key=key_columns)
                     for frame in active_frames:
@@ -186,7 +186,7 @@ def write_parquet(frame: pd.DataFrame, path: Path, **kwargs: object) -> Path:
             compression = options.pop("compression", "snappy")
             table = pa.Table.from_pandas(frame, preserve_index=preserve_index)
             with parquet_table_writer(
-                handle, parent=final_path.parent, compression=compression, **options
+                handle, compression=compression, **options
             ) as write_table:
                 write_table(
                     table, row_group_size=_parquet_row_group_size(table.num_rows)

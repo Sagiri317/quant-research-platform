@@ -109,7 +109,7 @@ def validate_output_manifest_business_envelope(
             evidence_payload = {
                 "hyperparameters": model_metadata["hyperparameters"],
                 "resolved_hyperparameters": model_metadata["resolved_hyperparameters"],
-                "dependency_version": model_metadata["dependency_status"]["version"],
+                "dependency_status": model_metadata["dependency_status"],
             }
     if evidence_json_value_unsafe_reason(evidence_payload) is not None:
         raise ValueError("output_manifest_metadata_invalid")

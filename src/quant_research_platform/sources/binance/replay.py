@@ -7,10 +7,8 @@ import hashlib
 import heapq
 import json
 import os
-import sqlite3
 import stat
 import sys
-import tempfile
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields
@@ -32,9 +30,6 @@ from quant_research_platform.contracts.order_book import (
 )
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    require_free_disk_headroom,
-)
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
@@ -85,9 +80,7 @@ _FILE_STREAM_IDENTITY_KEYS = ("market", "symbol", "data_kind", "stream")
 _LOWER_HEX = frozenset("0123456789abcdef")
 _HASH_BUFFER_BYTES = 64 * 1024
 _RAW_IDENTITY_ERROR = "binance_raw_export_identity_changed"
-_LEVEL_BYTES = 256
 RECONSTRUCTION_REQUIRED_LEVELS = 10
-RECONSTRUCTION_MAX_BOOK_LEVELS = 10_000
 _CONNECTION_INTERVAL_KEYS = frozenset(
     {
         "market",
@@ -106,8 +99,6 @@ _CONNECTION_CLOSE_REASONS = frozenset(
     {"stop", "connection_problem", "depth_resync", "failure"}
 )
 _CONNECTION_INTERVAL_MAX_RECORD_BYTES = 64 * 1024
-_COVERAGE_SQLITE_PAGE_BYTES = 4096
-_COVERAGE_SQLITE_STARTUP_BYTES = 1024 * 1024
 
 
 @dataclass
@@ -182,38 +173,15 @@ class ObservationCoverageIndex:
         )
         if self.identity.size != descriptor["compressed_bytes"]:
             raise ValueError("binance_replay_connection_intervals_invalid")
-        require_free_disk_headroom(
-            Path(tempfile.gettempdir()),
-            reserve_bytes=2 * _COVERAGE_SQLITE_STARTUP_BYTES,
-        )
-        self._scratch = None
-        self._database = None
-        self._coverage_readers = ExitStack()
-        try:
-            self._scratch = tempfile.TemporaryDirectory(prefix="qrp-binance-coverage-")
-            self._database = sqlite3.connect(
-                Path(self._scratch.name) / "coverage.sqlite3"
-            )
-            self._database.execute(
-                "CREATE TABLE coverage ("
-                "observation_id TEXT PRIMARY KEY, market TEXT NOT NULL, "
-                "data_kind TEXT NOT NULL, stream TEXT NOT NULL, "
-                "segment_id TEXT, opened_ns INTEGER NOT NULL, "
-                "closed_ns INTEGER NOT NULL)"
-            )
-            self._database.execute("PRAGMA cache_size=-1024")
-            self._database.execute("PRAGMA temp_store=FILE")
-            self._database.execute(
-                "CREATE INDEX coverage_window ON coverage "
-                "(market, data_kind, opened_ns)"
-            )
-            self._database.execute(
-                "CREATE INDEX coverage_close ON coverage (market, data_kind, closed_ns)"
-            )
-            self._load(markets=markets)
-        except BaseException:
-            self.close()
-            raise
+        self._rows = {}
+        self._groups = {}
+        self._load(markets=markets)
+        for row in self._rows.values():
+            observation_id, market, kind, stream, _segment, opened, closed = row
+            key = (market, kind, stream.split("@", 1)[0])
+            self._groups.setdefault(key, []).append((opened, closed, observation_id))
+        for rows in self._groups.values():
+            rows.sort()
 
     def _load(self, *, markets: set[str]) -> None:
         try:
@@ -238,32 +206,22 @@ class ObservationCoverageIndex:
                 line: bytes | None = None
                 interval: dict[str, Any] | None = None
                 row = None
+                line = gzip_handle.readline(_CONNECTION_INTERVAL_MAX_RECORD_BYTES + 1)
+                if not line:
+                    break
+                if len(line) > _CONNECTION_INTERVAL_MAX_RECORD_BYTES:
+                    raise ValueError("binance_replay_connection_intervals_invalid")
                 try:
-                    line = gzip_handle.readline(
-                        _CONNECTION_INTERVAL_MAX_RECORD_BYTES + 1
-                    )
-                    if not line:
-                        break
-                    if len(line) > _CONNECTION_INTERVAL_MAX_RECORD_BYTES:
-                        raise ValueError("binance_replay_connection_intervals_invalid")
-                    try:
-                        interval = parse_qrp_json_object(line)
-                    except (UnicodeError, ValueError) as exc:
-                        raise ValueError(
-                            "binance_replay_connection_intervals_invalid"
-                        ) from exc
-                    row = self._decode_interval(interval, markets=markets)
-                    try:
-                        self._database.execute(
-                            "INSERT INTO coverage VALUES (?, ?, ?, ?, ?, ?, ?)", row
-                        )
-                    except sqlite3.IntegrityError as exc:
-                        raise ValueError(
-                            "binance_replay_connection_intervals_invalid"
-                        ) from exc
-                    count += 1
-                finally:
-                    del interval, line, row
+                    interval = parse_qrp_json_object(line)
+                except (UnicodeError, ValueError) as exc:
+                    raise ValueError(
+                        "binance_replay_connection_intervals_invalid"
+                    ) from exc
+                row = self._decode_interval(interval, markets=markets)
+                if row[0] in self._rows:
+                    raise ValueError("binance_replay_connection_intervals_invalid")
+                self._rows[row[0]] = row
+                count += 1
             gzip_handle.close()
             digesting_handle.drain()
             if (
@@ -272,7 +230,6 @@ class ObservationCoverageIndex:
             ):
                 raise ValueError("binance_replay_connection_intervals_invalid")
             _verify_raw_file_handle(raw_handle, expected_identity=self.identity)
-            self._database.commit()
         finally:
             primary = sys.exception()
             first_failure: BaseException | None = None
@@ -312,20 +269,18 @@ class ObservationCoverageIndex:
         market_type: str,
         data_kind: str,
     ) -> tuple[int, int] | None:
-        row = self._database.execute(
-            "SELECT opened_ns, closed_ns FROM coverage "
-            "WHERE observation_id = ? AND market = ? AND data_kind = ? "
-            "AND stream LIKE ?",
-            (observation_id, market_type, data_kind, symbol.lower() + "@%"),
-        ).fetchone()
-        return None if row is None else (int(row[0]), int(row[1]))
+        row = self._rows.get(observation_id)
+        if (
+            row is None
+            or row[1:3] != (market_type, data_kind)
+            or not row[3].startswith(symbol.lower() + "@")
+        ):
+            return None
+        return row[5], row[6]
 
     def segment_id(self, observation_id: object) -> str | None:
-        row = self._database.execute(
-            "SELECT segment_id FROM coverage WHERE observation_id = ?",
-            (observation_id,),
-        ).fetchone()
-        return None if row is None else row[0]
+        row = self._rows.get(observation_id)
+        return None if row is None else row[4]
 
     def verify_file(self, root: Path) -> None:
         path = root / self._descriptor["path"]
@@ -340,75 +295,27 @@ class ObservationCoverageIndex:
         ):
             raise ValueError("binance_replay_file_identity_mismatch")
 
-    def close(self) -> None:
-        primary = sys.exception()
-        failure: BaseException | None = None
-        database = self._database
-        scratch = self._scratch
-        self._database = None
-        self._scratch = None
-        self._descriptor = {}
-        try:
-            self._coverage_readers.close()
-        except BaseException as close_error:
-            if primary is not None:
-                primary.add_note(
-                    "Binance coverage window close also failed: "
-                    + type(close_error).__name__
-                )
-            else:
-                failure = close_error
-        try:
-            if database is not None:
-                database.close()
-        except BaseException as close_error:
-            if primary is not None:
-                primary.add_note(
-                    "Binance connection coverage database close also failed: "
-                    f"{type(close_error).__name__}"
-                )
-            elif failure is None:
-                failure = close_error
-            else:
-                failure.add_note(
-                    "Binance coverage database close also failed: "
-                    + type(close_error).__name__
-                )
-        try:
-            if scratch is not None:
-                scratch.cleanup()
-        except BaseException as cleanup_error:
-            note = (
-                "Binance connection coverage scratch cleanup also failed: "
-                f"{type(cleanup_error).__name__}"
-            )
-            if primary is not None:
-                primary.add_note(note)
-            elif failure is None:
-                failure = cleanup_error
-            else:
-                failure.add_note(note)
-        if failure is not None:
-            raise failure
-
 
 class ObservationCoverage:
-    """Run-owned exact lookups and a monotone interval sweep."""
+    """Exact lookups and a single forward sweep over sorted connection intervals."""
 
     def __init__(self, index, market_type, data_kind, symbol):
         self.index = index
-        self.parameters = (market_type, data_kind, f"{symbol.lower()}@%")
-        self.cursor = None
-        self.pending = None
+        self.market_type = market_type
+        self.data_kind = data_kind
+        self.symbol = symbol
+        self.rows = index._groups.get((market_type, data_kind, symbol.lower()), ())
+        self.position = 0
         self.active = []
         self.last_bounds = None
 
     def get(self, observation_id, default=None):
-        row = self.index._database.execute(
-            "SELECT opened_ns, closed_ns FROM coverage "
-            "WHERE market=? AND data_kind=? AND stream LIKE ? AND observation_id=?",
-            (*self.parameters, observation_id),
-        ).fetchone()
+        row = self.index.bounds(
+            observation_id,
+            symbol=self.symbol,
+            market_type=self.market_type,
+            data_kind=self.data_kind,
+        )
         return default if row is None else row
 
     def __getitem__(self, observation_id):
@@ -423,67 +330,36 @@ class ObservationCoverage:
         ):
             raise ValueError("binance_coverage_window_non_monotonic")
         self.last_bounds = (start_ns, end_ns)
-        if self.cursor is None:
-            self.cursor = self.index._database.execute(
-                "SELECT opened_ns, closed_ns, observation_id FROM coverage "
-                "WHERE market=? AND data_kind=? AND stream LIKE ? AND closed_ns>? "
-                "ORDER BY opened_ns",
-                (*self.parameters, end_ns),
-            )
-            self.pending = self.cursor.fetchone()
         while self.active and self.active[0][0] <= end_ns:
             heapq.heappop(self.active)
-        while self.pending is not None and self.pending[0] <= start_ns:
-            _, closed_ns, observation_id = self.pending
+        while (
+            self.position < len(self.rows) and self.rows[self.position][0] <= start_ns
+        ):
+            _, closed_ns, observation_id = self.rows[self.position]
+            self.position += 1
             if closed_ns > end_ns:
                 heapq.heappush(self.active, (closed_ns, observation_id))
-            self.pending = self.cursor.fetchone()
-        # Two entries suffice to reject ambiguous coverage; no per-grid history scan.
         return tuple(item[1] for item in self.active[:2])
 
     def intervals(self):
         """Yield only unambiguous half-open coverage in chronological order."""
-        query = (
-            "WHERE market=? AND data_kind=? AND stream LIKE ? AND opened_ns<closed_ns"
+        events = sorted(
+            (timestamp, delta, identity)
+            for opened, closed, identity in self.rows
+            if opened < closed
+            for timestamp, delta in ((opened, 1), (closed, -1))
         )
         active = set()
         previous = None
-        with ExitStack() as readers:
-            cursors = [
-                readers.enter_context(
-                    closing_iterator(
-                        self.index._database.execute(
-                            f"SELECT {column}, observation_id, {delta} FROM coverage "
-                            + query
-                            + f" ORDER BY {column}",
-                            self.parameters,
-                        )
-                    )
-                )
-                for column, delta in (("opened_ns", 1), ("closed_ns", -1))
-            ]
-            cursor = heapq.merge(*cursors, key=lambda row: (row[0], row[2]))
-            for timestamp, events in groupby(cursor, key=lambda row: row[0]):
-                if previous is not None and previous < timestamp and len(active) == 1:
-                    _yield_value = previous, timestamp
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
-                for _stamp, identity, delta in events:
-                    if delta > 0:
-                        active.add(identity)
-                    else:
-                        active.remove(identity)
-                previous = timestamp
-
-    def close(self):
-        try:
-            if self.cursor is not None:
-                self.cursor.close()
-        finally:
-            self.cursor = self.pending = None
-            self.active.clear()
+        for timestamp, changes in groupby(events, key=lambda row: row[0]):
+            if previous is not None and previous < timestamp and len(active) == 1:
+                yield previous, timestamp
+            for _stamp, delta, identity in changes:
+                if delta > 0:
+                    active.add(identity)
+                else:
+                    active.remove(identity)
+            previous = timestamp
 
 
 @dataclass
@@ -524,10 +400,6 @@ class RecorderRun:
             "price_unit": native["tick_size"],
             "snapshot_limit": native["snapshot_limit"],
         }
-
-    def _retire(self) -> None:
-        self.manifest = {}
-        self._files = ()
 
     def iter_records(
         self,
@@ -603,11 +475,7 @@ class RecorderRun:
                     )
                 )
             )
-            observe = (
-                resources.enter_context(native_trade_identities())
-                if "agg_trades" in data_kinds
-                else None
-            )
+            observe = native_trade_identities() if "agg_trades" in data_kinds else None
             for record in records:
                 if end_ns is not None and record["observed_time_ns"] > end_ns:
                     continue
@@ -632,13 +500,7 @@ class RecorderRun:
     ) -> ObservationCoverage:
         if data_kind == "depth_snapshot":
             data_kind = "depth"
-        return self._coverage_index._coverage_readers.enter_context(
-            closing_iterator(
-                ObservationCoverage(
-                    self._coverage_index, market_type, data_kind, symbol
-                )
-            )
-        )
+        return ObservationCoverage(self._coverage_index, market_type, data_kind, symbol)
 
 
 @contextmanager
@@ -738,112 +600,59 @@ def _reject_raw_reparse(metadata: os.stat_result) -> None:
 @contextmanager
 def open_recorder_run(root: Path) -> Iterator[RecorderRun]:
     """Bind one exact recorder run and verify it before and after use."""
-
     run_root = Path(root)
     with _raw_path_session(run_root) as verify_root:
-        with _read_run_manifest(run_root) as (
-            manifest,
-            manifest_identity,
-        ):
-            coverage_index: ObservationCoverageIndex | None = None
-            files: tuple[_RunFile, ...] = ()
-            run: RecorderRun | None = None
+        manifest, manifest_identity = _read_run_manifest(run_root)
+        coverage_index = ObservationCoverageIndex(
+            run_root,
+            manifest["capture"]["connection_intervals"],
+            markets=set(manifest["market_types"]),
+            decode_interval=_decode_recorder_interval,
+        )
+        files = _capture_run_files(run_root, manifest, coverage_index=coverage_index)
+        run = RecorderRun(
+            root=run_root,
+            manifest=manifest,
+            source_identity={
+                "schema_id": "qrp-binance-recorder",
+                "artifact_id": manifest["run_id"],
+                "manifest_hash": canonical_json_hash(manifest),
+            },
+            _files=files,
+            _coverage_index=coverage_index,
+        )
+        try:
+            yield run
+        finally:
+            primary = sys.exception()
             try:
-                coverage_index = ObservationCoverageIndex(
-                    run_root,
-                    manifest["capture"]["connection_intervals"],
-                    markets=set(manifest["market_types"]),
-                    decode_interval=_decode_recorder_interval,
+                verify_root()
+                current_manifest, current_identity = _read_run_manifest(run_root)
+                if (
+                    current_identity != manifest_identity
+                    or canonical_json_hash(current_manifest)
+                    != run.source_identity["manifest_hash"]
+                ):
+                    raise ValueError("binance_replay_run_identity_changed")
+                current_files = _capture_run_files(
+                    run_root, current_manifest, coverage_index=coverage_index
                 )
-                try:
-                    files = _capture_run_files(
-                        run_root, manifest, coverage_index=coverage_index
-                    )
-                except BaseException as primary:
-                    try:
-                        coverage_index.close()
-                    except BaseException as cleanup_error:
-                        primary.add_note(
-                            "Binance connection coverage cleanup also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
+                if tuple(item.identity for item in current_files) != tuple(
+                    item.identity for item in files
+                ):
+                    raise ValueError("binance_replay_file_identity_changed")
+            except BaseException as error:
+                if primary is None:
                     raise
-                run = RecorderRun(
-                    root=run_root,
-                    manifest=manifest,
-                    source_identity={
-                        "schema_id": "qrp-binance-recorder",
-                        "artifact_id": manifest["run_id"],
-                        "manifest_hash": canonical_json_hash(manifest),
-                    },
-                    _files=files,
-                    _coverage_index=coverage_index,
+                primary.add_note(
+                    "Binance recorder run verification also failed: "
+                    + type(error).__name__
                 )
-                try:
-                    yield run
-                finally:
-                    primary = sys.exception()
-                    try:
-                        verify_root()
-                        with _read_run_manifest(run_root) as (
-                            current_manifest,
-                            current_identity,
-                        ):
-                            current_files: tuple[_RunFile, ...] = ()
-                            try:
-                                if (
-                                    current_identity != manifest_identity
-                                    or canonical_json_hash(current_manifest)
-                                    != run.source_identity["manifest_hash"]
-                                ):
-                                    raise ValueError(
-                                        "binance_replay_run_identity_changed"
-                                    )
-                                current_files = _capture_run_files(
-                                    run_root,
-                                    current_manifest,
-                                    coverage_index=coverage_index,
-                                )
-                                if tuple(
-                                    item.identity for item in current_files
-                                ) != tuple(item.identity for item in files):
-                                    raise ValueError(
-                                        "binance_replay_file_identity_changed"
-                                    )
-                            finally:
-                                current_files = ()
-                                current_manifest = None
-                    except BaseException as verify_error:
-                        if primary is not None:
-                            primary.add_note(
-                                "Binance recorder run verification also failed: "
-                                f"{type(verify_error).__name__}"
-                            )
-                        else:
-                            raise
-                    finally:
-                        cleanup_primary = sys.exception()
-                        try:
-                            coverage_index.close()
-                        except BaseException as cleanup_error:
-                            if cleanup_primary is None:
-                                raise
-                            cleanup_primary.add_note(
-                                "Binance connection coverage cleanup also failed: "
-                                f"{type(cleanup_error).__name__}"
-                            )
-            finally:
-                if run is not None:
-                    run._retire()
-                files = ()
-                coverage_index = None
-                manifest = None
 
 
-@contextmanager
 def _read_run_manifest(
     root: Path,
-) -> Iterator[tuple[dict[str, Any], DatasetFileIdentity]]:
+) -> tuple[dict[str, Any], DatasetFileIdentity]:
     path = root / "run.json"
     identity = _capture_raw_file_identity(path)
     if identity.size <= 0:
@@ -869,10 +678,7 @@ def _read_run_manifest(
         raise ValueError("binance_replay_run_identity_changed")
     _validate_run_manifest(manifest)
     assert manifest is not None
-    try:
-        yield manifest, identity
-    finally:
-        manifest = None
+    return manifest, identity
 
 
 def _validate_run_manifest(value: object) -> None:
@@ -1101,19 +907,16 @@ def _validate_connection_interval(
 
 
 def _decode_recorder_interval(value, *, markets):
-    try:
-        opened_ns, closed_ns = _validate_connection_interval(value, markets=markets)
-        return (
-            value["connection_id"],
-            value["market"],
-            value["data_kind"],
-            value["stream"],
-            value["segment_id"],
-            opened_ns,
-            closed_ns,
-        )
-    finally:
-        value = None
+    opened_ns, closed_ns = _validate_connection_interval(value, markets=markets)
+    return (
+        value["connection_id"],
+        value["market"],
+        value["data_kind"],
+        value["stream"],
+        value["segment_id"],
+        opened_ns,
+        closed_ns,
+    )
 
 
 def _validate_record_coverage(
@@ -1312,14 +1115,9 @@ def _iter_raw_file(
                     "snapshot_limit": market_metadata["snapshot_limit"],
                 }
                 try:
-                    try:
-                        yield output
-                    except GeneratorExit:
-                        return
-                finally:
-                    output = None
-                    record = None
-                    line = None
+                    yield output
+                except GeneratorExit:
+                    return
             if (
                 count != metadata["record_count"]
                 or minimum != metadata["capture_seq_min"]
@@ -1413,9 +1211,8 @@ def _levels(
     price_unit: str,
     error: str,
     allow_zero: bool,
-    max_levels: int,
 ) -> dict[int, float]:
-    if not isinstance(value, list) or len(value) > max_levels:
+    if not isinstance(value, list):
         raise ValueError(error)
     result: dict[int, float] = {}
     for level in value:
@@ -1450,7 +1247,6 @@ class DepthReconstructor:
         price_unit: str,
         snapshot_limit: int,
         required_levels: int,
-        max_book_levels: int,
         connection_close_ns: int | None,
         stats: ReconstructionStats,
         output_levels: int | None = None,
@@ -1461,8 +1257,6 @@ class DepthReconstructor:
             raise ValueError("binance_replay_required_levels_invalid")
         if type(snapshot_limit) is not int or snapshot_limit < required_levels:
             raise ValueError("binance_replay_snapshot_coverage_invalid")
-        if type(max_book_levels) is not int or max_book_levels < snapshot_limit:
-            raise ValueError("binance_replay_book_bound_invalid")
         if connection_close_ns is not None and (
             type(connection_close_ns) is not int or connection_close_ns < 0
         ):
@@ -1471,7 +1265,6 @@ class DepthReconstructor:
         self.price_unit = validate_price_unit(price_unit)
         self.required_levels = required_levels
         self.output_levels = output_levels
-        self.max_book_levels = max_book_levels
         self.connection_close_ns = connection_close_ns
         self.stats = stats
         self._bids: dict[int, float] = {}
@@ -1489,10 +1282,6 @@ class DepthReconstructor:
     def valid(self) -> bool:
         return self._bootstrapped and not self._invalid
 
-    def close(self) -> None:
-        self._bids.clear()
-        self._asks.clear()
-
     def bootstrap(self, record: dict[str, Any]) -> None:
         if record.get("market_type") != self.market_type:
             raise ValueError("binance_replay_market_type_mismatch")
@@ -1505,14 +1294,12 @@ class DepthReconstructor:
             price_unit=self.price_unit,
             error="binance_replay_snapshot_bids_invalid",
             allow_zero=False,
-            max_levels=self.max_book_levels,
         )
         asks = _levels(
             payload.get("asks"),
             price_unit=self.price_unit,
             error="binance_replay_snapshot_asks_invalid",
             allow_zero=False,
-            max_levels=self.max_book_levels,
         )
         reason = self._invalid_reason(bids, asks)
         if reason is not None:
@@ -1583,14 +1370,12 @@ class DepthReconstructor:
             price_unit=self.price_unit,
             error="binance_replay_delta_bids_invalid",
             allow_zero=True,
-            max_levels=self.max_book_levels,
         )
         ask_updates = _levels(
             payload.get("a"),
             price_unit=self.price_unit,
             error="binance_replay_delta_asks_invalid",
             allow_zero=True,
-            max_levels=self.max_book_levels,
         )
         assert self._known_bid_floor_tick is not None
         assert self._known_ask_ceiling_tick is not None
@@ -1604,12 +1389,6 @@ class DepthReconstructor:
             for price_index, quantity in ask_updates.items()
             if price_index <= self._known_ask_ceiling_tick
         }
-        if (
-            _projected_level_count(self._bids, known_bid_updates) > self.max_book_levels
-            or _projected_level_count(self._asks, known_ask_updates)
-            > self.max_book_levels
-        ):
-            return self._invalidate(record, "book_bound_exceeded")
         _apply_levels(self._bids, known_bid_updates)
         _apply_levels(self._asks, known_ask_updates)
         reason = self._invalid_reason(self._bids, self._asks)
@@ -1772,19 +1551,6 @@ def _record_times(
     )
 
 
-def _projected_level_count(
-    current: dict[int, float],
-    updates: dict[int, float],
-) -> int:
-    result = len(current)
-    for price_index, quantity in updates.items():
-        if quantity == 0 and price_index in current:
-            result -= 1
-        elif quantity > 0 and price_index not in current:
-            result += 1
-    return result
-
-
 def _apply_levels(target: dict[int, float], updates: dict[int, float]) -> None:
     for price_index, quantity in updates.items():
         if quantity == 0:
@@ -1799,7 +1565,6 @@ def iter_reconstructed_depth(
     *,
     symbol: str,
     required_levels: int = RECONSTRUCTION_REQUIRED_LEVELS,
-    max_book_levels: int = RECONSTRUCTION_MAX_BOOK_LEVELS,
     output_levels: int | None = None,
     stats: ReconstructionStats | None = None,
     end_ns: int | None = None,
@@ -1819,165 +1584,144 @@ def iter_reconstructed_depth(
         end_ns=end_ns,
     )
     with closing_iterator(records):
-        try:
-            for record in records:
-                segment_id, observation_id = _record_identity(record)
-                if record["data_kind"] == "depth_snapshot":
-                    if reconstructor is not None:
-                        if active_segment == segment_id:
-                            raise ValueError(
-                                "binance_replay_snapshot_identity_duplicate"
-                            )
-                        if reconstructor.valid:
-                            pending_reconnect = (
-                                active_segment or segment_id,
-                                reconstructor._observation_id or "",
-                            )
-                        reconstructor.close()
-                        reconstructor = None
-                    bounds = run._coverage_index.bounds(  # noqa: SLF001
-                        observation_id,
-                        symbol=symbol,
-                        market_type=market_type,
-                        data_kind="depth",
-                    )
-                    if bounds is None:
-                        raise ValueError("binance_replay_connection_coverage_invalid")
-                    if stats is None:
-                        active_stats.coverage_segments.clear()
-                    reconstructor = DepthReconstructor(
-                        market_type,
-                        price_unit=metadata["price_unit"],
-                        snapshot_limit=metadata["snapshot_limit"],
-                        required_levels=required_levels,
-                        max_book_levels=max_book_levels,
-                        output_levels=output_levels,
-                        connection_close_ns=bounds[1],
-                        stats=active_stats,
-                    )
-                    active_segment = segment_id
-                    pending_invalid_reason = None
-                    try:
-                        reconstructor.bootstrap(record)
-                    except ValueError as error:
-                        reason = str(error)
-                        prefix = "binance_replay_snapshot_"
-                        if not reason.startswith(prefix):
-                            raise
-                        reason = reason.removeprefix(prefix)
-                        if reason not in {
-                            "one_sided_book",
-                            "crossed_book",
-                            "unsupported_coverage",
-                        }:
-                            raise
-                        reconstructor.close()
-                        reconstructor = None
-                        pending_invalid_reason = reason
-                        active_stats.invalid_segments += 1
-                    continue
-
-                if segment_id != active_segment:
-                    if reconstructor is not None:
-                        if reconstructor.valid:
-                            event_time, transaction_time, observed_time = _record_times(
-                                record,
-                                market_type=market_type,
-                            )
-                            reconstructor._close_coverage(observed_time)
-                            active_stats.reconnect_boundaries += 1
-                            _yield_value = BookBoundary(
-                                source_sequence=record["source_sequence"],
-                                event_time_ms=event_time,
-                                transaction_time_ms=transaction_time,
-                                observed_time_ns=observed_time,
-                                receive_time=record["receive_time"],
-                                receive_monotonic_ns=record["receive_monotonic_ns"],
-                                segment_id=active_segment or segment_id,
-                                observation_id=reconstructor._observation_id or "",
-                                market_type=market_type,
-                                reason="reconnect_boundary",
-                            )
-                            try:
-                                yield _yield_value
-                            except GeneratorExit:
-                                return
-                        reconstructor.close()
-                    raise ValueError("binance_replay_snapshot_missing")
-
-                if record["data_kind"] == "depth_bootstrap":
-                    if reconstructor is not None:
-                        reconstructor.advance(record)
-                    continue
-
-                if pending_reconnect is not None:
-                    event_time, transaction_time, observed_time = _record_times(
-                        record,
-                        market_type=market_type,
-                    )
-                    active_stats.reconnect_boundaries += 1
-                    _yield_value = BookBoundary(
-                        source_sequence=record["source_sequence"],
-                        event_time_ms=event_time,
-                        transaction_time_ms=transaction_time,
-                        observed_time_ns=observed_time,
-                        receive_time=record["receive_time"],
-                        receive_monotonic_ns=record["receive_monotonic_ns"],
-                        segment_id=pending_reconnect[0],
-                        observation_id=pending_reconnect[1],
-                        market_type=market_type,
-                        reason="reconnect_boundary",
-                    )
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
-                    pending_reconnect = None
-                if pending_invalid_reason is not None:
-                    event_time, transaction_time, observed_time = _record_times(
-                        record,
-                        market_type=market_type,
-                    )
-                    _yield_value = BookBoundary(
-                        source_sequence=record["source_sequence"],
-                        event_time_ms=event_time,
-                        transaction_time_ms=transaction_time,
-                        observed_time_ns=observed_time,
-                        receive_time=record["receive_time"],
-                        receive_monotonic_ns=record["receive_monotonic_ns"],
-                        segment_id=segment_id,
-                        observation_id=observation_id,
-                        market_type=market_type,
-                        reason=pending_invalid_reason,
-                    )
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
-                    pending_invalid_reason = None
-                    continue
+        for record in records:
+            segment_id, observation_id = _record_identity(record)
+            if record["data_kind"] == "depth_snapshot":
                 if reconstructor is not None:
-                    for _yield_value in reconstructor.feed(record):
+                    if active_segment == segment_id:
+                        raise ValueError("binance_replay_snapshot_identity_duplicate")
+                    if reconstructor.valid:
+                        pending_reconnect = (
+                            active_segment or segment_id,
+                            reconstructor._observation_id or "",
+                        )
+                    reconstructor = None
+                bounds = run._coverage_index.bounds(  # noqa: SLF001
+                    observation_id,
+                    symbol=symbol,
+                    market_type=market_type,
+                    data_kind="depth",
+                )
+                if bounds is None:
+                    raise ValueError("binance_replay_connection_coverage_invalid")
+                if stats is None:
+                    active_stats.coverage_segments.clear()
+                reconstructor = DepthReconstructor(
+                    market_type,
+                    price_unit=metadata["price_unit"],
+                    snapshot_limit=metadata["snapshot_limit"],
+                    required_levels=required_levels,
+                    output_levels=output_levels,
+                    connection_close_ns=bounds[1],
+                    stats=active_stats,
+                )
+                active_segment = segment_id
+                pending_invalid_reason = None
+                try:
+                    reconstructor.bootstrap(record)
+                except ValueError as error:
+                    reason = str(error)
+                    prefix = "binance_replay_snapshot_"
+                    if not reason.startswith(prefix):
+                        raise
+                    reason = reason.removeprefix(prefix)
+                    if reason not in {
+                        "one_sided_book",
+                        "crossed_book",
+                        "unsupported_coverage",
+                    }:
+                        raise
+                    reconstructor = None
+                    pending_invalid_reason = reason
+                    active_stats.invalid_segments += 1
+                continue
+
+            if segment_id != active_segment:
+                if reconstructor is not None:
+                    if reconstructor.valid:
+                        event_time, transaction_time, observed_time = _record_times(
+                            record,
+                            market_type=market_type,
+                        )
+                        reconstructor._close_coverage(observed_time)
+                        active_stats.reconnect_boundaries += 1
+                        _yield_value = BookBoundary(
+                            source_sequence=record["source_sequence"],
+                            event_time_ms=event_time,
+                            transaction_time_ms=transaction_time,
+                            observed_time_ns=observed_time,
+                            receive_time=record["receive_time"],
+                            receive_monotonic_ns=record["receive_monotonic_ns"],
+                            segment_id=active_segment or segment_id,
+                            observation_id=reconstructor._observation_id or "",
+                            market_type=market_type,
+                            reason="reconnect_boundary",
+                        )
                         try:
                             yield _yield_value
                         except GeneratorExit:
                             return
-        finally:
-            primary = sys.exception()
-            if reconstructor is not None:
+                raise ValueError("binance_replay_snapshot_missing")
+
+            if record["data_kind"] == "depth_bootstrap":
+                if reconstructor is not None:
+                    reconstructor.advance(record)
+                continue
+
+            if pending_reconnect is not None:
+                event_time, transaction_time, observed_time = _record_times(
+                    record,
+                    market_type=market_type,
+                )
+                active_stats.reconnect_boundaries += 1
+                _yield_value = BookBoundary(
+                    source_sequence=record["source_sequence"],
+                    event_time_ms=event_time,
+                    transaction_time_ms=transaction_time,
+                    observed_time_ns=observed_time,
+                    receive_time=record["receive_time"],
+                    receive_monotonic_ns=record["receive_monotonic_ns"],
+                    segment_id=pending_reconnect[0],
+                    observation_id=pending_reconnect[1],
+                    market_type=market_type,
+                    reason="reconnect_boundary",
+                )
                 try:
-                    reconstructor.close()
-                except BaseException as cleanup_error:
-                    if primary is not None:
-                        primary.add_note(
-                            "Binance book release also failed: "
-                            f"{type(cleanup_error).__name__}"
-                        )
-                    else:
-                        raise
+                    yield _yield_value
+                except GeneratorExit:
+                    return
+                pending_reconnect = None
+            if pending_invalid_reason is not None:
+                event_time, transaction_time, observed_time = _record_times(
+                    record,
+                    market_type=market_type,
+                )
+                _yield_value = BookBoundary(
+                    source_sequence=record["source_sequence"],
+                    event_time_ms=event_time,
+                    transaction_time_ms=transaction_time,
+                    observed_time_ns=observed_time,
+                    receive_time=record["receive_time"],
+                    receive_monotonic_ns=record["receive_monotonic_ns"],
+                    segment_id=segment_id,
+                    observation_id=observation_id,
+                    market_type=market_type,
+                    reason=pending_invalid_reason,
+                )
+                try:
+                    yield _yield_value
+                except GeneratorExit:
+                    return
+                pending_invalid_reason = None
+                continue
+            if reconstructor is not None:
+                for _yield_value in reconstructor.feed(record):
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
 
 
-@contextmanager
 def native_trade_identities():
     """Track exact native trade identity across resends and historical conflicts."""
     index = ExactPrimaryKeyIndex(primary_key=("market", "symbol", "trade_id"))
@@ -2002,7 +1746,7 @@ def native_trade_identities():
         latest[namespace] = trade_id
         return True, previous
 
-    yield observe
+    return observe
 
 
 def iter_agg_trades(

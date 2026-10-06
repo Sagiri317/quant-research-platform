@@ -449,15 +449,15 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
             ["timestamp", "asset_id"],
         ]
         for selector in ("champion", "pv_all_equal_weight_rank_ensemble"):
-            with read_prediction_output_bundle(
+            (_manifest, lookup) = read_prediction_output_bundle(
                 prediction_root,
                 expected_output_id=prediction_id,
                 family_selection=selector,
-            ) as (_manifest, lookup):
-                values, found = lookup.values_for_frame(keys, mark_matched=True)
-                assert all(found)
-                assert len(values) == len(keys)
-                assert lookup.coverage_counts() == (0, 0)
+            )
+            values, found = lookup.values_for_frame(keys, mark_matched=True)
+            assert all(found)
+            assert len(values) == len(keys)
+            assert lookup.coverage_counts() == (0, 0)
         assert prediction_manifest["metadata"]["primary_key"] == [
             "timestamp",
             "asset_id",
@@ -2668,7 +2668,6 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
 ) -> None:
-    from contextlib import contextmanager
     from types import SimpleNamespace
 
     from quant_research_platform.contracts.models import (
@@ -2720,9 +2719,8 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
         lambda _metadata: None,
     )
 
-    @contextmanager
     def bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        yield manifest, object()
+        return manifest, object()
 
     monkeypatch.setattr(research, "read_prediction_output_bundle", bundle)
     monkeypatch.setattr(

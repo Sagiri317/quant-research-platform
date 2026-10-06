@@ -37,22 +37,19 @@ app.add_typer(report_app, name="report")
 def catalog_factors(
     profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
 ) -> None:
-    typer.echo("factor_id,market_id,factor_set,definition_version")
+    typer.echo("factor_id,market_id,factor_set")
     for item in queries.list_factors(research_profile(profile)).items:
-        typer.echo(
-            f"{item.factor_id},{item.market_id},{item.factor_set},"
-            f"{item.definition_version}"
-        )
+        typer.echo(f"{item.factor_id},{item.market_id},{item.factor_set}")
 
 
 @catalog_app.command("labels")
 def catalog_labels(
     profile: str = typer.Option(A_SHARE_PROFILE_ID, "--profile"),  # noqa: B008
 ) -> None:
-    typer.echo("label_id,market_id,horizon,horizon_unit,definition_version")
+    typer.echo("label_id,market_id,horizon,horizon_unit")
     for item in queries.list_labels(research_profile(profile)).items:
         typer.echo(
-            f"{item.label_id},{item.market_id},{item.horizon},{item.horizon_unit},{item.definition_version}"
+            f"{item.label_id},{item.market_id},{item.horizon},{item.horizon_unit}"
         )
 
 

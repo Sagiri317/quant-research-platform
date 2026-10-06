@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import gc
 import os
+import sys
 from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
@@ -44,6 +46,45 @@ def test_iter_frame_chunks_reuses_bounded_frame_storage() -> None:
         )
         for chunk in chunks
     )
+
+
+@pytest.mark.parametrize(
+    "primary_type", (RuntimeError, KeyboardInterrupt, GeneratorExit)
+)
+def test_fingerprint_consumer_failure_retains_primary_and_reader_identity_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, primary_type
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "fingerprint_consumer")
+    write_dataset(
+        root,
+        make_default_dataset_frame().iloc[:1],
+        spec=make_processed_dataset_spec("fingerprint_consumer"),
+    )
+    part = next(filesystem_glob(root / "data", "**/*.parquet"))
+    primary = primary_type("fingerprint_consumer_failed")
+    unraisable = []
+
+    def fail_hash(*_args, **_kwargs):
+        before = filesystem_stat(part)
+        os.utime(
+            native_filesystem_path(part),
+            ns=(before.st_atime_ns, before.st_mtime_ns + 100_000_000),
+        )
+        raise primary
+
+    monkeypatch.setattr(dataset_fingerprinting, "_iter_fingerprint_hashes", fail_hash)
+    monkeypatch.setattr(
+        sys, "unraisablehook", lambda event: unraisable.append(event.exc_value)
+    )
+    with pytest.raises(primary_type) as caught:
+        fingerprint_dataset(root)
+    assert caught.value is primary
+    assert primary.__notes__ == [
+        "file identity verification also failed: ValueError",
+        "dataset verification also failed: ValueError",
+    ]
+    gc.collect()
+    assert unraisable == []
 
 
 def test_compare_requires_exact_proof_after_forced_fingerprint_collision(

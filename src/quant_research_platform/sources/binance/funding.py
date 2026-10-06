@@ -269,19 +269,16 @@ def _manifest(root, symbol):
             if len(raw) != before.size or before != dataset_file_identity(path):
                 raise ValueError("binance_funding_settlement_source_changed")
             _events = proof = None
-            try:
-                _events, proof = _settlement_response(
-                    raw,
-                    source_id=native["source_id"],
-                    symbol=symbol,
-                    start_ms=native["start_ms"],
-                    end_ms=native["end_ms"],
-                    request_limit=native["request_limit"],
-                )
-                if any(native[key] != value for key, value in proof.items()):
-                    raise ValueError("binance_funding_settlement_source_invalid")
-            finally:
-                raw = _events = proof = None
+            _events, proof = _settlement_response(
+                raw,
+                source_id=native["source_id"],
+                symbol=symbol,
+                start_ms=native["start_ms"],
+                end_ms=native["end_ms"],
+                request_limit=native["request_limit"],
+            )
+            if any(native[key] != value for key, value in proof.items()):
+                raise ValueError("binance_funding_settlement_source_invalid")
     return manifest
 
 

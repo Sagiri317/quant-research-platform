@@ -238,7 +238,7 @@ def iter_native_slice(
     symbols=SYMBOLS,
     channels=CHANNELS,
 ):
-    """Yield borrowed native rows, including disconnect markers, in file order."""
+    """Yield native rows, including disconnect markers, in file order."""
     _request_scope(exchange, symbols, channels)
     day = _date(date)
     start = int(dt.datetime.combine(day, dt.time(), dt.UTC).timestamp()) * 10**9
@@ -252,89 +252,80 @@ def iter_native_slice(
         number = 0
         while True:
             line = value = payload = native = parts = timestamp = None
-            try:
-                line = stream.readline(MAX_RECORD_BYTES + 1)
-                if not line:
-                    return
-                number += 1
-                if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
-                    raise ValueError("tardis_native_record_invalid")
-                if line in (b"\n", b"\r\n"):
-                    _yield_value = (number, None, None)
-                    try:
-                        yield _yield_value
-                    except GeneratorExit:
-                        return
-                    continue
-                try:
-                    timestamp, payload = line.decode("utf-8").split(" ", 1)
-                except (UnicodeDecodeError, ValueError):
-                    raise ValueError("tardis_native_record_invalid") from None
-                observed = strict_iso_timestamp(
-                    timestamp, error="tardis_observed_time_invalid"
-                ).value
-                if (
-                    not timestamp.endswith("Z")
-                    or not lower <= observed < upper
-                    or observed < previous
-                ):
-                    raise ValueError("tardis_observed_time_invalid")
-                previous = observed
-                value = parse_qrp_json_object(payload.encode("utf-8"))
-                if (
-                    set(value) - {"stream", "data", "generated"}
-                    or not isinstance(value.get("stream"), str)
-                    or type(value.get("data")) is not dict
-                ):
-                    raise ValueError("tardis_native_record_invalid")
-                parts = value["stream"].split("@")
-                if (
-                    len(parts) < 2
-                    or parts[0] not in symbols
-                    or parts[1] not in channels
-                ):
-                    raise ValueError("tardis_native_channel_invalid")
-                channel = parts[1]
-                suffix = _stream_suffix(channel, exchange)
-                if value["stream"] != parts[0] + "@" + suffix:
-                    raise ValueError("tardis_native_frequency_unsupported")
-                native = value["data"]
-                if "generated" in value and type(value["generated"]) is not bool:
-                    raise ValueError("tardis_generated_flag_invalid")
-                if channel in ("depth", "aggTrade"):
-                    validate_market_payload(
-                        FUTURES_MARKET_TYPE
-                        if exchange == EXCHANGE
-                        else SPOT_MARKET_TYPE,
-                        "depth" if channel == "depth" else "agg_trades",
-                        parts[0].upper(),
-                        native,
-                        source_schema=SCHEMA_ID,
-                        observed_time_ns=observed,
-                    )
-                elif channel == "depthSnapshot":
-                    if (
-                        type(native.get("lastUpdateId")) is not int
-                        or native["lastUpdateId"] < 0
-                        or type(native.get("bids")) is not list
-                        or (type(native.get("asks")) is not list)
-                    ):
-                        raise ValueError("tardis_snapshot_invalid")
-                elif channel in STATE_CHANNELS:
-                    _validate_state(channel, parts[0].upper(), native)
-                elif (
-                    native.get("s") != parts[0].upper()
-                    or native.get("e") != "markPriceUpdate"
-                ):
-                    raise ValueError("tardis_mark_price_invalid")
-                _yield_value = (number, timestamp, value)
+            line = stream.readline(MAX_RECORD_BYTES + 1)
+            if not line:
+                return
+            number += 1
+            if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
+                raise ValueError("tardis_native_record_invalid")
+            if line in (b"\n", b"\r\n"):
+                _yield_value = (number, None, None)
                 try:
                     yield _yield_value
                 except GeneratorExit:
                     return
-                value = line = payload = native = None
-            finally:
-                line = value = payload = native = parts = timestamp = None
+                continue
+            try:
+                timestamp, payload = line.decode("utf-8").split(" ", 1)
+            except (UnicodeDecodeError, ValueError):
+                raise ValueError("tardis_native_record_invalid") from None
+            observed = strict_iso_timestamp(
+                timestamp, error="tardis_observed_time_invalid"
+            ).value
+            if (
+                not timestamp.endswith("Z")
+                or not lower <= observed < upper
+                or observed < previous
+            ):
+                raise ValueError("tardis_observed_time_invalid")
+            previous = observed
+            value = parse_qrp_json_object(payload.encode("utf-8"))
+            if (
+                set(value) - {"stream", "data", "generated"}
+                or not isinstance(value.get("stream"), str)
+                or type(value.get("data")) is not dict
+            ):
+                raise ValueError("tardis_native_record_invalid")
+            parts = value["stream"].split("@")
+            if len(parts) < 2 or parts[0] not in symbols or parts[1] not in channels:
+                raise ValueError("tardis_native_channel_invalid")
+            channel = parts[1]
+            suffix = _stream_suffix(channel, exchange)
+            if value["stream"] != parts[0] + "@" + suffix:
+                raise ValueError("tardis_native_frequency_unsupported")
+            native = value["data"]
+            if "generated" in value and type(value["generated"]) is not bool:
+                raise ValueError("tardis_generated_flag_invalid")
+            if channel in ("depth", "aggTrade"):
+                validate_market_payload(
+                    FUTURES_MARKET_TYPE if exchange == EXCHANGE else SPOT_MARKET_TYPE,
+                    "depth" if channel == "depth" else "agg_trades",
+                    parts[0].upper(),
+                    native,
+                    source_schema=SCHEMA_ID,
+                    observed_time_ns=observed,
+                )
+            elif channel == "depthSnapshot":
+                if (
+                    type(native.get("lastUpdateId")) is not int
+                    or native["lastUpdateId"] < 0
+                    or type(native.get("bids")) is not list
+                    or (type(native.get("asks")) is not list)
+                ):
+                    raise ValueError("tardis_snapshot_invalid")
+            elif channel in STATE_CHANNELS:
+                _validate_state(channel, parts[0].upper(), native)
+            elif (
+                native.get("s") != parts[0].upper()
+                or native.get("e") != "markPriceUpdate"
+            ):
+                raise ValueError("tardis_mark_price_invalid")
+            _yield_value = (number, timestamp, value)
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
+            value = line = payload = native = None
 
 
 class _ObservedStreams:
@@ -472,7 +463,8 @@ def _publish_slices(
             require_free_disk_headroom(root, reserve_bytes=4096)
             handle.write(json.dumps(row, separators=(",", ":")) + "\n")
 
-        with native_trade_identities() as observe_trade, ExitStack() as streams:
+        observe_trade = native_trade_identities()
+        with ExitStack() as streams:
             tracker = _ObservedStreams(exchange, observe_trade=observe_trade)
             gaps = streams.enter_context(
                 closing_iterator(filesystem_gzip_open(gap_path, "wt", encoding="utf-8"))
@@ -517,66 +509,60 @@ def _publish_slices(
                     channels=channels,
                 )
                 with closing_iterator(records):
-                    try:
-                        for number, timestamp, value in records:
-                            rows = number
-                            _, closed, gap = tracker.observe(
-                                offset, number, timestamp, value
-                            )
-                            for interval in closed:
-                                write_row(intervals, interval)
-                                interval_count += 1
-                            if value is None:
-                                disconnects += 1
-                            else:
-                                stream = value["stream"]
-                                symbol, channel, *_ = stream.split("@")
-                                symbol = symbol.upper()
-                                native = value["data"]
-                                if channel in ("depth", "depthSnapshot"):
-                                    names = (
-                                        ("b", "a")
-                                        if channel == "depth"
-                                        else ("bids", "asks")
-                                    )
-                                    for name in names:
-                                        for level in native[name]:
-                                            if (
-                                                type(level) is not list
-                                                or len(level) != 2
-                                            ):
-                                                raise ValueError(
-                                                    "tardis_price_level_invalid"
-                                                )
-                                            precision = price_decimal_places(level[0])
-                                            decimal_places[symbol] = max(
-                                                decimal_places.get(symbol, 0), precision
-                                            )
-                                    if channel == "depthSnapshot":
-                                        snapshot_limits[symbol] = max(
-                                            snapshot_limits.get(symbol, 0),
-                                            *(len(native[name]) for name in names),
-                                        )
-                                elif channel == "aggTrade":
-                                    decimal_places[symbol] = max(
-                                        decimal_places.get(symbol, 0),
-                                        price_decimal_places(native["p"]),
-                                    )
-                                counts[stream] = counts.get(stream, 0) + 1
-                                if first is None:
-                                    first = timestamp
-                                last = timestamp
-                            if gap is not None:
-                                gap.update(
-                                    offset_minutes=offset,
-                                    line=number,
-                                    observed_utc=timestamp,
+                    for number, timestamp, value in records:
+                        rows = number
+                        _, closed, gap = tracker.observe(
+                            offset, number, timestamp, value
+                        )
+                        for interval in closed:
+                            write_row(intervals, interval)
+                            interval_count += 1
+                        if value is None:
+                            disconnects += 1
+                        else:
+                            stream = value["stream"]
+                            symbol, channel, *_ = stream.split("@")
+                            symbol = symbol.upper()
+                            native = value["data"]
+                            if channel in ("depth", "depthSnapshot"):
+                                names = (
+                                    ("b", "a")
+                                    if channel == "depth"
+                                    else ("bids", "asks")
                                 )
-                                write_row(gaps, gap)
-                                gap_count += 1
-                            value = native = gap = interval = closed = None
-                    finally:
-                        value = native = gap = interval = closed = level = None
+                                for name in names:
+                                    for level in native[name]:
+                                        if type(level) is not list or len(level) != 2:
+                                            raise ValueError(
+                                                "tardis_price_level_invalid"
+                                            )
+                                        precision = price_decimal_places(level[0])
+                                        decimal_places[symbol] = max(
+                                            decimal_places.get(symbol, 0), precision
+                                        )
+                                if channel == "depthSnapshot":
+                                    snapshot_limits[symbol] = max(
+                                        snapshot_limits.get(symbol, 0),
+                                        *(len(native[name]) for name in names),
+                                    )
+                            elif channel == "aggTrade":
+                                decimal_places[symbol] = max(
+                                    decimal_places.get(symbol, 0),
+                                    price_decimal_places(native["p"]),
+                                )
+                            counts[stream] = counts.get(stream, 0) + 1
+                            if first is None:
+                                first = timestamp
+                            last = timestamp
+                        if gap is not None:
+                            gap.update(
+                                offset_minutes=offset,
+                                line=number,
+                                observed_utc=timestamp,
+                            )
+                            write_row(gaps, gap)
+                            gap_count += 1
+                        value = native = gap = interval = closed = None
                 member = {
                     "path": target.name,
                     "offset_minutes": offset,

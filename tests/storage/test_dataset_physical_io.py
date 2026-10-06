@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import errno
 import importlib
 import importlib.util
 import json
@@ -413,33 +414,42 @@ def test_session_metadata_reader_rejects_oversize_before_buffering(
         pass
 
 
-def test_dataset_parquet_disk_preflight_precedes_native_write(
+def test_dataset_native_disk_failure_removes_partial_candidate_and_preserves_published(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    table = pa.table({"value": [1]})
-    path = tmp_path / "part.parquet"
-    captured: dict[str, int] = {}
-    native_writes = 0
+    published = make_dataset_artifact_root(tmp_path, "published")
+    write_dataset(
+        published,
+        make_default_dataset_frame(),
+        spec=make_processed_dataset_spec("published"),
+    )
+    original = {
+        path: filesystem_read_bytes(path)
+        for path in filesystem_glob(published, "**/*")
+        if path.is_file()
+    }
+    candidate = make_dataset_artifact_root(tmp_path, "candidate")
+    primary = OSError(errno.ENOSPC, "synthetic_native_disk_full")
+    partial_paths = []
 
-    def reject_disk(path: Path, *, reserve_bytes: int) -> None:
-        captured["reserve_bytes"] = reserve_bytes
-        assert path == tmp_path
-        raise OSError("dataset_disk_preflight")
+    def fail_native_write(_table, path, **_kwargs):
+        partial = Path(path)
+        partial.write_bytes(b"partial parquet")
+        partial_paths.append(partial)
+        raise primary
 
-    def forbid_native_write(*_args, **_kwargs):
-        nonlocal native_writes
-        native_writes += 1
-        raise AssertionError("native_write_started_before_disk_preflight")
-
-    monkeypatch.setattr(dataset_writing, "require_free_disk_headroom", reject_disk)
-    monkeypatch.setattr(dataset_writing.pq, "write_table", forbid_native_write)
-    with pytest.raises(OSError, match="dataset_disk_preflight") as raised:
-        dataset_writing.write_parquet_file(table, path)
-    expected = table.nbytes
-    assert captured["reserve_bytes"] == expected
-    assert native_writes == 0
-    assert not filesystem_exists(path)
-    assert str(raised.value) == "dataset_disk_preflight"
+    monkeypatch.setattr(dataset_writing.pq, "write_table", fail_native_write)
+    with pytest.raises(OSError) as caught:
+        write_dataset(
+            candidate,
+            make_default_dataset_frame(),
+            spec=make_processed_dataset_spec("candidate"),
+        )
+    assert caught.value is primary
+    assert partial_paths and all(not path.exists() for path in partial_paths)
+    assert not filesystem_exists(candidate)
+    assert tuple(candidate.parent.glob(".a-*")) == ()
+    assert {path: filesystem_read_bytes(path) for path in original} == original
 
 
 @pytest.mark.parametrize("variant", ("normal", "empty", "override"))

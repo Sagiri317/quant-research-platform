@@ -94,146 +94,138 @@ def import_funding_history(
     )
     identity = dataset_file_identity(path)
     raw = events = metadata = native = None
-    try:
-        with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-            raw = handle.read(identity.size + 1)
-        if identity != dataset_file_identity(path) or len(raw) != identity.size:
-            raise ValueError("tardis_funding_source_changed")
-        if byte_budget <= len(raw):
-            raise ValueError("tardis_funding_budget_exceeded")
-        events, proof = _settlement_response(
-            raw,
-            source_id=source_id,
-            symbol=symbol,
-            start_ms=start_ms,
-            end_ms=end_ms,
-            request_limit=request_limit,
-        )
-        native = {
-            "source_id": source_id,
-            "endpoint": endpoint,
-            "symbol": symbol,
-            "start_ms": start_ms,
-            "end_ms": end_ms,
-            "http_status": http_status,
-            "sha256": hashlib.sha256(raw).hexdigest(),
-            "byte_count": len(raw),
-            **proof,
-        }
-        metadata = {
-            "schema_id": FUNDING_SCHEMA_ID,
-            "symbol": symbol,
-            "market_type": FUTURES_MARKET_TYPE,
-            "valuation_currency": "USDT",
-            "coverage": {
-                "start_ns": start_ns,
-                "end_ns": (end_ms + 1) * 1_000_000 - 1,
-                "status": "COMPLETE",
-            },
-            "provenance": "tardis_market_manifest:"
-            + canonical_json_hash(archive.source_identity),
-            "settlement_source": native,
-        }
+    with closing_iterator(open_filesystem_file(path, "rb")) as handle:
+        raw = handle.read(identity.size + 1)
+    if identity != dataset_file_identity(path) or len(raw) != identity.size:
+        raise ValueError("tardis_funding_source_changed")
+    if byte_budget <= len(raw):
+        raise ValueError("tardis_funding_budget_exceeded")
+    events, proof = _settlement_response(
+        raw,
+        source_id=source_id,
+        symbol=symbol,
+        start_ms=start_ms,
+        end_ms=end_ms,
+        request_limit=request_limit,
+    )
+    native = {
+        "source_id": source_id,
+        "endpoint": endpoint,
+        "symbol": symbol,
+        "start_ms": start_ms,
+        "end_ms": end_ms,
+        "http_status": http_status,
+        "sha256": hashlib.sha256(raw).hexdigest(),
+        "byte_count": len(raw),
+        **proof,
+    }
+    metadata = {
+        "schema_id": FUNDING_SCHEMA_ID,
+        "symbol": symbol,
+        "market_type": FUTURES_MARKET_TYPE,
+        "valuation_currency": "USDT",
+        "coverage": {
+            "start_ns": start_ns,
+            "end_ns": (end_ms + 1) * 1_000_000 - 1,
+            "status": "COMPLETE",
+        },
+        "provenance": "tardis_market_manifest:"
+        + canonical_json_hash(archive.source_identity),
+        "settlement_source": native,
+    }
 
-        def rows():
-            for settled in events:
-                yield (
-                    "settlement",
-                    settled.timestamp_ns,
-                    None,
-                    settled.rate,
-                    settled.mark_price,
-                    None,
-                )
-            previous_observed = -1
-            for member in archive.manifest["files"]:
-                records = iter_native_slice(
-                    archive.root / member["path"],
-                    date=archive.manifest["date"],
-                    offset_minutes=member["offset_minutes"],
-                    expected_sha256=member["sha256"],
-                    exchange=archive.manifest["exchange"],
-                    symbols=tuple(archive.manifest["symbols"]),
-                    channels=tuple(archive.manifest["requested_channels"]),
-                )
-                with closing_iterator(records):
+    def rows():
+        for settled in events:
+            yield (
+                "settlement",
+                settled.timestamp_ns,
+                None,
+                settled.rate,
+                settled.mark_price,
+                None,
+            )
+        previous_observed = -1
+        for member in archive.manifest["files"]:
+            records = iter_native_slice(
+                archive.root / member["path"],
+                date=archive.manifest["date"],
+                offset_minutes=member["offset_minutes"],
+                expected_sha256=member["sha256"],
+                exchange=archive.manifest["exchange"],
+                symbols=tuple(archive.manifest["symbols"]),
+                channels=tuple(archive.manifest["requested_channels"]),
+            )
+            with closing_iterator(records):
+                value = mark = forecast = None
+                for _number, timestamp, value in records:
+                    if (
+                        value is None
+                        or value["stream"] != symbol.lower() + "@markPrice@1s"
+                    ):
+                        value = None
+                        continue
+                    observed = strict_iso_timestamp(
+                        timestamp,
+                        error="tardis_funding_observed_time_invalid",
+                    ).value
+                    if observed <= previous_observed:
+                        raise ValueError("tardis_funding_forecast_order_invalid")
+                    previous_observed = observed
+                    mark = value["data"]
+                    until = (
+                        strict_non_negative_integer(
+                            mark.get("T"),
+                            error="tardis_funding_forecast_time_invalid",
+                        )
+                        * 1_000_000
+                    )
+                    rate = strict_finite_float(
+                        mark["r"],
+                        error="tardis_funding_forecast_rate_invalid",
+                    )
+                    price = strict_positive_float(
+                        mark.get("p"),
+                        error="tardis_funding_forecast_mark_invalid",
+                    )
+                    if until > observed:
+                        forecast = FundingForecast(
+                            observed, until, ((until, -rate * price),)
+                        )
+                        _yield_value = (
+                            "forecast",
+                            observed,
+                            until,
+                            None,
+                            None,
+                            [list(item) for item in forecast.cashflows],
+                        )
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
                     value = mark = forecast = None
-                    try:
-                        for _number, timestamp, value in records:
-                            if (
-                                value is None
-                                or value["stream"] != symbol.lower() + "@markPrice@1s"
-                            ):
-                                value = None
-                                continue
-                            observed = strict_iso_timestamp(
-                                timestamp,
-                                error="tardis_funding_observed_time_invalid",
-                            ).value
-                            if observed <= previous_observed:
-                                raise ValueError(
-                                    "tardis_funding_forecast_order_invalid"
-                                )
-                            previous_observed = observed
-                            mark = value["data"]
-                            until = (
-                                strict_non_negative_integer(
-                                    mark.get("T"),
-                                    error="tardis_funding_forecast_time_invalid",
-                                )
-                                * 1_000_000
-                            )
-                            rate = strict_finite_float(
-                                mark["r"],
-                                error="tardis_funding_forecast_rate_invalid",
-                            )
-                            price = strict_positive_float(
-                                mark.get("p"),
-                                error="tardis_funding_forecast_mark_invalid",
-                            )
-                            if until > observed:
-                                forecast = FundingForecast(
-                                    observed, until, ((until, -rate * price),)
-                                )
-                                _yield_value = (
-                                    "forecast",
-                                    observed,
-                                    until,
-                                    None,
-                                    None,
-                                    [list(item) for item in forecast.cashflows],
-                                )
-                                try:
-                                    yield _yield_value
-                                except GeneratorExit:
-                                    return
-                            value = mark = forecast = None
-                    finally:
-                        value = mark = forecast = None
 
-        def validate(root):
-            checked = _manifest(root, symbol)
-            for _item in _records(root, checked):
-                pass
-            with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-                digest = hashlib.file_digest(handle, "sha256").hexdigest()
-            if identity != dataset_file_identity(path) or digest != native["sha256"]:
-                raise ValueError("tardis_funding_source_changed")
+    def validate(root):
+        checked = _manifest(root, symbol)
+        for _item in _records(root, checked):
+            pass
+        with closing_iterator(open_filesystem_file(path, "rb")) as handle:
+            digest = hashlib.file_digest(handle, "sha256").hexdigest()
+        if identity != dataset_file_identity(path) or digest != native["sha256"]:
+            raise ValueError("tardis_funding_source_changed")
 
-        def publish(staging):
-            require_free_disk_headroom(staging, reserve_bytes=len(raw))
-            filesystem_write_bytes(staging / "settlements.json", raw)
-            projected = rows()
-            with closing_iterator(projected):
-                write_csv_snapshot(
-                    staging / "observations",
-                    columns=FUNDING_COLUMNS,
-                    rows=projected,
-                    metadata=metadata,
-                    max_bytes=byte_budget - len(raw),
-                    validate=validate,
-                )
+    def publish(staging):
+        require_free_disk_headroom(staging, reserve_bytes=len(raw))
+        filesystem_write_bytes(staging / "settlements.json", raw)
+        projected = rows()
+        with closing_iterator(projected):
+            write_csv_snapshot(
+                staging / "observations",
+                columns=FUNDING_COLUMNS,
+                rows=projected,
+                metadata=metadata,
+                max_bytes=byte_budget - len(raw),
+                validate=validate,
+            )
 
-        atomic_write_directory(archive.funding_root(symbol).parent, publish)
-    finally:
-        raw = events = metadata = native = None
+    atomic_write_directory(archive.funding_root(symbol).parent, publish)

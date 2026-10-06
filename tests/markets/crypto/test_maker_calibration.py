@@ -268,7 +268,7 @@ def test_actual_maker_keeps_cashflows_of_all_queued_commands():
     assert gains == pytest.approx([1.5, 0.0, 3.0])
 
 
-def test_many_known_funding_offsets_complete_under_one_small_query_budget():
+def test_many_known_funding_offsets_preserve_selection():
     state = _state(0, bid_levels=((995, 1.0), (990, 3.0)))
     paths = [
         ([state], [_trade(stamp, price="99.5", quantity=quantity, maker_buyer=True)])

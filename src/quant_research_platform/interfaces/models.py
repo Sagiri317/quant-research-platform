@@ -10,7 +10,6 @@ class _PublicModel(BaseModel):
 
 
 class FactorCatalogItem(_PublicModel):
-    definition_version: str
     factor_id: str
     market_id: str
     factor_set: str
@@ -32,7 +31,6 @@ class FactorCatalogItem(_PublicModel):
 
 
 class LabelCatalogItem(_PublicModel):
-    definition_version: str
     label_id: str
     market_id: str
     family: str
@@ -48,17 +46,14 @@ class LabelCatalogItem(_PublicModel):
 
 
 class FactorCatalogResponse(_PublicModel):
-    api_version: str
     items: list[FactorCatalogItem]
 
 
 class LabelCatalogResponse(_PublicModel):
-    api_version: str
     items: list[LabelCatalogItem]
 
 
 class ResearchDatasetRequirementsResponse(_PublicModel):
-    api_version: str
     status: str
     mode: str
     dataset_id: str

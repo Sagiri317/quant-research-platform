@@ -20,19 +20,15 @@ from quant_research_platform.profiles.research import ResearchProfile
 from quant_research_platform.storage.identity import native_filesystem_path
 from quant_research_platform.storage.layout import StorageLayout
 
-API_VERSION = "0.1"
-
 
 def list_factors(profile: ResearchProfile) -> FactorCatalogResponse:
     return FactorCatalogResponse(
-        api_version=API_VERSION,
         items=[item.to_manifest() for item in profile.factors.list()],
     )
 
 
 def list_labels(profile: ResearchProfile) -> LabelCatalogResponse:
     return LabelCatalogResponse(
-        api_version=API_VERSION,
         items=[item.to_manifest() for item in profile.labels.list()],
     )
 
@@ -43,7 +39,6 @@ def describe_research_dataset_requirements(
 ) -> ResearchDatasetRequirementsResponse:
     spec = profile.research_datasets.get(dataset_id)
     return ResearchDatasetRequirementsResponse(
-        api_version=API_VERSION,
         status="available",
         mode="requirements_query_only",
         dataset_id=spec.data_id,

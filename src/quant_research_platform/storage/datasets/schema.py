@@ -57,7 +57,6 @@ _DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset(
 )
 _DATASET_MANIFEST_RESERVED_KEYS = frozenset(
     {
-        "schema_version",
         "data_id",
         "frequency",
         "grain",
@@ -365,8 +364,6 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
         ResearchDatasetSpec,
     }:
         raise ValueError("dataset_spec_type_invalid")
-    if type(spec.schema_version) is not str or spec.schema_version != "0.1":
-        raise ValueError("unsupported_schema_version")
     _require_runtime_string(spec.data_id, "dataset_data_id_invalid")
     if type(spec.frequency) is not DataFrequency:
         raise ValueError("dataset_frequency_invalid")
@@ -480,7 +477,6 @@ def _validate_dataset_spec_variant(spec: DataSpec) -> None:
             column_roles=dict(spec.column_roles),
             primary_key=tuple(spec.primary_key),
             partition_columns=tuple(spec.partition_columns),
-            schema_version=spec.schema_version,
             market_id=spec.market_id,
             input_data_ids=tuple(spec.input_data_ids),
             base_input_data_id=spec.base_input_data_id,
@@ -498,8 +494,6 @@ def _validate_dataset_spec_variant(spec: DataSpec) -> None:
 
 def _validate_runtime_feature_transform(value: object) -> None:
     if type(value) is not FeatureTransformSpec:
-        raise ValueError("dataset_feature_transforms_invalid")
-    if type(value.contract_version) is not str or value.contract_version != "0.1":
         raise ValueError("dataset_feature_transforms_invalid")
     _require_runtime_string(value.transform_id, "dataset_feature_transforms_invalid")
     _require_runtime_string_tuple(
@@ -528,7 +522,6 @@ def _validate_runtime_feature_transform(value: object) -> None:
             output_columns=tuple(value.output_columns),
             winsorize_quantiles=quantiles,
             fillna_policy=value.fillna_policy,
-            contract_version=value.contract_version,
         )
     except (TypeError, ValueError) as exc:
         raise ValueError("dataset_feature_transforms_invalid") from exc

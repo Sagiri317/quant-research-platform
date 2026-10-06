@@ -64,7 +64,7 @@ MODEL_SELECTION_METRIC_DIRECTIONS = {
     "validation_mse": "minimize",
 }
 A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID = (
-    "qrp-a-share-shared-validation-final-models-v3"
+    "qrp-a-share-shared-validation-final-models"
 )
 _PARALLEL_MODEL_ALGORITHMS = frozenset(
     algorithm for algorithm, facts in _MODEL_ALGORITHM_FACTS.items() if facts.parallel
@@ -206,7 +206,6 @@ class ModelSpec:
     random_seed: int | None = None
     max_train_rows: int | None = None
     training_weighting: TrainingWeighting = field(default_factory=TrainingWeighting)
-    contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
         hyperparameters = _freeze_model_hyperparameters(self.hyperparameters)
@@ -216,8 +215,6 @@ class ModelSpec:
         if type(weighting) is not TrainingWeighting:
             raise ValueError("training_weighting_invalid")
         object.__setattr__(self, "training_weighting", weighting)
-        if type(self.contract_version) is not str or self.contract_version != "0.1":
-            raise ValueError("unsupported_model_contract_version")
         _validate_non_empty_string(self.model_id, "model_id_required")
         _validate_non_empty_string(self.model_algorithm, "model_algorithm_required")
         _model_algorithm_facts(self.model_algorithm)
@@ -385,22 +382,28 @@ def validate_model_metadata_core(
     ]:
         raise ValueError("invalid_model_metadata")
     dependency_status = metadata["dependency_status"]
-    if (
-        type(dependency_status) is not dict
-        or set(dependency_status) != {"status", "package", "version"}
-        or dependency_status["status"] != "available"
-        or any(
-            type(dependency_status[key]) is not str or not dependency_status[key]
-            for key in ("package", "version")
-        )
-    ):
-        raise ValueError("invalid_model_metadata")
     try:
         facts = _model_algorithm_facts(metadata["model_algorithm"])
     except ValueError as exc:
         raise ValueError("invalid_model_metadata") from exc
     expected_package = facts.dependency_package or "internal"
-    if dependency_status["package"] != expected_package:
+    expected_keys = {"status", "package"}
+    if facts.dependency_package is not None:
+        expected_keys.add("version")
+    if (
+        type(dependency_status) is not dict
+        or set(dependency_status) != expected_keys
+        or dependency_status["status"] != "available"
+        or type(dependency_status["package"]) is not str
+        or dependency_status["package"] != expected_package
+        or (
+            facts.dependency_package is not None
+            and (
+                type(dependency_status["version"]) is not str
+                or not dependency_status["version"]
+            )
+        )
+    ):
         raise ValueError("invalid_model_metadata")
     try:
         if metadata["filter_columns_used"] != list(
@@ -772,4 +775,4 @@ def validate_completed_model_trial_metrics(
     _validate_model_selection_trial_record(trial)
 
 
-CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID = "qrp-crypto-fold-predictor-artifact-v3"
+CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID = "qrp-crypto-fold-predictor-artifact"

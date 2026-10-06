@@ -84,14 +84,14 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
         model_metadata=model,
         prediction_metadata_factory=lambda: metadata,
     )
-    with bundle_validation.read_prediction_output_bundle(
+    _manifest, lookup = bundle_validation.read_prediction_output_bundle(
         root,
         expected_output_id=spec.prediction_id,
         time_window=TimeWindow(times[1], times[1]),
-    ) as (_manifest, lookup):
-        values, found = lookup.values_for_frame(frame, mark_matched=True)
-        assert list(found) == [0, 1, 0]
-        assert values[1] == 2.0
+    )
+    values, found = lookup.values_for_frame(frame, mark_matched=True)
+    assert list(found) == [0, 1, 0]
+    assert values[1] == 2.0
     path = root / "prediction.parquet"
     if deep_root:
         assert len(str(path)) > 260
@@ -106,6 +106,13 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
             pa.array(changed, type=pa.timestamp("ns")),
         )
         pq.write_table(altered, native_filesystem_path(path))
+        with pytest.raises(ValueError, match="^persisted_prediction_window_mismatch$"):
+            bundle_validation.read_prediction_output_bundle(
+                root,
+                expected_output_id=spec.prediction_id,
+                time_window=TimeWindow(times[1], times[1]),
+            )
+            pytest.fail("out-of-window source row reached the filtered reader")
 
 
 def _write_bundle(root: Path) -> None:
@@ -476,12 +483,10 @@ def test_validate_output_bundle_propagates_final_secondary_without_primary(
         ("scandir", "io"),
     ),
 )
-@pytest.mark.parametrize("cleanup_fails", (False, True))
-def test_prediction_bundle_preserves_fatal_and_primary_on_close(
-    tmp_path, monkeypatch, boundary, failure, cleanup_fails
+def test_prediction_bundle_preserves_source_failure(
+    tmp_path, monkeypatch, boundary, failure
 ):
     import errno
-    from contextlib import ExitStack
 
     root = tmp_path / "bundle"
     _write_bundle(root)
@@ -490,7 +495,6 @@ def test_prediction_bundle_preserves_fatal_and_primary_on_close(
         "io": OSError(errno.EIO, "primary"),
         "interrupt": KeyboardInterrupt("primary"),
     }[failure]
-    stack = ExitStack()
 
     def fail(*args, **kwargs):
         raise primary
@@ -508,12 +512,11 @@ def test_prediction_bundle_preserves_fatal_and_primary_on_close(
             return original(candidate, *args, **kwargs)
 
         monkeypatch.setattr(os, operation, fail_io)
-    monkeypatch.setattr(bundle_validation, "ExitStack", lambda: stack)
     with pytest.raises(type(primary)) as caught:
-        with bundle_validation.read_prediction_output_bundle(
+        bundle_validation.read_prediction_output_bundle(
             root, expected_output_id="pred-run"
-        ):
-            pytest.fail("fatal source failure was swallowed")
+        )
+        pytest.fail("fatal source failure was swallowed")
     assert caught.value is primary
 
 
@@ -591,21 +594,21 @@ def test_prediction_effective_end_matches_all_rows_before_filtering(
 
     monkeypatch.setattr(pq.ParquetFile, "iter_batches", one_row_batches)
     for window in (None, TimeWindow(times[0], times[0])):
-        reader = bundle_validation.read_prediction_output_bundle(
-            root, expected_output_id=spec.prediction_id, time_window=window
-        )
         if end_shift:
             with pytest.raises(
                 ValueError, match="^persisted_prediction_effective_end_mismatch$"
             ):
-                with reader:
-                    pytest.fail("inconsistent effective end reached consumer")
+                bundle_validation.read_prediction_output_bundle(
+                    root, expected_output_id=spec.prediction_id, time_window=window
+                )
         else:
-            with reader as (_manifest, lookup):
-                assert lookup.row_count == (3 if window is None else 1)
-                values, found = lookup.values_for_frame(frame, mark_matched=False)
-                assert list(found) == ([1, 1, 1] if window is None else [1, 0, 0])
-                assert values[0] == 1.0
+            _manifest, lookup = bundle_validation.read_prediction_output_bundle(
+                root, expected_output_id=spec.prediction_id, time_window=window
+            )
+            assert lookup.row_count == (3 if window is None else 1)
+            values, found = lookup.values_for_frame(frame, mark_matched=False)
+            assert list(found) == ([1, 1, 1] if window is None else [1, 0, 0])
+            assert values[0] == 1.0
     assert len(scans) == 2
 
 

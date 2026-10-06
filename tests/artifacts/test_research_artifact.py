@@ -224,7 +224,7 @@ def test_report_markdown_lists_every_formal_result_without_json_walls(tmp_path):
     assert "None" not in markdown and '"results":' not in markdown
 
 
-def test_large_report_round_trip_and_resource_failure_preserves_old_artifact(tmp_path):
+def test_large_report_round_trip(tmp_path):
     envelope, payload = _report()
     payload["sections"]["risk"] = {
         "results": [
@@ -242,9 +242,6 @@ def test_large_report_round_trip_and_resource_failure_preserves_old_artifact(tmp
         == payload
     )
     assert filesystem_read_bytes(root / "report.json") == original
-    assert not filesystem_exists(
-        tmp_path / "rejected" / "instances" / envelope.instance_identity
-    )
 
 
 @pytest.mark.parametrize("directory", [False, True])

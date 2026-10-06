@@ -27,7 +27,6 @@ MAX_LOGICAL_RECORD_BYTES = 1024 * 1024
 # balance export.
 _MAX_PROVIDER_HEADER_FIELDS = 160
 LOGICAL_RECORD_LIMIT_ERROR = "csmar_logical_record_exceeds_source_limit"
-_CSV_PARSER_WORKSPACE_BOUND_BYTES = 128 * 1024
 
 
 @dataclass(frozen=True)
@@ -138,8 +137,13 @@ class _BoundedCsvRecords:
             # The provider format permits fields above Python's default limit.
             csv.field_size_limit(MAX_LOGICAL_RECORD_BYTES)
             self._reader = csv.reader(self._lines(), strict=True)
-        except BaseException:
-            self._handle.close()
+        except BaseException as primary:
+            try:
+                self._handle.close()
+            except BaseException as error:
+                primary.add_note(
+                    "CSMAR source close also failed: " + type(error).__name__
+                )
             raise
 
     def _lines(self):

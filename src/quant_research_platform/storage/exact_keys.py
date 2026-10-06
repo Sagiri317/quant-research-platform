@@ -172,14 +172,9 @@ class ExactPrimaryKeyIndex:
         *,
         namespace: str,
         value_columns: Sequence[str],
-        validated_columns: tuple[str, ...] | None = None,
     ):
-        selected = (
-            self._validate_comparison_table_grammar(
-                table, namespace=namespace, value_columns=value_columns
-            )
-            if validated_columns is None
-            else validated_columns
+        selected = self._validate_comparison_table_grammar(
+            table, namespace=namespace, value_columns=value_columns
         )
         keys = self._key_table(table)
         return self._comparison_payload_rows(

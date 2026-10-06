@@ -626,7 +626,6 @@ def iter_holding_factor_inputs(
     position = int(sessions.get_loc(intervals.decision_at.iloc[0]))
     history = TimeWindow(sessions[position], pd.Timestamp(time_window.end))
     risk = FactorRiskState(style_columns=style_columns, config=risk_config)
-    seen = set()
     panel_window = {}
     context_frames = {}
 
@@ -672,7 +671,6 @@ def iter_holding_factor_inputs(
                 timestamp = stamp(panel)
                 if panel.asset_id.duplicated().any() or timestamp not in sessions:
                     raise ValueError("holding_panel_keys_invalid")
-                seen.update(panel.asset_id.astype(str))
                 panel_window[timestamp] = panel.copy(deep=True)
                 panel = next(panels, None)
 

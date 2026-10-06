@@ -101,7 +101,6 @@ def _price_volume_model_metadata() -> dict[str, object]:
         "dependency_status": {
             "status": "available",
             "package": "internal",
-            "version": "test",
         },
         "feature_importance": {PRICE_VOLUME_SIGNAL_COLUMN: 1.0},
     }

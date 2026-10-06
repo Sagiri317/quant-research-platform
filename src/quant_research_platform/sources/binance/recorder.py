@@ -14,7 +14,7 @@ import time
 import uuid
 from collections import Counter
 from collections.abc import Iterator
-from contextlib import ExitStack, contextmanager
+from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -44,7 +44,6 @@ from quant_research_platform.sources.binance.ids import (
     WS_STREAM_SUFFIXES,
 )
 from quant_research_platform.sources.binance.replay import (
-    RECONSTRUCTION_MAX_BOOK_LEVELS,
     RECONSTRUCTION_REQUIRED_LEVELS,
     DepthReconstructor,
     ReconstructionStats,
@@ -671,7 +670,7 @@ class _StreamReader(threading.Thread):
         self.config = config
         self.tick_size = tick_size
         self.ready = threading.Event()
-        self.failure: str | None = None
+        self.failure: BaseException | None = None
 
     def run(self) -> None:
         backoff = 1.0
@@ -693,7 +692,8 @@ class _StreamReader(threading.Thread):
                 reconnect = True
                 continue
             except BaseException as error:
-                self.failure = type(error).__name__
+                self.failure = error
+                self.ready.set()
                 break
             break
 
@@ -705,7 +705,6 @@ class _StreamReader(threading.Thread):
         close_reason = "stop"
         closed_at: str | None = None
         closed_monotonic_ns: int | None = None
-        depth_resources = ExitStack()
         depth_book: DepthReconstructor | None = None
 
         def freeze_close() -> None:
@@ -741,11 +740,9 @@ class _StreamReader(threading.Thread):
                     price_unit=self.tick_size,
                     snapshot_limit=SNAPSHOT_LIMITS[self.stream.market_type],
                     required_levels=RECONSTRUCTION_REQUIRED_LEVELS,
-                    max_book_levels=RECONSTRUCTION_MAX_BOOK_LEVELS,
                     connection_close_ns=None,
                     stats=ReconstructionStats(),
                 )
-                depth_resources.callback(depth_book.close)
                 assert segment_id is not None
                 _record_depth_snapshot(
                     self.writer,
@@ -862,7 +859,6 @@ class _StreamReader(threading.Thread):
                         ),
                     )
                 )
-            cleanups.append(("depth validation", depth_resources.close))
             if websocket is not None:
                 cleanups.append(("websocket", websocket.close))
             for name, close in cleanups:
@@ -964,45 +960,42 @@ def _record_market_metadata(
                 else None
             )
             payload = symbol = filters = tick_size = received = monotonic_ns = None
-            try:
-                payload, received, monotonic_ns = _http_get_json(
-                    base_url,
-                    endpoint,
-                    params=params,
+            payload, received, monotonic_ns = _http_get_json(
+                base_url,
+                endpoint,
+                params=params,
+            )
+            for symbol_id in requested_symbols:
+                symbol = _selected_symbol(payload, symbol_id)
+                filters = symbol.get("filters")
+                if not isinstance(filters, list):
+                    raise ValueError("binance_recorder_symbol_metadata_invalid")
+                tick_size = next(
+                    (
+                        item.get("tickSize")
+                        for item in filters
+                        if isinstance(item, dict)
+                        and item.get("filterType") == "PRICE_FILTER"
+                    ),
+                    None,
                 )
-                for symbol_id in requested_symbols:
-                    symbol = _selected_symbol(payload, symbol_id)
-                    filters = symbol.get("filters")
-                    if not isinstance(filters, list):
-                        raise ValueError("binance_recorder_symbol_metadata_invalid")
-                    tick_size = next(
-                        (
-                            item.get("tickSize")
-                            for item in filters
-                            if isinstance(item, dict)
-                            and item.get("filterType") == "PRICE_FILTER"
-                        ),
-                        None,
-                    )
-                    strict_positive_float(
-                        tick_size,
-                        error="binance_recorder_tick_size_invalid",
-                    )
-                    result[symbol_id][market_type] = {
-                        "tick_size": tick_size,
-                        "snapshot_limit": SNAPSHOT_LIMITS[market_type],
-                    }
-                    writer.write(
-                        symbol=symbol_id,
-                        market_type=market_type,
-                        data_kind="metadata",
-                        stream=f"REST:{endpoint}",
-                        payload=symbol,
-                        receive_time=received,
-                        receive_monotonic_ns=monotonic_ns,
-                    )
-            finally:
-                payload = symbol = filters = tick_size = received = monotonic_ns = None
+                strict_positive_float(
+                    tick_size,
+                    error="binance_recorder_tick_size_invalid",
+                )
+                result[symbol_id][market_type] = {
+                    "tick_size": tick_size,
+                    "snapshot_limit": SNAPSHOT_LIMITS[market_type],
+                }
+                writer.write(
+                    symbol=symbol_id,
+                    market_type=market_type,
+                    data_kind="metadata",
+                    stream=f"REST:{endpoint}",
+                    payload=symbol,
+                    receive_time=received,
+                    receive_monotonic_ns=monotonic_ns,
+                )
     return result
 
 
@@ -1044,45 +1037,42 @@ def _record_depth_snapshot(
     )
     payload = snapshot = received = monotonic_ns = None
     try:
-        try:
-            payload, received, monotonic_ns = _http_get_json(
-                base_url,
-                endpoint,
-                params={
-                    "symbol": stream.symbol,
-                    "limit": str(SNAPSHOT_LIMITS[market_type]),
-                },
-            )
-        except (TimeoutError, OSError) as error:
-            raise _ConnectionProblem() from error
-        snapshot = _validate_snapshot(payload, market_type=market_type)
-        capture_seq = writer.write(
-            symbol=stream.symbol,
-            market_type=market_type,
-            data_kind="depth_snapshot",
-            stream=f"REST:{endpoint}",
-            payload=snapshot,
-            receive_time=received,
-            receive_monotonic_ns=monotonic_ns,
-            connection_id=connection_id,
-            segment_id=segment_id,
+        payload, received, monotonic_ns = _http_get_json(
+            base_url,
+            endpoint,
+            params={
+                "symbol": stream.symbol,
+                "limit": str(SNAPSHOT_LIMITS[market_type]),
+            },
         )
-        reconstructor.bootstrap(
-            normalize_recorder_record(
-                {
-                    "capture_seq": capture_seq,
-                    "tick_size": reconstructor.price_unit,
-                    "market_type": market_type,
-                    "payload": snapshot,
-                    "receive_time": received,
-                    "receive_monotonic_ns": monotonic_ns,
-                    "connection_id": connection_id,
-                    "segment_id": segment_id,
-                }
-            )
+    except (TimeoutError, OSError) as error:
+        raise _ConnectionProblem() from error
+    snapshot = _validate_snapshot(payload, market_type=market_type)
+    capture_seq = writer.write(
+        symbol=stream.symbol,
+        market_type=market_type,
+        data_kind="depth_snapshot",
+        stream=f"REST:{endpoint}",
+        payload=snapshot,
+        receive_time=received,
+        receive_monotonic_ns=monotonic_ns,
+        connection_id=connection_id,
+        segment_id=segment_id,
+    )
+    reconstructor.bootstrap(
+        normalize_recorder_record(
+            {
+                "capture_seq": capture_seq,
+                "tick_size": reconstructor.price_unit,
+                "market_type": market_type,
+                "payload": snapshot,
+                "receive_time": received,
+                "receive_monotonic_ns": monotonic_ns,
+                "connection_id": connection_id,
+                "segment_id": segment_id,
+            }
         )
-    finally:
-        payload = snapshot = received = monotonic_ns = None
+    )
 
 
 def record(config: RecorderConfig) -> dict[str, Any]:
@@ -1132,9 +1122,16 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                 reader.start()
             deadline = time.monotonic() + config.connect_timeout_seconds
             for reader in readers:
-                remaining = max(0.0, deadline - time.monotonic())
-                if not reader.ready.wait(remaining):
-                    raise TimeoutError("binance_recorder_stream_connect_timeout")
+                while True:
+                    for pending_reader in readers:
+                        if pending_reader.failure is not None:
+                            raise pending_reader.failure
+                    if reader.ready.is_set():
+                        break
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise TimeoutError("binance_recorder_stream_connect_timeout")
+                    reader.ready.wait(min(0.1, remaining))
             started_at = _utc_now()
             started_clock = time.monotonic()
             cpu_start = time.process_time()
@@ -1147,7 +1144,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                 stop.wait(min(0.25, remaining))
                 for reader in readers:
                     if reader.failure is not None:
-                        raise RuntimeError("binance_recorder_reader_failure")
+                        raise reader.failure
                     if not reader.is_alive():
                         raise RuntimeError("binance_recorder_reader_thread_died")
         finally:
@@ -1169,6 +1166,15 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                         )
                     else:
                         cleanup_errors.append(type(cleanup_error).__name__)
+            for reader in readers:
+                if reader.failure is not None and reader.failure is not active_primary:
+                    if active_primary is None:
+                        active_primary = reader.failure
+                    else:
+                        active_primary.add_note(
+                            "Binance reader also failed: "
+                            + type(reader.failure).__name__
+                        )
             if join_failed:
                 try:
                     writer.abort()
@@ -1183,10 +1189,9 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                     raise _ReaderQuiescenceFailure(
                         "binance_recorder_reader_quiescence_timeout"
                     )
-            if active_primary is None and any(
-                reader.failure is not None for reader in readers
-            ):
-                raise RuntimeError("binance_recorder_reader_failure")
+            if sys.exception() is None and active_primary is not None:
+                raise active_primary
+
     captured = stats.payload()
 
     ended_at = _utc_now()

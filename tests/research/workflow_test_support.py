@@ -64,7 +64,6 @@ def _metadata(
         "dependency_status": {
             "status": "available",
             "package": "internal",
-            "version": "test",
         },
         "training_weighting": {"method": "equal_timestamp", "half_life": None},
         "scaler": None,

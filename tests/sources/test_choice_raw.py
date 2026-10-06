@@ -80,9 +80,9 @@ def test_official_shapes_roundtrip_and_exact_reuse(
         original = filesystem_read_bytes(root / "response.csv")
         assert session.fetch(layout, request) == root
         assert sdk.calls == 1
-        with read_choice_response(root, request) as restored:
-            assert restored == vars(response)
-            actual = copy.deepcopy(restored)
+        restored = read_choice_response(root, request)
+        assert restored == vars(response)
+        actual = copy.deepcopy(restored)
         assert actual == vars(response)
         assert filesystem_read_bytes(root / "response.csv") == original
     assert sdk.stops == 1
@@ -116,8 +116,8 @@ def test_documented_ctr_report_type_is_forwarded_and_persisted_exactly(tmp_path:
         before = _immediate_file_bytes(root)
         assert session.fetch(StorageLayout(tmp_path), request) == root
         assert sdk.calls == 1 and sdk.last_arguments == request.arguments
-        with read_choice_response(root, request) as restored:
-            assert restored == vars(sdk.response)
+        restored = read_choice_response(root, request)
+        assert restored == vars(sdk.response)
         metadata = read_manifest(root / "response.metadata.json")["metadata"]
         assert metadata["request"]["arguments"] == list(request.arguments)
         assert metadata["scope"]["research_cutoff_applied"] is False
@@ -133,14 +133,14 @@ def test_sdk_null_empty_nonfinite_and_bytes_are_distinct(tmp_path: Path) -> None
     request = _request()
     with choice_session(sdk) as session:
         root = session.fetch(StorageLayout(tmp_path), request)
-        with read_choice_response(root, request) as response:
-            restored = response["Data"]["0"]
-            assert restored[:5] == values[:5]
-            assert [type(value) for value in restored[:5]] == [
-                type(value) for value in values[:5]
-            ]
-            assert math.isnan(restored[5]) and restored[6] == float("inf")
-            assert restored[7] == b"x"
+        response = read_choice_response(root, request)
+        restored = response["Data"]["0"]
+        assert restored[:5] == values[:5]
+        assert [type(value) for value in restored[:5]] == [
+            type(value) for value in values[:5]
+        ]
+        assert math.isnan(restored[5]) and restored[6] == float("inf")
+        assert restored[7] == b"x"
 
 
 @pytest.mark.parametrize("corruption", ["value", "request", "column", "count", "scope"])
@@ -172,8 +172,8 @@ def test_corrupt_completed_response_refuses_reuse_without_overwriting(
         with pytest.raises(ValueError):
             session.fetch(StorageLayout(tmp_path), request)
         with pytest.raises(ValueError):
-            with read_choice_response(root, request):
-                pytest.fail("corrupt raw became visible")
+            read_choice_response(root, request)
+            pytest.fail("corrupt raw became visible")
         assert sdk.calls == 1
         assert before == _immediate_file_bytes(root)
 
@@ -201,8 +201,8 @@ def test_empty_success_and_failed_attempt_then_explicit_success(tmp_path: Path) 
             ]
             == []
         )
-        with read_choice_response(root, request) as response:
-            assert response["Data"] == {}
+        response = read_choice_response(root, request)
+        assert response["Data"] == {}
         session.fetch(StorageLayout(tmp_path), request)
         assert sdk.calls == 2
 
@@ -281,8 +281,8 @@ def test_scalar_saved_metadata_preserves_primary_error_at_read_and_reuse(
         filesystem_write_text(path, json.dumps(manifest), encoding="utf-8")
         corrupt = filesystem_read_bytes(path)
         with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
-            with read_choice_response(root, request):
-                pytest.fail("invalid metadata admitted")
+            read_choice_response(root, request)
+            pytest.fail("invalid metadata admitted")
         with pytest.raises(ValueError, match="^choice_saved_metadata_invalid$"):
             session.fetch(layout, request)
         assert sdk.calls == 1

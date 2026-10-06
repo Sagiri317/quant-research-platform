@@ -32,11 +32,8 @@ class FeatureTransformSpec:
     output_columns: tuple[str, ...]
     winsorize_quantiles: tuple[float, float] | None = None
     fillna_policy: str = "none"
-    contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if type(self.contract_version) is not str or self.contract_version != "0.1":
-            raise ValueError("unsupported_feature_transform_contract_version")
         if type(self.transform_id) is not str or not self.transform_id:
             raise ValueError("feature_transform_id_required")
         _validate_column_tuple(self.source_columns, "source_columns")

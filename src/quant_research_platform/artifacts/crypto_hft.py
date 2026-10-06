@@ -329,7 +329,6 @@ def write_crypto_episode_artifact(logical_root, *, envelope, produce):
         count = 0
         with parquet_table_writer(
             native_filesystem_path(staging / "episodes.parquet"),
-            parent=staging,
             compression="zstd",
             schema=CRYPTO_EPISODE_SCHEMA,
         ) as write_index:

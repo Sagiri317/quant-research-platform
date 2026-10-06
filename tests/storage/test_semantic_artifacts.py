@@ -52,6 +52,34 @@ def _write_artifact(tmp_path: Path) -> Path:
     return write_semantic_artifact(tmp_path / "model", _envelope(), writer)
 
 
+def test_discovery_accepts_more_than_1024_published_semantic_instances(
+    tmp_path: Path,
+) -> None:
+    logical_root = tmp_path / "history"
+    base = _envelope()
+    expected = []
+    for seed in range(1025):
+        envelope = build_business_manifest_envelope(
+            logical_artifact_id=base.logical_artifact_id,
+            schema_identity=base.schema_identity,
+            protocol_or_spec_identity=base.protocol_or_spec_identity,
+            software_identity=base.software_identity,
+            research_window=base.research_window,
+            upstream_identities=base.upstream_identities,
+            semantic_metadata={"seed": seed},
+        )
+        expected.append(
+            write_semantic_artifact(
+                logical_root,
+                envelope,
+                lambda staging: filesystem_write_bytes(staging / "model.bin", b"x"),
+            )
+        )
+    assert discover_semantic_artifact_instances(logical_root) == tuple(
+        sorted(expected, key=lambda path: path.name)
+    )
+
+
 def test_semantic_artifact_empty_members_are_rejected_before_publication(
     tmp_path: Path,
 ) -> None:

@@ -40,36 +40,34 @@ def test_crypto_ledger_failure_preserves_primary_and_old_good(
     tmp_path, monkeypatch, stage
 ):
     primary = RuntimeError("consumer_failure")
-    with crypto_rank_case(tmp_path) as case:
-        old_good = {
-            path.relative_to(case.root): path.read_bytes()
-            for path in case.root.rglob("*")
-            if path.is_file()
-        }
-        if stage == "selection":
+    case = crypto_rank_case(tmp_path)
+    old_good = {
+        path.relative_to(case.root): path.read_bytes()
+        for path in case.root.rglob("*")
+        if path.is_file()
+    }
+    if stage == "selection":
 
-            def fail(*args, **kwargs):
+        def fail(*args, **kwargs):
+            raise primary
+
+        monkeypatch.setattr(persisted, "_crypto_validation_chunks", fail)
+    else:
+        read = persisted.read_model_trial_ledger_reference
+
+        def fail_refit(layout, reference):
+            plan, records = read(layout, reference)
+            if plan.stage == "refit":
                 raise primary
+            return (plan, records)
 
-            monkeypatch.setattr(persisted, "_crypto_validation_chunks", fail)
-        else:
-            read = persisted.read_model_trial_ledger_reference
-
-            def fail_refit(layout, reference):
-                plan, records = read(layout, reference)
-                if plan.stage == "refit":
-                    raise primary
-                return (plan, records)
-
-            monkeypatch.setattr(
-                persisted, "read_model_trial_ledger_reference", fail_refit
-            )
-        with pytest.raises(RuntimeError) as caught:
-            persisted.read_crypto_model_artifact(case.root, trial_layout=case.layout)
-        assert caught.value is primary
-        assert primary.__traceback__ is not None
-        assert old_good == {
-            path.relative_to(case.root): path.read_bytes()
-            for path in case.root.rglob("*")
-            if path.is_file()
-        }
+        monkeypatch.setattr(persisted, "read_model_trial_ledger_reference", fail_refit)
+    with pytest.raises(RuntimeError) as caught:
+        persisted.read_crypto_model_artifact(case.root, trial_layout=case.layout)
+    assert caught.value is primary
+    assert primary.__traceback__ is not None
+    assert old_good == {
+        path.relative_to(case.root): path.read_bytes()
+        for path in case.root.rglob("*")
+        if path.is_file()
+    }

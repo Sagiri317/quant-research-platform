@@ -194,7 +194,7 @@ def test_panel_transaction_clock_is_nullable_integer(market_type) -> None:
 
 
 @pytest.mark.parametrize("close_early", (False, True))
-def test_panel_releases_consumed_buffers_before_yield(close_early) -> None:
+def test_panel_batches_preserve_previously_yielded_frames(close_early) -> None:
     frames = iter_panel_frames(
         [_state(0), _state(200)],
         [],
@@ -208,12 +208,10 @@ def test_panel_releases_consumed_buffers_before_yield(close_early) -> None:
     )
     first = next(frames)
     expected = first.copy(deep=True)
-    assert not frames.gi_frame.f_locals["buffers"]
     if close_early:
         frames.close()
     else:
         last = next(frames)
-        assert not frames.gi_frame.f_locals["buffers"]
         assert last["timestamp"].tolist() == [pd.Timestamp(200, unit="ms")]
         with pytest.raises(StopIteration):
             next(frames)

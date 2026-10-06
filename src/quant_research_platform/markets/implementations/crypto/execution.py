@@ -607,292 +607,261 @@ def simulate_taker(
         closing_iterator(forecasts),
         _PendingMarkouts(metrics, resolved_fill) as pending,
     ):
-        try:
-            next_event = next(events, None)
-            next_forecast = next(forecasts, None)
+        next_event = next(events, None)
+        next_forecast = next(forecasts, None)
 
-            def consume_event(
-                event: BookState | BookBoundary,
-            ) -> None:
-                nonlocal latest_state, terminal_mid, terminal_timestamp
-                terminal_timestamp = _book_key(event)[0]
-                apply_funding(terminal_timestamp)
-                if isinstance(event, BookBoundary):
-                    pending.advance(
-                        event.observed_time_ns - 1, latest_state, observed_coverage
-                    )
-                    latest_state = None
-                    if economics.quantity != 0.0:
-                        terminal_mid = None
-                    pending.expire_all()
-                    return
-                previous_state = latest_state
-                state = _book_value(event)
-                latest_state = state
-                try:
-                    if _covered(
-                        observed_coverage,
-                        state.segment_id,
-                        state.observed_time_ns,
-                    ):
-                        terminal_mid = _mid(state)
-                    _resolve_observed_markouts(
-                        pending,
-                        state,
-                        observed_coverage,
-                        previous_state=previous_state,
-                    )
-                finally:
-                    previous_state = None
-                if (
-                    decision_windows_ns is not None
-                    and max(decision_windows_ns[0][0], observation_start or 0)
-                    <= state.observed_time_ns
-                    <= decision_windows_ns[-1][1]
-                    and _covered(
-                        observed_coverage, state.segment_id, state.observed_time_ns
-                    )
-                ):
-                    economics.mark(state.observed_time_ns, _mid(state))
-
-            def consume_until(target: int) -> None:
-                nonlocal market_event_count, next_event
-                while (
-                    next_event is not None
-                    and _book_key(next_event)[0] <= target
-                    and (
-                        observation_stop is None
-                        or _book_key(next_event)[0] < observation_stop
-                    )
-                ):
-                    event = next_event
-                    market_event_count += 1
-                    consume_event(event)
-                    next_event = next(events, None)
-
-            def execute_order(order):
-                nonlocal reserved_buy, reserved_sell, filled_orders, unfilled_quantity
-                nonlocal equity_rows, max_abs_position, last_gross, last_net
-                (
-                    order_id,
-                    decision_time,
-                    effective_time,
-                    segment,
-                    signed_quantity,
-                    gain,
-                    decision_mid,
-                ) = order
-                effective_time_ns = effective_time * _NANOSECONDS_PER_MILLISECOND
-                if signed_quantity > 0:
-                    reserved_buy -= signed_quantity
-                else:
-                    reserved_sell -= -signed_quantity
-                apply_funding(effective_time_ns)
-                requested = abs(signed_quantity)
-                remaining = requested
-                current_mid = None
-                if (
-                    latest_state is not None
-                    and latest_state.segment_id == segment
-                    and _covered(observed_coverage, segment, effective_time_ns)
-                ):
-                    current_mid = _mid(latest_state)
-                    levels = (
-                        latest_state.asks if signed_quantity > 0 else latest_state.bids
-                    )
-                    notional = 0.0
-                    levels_consumed = 0
-                    for price_index, available in levels:
-                        quantity = min(remaining, available)
-                        if quantity <= 0:
-                            continue
-                        price = index_to_price(price_index, latest_state.price_unit)
-                        notional += quantity * price
-                        remaining -= quantity
-                        levels_consumed += 1
-                        if remaining <= 0:
-                            break
-                    filled = requested - remaining
-                    if filled > 0:
-                        filled_orders += 1
-                        fill_price = notional / filled
-                        fee = notional * config.taker_fee_bps / 10_000.0
-                        signed = 1.0 if signed_quantity > 0 else -1.0
-                        fill_id = economics.fill(
-                            timestamp_ns=effective_time_ns,
-                            order_id=str(order_id),
-                            quantity=signed * filled,
-                            price=fill_price,
-                            mark_price=current_mid,
-                            fee=fee,
-                        )
-                        fill = dict(
-                            fill_id=fill_id,
-                            order_id=order_id,
-                            timestamp_ms=effective_time,
-                            decision_time_ms=decision_time,
-                            effective_time_ms=effective_time,
-                            state_observed_time_ms=latest_state.observed_time_ms,
-                            segment_id=segment,
-                            side="buy" if signed_quantity > 0 else "sell",
-                            fill_price=fill_price,
-                            fill_qty=filled,
-                            requested_quantity=requested,
-                            decision_mid=decision_mid,
-                            expected_net_gain=gain,
-                            levels_consumed=levels_consumed,
-                            notional=notional,
-                            fee=fee,
-                            slippage_bps=signed
-                            * (fill_price - current_mid)
-                            / current_mid
-                            * 10_000.0,
-                            markout_target_time_ms=effective_time
-                            + config.markout_horizon_ms,
-                            markout_target_time_ns=effective_time_ns
-                            + config.markout_horizon_ms * _NANOSECONDS_PER_MILLISECOND,
-                        )
-                        metrics.observe_fill(fill)
-                        pending.add(fill)
-                unfilled_quantity += remaining
-                marked = (
-                    None
-                    if current_mid is None
-                    else economics.mark(effective_time_ns, current_mid)
+        def consume_event(
+            event: BookState | BookBoundary,
+        ) -> None:
+            nonlocal latest_state, terminal_mid, terminal_timestamp
+            terminal_timestamp = _book_key(event)[0]
+            apply_funding(terminal_timestamp)
+            if isinstance(event, BookBoundary):
+                pending.advance(
+                    event.observed_time_ns - 1, latest_state, observed_coverage
                 )
-                last_gross = None if marked is None else marked["gross_pnl"]
-                last_net = None if marked is None else marked["net_pnl"]
-                max_abs_position = max(max_abs_position, abs(economics.quantity))
-
-            def advance_events(target_ns):
-                nonlocal action_timestamp
-                while (
-                    orders and orders[0][2] * _NANOSECONDS_PER_MILLISECOND <= target_ns
-                ):
-                    consume_until(orders[0][2] * _NANOSECONDS_PER_MILLISECOND)
-                    order = orders.popleft()
-                    try:
-                        execute_order(order)
-                    finally:
-                        order = None
-                consume_until(target_ns)
-                apply_funding(target_ns)
-                action_timestamp = target_ns
-
-            def advance(target_ns):
-                nonlocal next_day
-                next_day = _advance_utc_boundaries(
-                    target_ns,
-                    next_day,
-                    advance_events,
-                    economics,
-                    lambda: latest_state,
-                    observed_coverage,
-                )
-
-            def boundary(timestamp_ns, *, closing):
-                nonlocal reserved_buy, reserved_sell, cancelled_orders
-                nonlocal unfilled_quantity
-                advance(timestamp_ns)
-                cancelled_count = len(orders) if closing else 0
-                cancelled_quantity = (
-                    sum(abs(order[4]) for order in orders) if closing else 0.0
-                )
-                if closing:
-                    cancelled_orders += len(orders)
-                    unfilled_quantity += cancelled_quantity
-                    orders.clear()
-                    reserved_buy = reserved_sell = 0.0
-                mark = (
-                    _mid(latest_state)
-                    if latest_state is not None
-                    and _covered(
-                        observed_coverage, latest_state.segment_id, timestamp_ns
-                    )
-                    else None
-                )
-                if mark is None and observation_window_ns is not None and not closing:
-                    raise PortfolioTargetBlocked(
-                        "portfolio_episode_initial_valuation_missing"
-                    )
-                if mark is None and economics.quantity != 0.0:
-                    raise PortfolioTargetBlocked(
-                        "portfolio_window_boundary_valuation_missing"
-                    )
-                diagnostic_asset = (
-                    asset_id if mark is not None else PORTFOLIO_CASH_ASSET_ID
-                )
-                economics.mark(
-                    timestamp_ns,
-                    mark,
-                    diagnostics=(
-                        PortfolioDiagnostic(
-                            diagnostic_asset,
-                            None,
-                            "oos_window_end" if closing else "oos_window_start",
-                            number=float(window_index),
-                        ),
-                        *(
-                            (
-                                PortfolioDiagnostic(
-                                    diagnostic_asset,
-                                    None,
-                                    "cancelled_order_count",
-                                    number=float(cancelled_count),
-                                ),
-                                PortfolioDiagnostic(
-                                    diagnostic_asset,
-                                    None,
-                                    "cancelled_order_quantity",
-                                    number=float(cancelled_quantity),
-                                ),
-                            )
-                            if closing
-                            else ()
-                        ),
-                    ),
-                )
-
-            if observation_start is not None and (
-                decision_windows_ns is None
-                or observation_start < decision_windows_ns[window_index][0]
+                latest_state = None
+                if economics.quantity != 0.0:
+                    terminal_mid = None
+                pending.expire_all()
+                return
+            previous_state = latest_state
+            state = _book_value(event)
+            latest_state = state
+            if _covered(
+                observed_coverage,
+                state.segment_id,
+                state.observed_time_ns,
             ):
-                advance(observation_start)
-                if latest_state is None or not _covered(
-                    observed_coverage, latest_state.segment_id, observation_start
-                ):
-                    raise PortfolioTargetBlocked(
-                        "portfolio_episode_initial_valuation_missing"
+                terminal_mid = _mid(state)
+            _resolve_observed_markouts(
+                pending,
+                state,
+                observed_coverage,
+                previous_state=previous_state,
+            )
+            if (
+                decision_windows_ns is not None
+                and max(decision_windows_ns[0][0], observation_start or 0)
+                <= state.observed_time_ns
+                <= decision_windows_ns[-1][1]
+                and _covered(
+                    observed_coverage, state.segment_id, state.observed_time_ns
+                )
+            ):
+                economics.mark(state.observed_time_ns, _mid(state))
+
+        def consume_until(target: int) -> None:
+            nonlocal market_event_count, next_event
+            while (
+                next_event is not None
+                and _book_key(next_event)[0] <= target
+                and (
+                    observation_stop is None
+                    or _book_key(next_event)[0] < observation_stop
+                )
+            ):
+                event = next_event
+                market_event_count += 1
+                consume_event(event)
+                next_event = next(events, None)
+
+        def execute_order(order):
+            nonlocal reserved_buy, reserved_sell, filled_orders, unfilled_quantity
+            nonlocal equity_rows, max_abs_position, last_gross, last_net
+            (
+                order_id,
+                decision_time,
+                effective_time,
+                segment,
+                signed_quantity,
+                gain,
+                decision_mid,
+            ) = order
+            effective_time_ns = effective_time * _NANOSECONDS_PER_MILLISECOND
+            if signed_quantity > 0:
+                reserved_buy -= signed_quantity
+            else:
+                reserved_sell -= -signed_quantity
+            apply_funding(effective_time_ns)
+            requested = abs(signed_quantity)
+            remaining = requested
+            current_mid = None
+            if (
+                latest_state is not None
+                and latest_state.segment_id == segment
+                and _covered(observed_coverage, segment, effective_time_ns)
+            ):
+                current_mid = _mid(latest_state)
+                levels = latest_state.asks if signed_quantity > 0 else latest_state.bids
+                notional = 0.0
+                levels_consumed = 0
+                for price_index, available in levels:
+                    quantity = min(remaining, available)
+                    if quantity <= 0:
+                        continue
+                    price = index_to_price(price_index, latest_state.price_unit)
+                    notional += quantity * price
+                    remaining -= quantity
+                    levels_consumed += 1
+                    if remaining <= 0:
+                        break
+                filled = requested - remaining
+                if filled > 0:
+                    filled_orders += 1
+                    fill_price = notional / filled
+                    fee = notional * config.taker_fee_bps / 10_000.0
+                    signed = 1.0 if signed_quantity > 0 else -1.0
+                    fill_id = economics.fill(
+                        timestamp_ns=effective_time_ns,
+                        order_id=str(order_id),
+                        quantity=signed * filled,
+                        price=fill_price,
+                        mark_price=current_mid,
+                        fee=fee,
                     )
-                economics.mark(observation_start, _mid(latest_state))
-            for row in active_decisions:
-                decision_time = row["timestamp_ms"]
-                decision_ns = decision_time * _NANOSECONDS_PER_MILLISECOND
-                if observation_start is not None and decision_ns < observation_start:
-                    continue
-                if observation_stop is not None and decision_ns >= observation_stop:
-                    break
-                if decision_windows_ns is not None:
-                    while (
-                        window_index < len(decision_windows_ns)
-                        and decision_ns > decision_windows_ns[window_index][1]
-                    ):
-                        if not window_open:
-                            boundary(
-                                max(
-                                    decision_windows_ns[window_index][0],
-                                    observation_start or 0,
-                                ),
-                                closing=False,
-                            )
-                        boundary(decision_windows_ns[window_index][1], closing=True)
-                        window_index += 1
-                        window_open = False
-                    if (
-                        window_index == len(decision_windows_ns)
-                        or decision_ns < decision_windows_ns[window_index][0]
-                    ):
-                        raise ValueError("hft_decision_outside_oos_window")
+                    fill = dict(
+                        fill_id=fill_id,
+                        order_id=order_id,
+                        timestamp_ms=effective_time,
+                        decision_time_ms=decision_time,
+                        effective_time_ms=effective_time,
+                        state_observed_time_ms=latest_state.observed_time_ms,
+                        segment_id=segment,
+                        side="buy" if signed_quantity > 0 else "sell",
+                        fill_price=fill_price,
+                        fill_qty=filled,
+                        requested_quantity=requested,
+                        decision_mid=decision_mid,
+                        expected_net_gain=gain,
+                        levels_consumed=levels_consumed,
+                        notional=notional,
+                        fee=fee,
+                        slippage_bps=signed
+                        * (fill_price - current_mid)
+                        / current_mid
+                        * 10_000.0,
+                        markout_target_time_ms=effective_time
+                        + config.markout_horizon_ms,
+                        markout_target_time_ns=effective_time_ns
+                        + config.markout_horizon_ms * _NANOSECONDS_PER_MILLISECOND,
+                    )
+                    metrics.observe_fill(fill)
+                    pending.add(fill)
+            unfilled_quantity += remaining
+            marked = (
+                None
+                if current_mid is None
+                else economics.mark(effective_time_ns, current_mid)
+            )
+            last_gross = None if marked is None else marked["gross_pnl"]
+            last_net = None if marked is None else marked["net_pnl"]
+            max_abs_position = max(max_abs_position, abs(economics.quantity))
+
+        def advance_events(target_ns):
+            nonlocal action_timestamp
+            while orders and orders[0][2] * _NANOSECONDS_PER_MILLISECOND <= target_ns:
+                consume_until(orders[0][2] * _NANOSECONDS_PER_MILLISECOND)
+                order = orders.popleft()
+                execute_order(order)
+            consume_until(target_ns)
+            apply_funding(target_ns)
+            action_timestamp = target_ns
+
+        def advance(target_ns):
+            nonlocal next_day
+            next_day = _advance_utc_boundaries(
+                target_ns,
+                next_day,
+                advance_events,
+                economics,
+                lambda: latest_state,
+                observed_coverage,
+            )
+
+        def boundary(timestamp_ns, *, closing):
+            nonlocal reserved_buy, reserved_sell, cancelled_orders
+            nonlocal unfilled_quantity
+            advance(timestamp_ns)
+            cancelled_count = len(orders) if closing else 0
+            cancelled_quantity = (
+                sum(abs(order[4]) for order in orders) if closing else 0.0
+            )
+            if closing:
+                cancelled_orders += len(orders)
+                unfilled_quantity += cancelled_quantity
+                orders.clear()
+                reserved_buy = reserved_sell = 0.0
+            mark = (
+                _mid(latest_state)
+                if latest_state is not None
+                and _covered(observed_coverage, latest_state.segment_id, timestamp_ns)
+                else None
+            )
+            if mark is None and observation_window_ns is not None and not closing:
+                raise PortfolioTargetBlocked(
+                    "portfolio_episode_initial_valuation_missing"
+                )
+            if mark is None and economics.quantity != 0.0:
+                raise PortfolioTargetBlocked(
+                    "portfolio_window_boundary_valuation_missing"
+                )
+            diagnostic_asset = asset_id if mark is not None else PORTFOLIO_CASH_ASSET_ID
+            economics.mark(
+                timestamp_ns,
+                mark,
+                diagnostics=(
+                    PortfolioDiagnostic(
+                        diagnostic_asset,
+                        None,
+                        "oos_window_end" if closing else "oos_window_start",
+                        number=float(window_index),
+                    ),
+                    *(
+                        (
+                            PortfolioDiagnostic(
+                                diagnostic_asset,
+                                None,
+                                "cancelled_order_count",
+                                number=float(cancelled_count),
+                            ),
+                            PortfolioDiagnostic(
+                                diagnostic_asset,
+                                None,
+                                "cancelled_order_quantity",
+                                number=float(cancelled_quantity),
+                            ),
+                        )
+                        if closing
+                        else ()
+                    ),
+                ),
+            )
+
+        if observation_start is not None and (
+            decision_windows_ns is None
+            or observation_start < decision_windows_ns[window_index][0]
+        ):
+            advance(observation_start)
+            if latest_state is None or not _covered(
+                observed_coverage, latest_state.segment_id, observation_start
+            ):
+                raise PortfolioTargetBlocked(
+                    "portfolio_episode_initial_valuation_missing"
+                )
+            economics.mark(observation_start, _mid(latest_state))
+        for row in active_decisions:
+            decision_time = row["timestamp_ms"]
+            decision_ns = decision_time * _NANOSECONDS_PER_MILLISECOND
+            if observation_start is not None and decision_ns < observation_start:
+                continue
+            if observation_stop is not None and decision_ns >= observation_stop:
+                break
+            if decision_windows_ns is not None:
+                while (
+                    window_index < len(decision_windows_ns)
+                    and decision_ns > decision_windows_ns[window_index][1]
+                ):
                     if not window_open:
                         boundary(
                             max(
@@ -901,215 +870,228 @@ def simulate_taker(
                             ),
                             closing=False,
                         )
-                        window_open = True
-                prediction = strict_finite_float(
-                    row.get(prediction_column), error="hft_prediction_invalid"
-                )
-                advance(decision_ns)
-                while next_forecast is not None:
-                    if (
-                        type(next_forecast) is not FundingForecast
-                        or next_forecast.available_at_ns <= forecast_timestamp
-                    ):
-                        raise ValueError("portfolio_funding_forecast_order_invalid")
-                    if next_forecast.available_at_ns > decision_ns:
-                        break
-                    active_forecast = next_forecast
-                    forecast_timestamp = active_forecast.available_at_ns
-                    next_forecast = next(forecasts, None)
-                decision_mid = None
-                selected = 0.0
-                gain = None
-                funding_per_unit = None
-                segment = None
-                reason = "decision_book_unavailable"
-                if latest_state is not None and _covered(
-                    observed_coverage, latest_state.segment_id, decision_ns
-                ):
-                    decision_mid = _mid(latest_state)
-                    segment = row.get(
-                        "book_segment_id",
-                        row.get("segment_id", latest_state.segment_id),
-                    )
-                    reason = "decision_segment_mismatch"
-                    if segment == latest_state.segment_id:
-                        reason = "forecast_expired_before_execution"
-                        if config.latency_ms < prediction_horizon_ms:
-                            forecast_end = (
-                                decision_time + prediction_horizon_ms
-                            ) * _NANOSECONDS_PER_MILLISECOND
-                            funding_per_unit = None
-                            if (
-                                active_forecast is not None
-                                and active_forecast.known_until_ns >= forecast_end
-                            ):
-                                cashflows = tuple(
-                                    value
-                                    for timestamp, value in active_forecast.cashflows
-                                    if (decision_time + config.latency_ms)
-                                    * _NANOSECONDS_PER_MILLISECOND
-                                    < timestamp
-                                    <= forecast_end
-                                )
-                                if all(value is not None for value in cashflows):
-                                    funding_per_unit = sum(cashflows)
-                            if funding_per_unit is None:
-                                blocked_decisions += 1
-                                reason = "portfolio_expected_funding_missing"
-                            else:
-                                selected, gain = _taker_order_quantity(
-                                    latest_state,
-                                    prediction=prediction,
-                                    config=config,
-                                    buy_limit=max(
-                                        0.0,
-                                        config.position_size
-                                        - economics.quantity
-                                        - reserved_buy,
-                                    ),
-                                    sell_limit=max(
-                                        0.0,
-                                        config.position_size
-                                        + economics.quantity
-                                        - reserved_sell,
-                                    ),
-                                    funding_per_unit=funding_per_unit,
-                                )
-                                reason = (
-                                    "positive_expected_net_gain"
-                                    if selected
-                                    else "no_positive_expected_net_gain"
-                                )
-                if gain is None and reason != "portfolio_expected_funding_missing":
-                    undefined_decisions += 1
-                marked = None
-                if decision_mid is not None:
-                    marked = economics.mark(
-                        decision_ns,
-                        decision_mid,
-                        diagnostics=(
-                            PortfolioDiagnostic(
-                                asset_id,
-                                None,
-                                "decision_requested_quantity",
-                                number=selected,
-                            ),
-                            PortfolioDiagnostic(
-                                asset_id, None, "expected_net_gain", number=gain
-                            ),
-                            PortfolioDiagnostic(
-                                asset_id,
-                                None,
-                                "expected_funding_cashflow",
-                                number=None
-                                if funding_per_unit is None
-                                else selected * funding_per_unit,
-                            ),
-                            PortfolioDiagnostic(
-                                asset_id,
-                                None,
-                                "prediction_horizon_ms",
-                                number=float(prediction_horizon_ms),
-                            ),
-                            PortfolioDiagnostic(
-                                asset_id, None, "decision_reason", text=reason
-                            ),
-                        ),
-                    )
-                last_gross = None if marked is None else marked["gross_pnl"]
-                last_net = None if marked is None else marked["net_pnl"]
-                if on_equity is not None:
-                    on_equity(
-                        dict(
-                            timestamp_ms=decision_time,
-                            decision_time_ms=decision_time,
-                            effective_time_ms=decision_time + config.latency_ms,
-                            state_observed_time_ms=None
-                            if latest_state is None
-                            else latest_state.observed_time_ms,
-                            position=economics.quantity,
-                            gross_pnl=last_gross,
-                            fees=-economics.cost_cashflows,
-                            net_pnl=last_net,
-                            requested_quantity=selected,
-                            expected_net_gain=gain,
-                            decision_reason=reason,
-                        )
-                    )
-                equity_rows += 1
-                if selected:
-                    created_orders += 1
-                    orders.append(
-                        (
-                            created_orders,
-                            decision_time,
-                            decision_time + config.latency_ms,
-                            segment,
-                            selected,
-                            gain,
-                            decision_mid,
-                        )
-                    )
-                    if selected > 0:
-                        reserved_buy += selected
-                    else:
-                        reserved_sell -= selected
-                    advance(decision_ns)
-            if decision_windows_ns is not None:
-                while window_index < len(decision_windows_ns):
-                    begin, end = decision_windows_ns[window_index]
-                    if observation_stop is not None and begin >= observation_stop:
-                        break
-                    if not window_open:
-                        boundary(max(begin, observation_start or 0), closing=False)
-                    if observation_stop is not None and end >= observation_stop:
-                        break
-                    boundary(end, closing=True)
+                    boundary(decision_windows_ns[window_index][1], closing=True)
                     window_index += 1
                     window_open = False
-            if truncated:
-                advance(observation_stop - 1)
-                censored_count = censored_pending = censored_zero_fill = len(orders)
-                censored_quantity = sum(abs(order[4]) for order in orders)
-                end_timestamp = max(terminal_timestamp, economics.last_timestamp)
-            elif decision_windows_ns is None:
-                while orders:
-                    advance(orders[0][2] * _NANOSECONDS_PER_MILLISECOND)
-                while next_event is not None:
-                    consume_until(_book_key(next_event)[0])
-                end_timestamp = max(
-                    action_timestamp, terminal_timestamp, economics.last_timestamp
-                )
-            else:
-                end_timestamp = max(
-                    action_timestamp, terminal_timestamp, economics.last_timestamp
-                )
-            pending.advance(
-                observation_stop - 1 if truncated else end_timestamp,
-                latest_state,
-                observed_coverage,
+                if (
+                    window_index == len(decision_windows_ns)
+                    or decision_ns < decision_windows_ns[window_index][0]
+                ):
+                    raise ValueError("hft_decision_outside_oos_window")
+                if not window_open:
+                    boundary(
+                        max(
+                            decision_windows_ns[window_index][0],
+                            observation_start or 0,
+                        ),
+                        closing=False,
+                    )
+                    window_open = True
+            prediction = strict_finite_float(
+                row.get(prediction_column), error="hft_prediction_invalid"
             )
-            pending.expire_all(reason="observation_truncated" if truncated else None)
-            terminal_mid = (
-                _mid(latest_state)
-                if latest_state is not None
-                and _covered(observed_coverage, latest_state.segment_id, end_timestamp)
-                else None
-            )
-            if terminal_mid is None and economics.quantity != 0.0:
-                last_gross = None
-                last_net = None
-            else:
+            advance(decision_ns)
+            while next_forecast is not None:
+                if (
+                    type(next_forecast) is not FundingForecast
+                    or next_forecast.available_at_ns <= forecast_timestamp
+                ):
+                    raise ValueError("portfolio_funding_forecast_order_invalid")
+                if next_forecast.available_at_ns > decision_ns:
+                    break
+                active_forecast = next_forecast
+                forecast_timestamp = active_forecast.available_at_ns
+                next_forecast = next(forecasts, None)
+            decision_mid = None
+            selected = 0.0
+            gain = None
+            funding_per_unit = None
+            segment = None
+            reason = "decision_book_unavailable"
+            if latest_state is not None and _covered(
+                observed_coverage, latest_state.segment_id, decision_ns
+            ):
+                decision_mid = _mid(latest_state)
+                segment = row.get(
+                    "book_segment_id",
+                    row.get("segment_id", latest_state.segment_id),
+                )
+                reason = "decision_segment_mismatch"
+                if segment == latest_state.segment_id:
+                    reason = "forecast_expired_before_execution"
+                    if config.latency_ms < prediction_horizon_ms:
+                        forecast_end = (
+                            decision_time + prediction_horizon_ms
+                        ) * _NANOSECONDS_PER_MILLISECOND
+                        funding_per_unit = None
+                        if (
+                            active_forecast is not None
+                            and active_forecast.known_until_ns >= forecast_end
+                        ):
+                            cashflows = tuple(
+                                value
+                                for timestamp, value in active_forecast.cashflows
+                                if (decision_time + config.latency_ms)
+                                * _NANOSECONDS_PER_MILLISECOND
+                                < timestamp
+                                <= forecast_end
+                            )
+                            if all(value is not None for value in cashflows):
+                                funding_per_unit = sum(cashflows)
+                        if funding_per_unit is None:
+                            blocked_decisions += 1
+                            reason = "portfolio_expected_funding_missing"
+                        else:
+                            selected, gain = _taker_order_quantity(
+                                latest_state,
+                                prediction=prediction,
+                                config=config,
+                                buy_limit=max(
+                                    0.0,
+                                    config.position_size
+                                    - economics.quantity
+                                    - reserved_buy,
+                                ),
+                                sell_limit=max(
+                                    0.0,
+                                    config.position_size
+                                    + economics.quantity
+                                    - reserved_sell,
+                                ),
+                                funding_per_unit=funding_per_unit,
+                            )
+                            reason = (
+                                "positive_expected_net_gain"
+                                if selected
+                                else "no_positive_expected_net_gain"
+                            )
+            if gain is None and reason != "portfolio_expected_funding_missing":
+                undefined_decisions += 1
+            marked = None
+            if decision_mid is not None:
                 marked = economics.mark(
-                    end_timestamp,
-                    terminal_mid,
+                    decision_ns,
+                    decision_mid,
+                    diagnostics=(
+                        PortfolioDiagnostic(
+                            asset_id,
+                            None,
+                            "decision_requested_quantity",
+                            number=selected,
+                        ),
+                        PortfolioDiagnostic(
+                            asset_id, None, "expected_net_gain", number=gain
+                        ),
+                        PortfolioDiagnostic(
+                            asset_id,
+                            None,
+                            "expected_funding_cashflow",
+                            number=None
+                            if funding_per_unit is None
+                            else selected * funding_per_unit,
+                        ),
+                        PortfolioDiagnostic(
+                            asset_id,
+                            None,
+                            "prediction_horizon_ms",
+                            number=float(prediction_horizon_ms),
+                        ),
+                        PortfolioDiagnostic(
+                            asset_id, None, "decision_reason", text=reason
+                        ),
+                    ),
                 )
-                last_gross, last_net = marked["gross_pnl"], marked["net_pnl"]
-            if on_terminal_book is not None and latest_state is not None:
-                on_terminal_book(latest_state)
-        finally:
-            orders.clear()
-            latest_state = None
+            last_gross = None if marked is None else marked["gross_pnl"]
+            last_net = None if marked is None else marked["net_pnl"]
+            if on_equity is not None:
+                on_equity(
+                    dict(
+                        timestamp_ms=decision_time,
+                        decision_time_ms=decision_time,
+                        effective_time_ms=decision_time + config.latency_ms,
+                        state_observed_time_ms=None
+                        if latest_state is None
+                        else latest_state.observed_time_ms,
+                        position=economics.quantity,
+                        gross_pnl=last_gross,
+                        fees=-economics.cost_cashflows,
+                        net_pnl=last_net,
+                        requested_quantity=selected,
+                        expected_net_gain=gain,
+                        decision_reason=reason,
+                    )
+                )
+            equity_rows += 1
+            if selected:
+                created_orders += 1
+                orders.append(
+                    (
+                        created_orders,
+                        decision_time,
+                        decision_time + config.latency_ms,
+                        segment,
+                        selected,
+                        gain,
+                        decision_mid,
+                    )
+                )
+                if selected > 0:
+                    reserved_buy += selected
+                else:
+                    reserved_sell -= selected
+                advance(decision_ns)
+        if decision_windows_ns is not None:
+            while window_index < len(decision_windows_ns):
+                begin, end = decision_windows_ns[window_index]
+                if observation_stop is not None and begin >= observation_stop:
+                    break
+                if not window_open:
+                    boundary(max(begin, observation_start or 0), closing=False)
+                if observation_stop is not None and end >= observation_stop:
+                    break
+                boundary(end, closing=True)
+                window_index += 1
+                window_open = False
+        if truncated:
+            advance(observation_stop - 1)
+            censored_count = censored_pending = censored_zero_fill = len(orders)
+            censored_quantity = sum(abs(order[4]) for order in orders)
+            end_timestamp = max(terminal_timestamp, economics.last_timestamp)
+        elif decision_windows_ns is None:
+            while orders:
+                advance(orders[0][2] * _NANOSECONDS_PER_MILLISECOND)
+            while next_event is not None:
+                consume_until(_book_key(next_event)[0])
+            end_timestamp = max(
+                action_timestamp, terminal_timestamp, economics.last_timestamp
+            )
+        else:
+            end_timestamp = max(
+                action_timestamp, terminal_timestamp, economics.last_timestamp
+            )
+        pending.advance(
+            observation_stop - 1 if truncated else end_timestamp,
+            latest_state,
+            observed_coverage,
+        )
+        pending.expire_all(reason="observation_truncated" if truncated else None)
+        terminal_mid = (
+            _mid(latest_state)
+            if latest_state is not None
+            and _covered(observed_coverage, latest_state.segment_id, end_timestamp)
+            else None
+        )
+        if terminal_mid is None and economics.quantity != 0.0:
+            last_gross = None
+            last_net = None
+        else:
+            marked = economics.mark(
+                end_timestamp,
+                terminal_mid,
+            )
+            last_gross, last_net = marked["gross_pnl"], marked["net_pnl"]
+        if on_terminal_book is not None and latest_state is not None:
+            on_terminal_book(latest_state)
     result = {
         "simulation": "decision_time_net_gain_taker",
         "created_orders": created_orders,
@@ -1391,95 +1373,88 @@ class MakerCalibration:
             ),
         )
         with closing_iterator(events) as events:
-            try:
-                event = next(events, None)
-                while event is not None or pending:
-                    event_time = event.event_at if event is not None else None
-                    command_time = pending[0][0] if pending else None
-                    stamp = _maker_next_time(event_time, command_time)
-                    if stamp >= end:
-                        break
-                    for _expired in _maker_expired_orders(active, stamp):
-                        if _expired is candidate:
-                            candidate_reason = "expired"
-                    if event_time == stamp:
-                        kind = event.kind
-                        if kind == "boundary":
+            event = next(events, None)
+            while event is not None or pending:
+                event_time = event.event_at if event is not None else None
+                command_time = pending[0][0] if pending else None
+                stamp = _maker_next_time(event_time, command_time)
+                if stamp >= end:
+                    break
+                for _expired in _maker_expired_orders(active, stamp):
+                    if _expired is candidate:
+                        candidate_reason = "expired"
+                if event_time == stamp:
+                    kind = event.kind
+                    if kind == "boundary":
+                        if candidate is not None and candidate_reason is None:
+                            candidate_reason = "book_boundary"
+                        active.clear()
+                        pending.clear()
+                        current_state = None
+                    elif kind == "book":
+                        next_state = SimpleNamespace(
+                            segment_id=event.segment_id,
+                            bids=tuple(
+                                (tick * history_scale, quantity)
+                                for tick, quantity in event.bids
+                            ),
+                            asks=tuple(
+                                (tick * history_scale, quantity)
+                                for tick, quantity in event.asks
+                            ),
+                        )
+                        if (
+                            current_state is not None
+                            and next_state.segment_id != current_state.segment_id
+                        ):
                             if candidate is not None and candidate_reason is None:
                                 candidate_reason = "book_boundary"
                             active.clear()
                             pending.clear()
-                            current_state = None
-                        elif kind == "book":
-                            next_state = SimpleNamespace(
-                                segment_id=event.segment_id,
-                                bids=tuple(
-                                    (tick * history_scale, quantity)
-                                    for tick, quantity in event.bids
-                                ),
-                                asks=tuple(
-                                    (tick * history_scale, quantity)
-                                    for tick, quantity in event.asks
-                                ),
-                            )
-                            if (
-                                current_state is not None
-                                and next_state.segment_id != current_state.segment_id
-                            ):
-                                if candidate is not None and candidate_reason is None:
-                                    candidate_reason = "book_boundary"
-                                active.clear()
-                                pending.clear()
-                            current_state = next_state
-                        else:
-                            order = active.get(side)
-                            if (
-                                order is not None
-                                and current_state is not None
-                                and order.segment_id == current_state.segment_id
-                            ):
-                                trade = SimpleNamespace(
-                                    **(
-                                        vars(event)
-                                        | {
-                                            "price_index": event.price_index
-                                            * history_scale
-                                        }
-                                    )
+                        current_state = next_state
+                    else:
+                        order = active.get(side)
+                        if (
+                            order is not None
+                            and current_state is not None
+                            and order.segment_id == current_state.segment_id
+                        ):
+                            trade = SimpleNamespace(
+                                **(
+                                    vars(event)
+                                    | {"price_index": event.price_index * history_scale}
                                 )
-                                quantity, _reason = _maker_trade_fill(order, trade)
-                                if quantity > 0:
-                                    price = index_to_price(
-                                        current_origin + order.price_index - origin,
-                                        new_order.price_unit,
-                                    )
-                                    _yield_value = (
-                                        stamp - start,
-                                        quantity,
-                                        price,
-                                        order is candidate,
-                                    )
-                                    try:
-                                        yield _yield_value
-                                    except GeneratorExit:
-                                        return
-                                    order.remaining -= quantity
-                                    if order.remaining <= 0:
-                                        active.pop(side)
-                                        if order is candidate:
-                                            candidate_reason = "filled"
-                        event = next(events, None)
-                        continue
-                    command = pending.popleft()
-                    _old, reason = _maker_apply_command(
-                        active, command, current_state, observed, traded
-                    )
-                    if command[2] is candidate and reason is not None:
-                        candidate_reason = reason
-                return candidate_reason or "expired"
-
-            finally:
-                current_state = event = None
+                            )
+                            quantity, _reason = _maker_trade_fill(order, trade)
+                            if quantity > 0:
+                                price = index_to_price(
+                                    current_origin + order.price_index - origin,
+                                    new_order.price_unit,
+                                )
+                                _yield_value = (
+                                    stamp - start,
+                                    quantity,
+                                    price,
+                                    order is candidate,
+                                )
+                                try:
+                                    yield _yield_value
+                                except GeneratorExit:
+                                    return
+                                order.remaining -= quantity
+                                if order.remaining <= 0:
+                                    active.pop(side)
+                                    if order is candidate:
+                                        candidate_reason = "filled"
+                    event = next(events, None)
+                    continue
+                command = pending.popleft()
+                _old, reason = _maker_apply_command(
+                    active, command, current_state, observed, traded
+                )
+                if command[2] is candidate and reason is not None:
+                    candidate_reason = reason
+            return candidate_reason or "expired"
 
     def select(
         self,
@@ -1755,61 +1730,58 @@ def replay_maker_calibration(
                             sample["activated"] = reason is None
                             sample["terminal_reason"] = reason
 
-        try:
-            for row in rows:
-                timestamp = row["timestamp_ms"] * _NANOSECONDS_PER_MILLISECOND
-                end = (
-                    timestamp
-                    + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
-                )
-                if row["label_available_at_ns"] > cutoff_ns or end > cutoff_ns:
-                    raise ValueError("maker_calibration_outcome_not_mature")
-                process_until(timestamp)
-                valid = (
-                    latest_state is not None
-                    and latest_state.segment_id == row["book_segment_id"]
-                    and _covered(observed_coverage, row["book_segment_id"], timestamp)
-                    and _covered(observed_coverage, row["book_segment_id"], end)
-                    and _covered(trade_coverage, row["trade_observation_id"], timestamp)
-                    and _covered(trade_coverage, row["trade_observation_id"], end)
-                )
-                if not valid or row["proxy_prediction"] < 0.5:
-                    excluded += 1
-                    continue
-                if latest_book_id is None:
-                    latest_book_id = record(latest_state)
-                for side in ("buy", "sell"):
-                    order = _maker_new_order(
-                        counts[side],
-                        side,
-                        order_quantity,
-                        latest_state,
-                        row,
-                        latency_ms,
-                    )
-                    samples.append(
-                        {
-                            "order": order,
-                            "sample_id": counts[side],
-                            "prediction": row["price_prediction"],
-                            "observed_return": row["price_label"],
-                            "available_ns": row["label_available_at_ns"],
-                            "activated": False,
-                            "attempted": False,
-                            "terminal_reason": None,
-                            "initial_book_event_id": latest_book_id,
-                            "initial_bid_index": latest_state.bids[0][0],
-                            "initial_ask_index": latest_state.asks[0][0],
-                            "event_start": event_count,
-                        }
-                    )
-                    counts[side] += 1
-                process_until(timestamp)
-            process_until(cutoff_ns)
-            if samples:
+        for row in rows:
+            timestamp = row["timestamp_ms"] * _NANOSECONDS_PER_MILLISECOND
+            end = (
+                timestamp
+                + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
+            )
+            if row["label_available_at_ns"] > cutoff_ns or end > cutoff_ns:
                 raise ValueError("maker_calibration_outcome_not_mature")
-        finally:
-            samples.clear()
+            process_until(timestamp)
+            valid = (
+                latest_state is not None
+                and latest_state.segment_id == row["book_segment_id"]
+                and _covered(observed_coverage, row["book_segment_id"], timestamp)
+                and _covered(observed_coverage, row["book_segment_id"], end)
+                and _covered(trade_coverage, row["trade_observation_id"], timestamp)
+                and _covered(trade_coverage, row["trade_observation_id"], end)
+            )
+            if not valid or row["proxy_prediction"] < 0.5:
+                excluded += 1
+                continue
+            if latest_book_id is None:
+                latest_book_id = record(latest_state)
+            for side in ("buy", "sell"):
+                order = _maker_new_order(
+                    counts[side],
+                    side,
+                    order_quantity,
+                    latest_state,
+                    row,
+                    latency_ms,
+                )
+                samples.append(
+                    {
+                        "order": order,
+                        "sample_id": counts[side],
+                        "prediction": row["price_prediction"],
+                        "observed_return": row["price_label"],
+                        "available_ns": row["label_available_at_ns"],
+                        "activated": False,
+                        "attempted": False,
+                        "terminal_reason": None,
+                        "initial_book_event_id": latest_book_id,
+                        "initial_bid_index": latest_state.bids[0][0],
+                        "initial_ask_index": latest_state.asks[0][0],
+                        "event_start": event_count,
+                    }
+                )
+                counts[side] += 1
+            process_until(timestamp)
+        process_until(cutoff_ns)
+        if samples:
+            raise ValueError("maker_calibration_outcome_not_mature")
     return {"samples": counts, "excluded_decisions": excluded}
 
 
@@ -2065,12 +2037,9 @@ def simulate_maker(
             if previous is not None and previous.segment_id != state.segment_id:
                 cancel_all(state.observed_time_ns)
             latest_state = state
-            try:
-                _resolve_observed_markouts(
-                    pending, state, observed_coverage, previous_state=previous
-                )
-            finally:
-                previous = None
+            _resolve_observed_markouts(
+                pending, state, observed_coverage, previous_state=previous
+            )
             if (
                 decision_windows_ns is None
                 or max(decision_windows_ns[0][0], observation_start or 0)
@@ -2274,51 +2243,28 @@ def simulate_maker(
                 ),
             )
 
-        try:
-            if observation_start is not None and (
-                decision_windows_ns is None
-                or observation_start < decision_windows_ns[window_index][0]
-            ):
-                process_until(observation_start)
-                mark = observed_mark(observation_start)
-                if mark is None:
-                    raise PortfolioTargetBlocked(
-                        "portfolio_episode_initial_valuation_missing"
-                    )
-                economics.mark(observation_start, mark)
-            for row in decisions:
-                decision_time_ns = row["timestamp_ms"] * _NANOSECONDS_PER_MILLISECOND
-                if (
-                    observation_start is not None
-                    and decision_time_ns < observation_start
+        if observation_start is not None and (
+            decision_windows_ns is None
+            or observation_start < decision_windows_ns[window_index][0]
+        ):
+            process_until(observation_start)
+            mark = observed_mark(observation_start)
+            if mark is None:
+                raise PortfolioTargetBlocked(
+                    "portfolio_episode_initial_valuation_missing"
+                )
+            economics.mark(observation_start, mark)
+        for row in decisions:
+            decision_time_ns = row["timestamp_ms"] * _NANOSECONDS_PER_MILLISECOND
+            if observation_start is not None and decision_time_ns < observation_start:
+                continue
+            if observation_stop is not None and decision_time_ns >= observation_stop:
+                break
+            if decision_windows_ns is not None:
+                while (
+                    window_index < len(decision_windows_ns)
+                    and decision_time_ns > decision_windows_ns[window_index][1]
                 ):
-                    continue
-                if (
-                    observation_stop is not None
-                    and decision_time_ns >= observation_stop
-                ):
-                    break
-                if decision_windows_ns is not None:
-                    while (
-                        window_index < len(decision_windows_ns)
-                        and decision_time_ns > decision_windows_ns[window_index][1]
-                    ):
-                        if not window_open:
-                            boundary(
-                                max(
-                                    decision_windows_ns[window_index][0],
-                                    observation_start or 0,
-                                ),
-                                closing=False,
-                            )
-                        boundary(decision_windows_ns[window_index][1], closing=True)
-                        window_index += 1
-                        window_open = False
-                    if (
-                        window_index == len(decision_windows_ns)
-                        or decision_time_ns < decision_windows_ns[window_index][0]
-                    ):
-                        raise ValueError("hft_decision_outside_oos_window")
                     if not window_open:
                         boundary(
                             max(
@@ -2327,299 +2273,302 @@ def simulate_maker(
                             ),
                             closing=False,
                         )
-                        window_open = True
-                process_until(decision_time_ns)
-                while next_forecast is not None:
-                    if (
-                        type(next_forecast) is not FundingForecast
-                        or next_forecast.available_at_ns <= forecast_timestamp
-                    ):
-                        raise ValueError("portfolio_funding_forecast_order_invalid")
-                    if next_forecast.available_at_ns > decision_time_ns:
-                        break
-                    active_forecast = next_forecast
-                    forecast_timestamp = active_forecast.available_at_ns
-                    next_forecast = next(forecasts, None)
-                observe_trade_connection(row["trade_observation_id"], decision_time_ns)
-                mid = observed_mark(decision_time_ns)
-                valid = (
-                    mid is not None
-                    and latest_state.segment_id == row["book_segment_id"]
-                    and _covered(
-                        trade_coverage, row["trade_observation_id"], decision_time_ns
+                    boundary(decision_windows_ns[window_index][1], closing=True)
+                    window_index += 1
+                    window_open = False
+                if (
+                    window_index == len(decision_windows_ns)
+                    or decision_time_ns < decision_windows_ns[window_index][0]
+                ):
+                    raise ValueError("hft_decision_outside_oos_window")
+                if not window_open:
+                    boundary(
+                        max(
+                            decision_windows_ns[window_index][0],
+                            observation_start or 0,
+                        ),
+                        closing=False,
                     )
+                    window_open = True
+            process_until(decision_time_ns)
+            while next_forecast is not None:
+                if (
+                    type(next_forecast) is not FundingForecast
+                    or next_forecast.available_at_ns <= forecast_timestamp
+                ):
+                    raise ValueError("portfolio_funding_forecast_order_invalid")
+                if next_forecast.available_at_ns > decision_time_ns:
+                    break
+                active_forecast = next_forecast
+                forecast_timestamp = active_forecast.available_at_ns
+                next_forecast = next(forecasts, None)
+            observe_trade_connection(row["trade_observation_id"], decision_time_ns)
+            mid = observed_mark(decision_time_ns)
+            valid = (
+                mid is not None
+                and latest_state.segment_id == row["book_segment_id"]
+                and _covered(
+                    trade_coverage, row["trade_observation_id"], decision_time_ns
                 )
-                if not valid:
-                    undefined_decisions += 1
-                if calibrations is not None:
-                    for column in ("price_prediction", "proxy_prediction"):
-                        if row[column] is not None:
-                            strict_finite_float(
-                                row[column], error="hft_maker_prediction_invalid"
-                            )
-                gate = calibrations is None or (
-                    row["proxy_prediction"] is not None
-                    and row["proxy_prediction"] >= 0.5
-                    and row["price_prediction"] is not None
-                )
-                forecast_end = (
-                    decision_time_ns
-                    + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
-                )
-                funding = []
-                funding_known = True
-                if calibrations is not None and valid and gate:
-                    funding_known = (
-                        active_forecast is not None
-                        and active_forecast.known_until_ns >= forecast_end
-                    )
-                    if funding_known:
-                        funding = [
-                            (stamp - decision_time_ns, cash)
-                            for stamp, cash in active_forecast.cashflows
-                            if decision_time_ns < stamp <= forecast_end
-                        ]
-                        funding_known = all(
-                            cash is not None for _stamp, cash in funding
+            )
+            if not valid:
+                undefined_decisions += 1
+            if calibrations is not None:
+                for column in ("price_prediction", "proxy_prediction"):
+                    if row[column] is not None:
+                        strict_finite_float(
+                            row[column], error="hft_maker_prediction_invalid"
                         )
-                    if not funding_known:
-                        blocked_decisions += 1
-                diagnostics = []
-                for side, sign in (("buy", 1.0), ("sell", -1.0)):
-                    desired_price = (
-                        None
-                        if not valid
-                        else (
-                            latest_state.bids if side == "buy" else latest_state.asks
-                        )[0][0]
-                    )
-                    headroom = max(0.0, config.max_position - sign * economics.quantity)
-                    lifetime = (
-                        CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
-                    )
-                    if decision_windows_ns is not None:
-                        lifetime = min(
-                            lifetime,
-                            decision_windows_ns[window_index][1] - decision_time_ns,
-                        )
-                    allowed = (
-                        valid
-                        and gate
-                        and funding_known
-                        and config.latency_ms * _NANOSECONDS_PER_MILLISECOND < lifetime
-                    )
-
-                    def choose(
-                        limit,
-                        sign=sign,
-                        allowed=allowed,
-                    ):
-                        if not allowed:
-                            return 0.0, 0.0
-                        limit = min(config.order_quantity, limit)
-                        skew = (
-                            economics.quantity - config.inventory_target
-                        ) / config.max_position
-                        return min(
-                            limit,
-                            config.order_quantity
-                            * max(0.0, 1.0 - sign * config.inventory_skew * skew),
-                        ), None
-
-                    quantity, gain = (
-                        choose(headroom) if calibrations is None else (0.0, 0.0)
-                    )
-                    side_commands = [
-                        command for command in commands if command[1] == side
+            gate = calibrations is None or (
+                row["proxy_prediction"] is not None
+                and row["proxy_prediction"] >= 0.5
+                and row["price_prediction"] is not None
+            )
+            forecast_end = (
+                decision_time_ns
+                + CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
+            )
+            funding = []
+            funding_known = True
+            if calibrations is not None and valid and gate:
+                funding_known = (
+                    active_forecast is not None
+                    and active_forecast.known_until_ns >= forecast_end
+                )
+                if funding_known:
+                    funding = [
+                        (stamp - decision_time_ns, cash)
+                        for stamp, cash in active_forecast.cashflows
+                        if decision_time_ns < stamp <= forecast_end
                     ]
-                    pending_side = [order for _time, _side, order in side_commands]
-                    current = pending_side[-1] if pending_side else active.get(side)
-                    reserved = sum(
-                        order.remaining for order in pending_side if order is not None
+                    funding_known = all(cash is not None for _stamp, cash in funding)
+                if not funding_known:
+                    blocked_decisions += 1
+            diagnostics = []
+            for side, sign in (("buy", 1.0), ("sell", -1.0)):
+                desired_price = (
+                    None
+                    if not valid
+                    else (latest_state.bids if side == "buy" else latest_state.asks)[0][
+                        0
+                    ]
+                )
+                headroom = max(0.0, config.max_position - sign * economics.quantity)
+                lifetime = (
+                    CryptoMakerPlan.quote_horizon_ms * _NANOSECONDS_PER_MILLISECOND
+                )
+                if decision_windows_ns is not None:
+                    lifetime = min(
+                        lifetime,
+                        decision_windows_ns[window_index][1] - decision_time_ns,
                     )
-                    if side in active:
-                        reserved += active[side].remaining
-                    if config.latency_ms == 0:
-                        reserved = 0.0
-                    keep = (
-                        current is not None
-                        and quantity > 0
-                        and current.price_index == desired_price
-                        and current.remaining == quantity
-                        and current.valid_until_ns > decision_time_ns
-                    )
-                    if calibrations is not None:
-                        if valid and gate and funding_known and lifetime > 0:
-                            proposed = _maker_new_order(
-                                0,
+                allowed = (
+                    valid
+                    and gate
+                    and funding_known
+                    and config.latency_ms * _NANOSECONDS_PER_MILLISECOND < lifetime
+                )
+
+                def choose(
+                    limit,
+                    sign=sign,
+                    allowed=allowed,
+                ):
+                    if not allowed:
+                        return 0.0, 0.0
+                    limit = min(config.order_quantity, limit)
+                    skew = (
+                        economics.quantity - config.inventory_target
+                    ) / config.max_position
+                    return min(
+                        limit,
+                        config.order_quantity
+                        * max(0.0, 1.0 - sign * config.inventory_skew * skew),
+                    ), None
+
+                quantity, gain = (
+                    choose(headroom) if calibrations is None else (0.0, 0.0)
+                )
+                side_commands = [command for command in commands if command[1] == side]
+                pending_side = [order for _time, _side, order in side_commands]
+                current = pending_side[-1] if pending_side else active.get(side)
+                reserved = sum(
+                    order.remaining for order in pending_side if order is not None
+                )
+                if side in active:
+                    reserved += active[side].remaining
+                if config.latency_ms == 0:
+                    reserved = 0.0
+                keep = (
+                    current is not None
+                    and quantity > 0
+                    and current.price_index == desired_price
+                    and current.remaining == quantity
+                    and current.valid_until_ns > decision_time_ns
+                )
+                if calibrations is not None:
+                    if valid and gate and funding_known and lifetime > 0:
+                        proposed = _maker_new_order(
+                            0,
+                            side,
+                            min(config.order_quantity, max(0.0, headroom - reserved))
+                            if allowed
+                            else 0.0,
+                            latest_state,
+                            row,
+                            config.latency_ms,
+                        )
+                        keep, quantity, gain = calibrations[row["fold_id"]].select(
+                            state=latest_state,
+                            decision_ns=decision_time_ns,
+                            new_order=proposed,
+                            active_order=active.get(side),
+                            commands=side_commands,
+                            lifetime_ns=lifetime,
+                            prediction=row["price_prediction"],
+                            fee_bps=config.maker_fee_bps,
+                            funding=funding,
+                        )
+                        if keep and current is not None:
+                            quantity = current.remaining
+                if not keep:
+                    if calibrations is None:
+                        quantity, gain = choose(max(0.0, headroom - reserved))
+                    if quantity > 0 or current is not None:
+                        order = None
+                        if quantity > 0:
+                            created_orders += 1
+                            order = _maker_new_order(
+                                created_orders,
                                 side,
-                                min(
-                                    config.order_quantity, max(0.0, headroom - reserved)
-                                )
-                                if allowed
-                                else 0.0,
+                                quantity,
                                 latest_state,
                                 row,
                                 config.latency_ms,
                             )
-                            keep, quantity, gain = calibrations[row["fold_id"]].select(
-                                state=latest_state,
-                                decision_ns=decision_time_ns,
-                                new_order=proposed,
-                                active_order=active.get(side),
-                                commands=side_commands,
-                                lifetime_ns=lifetime,
-                                prediction=row["price_prediction"],
-                                fee_bps=config.maker_fee_bps,
-                                funding=funding,
-                            )
-                            if keep and current is not None:
-                                quantity = current.remaining
-                    if not keep:
-                        if calibrations is None:
-                            quantity, gain = choose(max(0.0, headroom - reserved))
-                        if quantity > 0 or current is not None:
-                            order = None
-                            if quantity > 0:
-                                created_orders += 1
-                                order = _maker_new_order(
-                                    created_orders,
-                                    side,
-                                    quantity,
-                                    latest_state,
-                                    row,
-                                    config.latency_ms,
-                                )
-                            effective = (
-                                decision_time_ns
-                                + config.latency_ms * _NANOSECONDS_PER_MILLISECOND
-                            )
-                            commands.append((effective, side, order))
-                    reason = (
-                        "decision_book_or_trade_unavailable"
-                        if not valid
-                        else "proxy_gate_closed"
-                        if not gate
-                        else "portfolio_expected_funding_missing"
-                        if not funding_known
-                        else "keep_existing_schedule_without_renewal"
-                        if keep and calibrations is not None
-                        else "keep_queue_without_renewal"
-                        if keep
-                        else "cancel_replace_maximizes_expected_net_gain"
-                        if quantity and calibrations is not None
-                        else "cancel_maximizes_expected_net_gain"
-                        if calibrations is not None and current is not None
-                        else "fixed_quote_diagnostic"
-                        if quantity
-                        else "no_positive_expected_net_gain"
-                    )
-                    diagnostic_asset = (
-                        asset_id if mid is not None else PORTFOLIO_CASH_ASSET_ID
-                    )
-                    diagnostics.extend(
-                        (
-                            PortfolioDiagnostic(
-                                diagnostic_asset,
-                                None,
-                                f"maker_{side}_requested_quantity",
-                                number=quantity,
-                            ),
-                            PortfolioDiagnostic(
-                                diagnostic_asset,
-                                None,
-                                f"maker_{side}_expected_net_gain",
-                                number=gain,
-                            ),
-                            PortfolioDiagnostic(
-                                diagnostic_asset,
-                                None,
-                                f"maker_{side}_selection_reason",
-                                text=reason,
-                            ),
+                        effective = (
+                            decision_time_ns
+                            + config.latency_ms * _NANOSECONDS_PER_MILLISECOND
                         )
+                        commands.append((effective, side, order))
+                reason = (
+                    "decision_book_or_trade_unavailable"
+                    if not valid
+                    else "proxy_gate_closed"
+                    if not gate
+                    else "portfolio_expected_funding_missing"
+                    if not funding_known
+                    else "keep_existing_schedule_without_renewal"
+                    if keep and calibrations is not None
+                    else "keep_queue_without_renewal"
+                    if keep
+                    else "cancel_replace_maximizes_expected_net_gain"
+                    if quantity and calibrations is not None
+                    else "cancel_maximizes_expected_net_gain"
+                    if calibrations is not None and current is not None
+                    else "fixed_quote_diagnostic"
+                    if quantity
+                    else "no_positive_expected_net_gain"
+                )
+                diagnostic_asset = (
+                    asset_id if mid is not None else PORTFOLIO_CASH_ASSET_ID
+                )
+                diagnostics.extend(
+                    (
+                        PortfolioDiagnostic(
+                            diagnostic_asset,
+                            None,
+                            f"maker_{side}_requested_quantity",
+                            number=quantity,
+                        ),
+                        PortfolioDiagnostic(
+                            diagnostic_asset,
+                            None,
+                            f"maker_{side}_expected_net_gain",
+                            number=gain,
+                        ),
+                        PortfolioDiagnostic(
+                            diagnostic_asset,
+                            None,
+                            f"maker_{side}_selection_reason",
+                            text=reason,
+                        ),
                     )
-                marked = None
-                if mid is not None or economics.quantity == 0:
-                    marked = economics.mark(
-                        decision_time_ns, mid, diagnostics=tuple(diagnostics)
-                    )
-                process_until(decision_time_ns)
-                if on_equity is not None:
-                    on_equity(
-                        {
-                            "timestamp_ms": row["timestamp_ms"],
-                            "position": economics.quantity,
-                            "gross_pnl": None
-                            if marked is None
-                            else marked["gross_pnl"],
-                            "net_pnl": None if marked is None else marked["net_pnl"],
-                            "fees": -economics.cost_cashflows,
-                        }
-                    )
-                equity_rows += 1
-            if decision_windows_ns is not None:
-                while window_index < len(decision_windows_ns):
-                    begin, end = decision_windows_ns[window_index]
-                    if observation_stop is not None and begin >= observation_stop:
-                        break
-                    if not window_open:
-                        boundary(max(begin, observation_start or 0), closing=False)
-                    if observation_stop is not None and end >= observation_stop:
-                        break
-                    boundary(end, closing=True)
-                    window_index += 1
-                    window_open = False
-            if truncated:
-                process_until(observation_stop - 1)
-                censored_orders = (
-                    *active.values(),
-                    *(order for _time, _side, order in commands if order is not None),
                 )
-                censored_count = len(censored_orders)
-                censored_pending = sum(
-                    order is not None for _time, _side, order in commands
+            marked = None
+            if mid is not None or economics.quantity == 0:
+                marked = economics.mark(
+                    decision_time_ns, mid, diagnostics=tuple(diagnostics)
                 )
-                censored_zero_fill = sum(
-                    not order.had_fill for order in censored_orders
+            process_until(decision_time_ns)
+            if on_equity is not None:
+                on_equity(
+                    {
+                        "timestamp_ms": row["timestamp_ms"],
+                        "position": economics.quantity,
+                        "gross_pnl": None if marked is None else marked["gross_pnl"],
+                        "net_pnl": None if marked is None else marked["net_pnl"],
+                        "fees": -economics.cost_cashflows,
+                    }
                 )
-                censored_quantity = sum(order.remaining for order in censored_orders)
-                end_timestamp = max(
-                    economics.last_timestamp, last_event_time_ns, observation_start or 0
-                )
-            elif decision_windows_ns is not None:
-                end_timestamp = decision_windows_ns[-1][1]
-            else:
-                while next_event is not None or commands:
-                    times = ([next_event[0][0]] if next_event is not None else []) + (
-                        [commands[0][0]] if commands else []
-                    )
-                    process_until(min(times))
-                end_timestamp = max(
-                    economics.last_timestamp, last_event_time_ns, decision_time_ns
-                )
-                for order in active.values():
-                    finish_order(order, order.valid_until_ns, cancelled=True)
-                active.clear()
-            pending.advance(
-                observation_stop - 1 if truncated else end_timestamp,
-                latest_state,
-                observed_coverage,
+            equity_rows += 1
+        if decision_windows_ns is not None:
+            while window_index < len(decision_windows_ns):
+                begin, end = decision_windows_ns[window_index]
+                if observation_stop is not None and begin >= observation_stop:
+                    break
+                if not window_open:
+                    boundary(max(begin, observation_start or 0), closing=False)
+                if observation_stop is not None and end >= observation_stop:
+                    break
+                boundary(end, closing=True)
+                window_index += 1
+                window_open = False
+        if truncated:
+            process_until(observation_stop - 1)
+            censored_orders = (
+                *active.values(),
+                *(order for _time, _side, order in commands if order is not None),
             )
-            pending.expire_all(reason="observation_truncated" if truncated else None)
-            terminal_mid = observed_mark(end_timestamp)
-            marked = (
-                None
-                if terminal_mid is None and economics.quantity != 0
-                else economics.mark(end_timestamp, terminal_mid)
+            censored_count = len(censored_orders)
+            censored_pending = sum(
+                order is not None for _time, _side, order in commands
             )
-            last_gross = None if marked is None else marked["gross_pnl"]
-            last_net = None if marked is None else marked["net_pnl"]
-            if on_terminal_book is not None and latest_state is not None:
-                on_terminal_book(latest_state)
-        finally:
+            censored_zero_fill = sum(not order.had_fill for order in censored_orders)
+            censored_quantity = sum(order.remaining for order in censored_orders)
+            end_timestamp = max(
+                economics.last_timestamp, last_event_time_ns, observation_start or 0
+            )
+        elif decision_windows_ns is not None:
+            end_timestamp = decision_windows_ns[-1][1]
+        else:
+            while next_event is not None or commands:
+                times = ([next_event[0][0]] if next_event is not None else []) + (
+                    [commands[0][0]] if commands else []
+                )
+                process_until(min(times))
+            end_timestamp = max(
+                economics.last_timestamp, last_event_time_ns, decision_time_ns
+            )
+            for order in active.values():
+                finish_order(order, order.valid_until_ns, cancelled=True)
             active.clear()
-            commands.clear()
+        pending.advance(
+            observation_stop - 1 if truncated else end_timestamp,
+            latest_state,
+            observed_coverage,
+        )
+        pending.expire_all(reason="observation_truncated" if truncated else None)
+        terminal_mid = observed_mark(end_timestamp)
+        marked = (
+            None
+            if terminal_mid is None and economics.quantity != 0
+            else economics.mark(end_timestamp, terminal_mid)
+        )
+        last_gross = None if marked is None else marked["gross_pnl"]
+        last_net = None if marked is None else marked["net_pnl"]
+        if on_terminal_book is not None and latest_state is not None:
+            on_terminal_book(latest_state)
     result = {
         "simulation": "event_ordered_public_l2_maker",
         "created_orders": created_orders,

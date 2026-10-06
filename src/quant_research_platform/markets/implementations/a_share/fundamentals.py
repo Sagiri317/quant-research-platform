@@ -274,56 +274,47 @@ def construct_ttm_events(
             ["available_at", "report_period", "version_identity"],
             kind="mergesort",
         )
-        for position, row in group.iterrows():
-            period = pd.Timestamp(row["report_period"])
-            result.loc[position, "ttm_value"] = _ttm_value_at_cutoff(
-                group,
-                report_period=period,
-                cutoff=pd.Timestamp(row["available_at"]),
-                value_column=value_column,
+        known = {}
+        dependents = {}
+        derived = []
+        for cutoff, available in group.groupby("available_at", sort=False):
+            changed = set(available["report_period"])
+            # All same-session disclosures are known before evaluating that session.
+            for _position, row in available.iterrows():
+                period = row["report_period"]
+                if period not in known and period.month != 12:
+                    for dependency in (
+                        _prior_fy_report_period(period),
+                        _prior_year_report_period(period),
+                    ):
+                        if dependency is not None:
+                            dependents.setdefault(dependency, set()).add(period)
+                known[period] = (
+                    None if pd.isna(row[value_column]) else float(row[value_column])
+                )
+            for position, row in available.iterrows():
+                result.loc[position, "ttm_value"] = _ttm_value(
+                    known, row["report_period"]
+                )
+            affected = set().union(
+                *(dependents.get(period, set()) for period in changed)
             )
-        for period in sorted(
-            pd.Timestamp(value) for value in group["report_period"].drop_duplicates()
-        ):
-            if period.month == 12:
-                continue
-            prior_fy = _prior_fy_report_period(period)
-            prior_ytd = _prior_year_report_period(period)
-            dependencies = {prior_fy, prior_ytd}
-            if None in dependencies:
-                dependencies.discard(None)
-            target_rows = group.loc[group["report_period"].eq(period)]
-            target_first_available = target_rows["available_at"].min()
-            cutoffs = group.loc[
-                group["report_period"].isin(dependencies)
-                & group["available_at"].gt(target_first_available),
-                "available_at",
-            ].drop_duplicates()
-            for cutoff in sorted(pd.Timestamp(value) for value in cutoffs):
-                if bool(target_rows["available_at"].eq(cutoff).any()):
-                    continue
-                derived_records.append(
+            for period in affected - changed:
+                derived.append(
                     {
-                        "asset_id": target_rows["asset_id"].iloc[0],
+                        "asset_id": _asset_id,
                         "metric_id": metric_id,
                         "report_period": period,
                         "available_at": cutoff,
                         "version_identity": f"derived@{cutoff:%Y-%m-%d}",
                         "is_corrected": True,
-                        value_column: _latest_legal_event_value(
-                            group,
-                            report_period=period,
-                            cutoff=cutoff,
-                            value_column=value_column,
-                        ),
-                        "ttm_value": _ttm_value_at_cutoff(
-                            group,
-                            report_period=period,
-                            cutoff=cutoff,
-                            value_column=value_column,
-                        ),
+                        value_column: known[period],
+                        "ttm_value": _ttm_value(known, period),
                     }
                 )
+        derived_records.extend(
+            sorted(derived, key=lambda row: (row["report_period"], row["available_at"]))
+        )
     if derived_records:
         result = pd.concat(
             (result, pd.DataFrame.from_records(derived_records)),
@@ -334,61 +325,20 @@ def construct_ttm_events(
     return result
 
 
-def _ttm_value_at_cutoff(
-    events: pd.DataFrame,
-    *,
-    report_period: pd.Timestamp,
-    cutoff: pd.Timestamp,
-    value_column: str,
-) -> float | None:
-    current = _latest_legal_event_value(
-        events,
-        report_period=report_period,
-        cutoff=cutoff,
-        value_column=value_column,
-    )
+def _ttm_value(known, report_period: pd.Timestamp) -> float | None:
+    current = known.get(report_period)
     if current is None:
         return None
     if report_period.month == 12:
         return current
-    prior_fy = _latest_legal_event_value(
-        events,
-        report_period=_prior_fy_report_period(report_period),
-        cutoff=cutoff,
-        value_column=value_column,
-    )
-    prior_ytd = _latest_legal_event_value(
-        events,
-        report_period=_prior_year_report_period(report_period),
-        cutoff=cutoff,
-        value_column=value_column,
-    )
+    prior_fy = known.get(_prior_fy_report_period(report_period))
+    prior_ytd = known.get(_prior_year_report_period(report_period))
     if prior_fy is None or prior_ytd is None:
         return None
     try:
         return float(Fraction(current) + Fraction(prior_fy) - Fraction(prior_ytd))
     except OverflowError as exc:
         raise ValueError("invalid_ttm_value") from exc
-
-
-def _latest_legal_event_value(
-    events: pd.DataFrame,
-    *,
-    report_period: pd.Timestamp | None,
-    cutoff: pd.Timestamp,
-    value_column: str,
-) -> float | None:
-    if report_period is None:
-        return None
-    candidates = events.loc[
-        events["report_period"].eq(report_period) & events["available_at"].le(cutoff)
-    ]
-    if candidates.empty:
-        return None
-    row = candidates.sort_values(
-        ["available_at", "version_identity"], kind="mergesort"
-    ).iloc[-1]
-    return None if pd.isna(row[value_column]) else float(row[value_column])
 
 
 def materialize_pit_fundamentals(

@@ -6,7 +6,6 @@ import json
 import math
 import re
 from collections.abc import Iterator, Mapping
-from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import date, timedelta
 from itertools import groupby, islice
@@ -148,51 +147,47 @@ def _raw_requests(raw_root: Path, *, financial: bool):
             require_unaliased_path(directory, error="choice_raw_identity_changed")
             path = directory / "response.metadata.json"
             expected = dataset_file_identity(path)
+            manifest = read_bounded_qrp_json(path, expected_identity=expected)[1]
             try:
-                manifest = read_bounded_qrp_json(path, expected_identity=expected)[1]
-                try:
-                    payload = manifest["metadata"]["request"]
-                    if type(payload["arguments"]) is not list:
-                        raise ValueError("choice_raw_request_metadata_invalid")
-                    request = ChoiceRequest(
-                        endpoint=payload["endpoint"],
-                        arguments=tuple(payload["arguments"]),
-                        sdk_version=payload["sdk_version"],
-                        cutoff=date.fromisoformat(payload["cutoff"]),
-                        max_response_bytes=manifest["byte_count"],
-                    )
-                    request_identity = request.identity()
-                except (KeyError, TypeError) as error:
-                    raise ValueError("choice_raw_request_metadata_invalid") from error
-                if request_identity != directory.name or request.endpoint != "css":
-                    raise ValueError("choice_raw_identity_changed")
-                options = dict(
-                    (
-                        (name.lower(), value)
-                        for part in request.arguments[2].split(",")
-                        if part
-                        for name, _, value in (part.partition("="),)
-                    )
+                payload = manifest["metadata"]["request"]
+                if type(payload["arguments"]) is not list:
+                    raise ValueError("choice_raw_request_metadata_invalid")
+                request = ChoiceRequest(
+                    endpoint=payload["endpoint"],
+                    arguments=tuple(payload["arguments"]),
+                    sdk_version=payload["sdk_version"],
+                    cutoff=date.fromisoformat(payload["cutoff"]),
+                    max_response_bytes=manifest["byte_count"],
                 )
-                fields = set(request.arguments[1].upper().split(","))
-                disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
-                snapshot = (
-                    financial
-                    and bool(set(_INDICATORS).intersection(fields))
-                    and (options.get("type", "1") in {"1", "3"})
+                request_identity = request.identity()
+            except (KeyError, TypeError) as error:
+                raise ValueError("choice_raw_request_metadata_invalid") from error
+            if request_identity != directory.name or request.endpoint != "css":
+                raise ValueError("choice_raw_identity_changed")
+            options = dict(
+                (
+                    (name.lower(), value)
+                    for part in request.arguments[2].split(",")
+                    if part
+                    for name, _, value in (part.partition("="),)
                 )
-                if "reportdate" not in options or not (disclosure or snapshot):
-                    continue
-                _yield_value = (directory, request, options, disclosure)
-                try:
-                    yield _yield_value
-                except GeneratorExit:
-                    return
-            finally:
-                manifest = payload = request = options = fields = None
+            )
+            fields = set(request.arguments[1].upper().split(","))
+            disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
+            snapshot = (
+                financial
+                and bool(set(_INDICATORS).intersection(fields))
+                and (options.get("type", "1") in {"1", "3"})
+            )
+            if "reportdate" not in options or not (disclosure or snapshot):
+                continue
+            _yield_value = (directory, request, options, disclosure)
+            try:
+                yield _yield_value
+            except GeneratorExit:
+                return
 
 
-@contextmanager
 def _source_snapshot(raw_root: Path, data_id: str):
     interim_catalog().get(data_id)
     members = {}
@@ -218,12 +213,12 @@ def _source_snapshot(raw_root: Path, data_id: str):
             if members
             else None
         )
-        yield identity, members
+        return identity, members
 
 
 def source_content_identity(raw_root: Path, data_id: str) -> str | None:
-    with _source_snapshot(raw_root, data_id) as (identity, _members):
-        return identity
+    (identity, _members) = _source_snapshot(raw_root, data_id)
+    return identity
 
 
 def _encode(value: object) -> bytes:
@@ -288,7 +283,6 @@ def _values(cells):
     return result
 
 
-@contextmanager
 def _raw_index(raw_root, financial, *, members):
     index = ExactPrimaryKeyIndex(
         primary_key=("source_coordinate",),
@@ -302,120 +296,119 @@ def _raw_index(raw_root, financial, *, members):
                     expected_metadata = members[root / "response.metadata.json"]
                 except KeyError:
                     raise ValueError("choice_raw_identity_changed") from None
-                with read_choice_response(
+                response = read_choice_response(
                     root, request, expected_metadata_identity=expected_metadata
-                ) as response:
-                    if not response["Data"]:
-                        continue
-                    if len(response["Dates"]) != 1:
-                        raise ValueError("choice_financial_snapshot_dates_invalid")
-                    fields = response["Indicators"]
-                    for code, cells in response["Data"].items():
-                        if not re.fullmatch("\\d{6}\\.(SH|SZ|BJ)", code):
-                            raise ValueError("invalid_choice_asset_id")
-                        values = dict(zip(fields, cells, strict=True))
-                        pair = [code, period]
-                        coordinate = [
-                            *pair,
-                            options["enddate"],
-                            options.get("type", "1"),
-                        ]
-                        if disclosure:
-                            for field in _DISCLOSURE_INDICATORS.intersection(values):
+                )
+                if not response["Data"]:
+                    continue
+                if len(response["Dates"]) != 1:
+                    raise ValueError("choice_financial_snapshot_dates_invalid")
+                fields = response["Indicators"]
+                for code, cells in response["Data"].items():
+                    if not re.fullmatch("\\d{6}\\.(SH|SZ|BJ)", code):
+                        raise ValueError("invalid_choice_asset_id")
+                    values = dict(zip(fields, cells, strict=True))
+                    pair = [code, period]
+                    coordinate = [
+                        *pair,
+                        options["enddate"],
+                        options.get("type", "1"),
+                    ]
+                    if disclosure:
+                        for field in _DISCLOSURE_INDICATORS.intersection(values):
+                            _yield_value = _identity_payload_row(
+                                index,
+                                "disclosure_field",
+                                [*coordinate, field],
+                                {
+                                    "values": [
+                                        day.isoformat() for day in _dates(values[field])
+                                    ],
+                                    "request_identity": root.name,
+                                },
+                            )
+                            try:
+                                yield _yield_value
+                            except GeneratorExit:
+                                return
+                        _yield_value = _identity_payload_row(
+                            index,
+                            f"disclosure_coordinates:{code}:{period}",
+                            coordinate,
+                            coordinate,
+                        )
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
+                        _yield_value = _identity_payload_row(
+                            index, "report", pair, pair
+                        )
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
+                        if "STMTACTDATE" in values:
+                            first = [
+                                day
+                                for day in _dates(values["STMTACTDATE"])
+                                if day <= request.cutoff
+                            ]
+                            if first:
                                 _yield_value = _identity_payload_row(
                                     index,
-                                    "disclosure_field",
-                                    [*coordinate, field],
-                                    {
-                                        "values": [
-                                            day.isoformat()
-                                            for day in _dates(values[field])
-                                        ],
-                                        "request_identity": root.name,
-                                    },
+                                    "disclosure",
+                                    pair,
+                                    [*pair, first[0].isoformat()],
                                 )
                                 try:
                                     yield _yield_value
                                 except GeneratorExit:
                                     return
-                            _yield_value = _identity_payload_row(
-                                index,
-                                f"disclosure_coordinates:{code}:{period}",
-                                coordinate,
-                                coordinate,
-                            )
-                            try:
-                                yield _yield_value
-                            except GeneratorExit:
-                                return
-                            _yield_value = _identity_payload_row(
-                                index, "report", pair, pair
-                            )
-                            try:
-                                yield _yield_value
-                            except GeneratorExit:
-                                return
-                            if "STMTACTDATE" in values:
-                                first = [
-                                    day
-                                    for day in _dates(values["STMTACTDATE"])
-                                    if day <= request.cutoff
-                                ]
-                                if first:
+                        if "ITEMVALUECHANGEDATE" in values:
+                            for event in _dates(values["ITEMVALUECHANGEDATE"]):
+                                if event <= request.cutoff:
                                     _yield_value = _identity_payload_row(
                                         index,
-                                        "disclosure",
-                                        pair,
-                                        [*pair, first[0].isoformat()],
+                                        f"events:{code}:{period}",
+                                        event.isoformat(),
+                                        event.isoformat(),
                                     )
                                     try:
                                         yield _yield_value
                                     except GeneratorExit:
                                         return
-                            if "ITEMVALUECHANGEDATE" in values:
-                                for event in _dates(values["ITEMVALUECHANGEDATE"]):
-                                    if event <= request.cutoff:
-                                        _yield_value = _identity_payload_row(
-                                            index,
-                                            f"events:{code}:{period}",
-                                            event.isoformat(),
-                                            event.isoformat(),
-                                        )
-                                        try:
-                                            yield _yield_value
-                                        except GeneratorExit:
-                                            return
-                        if (
-                            financial
-                            and set(_INDICATORS).intersection(values)
-                            and (options.get("type", "1") in {"1", "3"})
-                        ):
-                            for field in set(_INDICATORS).intersection(values):
-                                _yield_value = _identity_payload_row(
-                                    index,
-                                    "snapshot",
-                                    [*coordinate, field],
-                                    {
-                                        "values": _values((values[field],))[0],
-                                        "request_identity": root.name,
-                                    },
-                                )
-                                try:
-                                    yield _yield_value
-                                except GeneratorExit:
-                                    return
+                    if (
+                        financial
+                        and set(_INDICATORS).intersection(values)
+                        and (options.get("type", "1") in {"1", "3"})
+                    ):
+                        for field in set(_INDICATORS).intersection(values):
                             _yield_value = _identity_payload_row(
-                                index, "report", pair, pair
+                                index,
+                                "snapshot",
+                                [*coordinate, field],
+                                {
+                                    "values": _values((values[field],))[0],
+                                    "request_identity": root.name,
+                                },
                             )
                             try:
                                 yield _yield_value
                             except GeneratorExit:
                                 return
+                        _yield_value = _identity_payload_row(
+                            index, "report", pair, pair
+                        )
+                        try:
+                            yield _yield_value
+                        except GeneratorExit:
+                            return
 
     with closing_iterator(rows()) as input_rows:
         for row in input_rows:
             index.add_identity_payload_rows(rows=(row,))
-    yield index
+    return index
 
 
 def _snapshot(index, pair, day, branch):
@@ -599,36 +592,33 @@ def _frames(rows, spec):
     columns = spec.required_columns
     count = 8192
     frame = pending = None
-    try:
-        while True:
-            pending = list(islice(rows, count))
-            if not pending:
-                return
-            frame = pd.DataFrame.from_records(pending, columns=columns)
-            pending = None
-            if spec.data_id == FIRST_DISCLOSURE_DATA_ID:
-                frame = normalize_first_disclosure_frame(frame)
-            else:
-                frame["source_asset_id"] = frame["source_asset_id"].astype("string")
-                for name in (
-                    "timestamp",
-                    "report_period",
-                    "correction_disclosure_date",
-                ):
-                    frame[name] = strict_timestamp_series(
-                        frame[name],
-                        error="choice_financial_date_invalid",
-                        allow_null=name == "correction_disclosure_date",
-                    )
-                frame["report_type"] = frame["report_type"].astype("string")
-                frame["version_identity"] = frame["version_identity"].astype("string")
-                frame["is_corrected"] = frame["is_corrected"].astype("bool")
-                for name in FINANCIAL_FIELDS[spec.data_id].values():
-                    frame[name] = frame[name].astype("float64")
-            yield frame
-            frame = None
-    finally:
-        frame = pending = None
+    while True:
+        pending = list(islice(rows, count))
+        if not pending:
+            return
+        frame = pd.DataFrame.from_records(pending, columns=columns)
+        pending = None
+        if spec.data_id == FIRST_DISCLOSURE_DATA_ID:
+            frame = normalize_first_disclosure_frame(frame)
+        else:
+            frame["source_asset_id"] = frame["source_asset_id"].astype("string")
+            for name in (
+                "timestamp",
+                "report_period",
+                "correction_disclosure_date",
+            ):
+                frame[name] = strict_timestamp_series(
+                    frame[name],
+                    error="choice_financial_date_invalid",
+                    allow_null=name == "correction_disclosure_date",
+                )
+            frame["report_type"] = frame["report_type"].astype("string")
+            frame["version_identity"] = frame["version_identity"].astype("string")
+            frame["is_corrected"] = frame["is_corrected"].astype("bool")
+            for name in FINANCIAL_FIELDS[spec.data_id].values():
+                frame[name] = frame[name].astype("float64")
+        yield frame
+        frame = None
 
 
 def materialize_interim_data(
@@ -658,45 +648,43 @@ def materialize_interim_data(
         specs, key=lambda spec: spec.data_id != FIRST_DISCLOSURE_DATA_ID
     ):
         group = tuple(grouped)
-        with _source_snapshot(root, group[0].data_id) as (identity, members):
-            if (
-                instance_metadata is not None
-                and COMMON_MANIFEST_METADATA_KEY in instance_metadata
-            ):
-                envelope = validate_business_manifest_envelope(
-                    instance_metadata[COMMON_MANIFEST_METADATA_KEY]
-                )
-                if envelope["semantic_metadata"]["raw_content_identity"] != identity:
+        (identity, members) = _source_snapshot(root, group[0].data_id)
+        if (
+            instance_metadata is not None
+            and COMMON_MANIFEST_METADATA_KEY in instance_metadata
+        ):
+            envelope = validate_business_manifest_envelope(
+                instance_metadata[COMMON_MANIFEST_METADATA_KEY]
+            )
+            if envelope["semantic_metadata"]["raw_content_identity"] != identity:
+                raise ValueError("choice_raw_identity_changed")
+
+        index = _raw_index(root, financial, members=members)
+        for spec in group:
+
+            def verify_source(_receipt, data_id=spec.data_id, expected=identity):
+                if source_content_identity(root, data_id) != expected:
                     raise ValueError("choice_raw_identity_changed")
 
-            with _raw_index(root, financial, members=members) as index:
-                for spec in group:
-
-                    def verify_source(
-                        _receipt, data_id=spec.data_id, expected=identity
-                    ):
-                        if source_content_identity(root, data_id) != expected:
-                            raise ValueError("choice_raw_identity_changed")
-
-                    rows = _rows(index, spec.data_id, start, end)
-                    frames = _frames(rows, spec)
-                    target = layout.target_root(
-                        spec.data_id,
-                        layout.interim_data_root(SOURCE_ID, spec.data_id),
+            rows = _rows(index, spec.data_id, start, end)
+            frames = _frames(rows, spec)
+            target = layout.target_root(
+                spec.data_id,
+                layout.interim_data_root(SOURCE_ID, spec.data_id),
+            )
+            with closing_iterator(rows), closing_iterator(frames):
+                try:
+                    write_dataset(
+                        target,
+                        frames,
+                        spec=spec,
+                        instance_metadata=instance_metadata,
+                        staged_validator=verify_source,
                     )
-                    with closing_iterator(rows), closing_iterator(frames):
-                        try:
-                            write_dataset(
-                                target,
-                                frames,
-                                spec=spec,
-                                instance_metadata=instance_metadata,
-                                staged_validator=verify_source,
-                            )
-                        except ValueError as error:
-                            if str(error) != "empty_dataset_schema_missing":
-                                raise
-                            skipped.append(spec.data_id)
-                            continue
-                    written[spec.data_id] = target
+                except ValueError as error:
+                    if str(error) != "empty_dataset_schema_missing":
+                        raise
+                    skipped.append(spec.data_id)
+                    continue
+            written[spec.data_id] = target
     return ChoiceInterimImportResult(written, tuple(skipped))

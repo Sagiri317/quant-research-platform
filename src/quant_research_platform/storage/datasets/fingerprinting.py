@@ -11,6 +11,7 @@ import pyarrow as pa
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.paths import relative_partition_label
 from quant_research_platform.storage.datasets.reading import (
@@ -71,32 +72,37 @@ def fingerprint_dataset_session(context: DatasetSession) -> DatasetFingerprint:
     partition_hash_xor: dict[str, int] = {}
     file_count = 0
     last_observed_path: Path | None = None
-    for path, chunk in iter_dataset_file_batches(
-        context, columns=hash_physical_columns, batch_rows=DEFAULT_BATCH_ROWS
-    ):
-        chunk = chunk.loc[:, list(hash_columns)]
-        if chunk.empty:
-            continue
-        if path != last_observed_path:
-            file_count += 1
-            last_observed_path = path
-        chunk_sum = 0
-        chunk_xor = 0
-        for hashes in _iter_fingerprint_hashes(
-            chunk, arrow_schema=context.arrow_schema, primary_key=key_columns
-        ):
-            chunk_sum = (chunk_sum + int(hashes.sum(dtype=np.uint64))) % 2**64
-            chunk_xor ^= int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
-            del hashes
-        partition = relative_partition_label(context.data_root, path)
-        row_count += int(len(chunk))
-        row_hash_sum = (row_hash_sum + chunk_sum) % 2**64
-        row_hash_xor ^= chunk_xor
-        partition_rows[partition] = partition_rows.get(partition, 0) + len(chunk)
-        partition_hash_sum[partition] = (
-            partition_hash_sum.get(partition, 0) + chunk_sum
-        ) % 2**64
-        partition_hash_xor[partition] = partition_hash_xor.get(partition, 0) ^ chunk_xor
+    with closing_iterator(
+        iter_dataset_file_batches(
+            context, columns=hash_physical_columns, batch_rows=DEFAULT_BATCH_ROWS
+        )
+    ) as batches:
+        for path, chunk in batches:
+            chunk = chunk.loc[:, list(hash_columns)]
+            if chunk.empty:
+                continue
+            if path != last_observed_path:
+                file_count += 1
+                last_observed_path = path
+            chunk_sum = 0
+            chunk_xor = 0
+            for hashes in _iter_fingerprint_hashes(
+                chunk, arrow_schema=context.arrow_schema, primary_key=key_columns
+            ):
+                chunk_sum = (chunk_sum + int(hashes.sum(dtype=np.uint64))) % 2**64
+                chunk_xor ^= int(np.bitwise_xor.reduce(hashes, initial=np.uint64(0)))
+                del hashes
+            partition = relative_partition_label(context.data_root, path)
+            row_count += int(len(chunk))
+            row_hash_sum = (row_hash_sum + chunk_sum) % 2**64
+            row_hash_xor ^= chunk_xor
+            partition_rows[partition] = partition_rows.get(partition, 0) + len(chunk)
+            partition_hash_sum[partition] = (
+                partition_hash_sum.get(partition, 0) + chunk_sum
+            ) % 2**64
+            partition_hash_xor[partition] = (
+                partition_hash_xor.get(partition, 0) ^ chunk_xor
+            )
     content_hash = canonical_json_hash(
         {
             "row_hash_sum": row_hash_sum,

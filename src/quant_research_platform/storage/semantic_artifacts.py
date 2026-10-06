@@ -56,7 +56,6 @@ from quant_research_platform.storage.parquet import (
 )
 
 SEMANTIC_ARTIFACT_SCHEMA_ID = "qrp-semantic-artifact"
-MAX_SEMANTIC_ARTIFACT_INSTANCES = 1024
 _HASH_BUFFER_BYTES = 1024 * 1024
 
 
@@ -469,11 +468,7 @@ def _operational_metadata(value: object) -> dict[str, object]:
     return snapshot
 
 
-def discover_semantic_artifact_instances(
-    logical_root: Path, *, max_instances: int = MAX_SEMANTIC_ARTIFACT_INSTANCES
-) -> tuple[Path, ...]:
-    if type(max_instances) is not int or max_instances <= 0:
-        raise ValueError("semantic_artifact_instance_limit_invalid")
+def discover_semantic_artifact_instances(logical_root: Path) -> tuple[Path, ...]:
     root = require_unaliased_path(
         Path(logical_root), error="semantic_artifact_root_invalid"
     )
@@ -490,8 +485,6 @@ def discover_semantic_artifact_instances(
         try:
             with filesystem_scandir(instances_root) as entries:
                 for entry in entries:
-                    if len(names) >= max_instances:
-                        raise ValueError("semantic_artifact_instance_limit_exceeded")
                     names.append(entry.name)
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("semantic_artifact_root_invalid") from exc

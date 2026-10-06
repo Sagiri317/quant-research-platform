@@ -1,4 +1,3 @@
-from contextlib import contextmanager
 from copy import deepcopy
 from dataclasses import replace
 from types import SimpleNamespace
@@ -29,7 +28,6 @@ from tests.helpers.binance_hft import hft_research_plan
 from tests.helpers.research_configuration import research_configuration
 
 
-@contextmanager
 def crypto_rank_case(output, *, missing_rank_input=False):
     plan = hft_research_plan()
     plan["folds"] = plan["folds"][:1]
@@ -174,7 +172,7 @@ def crypto_rank_case(output, *, missing_rank_input=False):
     saved = persisted.read_crypto_model_artifact(
         root, expected_identity=envelope.instance_identity, trial_layout=layout
     )
-    case = SimpleNamespace(
+    return SimpleNamespace(
         root=root,
         dataset=dataset,
         manifest=manifest,
@@ -183,89 +181,75 @@ def crypto_rank_case(output, *, missing_rank_input=False):
         profile=profile,
         holdout=TimeWindow(**plan["test"]),
     )
-    try:
-        yield case
-    finally:
-        case = saved = None
 
 
 @pytest.mark.parametrize("missing_rank_input", (False, True))
 def test_crypto_rank_roundtrip_and_frozen_holdout(tmp_path, missing_rank_input):
-    with crypto_rank_case(tmp_path, missing_rank_input=missing_rank_input) as case:
-        for entry in case.saved.final_models:
-            algorithm = entry["model_metadata"]["model_algorithm"]
-            expected = (
-                [-0.001, 0.001] if algorithm == "linear_regression" else [-0.25, 0.25]
+    case = crypto_rank_case(tmp_path, missing_rank_input=missing_rank_input)
+    for entry in case.saved.final_models:
+        algorithm = entry["model_metadata"]["model_algorithm"]
+        expected = (
+            [-0.001, 0.001] if algorithm == "linear_regression" else [-0.25, 0.25]
+        )
+        model = persisted.read_crypto_model_member(case.saved, entry)
+        probe = pd.DataFrame(
+            {
+                "timestamp": [pd.Timestamp(case.holdout.start)] * 2,
+                "imbalance_1": [-1.0, 1.0],
+            }
+        )
+        scores = fitting.prediction_callable(("imbalance_1",), model)(probe)
+        np.testing.assert_allclose(scores, expected, rtol=0, atol=1e-15)
+        if algorithm != "linear_regression":
+            parameter = (
+                "directions" if algorithm == "equal_weight_rank_ensemble" else "weights"
             )
-            model = persisted.read_crypto_model_member(case.saved, entry)
-            probe = pd.DataFrame(
-                {
-                    "timestamp": [pd.Timestamp(case.holdout.start)] * 2,
-                    "imbalance_1": [-1.0, 1.0],
-                }
-            )
-            scores = fitting.prediction_callable(("imbalance_1",), model)(probe)
-            np.testing.assert_allclose(scores, expected, rtol=0, atol=1e-15)
-            if algorithm != "linear_regression":
-                parameter = (
-                    "directions"
-                    if algorithm == "equal_weight_rank_ensemble"
-                    else "weights"
-                )
-                assert entry["model_metadata"]["rank_parameters"] == {
-                    "columns": ["imbalance_1"],
-                    "label_calibration": pytest.approx([0.0, 0.004]),
-                    parameter: [1.0],
-                }
-                for changes in (
-                    {"columns": ("other",)},
-                    {parameter: (-1.0,)},
-                    {"label_calibration": (0.0, 1.0)},
-                ):
-                    changed = replace(model, **changes)
-                    with pytest.raises(
-                        ValueError, match="model_state_metadata_mismatch"
-                    ):
-                        fitting.validate_model_state(changed, entry["model_metadata"])
-                    changed = None
-            model = None
-        observed = set()
-        with closing_iterator(
-            build_crypto_predictions(
-                layout=case.layout,
-                dataset_catalog=case.profile.research_datasets,
-                persisted_model=case.saved,
-                time_window=case.holdout,
-                access_window="holdout",
-            )
-        ) as results:
-            for result in results:
-                observed.add(result.spec.model_id)
-                rows = 0
-                with result:
-                    for owned in result.output_chunks:
-                        try:
-                            frame = owned
-                            scale = (
-                                0.001
-                                if result.spec.model_id.endswith("linear_regression")
-                                else 0.25
-                            )
-                            expected = frame.asset_id.map(
-                                {"btc_usdt": -scale, "eth_usdt": scale}
-                            )
-                            np.testing.assert_allclose(
-                                frame.prediction_score, expected, rtol=0, atol=1e-15
-                            )
-                            assert frame.timestamp.between(
-                                pd.Timestamp(case.holdout.start),
-                                pd.Timestamp(case.holdout.end),
-                            ).all()
-                            rows += len(frame)
-                        finally:
-                            frame = None
-                    assert rows == 10
-        assert observed == {entry["model_id"] for entry in case.saved.final_models}
+            assert entry["model_metadata"]["rank_parameters"] == {
+                "columns": ["imbalance_1"],
+                "label_calibration": pytest.approx([0.0, 0.004]),
+                parameter: [1.0],
+            }
+            for changes in (
+                {"columns": ("other",)},
+                {parameter: (-1.0,)},
+                {"label_calibration": (0.0, 1.0)},
+            ):
+                changed = replace(model, **changes)
+                with pytest.raises(ValueError, match="model_state_metadata_mismatch"):
+                    fitting.validate_model_state(changed, entry["model_metadata"])
+    observed = set()
+    with closing_iterator(
+        build_crypto_predictions(
+            layout=case.layout,
+            dataset_catalog=case.profile.research_datasets,
+            persisted_model=case.saved,
+            time_window=case.holdout,
+            access_window="holdout",
+        )
+    ) as results:
+        for result in results:
+            observed.add(result.spec.model_id)
+            rows = 0
+            with result:
+                for frame in result.output_chunks:
+                    scale = (
+                        0.001
+                        if result.spec.model_id.endswith("linear_regression")
+                        else 0.25
+                    )
+                    expected = frame.asset_id.map(
+                        {"btc_usdt": -scale, "eth_usdt": scale}
+                    )
+                    np.testing.assert_allclose(
+                        frame.prediction_score, expected, rtol=0, atol=1e-15
+                    )
+                    assert frame.timestamp.between(
+                        pd.Timestamp(case.holdout.start),
+                        pd.Timestamp(case.holdout.end),
+                    ).all()
+                    rows += len(frame)
+                assert rows == 10
+    assert observed == {entry["model_id"] for entry in case.saved.final_models}
 
 
 def test_rank_economic_consumers_use_frozen_training_label_units(tmp_path):
@@ -279,61 +263,61 @@ def test_rank_economic_consumers_use_frozen_training_label_units(tmp_path):
     )
     from quant_research_platform.workflows.research import _output_spec_for_target
 
-    with crypto_rank_case(tmp_path) as case:
-        prediction_root = tmp_path / "prediction_outputs"
-        with closing_iterator(
-            build_crypto_predictions(
-                layout=case.layout,
-                dataset_catalog=case.profile.research_datasets,
-                persisted_model=case.saved,
-                time_window=case.holdout,
-                access_window="holdout",
-            )
-        ) as results:
-            for result in results:
-                with result:
-                    write_prediction_outputs(
-                        spec=result.spec,
-                        output_spec=_output_spec_for_target(
-                            result.spec.prediction_id, "crypto", "prediction"
-                        ),
-                        layout=StorageLayout(prediction_root),
-                        output_chunks=result.output_chunks,
-                        model_metadata=result.model_metadata,
-                        prediction_metadata_factory=result.prediction_metadata_factory,
-                    )
-        layout = case.layout.with_target_roots(
-            {case.dataset.data_id + "_predictions": prediction_root}
+    case = crypto_rank_case(tmp_path)
+    prediction_root = tmp_path / "prediction_outputs"
+    with closing_iterator(
+        build_crypto_predictions(
+            layout=case.layout,
+            dataset_catalog=case.profile.research_datasets,
+            persisted_model=case.saved,
+            time_window=case.holdout,
+            access_window="holdout",
         )
-        for entry in case.saved.final_models:
-            for asset, expected in (("btc_usdt", -0.001), ("eth_usdt", 0.001)):
-                values = list(
-                    _prediction_rows(
-                        layout=layout,
-                        dataset=case.dataset,
-                        windows=(("final", case.holdout),),
-                        model_id=entry["model_id"],
-                        asset_id=asset,
-                        protocol_manifest=case.profile.protocol(
-                            case.dataset.data_id
-                        ).manifest(),
-                        read_prediction_bundle=read_prediction_output_bundle,
-                        output_window=case.holdout,
-                    )
+    ) as results:
+        for result in results:
+            with result:
+                write_prediction_outputs(
+                    spec=result.spec,
+                    output_spec=_output_spec_for_target(
+                        result.spec.prediction_id, "crypto", "prediction"
+                    ),
+                    layout=StorageLayout(prediction_root),
+                    output_chunks=result.output_chunks,
+                    model_metadata=result.model_metadata,
+                    prediction_metadata_factory=result.prediction_metadata_factory,
                 )
-                assert len(values) == 5
-                assert [value["prediction_score"] for value in values] == pytest.approx(
-                    [expected] * 5
+    layout = case.layout.with_target_roots(
+        {case.dataset.data_id + "_predictions": prediction_root}
+    )
+    for entry in case.saved.final_models:
+        for asset, expected in (("btc_usdt", -0.001), ("eth_usdt", 0.001)):
+            values = list(
+                _prediction_rows(
+                    layout=layout,
+                    dataset=case.dataset,
+                    windows=(("final", case.holdout),),
+                    model_id=entry["model_id"],
+                    asset_id=asset,
+                    protocol_manifest=case.profile.protocol(
+                        case.dataset.data_id
+                    ).manifest(),
+                    read_prediction_bundle=read_prediction_output_bundle,
+                    output_window=case.holdout,
                 )
-                validation = list(
-                    _validation_rows(
-                        case.saved,
-                        fold_id=case.saved.models[0]["fold_id"],
-                        model_id=entry["model_id"],
-                        asset_id=asset,
-                    )
+            )
+            assert len(values) == 5
+            assert [value["prediction_score"] for value in values] == pytest.approx(
+                [expected] * 5
+            )
+            validation = list(
+                _validation_rows(
+                    case.saved,
+                    fold_id=case.saved.models[0]["fold_id"],
+                    model_id=entry["model_id"],
+                    asset_id=asset,
                 )
-                assert validation
-                assert [row.prediction_score for row in validation] == pytest.approx(
-                    [expected] * len(validation)
-                )
+            )
+            assert validation
+            assert [row.prediction_score for row in validation] == pytest.approx(
+                [expected] * len(validation)
+            )

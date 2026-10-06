@@ -554,7 +554,6 @@ class TrialRecord:
     rebalance_assumption: str = "not_applicable"
     artifact_lineage: tuple[str, ...] = ()
     holdout_accessed: bool = False
-    contract_version: str = "3.0"
 
     def __post_init__(self) -> None:
         for value in (
@@ -611,8 +610,6 @@ class TrialRecord:
             raise ValueError("trial_thread_settings_invalid")
         if self.holdout_accessed is not False:
             raise ValueError("trial_holdout_access_forbidden")
-        if self.contract_version != "3.0":
-            raise ValueError("trial_contract_version_invalid")
         for field_name in (
             "normalized_parameters",
             "backend_versions",
@@ -634,7 +631,6 @@ class TrialRecord:
 
     def payload(self) -> dict[str, object]:
         return {
-            "contract_version": self.contract_version,
             "event_id": self.event_id,
             "run_id": self.run_id,
             "attempt_index": self.attempt_index,

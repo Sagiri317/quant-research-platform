@@ -209,33 +209,29 @@ def _archive_intersects(manifest, time_window):
 
 
 def _decode_interval(value, *, markets, symbols, archive_identity):
-    try:
-        if (
-            type(value) is not dict
-            or set(value)
-            != {"observation_id", "symbol", "data_kind", "start_ns", "end_ns"}
-            or type(value["observation_id"]) is not str
-            or not value["observation_id"].startswith("tardis:")
-            or value["symbol"] not in symbols
-            or value["data_kind"] not in {"depth", "agg_trades"}
-            or any(type(value[key]) is not int for key in ("start_ns", "end_ns"))
-            or not 0 <= value["start_ns"] < value["end_ns"]
-            or markets not in ({FUTURES_MARKET_TYPE}, {SPOT_MARKET_TYPE})
-        ):
-            raise ValueError("tardis_observation_interval_invalid")
-        identity = archive_identity + ":" + value["observation_id"]
-        kind = value["data_kind"]
-        return (
-            identity,
-            next(iter(markets)),
-            kind,
-            value["symbol"].lower() + "@" + kind,
-            identity if kind == "depth" else None,
-            value["start_ns"],
-            value["end_ns"],
-        )
-    finally:
-        value = None
+    if (
+        type(value) is not dict
+        or set(value) != {"observation_id", "symbol", "data_kind", "start_ns", "end_ns"}
+        or type(value["observation_id"]) is not str
+        or not value["observation_id"].startswith("tardis:")
+        or value["symbol"] not in symbols
+        or value["data_kind"] not in {"depth", "agg_trades"}
+        or any(type(value[key]) is not int for key in ("start_ns", "end_ns"))
+        or not 0 <= value["start_ns"] < value["end_ns"]
+        or markets not in ({FUTURES_MARKET_TYPE}, {SPOT_MARKET_TYPE})
+    ):
+        raise ValueError("tardis_observation_interval_invalid")
+    identity = archive_identity + ":" + value["observation_id"]
+    kind = value["data_kind"]
+    return (
+        identity,
+        next(iter(markets)),
+        kind,
+        value["symbol"].lower() + "@" + kind,
+        identity if kind == "depth" else None,
+        value["start_ns"],
+        value["end_ns"],
+    )
 
 
 @dataclass
@@ -262,109 +258,107 @@ class TardisArchive:
             else SPOT_MARKET_TYPE
         )
         prefix = 0
-        with native_trade_identities() as observe_trade:
-            tracker = _ObservedStreams(
-                self.manifest["exchange"], observe_trade=observe_trade
-            )
-            state_epoch = 0
-            for member in self.manifest["files"]:
-                number = 0
-                with closing_iterator(
-                    iter_native_slice(
-                        self.root / member["path"],
-                        date=self.manifest["date"],
-                        offset_minutes=member["offset_minutes"],
-                        expected_sha256=member["sha256"],
-                        exchange=self.manifest["exchange"],
-                        symbols=tuple(self.manifest["symbols"]),
-                        channels=tuple(self.manifest["requested_channels"]),
+        observe_trade = native_trade_identities()
+        tracker = _ObservedStreams(
+            self.manifest["exchange"], observe_trade=observe_trade
+        )
+        state_epoch = 0
+        for member in self.manifest["files"]:
+            number = 0
+            with closing_iterator(
+                iter_native_slice(
+                    self.root / member["path"],
+                    date=self.manifest["date"],
+                    offset_minutes=member["offset_minutes"],
+                    expected_sha256=member["sha256"],
+                    exchange=self.manifest["exchange"],
+                    symbols=tuple(self.manifest["symbols"]),
+                    channels=tuple(self.manifest["requested_channels"]),
+                )
+            ) as records:
+                for number, timestamp, value in records:
+                    identity, closed, _gap = tracker.observe(
+                        member["offset_minutes"], number, timestamp, value
                     )
-                ) as records:
-                    for number, timestamp, value in records:
-                        identity, closed, _gap = tracker.observe(
-                            member["offset_minutes"], number, timestamp, value
-                        )
-                        for interval in closed:
-                            self._check_interval(interval)
-                        if value is None:
-                            continue
-                        if tracker.epoch != state_epoch:
-                            state_epoch = tracker.epoch
-                            for affected in self.manifest["symbols"]:
-                                _yield_value = (
-                                    (affected.upper(), "state"),
-                                    {
-                                        "receive_time": timestamp,
-                                        "channel": None,
-                                        "payload": None,
-                                        "epoch": self._sequence_offset + state_epoch,
-                                    },
-                                )
-                                try:
-                                    yield _yield_value
-                                except GeneratorExit:
-                                    return
-                        raw_symbol, channel, *_ = value["stream"].split("@")
-                        symbol = raw_symbol.upper()
-                        if channel in STATE_CHANNELS:
+                    for interval in closed:
+                        self._check_interval(interval)
+                    if value is None:
+                        continue
+                    if tracker.epoch != state_epoch:
+                        state_epoch = tracker.epoch
+                        for affected in self.manifest["symbols"]:
                             _yield_value = (
-                                (symbol, "state"),
+                                (affected.upper(), "state"),
                                 {
                                     "receive_time": timestamp,
-                                    "channel": channel,
-                                    "payload": value["data"],
-                                    "epoch": self._sequence_offset + tracker.epoch,
+                                    "channel": None,
+                                    "payload": None,
+                                    "epoch": self._sequence_offset + state_epoch,
                                 },
                             )
                             try:
                                 yield _yield_value
                             except GeneratorExit:
                                 return
-                            continue
-                        if identity is None:
-                            continue
-                        depth = channel != "aggTrade"
-                        payload = value["data"]
-                        if market_type == SPOT_MARKET_TYPE:
-                            payload = dict(payload)
-                            for clock in ("E", "T"):
-                                if clock in payload and payload[clock] > 10**15:
-                                    payload[clock] //= 1000
+                    raw_symbol, channel, *_ = value["stream"].split("@")
+                    symbol = raw_symbol.upper()
+                    if channel in STATE_CHANNELS:
                         _yield_value = (
-                            (symbol, "depth" if depth else "agg_trades"),
+                            (symbol, "state"),
                             {
-                                "source_sequence": self._sequence_offset
-                                + prefix
-                                + number,
-                                "market_type": market_type,
-                                "data_kind": "depth_snapshot"
-                                if channel == "depthSnapshot"
-                                else "depth"
-                                if depth
-                                else "agg_trades",
-                                "payload": payload,
                                 "receive_time": timestamp,
-                                "receive_monotonic_ns": None,
-                                "observation_id": self.source_identity["manifest_hash"]
-                                + ":"
-                                + identity,
-                                "segment_id": self.source_identity["manifest_hash"]
-                                + ":"
-                                + identity
-                                if depth
-                                else None,
-                                "price_unit": self.manifest["price_units"][symbol],
+                                "channel": channel,
+                                "payload": value["data"],
+                                "epoch": self._sequence_offset + tracker.epoch,
                             },
                         )
                         try:
                             yield _yield_value
                         except GeneratorExit:
                             return
-                if number != member["line_count"]:
-                    raise ValueError("tardis_native_line_count_mismatch")
-                prefix += number
-            for interval in tracker.finish():
-                self._check_interval(interval)
+                        continue
+                    if identity is None:
+                        continue
+                    depth = channel != "aggTrade"
+                    payload = value["data"]
+                    if market_type == SPOT_MARKET_TYPE:
+                        payload = dict(payload)
+                        for clock in ("E", "T"):
+                            if clock in payload and payload[clock] > 10**15:
+                                payload[clock] //= 1000
+                    _yield_value = (
+                        (symbol, "depth" if depth else "agg_trades"),
+                        {
+                            "source_sequence": self._sequence_offset + prefix + number,
+                            "market_type": market_type,
+                            "data_kind": "depth_snapshot"
+                            if channel == "depthSnapshot"
+                            else "depth"
+                            if depth
+                            else "agg_trades",
+                            "payload": payload,
+                            "receive_time": timestamp,
+                            "receive_monotonic_ns": None,
+                            "observation_id": self.source_identity["manifest_hash"]
+                            + ":"
+                            + identity,
+                            "segment_id": self.source_identity["manifest_hash"]
+                            + ":"
+                            + identity
+                            if depth
+                            else None,
+                            "price_unit": self.manifest["price_units"][symbol],
+                        },
+                    )
+                    try:
+                        yield _yield_value
+                    except GeneratorExit:
+                        return
+            if number != member["line_count"]:
+                raise ValueError("tardis_native_line_count_mismatch")
+            prefix += number
+        for interval in tracker.finish():
+            self._check_interval(interval)
 
     def _stream_records(self, symbol, data_kind, end_ns):
         """Independent cursors over one lazily advanced native scan."""
@@ -422,13 +416,7 @@ class TardisArchive:
         }
 
     def observation_coverage(self, *, market_type, data_kind, symbol):
-        return self._coverage_index._coverage_readers.enter_context(
-            closing_iterator(
-                ObservationCoverage(
-                    self._coverage_index, market_type, data_kind, symbol
-                )
-            )
-        )
+        return ObservationCoverage(self._coverage_index, market_type, data_kind, symbol)
 
     def _check_interval(self, row):
         if self._coverage_index.bounds(
@@ -520,91 +508,80 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
         manifest_path = root / "manifest.json"
         identity = _capture_raw_file_identity(manifest_path)
         _raw = manifest = members = identities = _after_raw = after = run = None
-        try:
-            _raw, manifest = read_bounded_qrp_json(
-                manifest_path, expected_identity=identity, max_bytes=identity.size
-            )
-            _validate_manifest(manifest)
-            manifest_hash = canonical_json_hash(manifest)
-            if manifest_hash != expected_manifest_hash:
-                raise ValueError("tardis_archive_selection_identity_changed")
-            _raw = None
-            members = (
-                *manifest["files"],
-                manifest["gaps"],
-                manifest["observation_intervals"],
-            )
-            identities = tuple(
-                _capture_raw_file_identity(root / item["path"]) for item in members
-            )
+        _raw, manifest = read_bounded_qrp_json(
+            manifest_path, expected_identity=identity, max_bytes=identity.size
+        )
+        _validate_manifest(manifest)
+        manifest_hash = canonical_json_hash(manifest)
+        if manifest_hash != expected_manifest_hash:
+            raise ValueError("tardis_archive_selection_identity_changed")
+        _raw = None
+        members = (
+            *manifest["files"],
+            manifest["gaps"],
+            manifest["observation_intervals"],
+        )
+        identities = tuple(
+            _capture_raw_file_identity(root / item["path"]) for item in members
+        )
 
-            def verify_files():
-                verify_root()
-                for member, expected in zip(members, identities, strict=True):
-                    if (
-                        expected.size != member["compressed_bytes"]
-                        or _sha256_file(root / member["path"], expected)
-                        != member["sha256"]
-                    ):
-                        raise ValueError("tardis_raw_identity_changed")
+        def verify_files():
+            verify_root()
+            for member, expected in zip(members, identities, strict=True):
+                if (
+                    expected.size != member["compressed_bytes"]
+                    or _sha256_file(root / member["path"], expected) != member["sha256"]
+                ):
+                    raise ValueError("tardis_raw_identity_changed")
 
-            verify_files()
-            index = ObservationCoverageIndex(
-                root,
-                manifest["observation_intervals"],
-                markets={
-                    FUTURES_MARKET_TYPE
-                    if manifest["exchange"] == EXCHANGE
-                    else SPOT_MARKET_TYPE
-                },
-                decode_interval=partial(
-                    _decode_interval,
-                    archive_identity=manifest_hash,
-                    symbols={symbol.upper() for symbol in manifest["symbols"]},
-                ),
-            )
-            replay_resources = ExitStack()
-            run = TardisArchive(
-                root,
-                manifest,
-                {
-                    "schema_id": SCHEMA_ID,
-                    "artifact_id": "native_archive_" + manifest_hash[:24],
-                    "manifest_hash": manifest_hash,
-                },
-                index,
-                replay_resources,
-            )
-            with closing_iterator(index), replay_resources:
+        verify_files()
+        index = ObservationCoverageIndex(
+            root,
+            manifest["observation_intervals"],
+            markets={
+                FUTURES_MARKET_TYPE
+                if manifest["exchange"] == EXCHANGE
+                else SPOT_MARKET_TYPE
+            },
+            decode_interval=partial(
+                _decode_interval,
+                archive_identity=manifest_hash,
+                symbols={symbol.upper() for symbol in manifest["symbols"]},
+            ),
+        )
+        replay_resources = ExitStack()
+        run = TardisArchive(
+            root,
+            manifest,
+            {
+                "schema_id": SCHEMA_ID,
+                "artifact_id": "native_archive_" + manifest_hash[:24],
+                "manifest_hash": manifest_hash,
+            },
+            index,
+            replay_resources,
+        )
+        with replay_resources:
+            try:
+                yield run
+            finally:
+                primary = sys.exception()
                 try:
-                    yield run
-                finally:
-                    primary = sys.exception()
-                    try:
-                        verify_files()
-                        try:
-                            _after_raw, after = read_bounded_qrp_json(
-                                manifest_path,
-                                expected_identity=identity,
-                                max_bytes=identity.size,
-                            )
-                            if canonical_json_hash(after) != manifest_hash:
-                                raise ValueError("tardis_manifest_identity_changed")
-                        finally:
-                            _after_raw = after = None
-                    except BaseException as error:
-                        if primary is None:
-                            raise
-                        primary.add_note(
-                            "Tardis source verification also failed: "
-                            + type(error).__name__
-                        )
-                    finally:
-                        run.manifest = {}
-        finally:
-            if run is not None:
-                run.manifest = {}
-            _raw = manifest = members = identities = _after_raw = after = run = None
+                    verify_files()
+                    _after_raw, after = read_bounded_qrp_json(
+                        manifest_path,
+                        expected_identity=identity,
+                        max_bytes=identity.size,
+                    )
+                    if canonical_json_hash(after) != manifest_hash:
+                        raise ValueError("tardis_manifest_identity_changed")
+                except BaseException as error:
+                    if primary is None:
+                        raise
+                    primary.add_note(
+                        "Tardis source verification also failed: "
+                        + type(error).__name__
+                    )
 
 
 class _ArchiveCoverage:
@@ -732,17 +709,14 @@ def open_tardis_archive(root, *, archive_paths=None, time_window=None):
         for path in paths:
             identity = _capture_raw_file_identity(path / "manifest.json")
             _raw = manifest = None
-            try:
-                _raw, manifest = read_bounded_qrp_json(
-                    path / "manifest.json",
-                    expected_identity=identity,
-                    max_bytes=identity.size,
-                )
-                _validate_manifest(manifest)
-                if _archive_intersects(manifest, time_window):
-                    selected.append((path, canonical_json_hash(manifest)))
-            finally:
-                _raw = manifest = None
+            _raw, manifest = read_bounded_qrp_json(
+                path / "manifest.json",
+                expected_identity=identity,
+                max_bytes=identity.size,
+            )
+            _validate_manifest(manifest)
+            if _archive_intersects(manifest, time_window):
+                selected.append((path, canonical_json_hash(manifest)))
         if not selected:
             raise PortfolioTargetBlocked("tardis_archive_window_empty")
         archives = tuple(

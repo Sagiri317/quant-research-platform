@@ -581,7 +581,32 @@ def test_research_dataset_session_complete_chunks_preserve_output(
         filter_column_roles={"eligible": ColumnRole.UNIVERSE}
     )
     write_demo_processed_inputs(default_layout, processed_catalog, frame=frame)
-    write_demo_processed_inputs(tiny_layout, processed_catalog, frame=frame)
+    for spec in processed_catalog.list():
+        source = frame.loc[:, list(spec.column_roles)]
+        root = tiny_layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        write_dataset(
+            root,
+            (source.iloc[position : position + 1] for position in range(len(source))),
+            spec=spec,
+        )
+        assert inspect_dataset(root).file_count == len(source)
+    base_spec = processed_catalog.get(dataset_catalog.get("demo").base_input_data_id)
+    base_root = tiny_layout.processed_data_root(
+        base_spec.market_id, base_spec.kind, base_spec.data_id
+    )
+    from quant_research_platform.storage.datasets.reading import (
+        iter_dataset_chunks,
+        open_dataset_session,
+    )
+
+    batches = list(
+        iter_dataset_chunks(
+            open_dataset_session(base_root, columns=None, time_window=None)
+        )
+    )
+    assert len(batches) == len(frame)
+    assert all(len(batch) == 1 for batch in batches)
+    assert batches[0].timestamp.iloc[0] == batches[1].timestamp.iloc[0]
     default_root = assemble_research_dataset(
         layout=default_layout,
         dataset_catalog=dataset_catalog,
@@ -618,8 +643,7 @@ def test_research_dataset_session_complete_chunks_preserve_output(
         default.reset_index(drop=True), tiny.reset_index(drop=True)
     )
     assert (
-        inspect_dataset(tiny_root).file_count
-        == inspect_dataset(default_root).file_count
+        inspect_dataset(tiny_root).file_count > inspect_dataset(default_root).file_count
     )
 
 

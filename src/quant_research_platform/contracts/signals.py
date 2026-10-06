@@ -30,11 +30,8 @@ class SignalSpec:
     source_column: str
     direction: SignalDirection = "higher_is_better"
     transform: SignalTransform = "identity"
-    contract_version: str = "0.1"
 
     def __post_init__(self) -> None:
-        if type(self.contract_version) is not str or self.contract_version != "0.1":
-            raise ValueError("unsupported_signal_contract_version")
         if type(self.signal_id) is not str or not self.signal_id:
             raise ValueError("signal_id_required")
         if type(self.source_kind) is not str or self.source_kind not in {

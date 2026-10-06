@@ -716,27 +716,16 @@ def test_raw_mutation_before_publish_preserves_old_good(
 def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identity(
     tmp_path, monkeypatch
 ):
-    from contextlib import contextmanager
-
     layout = StorageLayout(tmp_path)
     with choice_session(SDK(response())) as session:
         _disclosure(session, layout)
         snapshot, _ = _snapshot(session, layout, "2020-01-30", [100.0] * 14)
     original_index = interim._raw_index
     opened = []
-    active = 0
 
-    @contextmanager
     def observed_index(root, financial, *, members):
-        nonlocal active
-        active += 1
-        assert active == 1
         opened.append(financial)
-        try:
-            with original_index(root, financial, members=members) as index:
-                yield index
-        finally:
-            active -= 1
+        return original_index(root, financial, members=members)
 
     monkeypatch.setattr(interim, "_raw_index", observed_index)
     good = interim.materialize_interim_data(layout=layout)
@@ -773,7 +762,6 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
         )
     assert published == ["financial_balance"]
     assert opened == [True, False, True]
-    assert active == 0
     assert not filesystem_exists(
         candidate.interim_data_root("choice", "financial_income")
     )

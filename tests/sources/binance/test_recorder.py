@@ -684,7 +684,7 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
     monkeypatch.setattr(recorder, "atomic_write_json", write_json)
     monkeypatch.setattr(recorder, "atomic_write_directory", publish_directory)
     if late_failure:
-        with pytest.raises(RuntimeError, match="binance_recorder_reader_failure"):
+        with pytest.raises(OSError, match="final_write_failed"):
             recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
         assert not output_root.exists()
     elif join_completes:
@@ -717,7 +717,7 @@ def test_recorder_abort_failure_preserves_reader_failure(
             self.name = "fake-reader"
             self.stream = kwargs["stream"]
             self.ready = threading.Event()
-            self.failure = "reader-failure"
+            self.failure = RuntimeError("reader_failure")
 
         def start(self) -> None:
             self.ready.set()
@@ -1046,3 +1046,38 @@ def test_writer_lifecycle_preserves_first_cleanup_or_body_failure(
     assert writer._closed
     if body_fails:
         assert any(type(secondary).__name__ in note for note in primary.__notes__)
+
+
+@pytest.mark.parametrize("set_ready", [False, True])
+@pytest.mark.parametrize("error_type", [GeneratorExit, KeyboardInterrupt, MemoryError])
+def test_recorder_preserves_reader_business_exception(
+    tmp_path, monkeypatch, set_ready, error_type
+):
+    primary = error_type("reader-primary")
+    readers = []
+    stream = FUTURES_STREAMS[1]
+
+    class FailingReader(recorder._StreamReader):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            readers.append(self)
+
+        def _read_connection(self, *, reconnect):
+            if set_ready:
+                self.ready.set()
+            raise primary
+
+    monkeypatch.setitem(recorder.RECORDER_STREAMS_BY_SCOPE, "futures-hft", (stream,))
+    monkeypatch.setattr(recorder, "_StreamReader", FailingReader)
+    monkeypatch.setattr(
+        recorder,
+        "_record_market_metadata",
+        lambda *_a, **_k: {stream.symbol: {stream.market_type: {"tick_size": "0.1"}}},
+    )
+    output = tmp_path / "run"
+    with pytest.raises(error_type) as raised:
+        recorder.record(RecorderConfig(output, duration_seconds=0.01))
+    assert raised.value is primary
+    assert readers and all(not reader.is_alive() for reader in readers)
+    assert all(reader.failure is primary for reader in readers)
+    assert not output.exists()

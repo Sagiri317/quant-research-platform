@@ -136,7 +136,7 @@ def frozen_alpha_calibration(payload, *, cutoff, selection_group):
             "calibration",
         }
         or (
-            payload["schema_id"] != "qrp-final-alpha-calibration-v1"
+            payload["schema_id"] != "qrp-final-alpha-calibration"
             or payload["selection_group"] != selection_group
             or pd.Timestamp(payload["cutoff"]) != pd.Timestamp(cutoff)
             or (type(payload["calibration"]) is not dict)
@@ -357,7 +357,6 @@ def build_portfolio_ledger(
     cash = float(assumptions.initial_nav)
     nav = cash
     amount_history: dict[str, deque[float]] = {}
-    risk_assets: set[str] = set()
     factor_risk = (
         FactorRiskState(style_columns=risk_style_columns, config=risk_config)
         if enhanced
@@ -436,8 +435,6 @@ def build_portfolio_ledger(
             panel = panel_at(decision_timestamp)
             if panel.empty:
                 raise PortfolioTargetBlocked("portfolio_panel_session_missing")
-            if enhanced:
-                risk_assets.update(panel.asset_id.astype(str))
             _update_amount_history(panel, amount_history, holdings)
             benchmark_weights = pd.Series(dtype="float64")
             alpha: pd.Series | None = None
@@ -689,7 +686,7 @@ def build_portfolio_ledger(
                 )
             on_final_calibration(
                 {
-                    "schema_id": "qrp-final-alpha-calibration-v1",
+                    "schema_id": "qrp-final-alpha-calibration",
                     "selection_group": candidate.selection_group,
                     "cutoff": pd.Timestamp(output_window.end).date().isoformat(),
                     "upstream_identities": dict(upstream_identities),
