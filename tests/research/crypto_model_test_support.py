@@ -1002,7 +1002,6 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
         filesystem_write_bytes(part, payload[:-1] + bytes((payload[-1] ^ 1,)))
 
     def fit_scaler(cls, matrix, **kwargs):
-        opened_sessions[-1]
         if mutate_source == "selection" or (mutate_source == "refit" and captured):
             change_source()
         if captured:

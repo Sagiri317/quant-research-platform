@@ -303,9 +303,7 @@ def test_writer_manifest_uses_persisted_bytes_not_prewrite_summary(
         )
 
 
-def test_exact_primary_key_index_supports_nested_arrow_key_identity(
-    tmp_path: Path,
-) -> None:
+def test_exact_primary_key_index_supports_nested_arrow_key_identity() -> None:
     table = pa.table(
         {
             "key": pa.array(

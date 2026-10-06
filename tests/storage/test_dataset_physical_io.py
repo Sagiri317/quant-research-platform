@@ -88,7 +88,7 @@ def test_session_detects_part_replacement_after_issue(tmp_path: Path) -> None:
         session.verify()
 
 
-def test_exact_key_decimal_zero_and_numpy_scalar_identity(tmp_path: Path) -> None:
+def test_exact_key_decimal_zero_and_numpy_scalar_identity() -> None:
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     decimals = module.ExactPrimaryKeyIndex(
         primary_key=("key",),

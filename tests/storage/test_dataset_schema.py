@@ -470,7 +470,7 @@ def test_arrow_scalar_dtypes_are_stable_across_storage_read_boundaries(
 @pytest.mark.parametrize("arrow_type", (pa.float32(), pa.float64()))
 @pytest.mark.parametrize("has_nan", (False, True))
 def test_public_arrow_float_validity_survives_reads_rewrite_and_exact_compare(
-    tmp_path, monkeypatch, arrow_type, has_nan
+    tmp_path, arrow_type, has_nan
 ):
     from quant_research_platform.contracts.data import ProcessedDataKind
 

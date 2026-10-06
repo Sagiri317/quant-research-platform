@@ -625,7 +625,7 @@ def test_archive_source_identity_is_validated_on_write_and_read(tmp_path, mutati
 
 
 def test_public_writer_omits_caller_attrs_before_copy_and_arrow_serialization(
-    tmp_path, monkeypatch
+    tmp_path,
 ):
 
     class CallerOnly:
@@ -682,8 +682,8 @@ def test_public_writer_rejects_nonnull_object_schema_drift(tmp_path, drift_kind)
 
 
 @pytest.mark.parametrize("nonnull_first", (False, True))
-def test_public_writer_uses_complete_object_string_facts_before_bounded_schema(
-    tmp_path, monkeypatch, nonnull_first
+def test_public_writer_preserves_nullable_object_strings_independent_of_row_order(
+    tmp_path, nonnull_first
 ):
     from dataclasses import replace
 
@@ -729,8 +729,7 @@ def test_public_writer_uses_complete_object_string_facts_before_bounded_schema(
     root = make_dataset_artifact_root(
         tmp_path, spec.data_id, kind=ProcessedDataKind.PANEL
     )
-    with monkeypatch.context():
-        write_dataset(root, frame, spec=spec)
+    write_dataset(root, frame, spec=spec)
     actual = (
         read_dataset(root).sort_values(list(spec.primary_key)).reset_index(drop=True)
     )

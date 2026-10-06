@@ -505,11 +505,9 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
             "access": "not_applicable",
         }
         assert manifest["row_count"] == 12
-        common = manifest = None
         saved = read_dataset(history_root)
         assert len(saved) == 12
         assert tuple(saved["timestamp"].sort_values().unique()) == tuple(dates)
-        saved = None
     else:
         assert not tuple(root.rglob("manifest.json"))
 

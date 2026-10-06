@@ -523,7 +523,7 @@ def test_research_measurement_domains(tmp_path, tables, envelope, table, column,
 @pytest.mark.parametrize(
     "factor_case", ["formal", "diagnostic_only", "no_factor_columns"]
 )
-def test_research_tables_complete_sequentially_under_16_mib(
+def test_research_statistics_tables_round_trip_by_factor_case(
     tmp_path, tables, envelope, factor_case
 ):
     factor = tables["factor_diagnostics"]
@@ -924,7 +924,7 @@ def test_incremental_maker_publication_preserves_old_good_and_primary(
     )
 
 
-def test_maker_calibration_completes_payload_larger_than_cap_without_full_reads(
+def test_maker_calibration_streams_many_events_without_full_table_reads(
     tmp_path, monkeypatch, record_testsuite_property
 ):
     from contextlib import nullcontext

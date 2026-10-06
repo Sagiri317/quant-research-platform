@@ -110,7 +110,7 @@ def test_shared_path_move_is_fail_if_destination_exists(
 
 
 def test_write_and_scratch_owners_reject_aliased_parent_before_access(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path,
 ) -> None:
     target = tmp_path / "target"
     identity.filesystem_mkdir(target)

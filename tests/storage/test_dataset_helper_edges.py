@@ -64,9 +64,7 @@ def _discovered_paths(data_root: Path, *, spec: dict[str, object]) -> list[Path]
     return list(inventory.paths)
 
 
-def test_exact_key_index_classifies_typed_exact_duplicates_and_conflicts(
-    tmp_path: Path,
-) -> None:
+def test_exact_key_index_classifies_typed_exact_duplicates_and_conflicts() -> None:
     table = pa.table(
         {
             "asset_id": pa.array(["a", "a", "b"], type=pa.string()),
@@ -129,7 +127,7 @@ def test_exact_key_index_classifies_typed_exact_duplicates_and_conflicts(
     ),
 )
 def test_exact_key_classifier_validates_comparison_columns(
-    tmp_path: Path, namespace: str, value_columns: tuple[str, ...], error: str
+    namespace: str, value_columns: tuple[str, ...], error: str
 ) -> None:
     table = pa.table(
         {
@@ -144,7 +142,7 @@ def test_exact_key_classifier_validates_comparison_columns(
         )
 
 
-def test_exact_key_classifier_batches_large_duplicate_group(tmp_path: Path) -> None:
+def test_exact_key_classifier_batches_large_duplicate_group() -> None:
     table = pa.table({"asset_id": ["same"] * 4096})
     index = ExactPrimaryKeyIndex(primary_key=("asset_id",))
     keep, duplicate_count = index.classify_comparison_table(
@@ -575,9 +573,7 @@ def test_low_level_fixture_requires_explicit_primary_key(tmp_path: Path) -> None
         )
 
 
-def test_exact_key_index_stores_primary_keys_once_and_category_values_only(
-    tmp_path: Path,
-) -> None:
+def test_exact_key_index_stores_primary_keys_once_and_category_values_only() -> None:
     index = ExactPrimaryKeyIndex(primary_key=("asset_id",))
     index.add_table(pa.table({"asset_id": ["a", "b"]}))
     dataset_rows = sorted(index._namespaces["dataset"].items())
@@ -592,7 +588,7 @@ def test_exact_key_index_stores_primary_keys_once_and_category_values_only(
     ) == [b"value-a", b"value-b"]
 
 
-def test_exact_key_index_compares_persisted_row_values(tmp_path: Path) -> None:
+def test_exact_key_index_compares_persisted_row_values() -> None:
     left = pa.table(
         {
             "asset_id": ["a", "b", "d"],
@@ -692,9 +688,7 @@ def _nested_float_zero_array(case: str) -> pa.Array:
         "recursive",
     ),
 )
-def test_nested_float_primary_key_zero_keeps_bit_identity(
-    tmp_path: Path, case: str
-) -> None:
+def test_nested_float_primary_key_zero_keeps_bit_identity(case: str) -> None:
     table = pa.Table.from_arrays([_nested_float_zero_array(case)], names=("key",))
     index = ExactPrimaryKeyIndex(primary_key=("key",))
     assert index.add_table(table, namespace="writer") == 0
@@ -720,7 +714,7 @@ def test_top_level_float_primary_key_fingerprint_rejects_unsupported_width(
 
 @pytest.mark.parametrize("nonfinite", (float("nan"), float("inf")))
 def test_nested_primary_key_nonfinite_rejects_but_nested_value_allows(
-    tmp_path: Path, nonfinite: float
+    nonfinite: float,
 ) -> None:
     nested = pa.array([[nonfinite]], type=pa.list_(pa.float64()))
     index = ExactPrimaryKeyIndex(primary_key=("key",))
@@ -737,9 +731,7 @@ def test_nested_primary_key_nonfinite_rejects_but_nested_value_allows(
     )
 
 
-def test_exact_comparison_primary_key_only_projection_has_empty_value(
-    tmp_path: Path,
-) -> None:
+def test_exact_comparison_primary_key_only_projection_has_empty_value() -> None:
     index = ExactPrimaryKeyIndex(primary_key=("asset_id",))
     assert (
         index.add_comparison_table(
@@ -782,9 +774,7 @@ def test_dataset_comparison_failure_summary_does_not_expose_local_path(
     assert comparison.summary == {"error": "dataset_inspection_failed"}
 
 
-def test_exact_index_preserves_decimal_values_beyond_context_precision(
-    tmp_path: Path,
-) -> None:
+def test_exact_index_preserves_decimal_values_beyond_context_precision() -> None:
     schema = pa.schema([pa.field("key", pa.decimal128(38, 0))])
     first = Decimal("12345678901234567890123456789012345678")
     second = Decimal("12345678901234567890123456789012345679")
@@ -793,7 +783,7 @@ def test_exact_index_preserves_decimal_values_beyond_context_precision(
     assert index.add_table(pa.table({"key": [second]})) == 0
 
 
-def test_write_stats_rejects_invalid_non_null_timestamp(tmp_path: Path) -> None:
+def test_write_stats_rejects_invalid_non_null_timestamp() -> None:
     spec = make_processed_dataset_spec("storage_demo", market_id="dummy")
     tracker = ExactPrimaryKeyIndex(primary_key=spec.primary_key)
     inventory = DatasetSessionInventory(data_root=Path("data"))

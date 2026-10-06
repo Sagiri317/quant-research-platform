@@ -1098,7 +1098,6 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     process = psutil.Process(os.getpid())
     market_metadata: dict[str, dict[str, dict[str, Any]]] = {}
     duration_reached = False
-    cleanup_errors: list[str] = []
     files: list[dict[str, Any]] = []
     with _writer_lifecycle(writer, files, capture_stats=stats):
         market_metadata = _record_market_metadata(
@@ -1156,7 +1155,6 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                     reader.join(timeout=20)
                     if reader.is_alive():
                         join_failed = True
-                        cleanup_errors.append(f"{reader.name}:join_timeout")
                 except BaseException as cleanup_error:
                     join_failed = True
                     if active_primary is not None:
@@ -1165,7 +1163,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                             f"{type(cleanup_error).__name__}"
                         )
                     else:
-                        cleanup_errors.append(type(cleanup_error).__name__)
+                        active_primary = cleanup_error
             for reader in readers:
                 if reader.failure is not None and reader.failure is not active_primary:
                     if active_primary is None:
@@ -1176,18 +1174,16 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                             + type(reader.failure).__name__
                         )
             if join_failed:
+                if active_primary is None:
+                    active_primary = _ReaderQuiescenceFailure(
+                        "binance_recorder_reader_quiescence_timeout"
+                    )
                 try:
                     writer.abort()
                 except BaseException as cleanup_error:
-                    if active_primary is None:
-                        raise
                     active_primary.add_note(
                         "Binance run writer abort also failed: "
                         f"{type(cleanup_error).__name__}"
-                    )
-                if active_primary is None:
-                    raise _ReaderQuiescenceFailure(
-                        "binance_recorder_reader_quiescence_timeout"
                     )
             if sys.exception() is None and active_primary is not None:
                 raise active_primary
@@ -1207,9 +1203,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
         )
     ]
     status = (
-        "FAIL"
-        if cleanup_errors
-        else "PARTIAL"
+        "PARTIAL"
         if captured["connection_errors"]
         or any(captured["reconnects"].values())
         or captured["sequence_gaps"]
@@ -1241,7 +1235,6 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
             "process_cpu_seconds": max(0.0, time.process_time() - cpu_start),
             "threads": len(readers),
             "descendants": len(process.children(recursive=True)),
-            "cleanup_errors": cleanup_errors,
         },
     }
     atomic_write_json(root / "run.json", manifest)

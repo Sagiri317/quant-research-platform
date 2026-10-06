@@ -71,9 +71,7 @@ def test_exact_primary_key_index_retains_exact_native_semantics():
     assert numeric.add_table(pa.table({"value": [0.0]})) == 1
 
 
-def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk(
-    tmp_path: Path,
-) -> None:
+def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk() -> None:
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     index = module.ExactPrimaryKeyIndex(primary_key=("key",))
     assert (
@@ -92,9 +90,7 @@ def test_exact_key_index_inserts_unique_rows_from_duplicate_chunk(
     )
 
 
-def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
-    tmp_path: Path,
-) -> None:
+def test_exact_primary_key_index_uses_target_arrow_scalar_semantics() -> None:
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     numeric = module.ExactPrimaryKeyIndex(
         primary_key=("key",), key_schema=pa.schema([pa.field("key", pa.float64())])
@@ -176,9 +172,7 @@ def test_exact_primary_key_index_uses_target_arrow_scalar_semantics(
     )
 
 
-def test_exact_primary_key_accepts_timestamp_outside_nanosecond_range(
-    tmp_path: Path,
-) -> None:
+def test_exact_primary_key_accepts_timestamp_outside_nanosecond_range() -> None:
     module = importlib.import_module("quant_research_platform.storage.exact_keys")
     out_of_nanosecond_range = 32503680000
     timestamp_type = pa.timestamp("s", tz="UTC")

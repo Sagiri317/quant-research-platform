@@ -745,9 +745,7 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
         assert cancel and str(error) == "cancel_native_scan"
 
 
-def test_archive_tail_spooling_batches_raw_io_and_preserves_replay(
-    tmp_path, monkeypatch
-):
+def test_archive_tail_batches_raw_io_and_preserves_replay(tmp_path, monkeypatch):
     from collections import Counter
     from functools import partial
 

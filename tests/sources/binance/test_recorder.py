@@ -922,7 +922,6 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
     assert recovered_recorded.is_set()
     assert result["status"] == "PARTIAL"
     assert result["capture"]["sequence_gaps"] == 0
-    assert result["capture"]["cleanup_errors"] == []
     assert connections == {"BTCUSDT": 2, "ETHUSDT": 1}
     assert snapshots == connections
     assert all(socket.closed.is_set() for socket in sockets)
@@ -1080,4 +1079,75 @@ def test_recorder_preserves_reader_business_exception(
     assert raised.value is primary
     assert readers and all(not reader.is_alive() for reader in readers)
     assert all(reader.failure is primary for reader in readers)
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("error_type", [KeyboardInterrupt, MemoryError, GeneratorExit])
+@pytest.mark.parametrize("abort_fails", [False, True])
+def test_join_primary_survives_all_reader_cleanup_and_abort(
+    tmp_path, monkeypatch, error_type, abort_fails
+):
+    primary = error_type("join-primary")
+    readers = []
+    joined = []
+    aborted = []
+    streams = RECORDER_STREAMS_BY_SCOPE["futures-hft"]
+
+    class Reader:
+        def __init__(self, **kwargs):
+            self.name = f"reader-{len(readers)}"
+            self.stream = kwargs["stream"]
+            self.stop = kwargs["stop"]
+            self.ready = threading.Event()
+            self.failure = None
+            self.alive = True
+            readers.append(self)
+
+        def start(self):
+            self.ready.set()
+
+        def is_alive(self):
+            return self.alive
+
+        def join(self, timeout):
+            assert timeout == 20
+            assert self.stop.is_set()
+            joined.append(self)
+            self.alive = False
+            if self is readers[0]:
+                raise primary
+            if self is readers[-1]:
+                self.failure = ValueError("late-reader-secondary")
+            raise OSError("join-secondary")
+
+    original_abort = recorder._RunWriter.abort
+
+    def abort(writer):
+        aborted.append(True)
+        original_abort(writer)
+        if abort_fails:
+            raise OSError("abort-secondary")
+
+    monkeypatch.setattr(recorder, "_StreamReader", Reader)
+    monkeypatch.setattr(recorder._RunWriter, "abort", abort)
+    monkeypatch.setattr(
+        recorder,
+        "_record_market_metadata",
+        lambda *_a, **_k: {
+            stream.symbol: {stream.market_type: {"tick_size": "0.1"}}
+            for stream in streams
+        },
+    )
+    output = tmp_path / "run"
+    with pytest.raises(error_type) as raised:
+        recorder.record(RecorderConfig(output, duration_seconds=0.001))
+    assert raised.value is primary
+    assert len(readers) == len(streams) > 1
+    assert joined == readers
+    assert aborted == [True]
+    assert primary.__notes__ == [
+        *["Binance reader join also failed: OSError"] * (len(readers) - 1),
+        "Binance reader also failed: ValueError",
+        *(["Binance run writer abort also failed: OSError"] if abort_fails else []),
+    ]
     assert not output.exists()
