@@ -28,10 +28,12 @@ from quant_research_platform.sources.binance.validation import (
     strict_positive_float,
 )
 from quant_research_platform.storage.identity import (
+    _hash_file_content,
     dataset_file_identity,
     filesystem_is_file,
     open_filesystem_file,
     require_unaliased_path,
+    verified_file_handle,
 )
 from quant_research_platform.storage.manifests import read_manifest
 from quant_research_platform.storage.raw_snapshots import (
@@ -105,8 +107,8 @@ def _settlement_response(raw, *, source_id, symbol, start_ms, end_ms, request_li
                 if row.get("slug") != asset.lower():
                     raise ValueError("binance_funding_settlement_identity_invalid")
                 selected.append(row)
-        # Bracketing settlement facts prove a historical interval independently
-        # of a server refresh timestamp or a caller's claim of completeness.
+        # Require actual settlements on both sides; this is not a supplier
+        # guarantee that the interval contains every historical settlement.
         if (
             not selected
             or strict_iso_timestamp(
@@ -216,6 +218,7 @@ def _manifest(root, symbol):
     ):
         raise PortfolioTargetBlocked("binance_funding_coverage_unproven")
     native = metadata["settlement_source"]
+    events = original_identity = None
     if native is not None:
         if (
             type(native) is not dict
@@ -255,34 +258,34 @@ def _manifest(root, symbol):
             root.parent / "settlements.json",
             error="binance_funding_settlement_source_invalid",
         )
-        before = dataset_file_identity(path)
+        original_identity = dataset_file_identity(path)
         with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-            digest = hashlib.file_digest(handle, "sha256").hexdigest()
-            if (
-                before != dataset_file_identity(path)
-                or before.size != native["byte_count"]
-                or digest != native["sha256"]
+            with verified_file_handle(
+                path,
+                handle,
+                expected_identity=original_identity,
+                error="binance_funding_settlement_source_changed",
             ):
-                raise ValueError("binance_funding_settlement_source_changed")
-            handle.seek(0)
-            raw = handle.read(before.size + 1)
-            if len(raw) != before.size or before != dataset_file_identity(path):
-                raise ValueError("binance_funding_settlement_source_changed")
-            _events = proof = None
-            _events, proof = _settlement_response(
-                raw,
-                source_id=native["source_id"],
-                symbol=symbol,
-                start_ms=native["start_ms"],
-                end_ms=native["end_ms"],
-                request_limit=native["request_limit"],
-            )
-            if any(native[key] != value for key, value in proof.items()):
-                raise ValueError("binance_funding_settlement_source_invalid")
-    return manifest
+                raw = handle.read(original_identity.size + 1)
+                if (
+                    len(raw) != native["byte_count"]
+                    or hashlib.sha256(raw).hexdigest() != native["sha256"]
+                ):
+                    raise ValueError("binance_funding_settlement_source_changed")
+                events, proof = _settlement_response(
+                    raw,
+                    source_id=native["source_id"],
+                    symbol=symbol,
+                    start_ms=native["start_ms"],
+                    end_ms=native["end_ms"],
+                    request_limit=native["request_limit"],
+                )
+                if any(native[key] != value for key, value in proof.items()):
+                    raise ValueError("binance_funding_settlement_source_invalid")
+    return manifest, events, original_identity
 
 
-def _records(root, manifest):
+def _records(root, manifest, *, settlements):
     previous = {"settlement": -1, "forecast": -1}
     settlement_count = 0
     rows = iter_csv_snapshot(
@@ -308,6 +311,13 @@ def _records(root, manifest):
                     raise ValueError("binance_funding_settlement_invalid")
                 settlement_count += 1
                 _yield_value = FundingEvent(timestamp, rate, mark)
+                if settlements is not None:
+                    if settlement_count > len(settlements):
+                        raise ValueError("binance_funding_settlement_count_invalid")
+                    if _yield_value != settlements[settlement_count - 1]:
+                        raise ValueError(
+                            "binance_funding_settlement_projection_invalid"
+                        )
                 try:
                     yield _yield_value
                 except GeneratorExit:
@@ -342,23 +352,46 @@ def read_funding_observations(funding_roots, *, symbol):
     coverage = []
     for value in funding_roots:
         root = Path(value)
-        manifest = _manifest(root, symbol)
+        manifest, settlements, original_identity = _manifest(root, symbol)
         interval = manifest["metadata"]["coverage"]
         start, end = interval["start_ns"], interval["end_ns"]
         if coverage and start <= coverage[-1][1]:
             raise ValueError("binance_funding_source_intervals_invalid")
         coverage.append((start, end))
-        sources.append((root, canonical_json_hash(manifest)))
+        sources.append(
+            (
+                root,
+                canonical_json_hash(manifest),
+                manifest,
+                settlements,
+                original_identity,
+            )
+        )
         del manifest, interval
     identity = canonical_json_hash({"sources": [item[1] for item in sources]})
 
+    def verify(root, expected, manifest, original_identity, *, content=False):
+        if (
+            canonical_json_hash(read_manifest(root / "response.metadata.json"))
+            != expected
+        ):
+            raise ValueError("binance_funding_identity_changed")
+        if original_identity is not None:
+            path = root.parent / "settlements.json"
+            if dataset_file_identity(path) != original_identity or (
+                content
+                and _hash_file_content(
+                    path, original_identity, "binance_funding_settlement_source_changed"
+                )
+                != manifest["metadata"]["settlement_source"]["sha256"]
+            ):
+                raise ValueError("binance_funding_settlement_source_changed")
+
     def records():
         previous = {FundingEvent: -1, FundingForecast: -1}
-        for root, expected in sources:
-            manifest = _manifest(root, symbol)
-            if canonical_json_hash(manifest) != expected:
-                raise ValueError("binance_funding_identity_changed")
-            rows = _records(root, manifest)
+        for root, expected, manifest, settlements, original_identity in sources:
+            verify(root, expected, manifest, original_identity)
+            rows = _records(root, manifest, settlements=settlements)
             with closing_iterator(rows):
                 for item in rows:
                     kind = type(item)
@@ -374,8 +407,7 @@ def read_funding_observations(funding_roots, *, symbol):
                         yield item
                     except GeneratorExit:
                         return
-            if canonical_json_hash(_manifest(root, symbol)) != expected:
-                raise ValueError("binance_funding_identity_changed")
+            verify(root, expected, manifest, original_identity)
 
     events = []
     with closing_iterator(records()) as rows:
@@ -402,6 +434,8 @@ def read_funding_observations(funding_roots, *, symbol):
             with closing_iterator(records()) as rows:
                 for _item in rows:
                     pass
+            for root, expected, manifest, _settlements, original_identity in sources:
+                verify(root, expected, manifest, original_identity, content=True)
         except BaseException as error:
             if primary is None:
                 raise

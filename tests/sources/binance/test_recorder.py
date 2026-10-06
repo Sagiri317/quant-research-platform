@@ -7,6 +7,8 @@ import os
 import subprocess
 import sys
 import threading
+import time
+from dataclasses import replace
 from pathlib import Path
 
 import pytest
@@ -486,6 +488,10 @@ def test_connection_stats_close_failure_still_closes_websocket(
     class Websocket:
         closed = False
 
+        def recv(self, timeout):
+            reader.stop.set()
+            raise TimeoutError
+
         def close(self) -> None:
             self.closed = True
 
@@ -507,7 +513,6 @@ def test_connection_stats_close_failure_still_closes_websocket(
         config=RecorderConfig(tmp_path / "run", 1),
         tick_size="0.1",
     )
-    reader.stop.set()
     with pytest.raises(OSError, match="stats-close-primary"):
         reader._read_connection(reconnect=False)
     assert websocket.closed
@@ -623,8 +628,220 @@ def test_capture_stats_streams_finalized_intervals_to_sidecar(tmp_path: Path) ->
 
 
 @pytest.mark.parametrize(
-    "join_completes,late_failure", [(False, False), (True, False), (True, True)]
+    "phase,interrupt_join",
+    (
+        ("reconnect_handshake", False),
+        ("snapshot_headers", False),
+        ("snapshot_body", False),
+        ("snapshot_headers", True),
+    ),
 )
+def test_real_recorder_stops_owned_network_and_joins_before_return(
+    tmp_path, monkeypatch, phase, interrupt_join
+):
+    from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+
+    from websockets.sync.client import ClientConnection
+    from websockets.sync.server import serve
+
+    release = threading.Event()
+    entered = threading.Event()
+    server_threads = []
+    readers = []
+    clients = []
+    connections = []
+    handshakes = []
+    original_reader = recorder._StreamReader
+    original_join = original_reader.join
+    join_interruptions = []
+
+    def join_reader(reader, timeout=None):
+        if interrupt_join and timeout is None and not join_interruptions:
+            join_interruptions.append(True)
+            raise KeyboardInterrupt("join interrupted")
+        return original_join(reader, timeout)
+
+    monkeypatch.setattr(original_reader, "join", join_reader)
+
+    def make_reader(**kwargs):
+        reader = original_reader(**kwargs)
+        readers.append(reader)
+        return reader
+
+    def make_connection(*args, **kwargs):
+        client = ClientConnection(*args, **kwargs)
+        clients.append(client)
+        return client
+
+    def request_gate(connection, request):
+        del connection, request
+        server_threads.append(threading.current_thread())
+        handshakes.append(True)
+        if phase == "reconnect_handshake" and len(handshakes) == 2:
+            entered.set()
+            assert release.wait(80)
+
+    def websocket_handler(connection):
+        connections.append(connection)
+        if phase == "reconnect_handshake":
+            connection.close()
+        else:
+            release.wait(80)
+
+    class SnapshotHandler(BaseHTTPRequestHandler):
+        def log_message(self, *_args):
+            pass
+
+        def do_GET(self):
+            server_threads.append(threading.current_thread())
+            entered.set()
+            try:
+                if phase == "snapshot_headers":
+                    # No response bytes: cancellation must reach the active socket.
+                    release.wait(80)
+                else:
+                    self.send_response(200)
+                    self.send_header("Content-Type", "application/json")
+                    self.send_header("Content-Length", "1000000")
+                    self.end_headers()
+                    while not release.wait(0.02):
+                        self.wfile.write(b" ")
+                        self.wfile.flush()
+            except (BrokenPipeError, ConnectionResetError):
+                pass
+
+    http_server = ThreadingHTTPServer(("127.0.0.1", 0), SnapshotHandler)
+    http_thread = threading.Thread(target=http_server.serve_forever)
+    http_thread.start()
+    with serve(
+        websocket_handler, "127.0.0.1", 0, process_request=request_gate, open_timeout=60
+    ) as websocket_server:
+        websocket_thread = threading.Thread(target=websocket_server.serve_forever)
+        websocket_thread.start()
+        original_stream = FUTURES_STREAMS[1 if phase == "reconnect_handshake" else 0]
+        stream = replace(
+            original_stream,
+            url=f"ws://127.0.0.1:{websocket_server.socket.getsockname()[1]}/stream",
+        )
+        monkeypatch.setitem(
+            recorder.RECORDER_STREAMS_BY_SCOPE, "futures-hft", (stream,)
+        )
+        monkeypatch.setattr(recorder, "_StreamReader", make_reader)
+        monkeypatch.setattr(
+            recorder, "ClientConnection", make_connection, raising=False
+        )
+        monkeypatch.setattr(
+            recorder,
+            "FUTURES_REST_BASE_URL",
+            f"http://127.0.0.1:{http_server.server_port}",
+        )
+        monkeypatch.setattr(
+            recorder,
+            "_record_market_metadata",
+            lambda *_a, **_k: {
+                stream.symbol: {stream.market_type: {"tick_size": "0.1"}}
+            },
+        )
+        output = tmp_path / "run"
+        started = time.monotonic()
+        returned_readers = []
+        try:
+            configuration = RecorderConfig(
+                output,
+                duration_seconds=1.3,
+                connect_timeout_seconds=60 if phase == "reconnect_handshake" else 0.5,
+            )
+            if phase == "reconnect_handshake":
+                result = recorder.record(configuration)
+                assert result["status"] == "PARTIAL"
+                assert (
+                    json.loads((output / "run.json").read_text(encoding="utf-8"))
+                    == result
+                )
+            else:
+                with pytest.raises(
+                    TimeoutError,
+                    match="^binance_recorder_stream_connect_timeout(?:\n|$)",
+                ) as raised:
+                    recorder.record(configuration)
+                assert str(raised.value) == "binance_recorder_stream_connect_timeout"
+                if interrupt_join:
+                    assert raised.value.__notes__ == [
+                        "Binance reader join also failed: KeyboardInterrupt"
+                    ]
+                assert not output.exists()
+            returned_readers = [reader for reader in readers if reader.is_alive()]
+            assert entered.is_set()
+            assert not returned_readers
+            assert time.monotonic() - started < 5
+            assert all(reader._active_websocket is None for reader in readers)
+            assert len(clients) >= (2 if phase == "reconnect_handshake" else 1)
+            assert all(not client.recv_events_thread.is_alive() for client in clients)
+            assert all(
+                client.keepalive_thread is None
+                or not client.keepalive_thread.is_alive()
+                for client in clients
+            )
+        finally:
+            release.set()
+            for connection in connections:
+                connection.close()
+            websocket_server.shutdown()
+            websocket_thread.join(3)
+            http_server.shutdown()
+            http_thread.join(3)
+            http_server.server_close()
+            for thread in server_threads:
+                thread.join(3)
+            for reader in readers:
+                reader.stop.set()
+                reader.join(3)
+            assert not websocket_thread.is_alive() and not http_thread.is_alive()
+            assert all(not thread.is_alive() for thread in server_threads)
+            assert all(not reader.is_alive() for reader in readers)
+
+
+def test_recorder_start_failure_joins_only_started_native_threads(
+    tmp_path, monkeypatch
+):
+    readers = []
+    primary = OSError("thread start failed")
+
+    class Reader(recorder._StreamReader):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            readers.append(self)
+
+        def start(self):
+            if self is readers[1]:
+                raise primary
+            super().start()
+
+        def _run_stream(self):
+            self.ready.set()
+            self.stop.wait()
+
+    streams = RECORDER_STREAMS_BY_SCOPE["futures-hft"][:2]
+    monkeypatch.setitem(recorder.RECORDER_STREAMS_BY_SCOPE, "futures-hft", streams)
+    monkeypatch.setattr(recorder, "_StreamReader", Reader)
+    monkeypatch.setattr(
+        recorder,
+        "_record_market_metadata",
+        lambda *_a, **_k: {
+            stream.symbol: {stream.market_type: {"tick_size": "0.1"}}
+            for stream in streams
+        },
+    )
+    output = tmp_path / "run"
+    with pytest.raises(OSError, match="^thread start failed$") as raised:
+        recorder.record(RecorderConfig(output, duration_seconds=0.001))
+    assert raised.value is primary
+    assert readers[0].finished.is_set() and not readers[0].is_alive()
+    assert readers[1].ident is None and not readers[1].is_alive()
+    assert not output.exists()
+
+
+@pytest.mark.parametrize("join_completes,late_failure", [(True, False), (True, True)])
 def test_recorder_publishes_only_after_reader_and_writer_completion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -639,11 +856,15 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
             self.name = "fake-reader"
             self.stream = kwargs["stream"]
             self.ready = threading.Event()
+            self.finished = threading.Event()
             self.failure = None
             self.alive = True
 
         def start(self) -> None:
             self.ready.set()
+
+        def cancel(self):
+            self.finished.set()
 
         def is_alive(self) -> bool:
             return self.alive
@@ -700,10 +921,6 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
         assert descriptor["record_count"] == 0
         with gzip.open(sidecar, "rb") as handle:
             assert handle.read() == b""
-    else:
-        with pytest.raises(RuntimeError, match="quiescence_timeout"):
-            recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
-        assert not output_root.exists()
 
 
 def test_recorder_abort_failure_preserves_reader_failure(
@@ -717,16 +934,23 @@ def test_recorder_abort_failure_preserves_reader_failure(
             self.name = "fake-reader"
             self.stream = kwargs["stream"]
             self.ready = threading.Event()
+            self.finished = threading.Event()
             self.failure = RuntimeError("reader_failure")
+            self.alive = True
 
         def start(self) -> None:
             self.ready.set()
 
+        def cancel(self):
+            self.finished.set()
+
         def is_alive(self) -> bool:
-            return True
+            return self.alive
 
         def join(self, timeout: float) -> None:
             del timeout
+            self.alive = False
+            raise OSError("join-secondary")
 
     def abort(_writer: object) -> None:
         raise OSError("abort-secondary")
@@ -836,7 +1060,7 @@ def test_recorder_recovers_exhausted_known_depth_with_new_connection_and_snapsho
     )
     monkeypatch.setattr(recorder._RunWriter, "write", write)
 
-    def http(_base, endpoint, *, params=None):
+    def http(_base, endpoint, *, params=None, **_kwargs):
         if endpoint.endswith("exchangeInfo"):
             payload = {
                 "symbols": [
@@ -1099,6 +1323,7 @@ def test_join_primary_survives_all_reader_cleanup_and_abort(
             self.stream = kwargs["stream"]
             self.stop = kwargs["stop"]
             self.ready = threading.Event()
+            self.finished = threading.Event()
             self.failure = None
             self.alive = True
             readers.append(self)
@@ -1106,11 +1331,14 @@ def test_join_primary_survives_all_reader_cleanup_and_abort(
         def start(self):
             self.ready.set()
 
+        def cancel(self):
+            self.finished.set()
+
         def is_alive(self):
             return self.alive
 
         def join(self, timeout):
-            assert timeout == 20
+            assert timeout is None
             assert self.stop.is_set()
             joined.append(self)
             self.alive = False

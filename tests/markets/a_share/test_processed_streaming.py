@@ -696,7 +696,7 @@ def test_processed_narrow_output_uses_existing_panel_history(
     )
     expected = producer._compute_processed_frame(
         spec,
-        source={},
+        source={"trading_calendar": source["trading_calendar"]},
         dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(dates),
     )
@@ -714,6 +714,13 @@ def test_processed_narrow_output_uses_existing_panel_history(
         panel,
         spec=panel_spec,
     )
+    for data_id in spec.source_input_data_ids:
+        source_spec = profile.interim.get(data_id)
+        write_dataset(
+            layout.interim_data_root(source_spec.source_id, data_id),
+            source[data_id],
+            spec=source_spec,
+        )
     input_sessions = []
     compute = producer._compute_processed_frame
 
@@ -723,7 +730,23 @@ def test_processed_narrow_output_uses_existing_panel_history(
         )
         return compute(spec, **kwargs)
 
-    monkeypatch.setattr(producer, "_compute_processed_frame", observed)
+    if target == "market_model_factors":
+        market_model_frames = producer.factor_engine._market_model_frames
+
+        def observed_market_models(panels, **kwargs):
+            def observed_panels():
+                for panel in panels:
+                    input_sessions.append(panel.timestamp.nunique())
+                    yield panel
+
+            yield from market_model_frames(observed_panels(), **kwargs)
+
+        monkeypatch.setattr(
+            producer.factor_engine, "_market_model_frames", observed_market_models
+        )
+        monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 300)
+    else:
+        monkeypatch.setattr(producer, "_compute_processed_frame", observed)
     root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
     with producer.produce_a_share_processed_data(
         spec,
@@ -752,7 +775,9 @@ def test_processed_narrow_output_uses_existing_panel_history(
             if definition.output_column in spec.required_columns
         )
     )
-    assert input_sessions and max(input_sessions) <= lookback + len(core)
+    assert input_sessions and max(input_sessions) <= (
+        100 if target == "market_model_factors" else lookback + len(core)
+    )
     assert max(input_sessions) < len(dates)
 
 

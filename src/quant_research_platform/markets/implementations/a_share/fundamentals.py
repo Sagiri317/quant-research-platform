@@ -290,7 +290,10 @@ def construct_ttm_events(
                         if dependency is not None:
                             dependents.setdefault(dependency, set()).add(period)
                 known[period] = (
-                    None if pd.isna(row[value_column]) else float(row[value_column])
+                    None
+                    if pd.isna(row[value_column])
+                    or (metric_id == "capex_cash_paid" and row[value_column] < 0)
+                    else float(row[value_column])
                 )
             for position, row in available.iterrows():
                 result.loc[position, "ttm_value"] = _ttm_value(

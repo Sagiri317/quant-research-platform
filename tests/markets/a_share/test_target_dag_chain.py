@@ -168,6 +168,142 @@ def test_fundamental_pit_and_factors_reach_the_same_target_dag(tmp_path: Path) -
     assert output["model_target"].notna().any()
 
 
+@pytest.mark.parametrize("negative_component", ("current_ytd", "prior_fy", "prior_ytd"))
+def test_negative_source_capex_propagates_through_native_pit_and_factor_revision(
+    tmp_path, monkeypatch, negative_component
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+
+    sessions = pd.bdate_range("2020-04-01", "2020-04-10").as_unit("ns")
+    frames = _synthetic_interim_frames(sessions)
+    financial = _synthetic_financial_frames()
+    periods = pd.to_datetime(["2019-03-31", "2019-12-31", "2020-03-31"])
+    for data_id in FINANCIAL_VALUE_COLUMNS:
+        financial[data_id] = (
+            financial[data_id]
+            .loc[financial[data_id].report_period.isin(periods)]
+            .copy()
+        )
+    financial["financial_balance"]["total_assets"] = 100.0
+    cash = financial["financial_cashflow"]
+    components = {
+        "prior_ytd": (periods[0], 10.0),
+        "prior_fy": (periods[1], 100.0),
+        "current_ytd": (
+            periods[2],
+            100.0 if negative_component == "prior_fy" else 10.0,
+        ),
+    }
+    for period, value in components.values():
+        cash.loc[cash.report_period.eq(period), "capex_cash_paid"] = value
+    for period, value in zip(periods, (-10.0, -30.0, -20.0), strict=True):
+        cash.loc[cash.report_period.eq(period), "operating_cash_flow"] = value
+    bad_period, _value = components[negative_component]
+    cash.loc[cash.report_period.eq(bad_period), "capex_cash_paid"] = -5.0
+    revision = cash.loc[cash.report_period.eq(bad_period)].copy()
+    restored_value = 100.0 if negative_component == "prior_fy" else 15.0
+    revision["capex_cash_paid"] = restored_value
+    revision["is_corrected"] = True
+    revision["correction_disclosure_date"] = pd.Timestamp("2020-04-06")
+    revision["version_identity"] = "correction@2020-04-06"
+    financial["financial_cashflow"] = pd.concat((cash, revision), ignore_index=True)
+    disclosures = financial["financial_first_disclosure"]
+    disclosures = disclosures.loc[disclosures.report_period.isin(periods)].copy()
+    for period, disclosed in zip(
+        periods, ("2019-04-20", "2020-01-20", "2020-04-02"), strict=True
+    ):
+        disclosures.loc[
+            disclosures.report_period.eq(period), "first_disclosure_date"
+        ] = pd.Timestamp(disclosed)
+    financial["financial_first_disclosure"] = disclosures
+    frames.update(financial)
+    profile = _windowed_source_profile(frames, [])
+    layout = StorageLayout(tmp_path)
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 6)
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=tmp_path / "synthetic-raw",
+        start_date="2020-04-01",
+        end_date="2020-04-10",
+        data_ids=("fundamental_factors",),
+    )
+    assert result["status"] == "COMPLETE"
+    targets = {item["target_id"]: item for item in result["target_results"]}
+
+    def restored(data_id):
+        spec = profile.processed.get(data_id)
+        return (
+            read_dataset(
+                layout.instance_root(
+                    layout.processed_data_root(spec.market_id, spec.kind, data_id),
+                    targets[data_id]["instance_identity"],
+                )
+            )
+            .sort_values(["timestamp", "asset_id"])
+            .reset_index(drop=True)
+        )
+
+    pit = restored("fundamental_pit")
+    factors = restored("fundamental_factors")
+    assert not factors.duplicated(["market_id", "asset_id", "timestamp"]).any()
+    assert len(factors) == 3 * len(sessions)
+    assert factors.timestamp.dtype == np.dtype("datetime64[ns]")
+    assert factors.capex_to_assets.dtype == np.dtype("float64")
+    invalid = factors.timestamp.between("2020-04-03", "2020-04-06")
+    assert factors.loc[invalid, "capex_to_assets"].isna().all()
+    assert (
+        pit.loc[
+            pit.timestamp.between("2020-04-03", "2020-04-06"), "capex_cash_paid_ttm"
+        ]
+        .isna()
+        .all()
+    )
+    expected_ttm = {"current_ytd": 105.0, "prior_fy": 190.0, "prior_ytd": 95.0}[
+        negative_component
+    ]
+    assert (
+        pit.loc[pit.timestamp.ge("2020-04-07"), "capex_cash_paid_ttm"]
+        .eq(expected_ttm)
+        .all()
+    )
+    assert (
+        factors.loc[factors.timestamp.ge("2020-04-07"), "capex_to_assets"]
+        .eq(expected_ttm / 100)
+        .all()
+    )
+    assert (
+        factors.loc[factors.timestamp.ge("2020-04-03"), "cfo_to_assets"].eq(-0.4).all()
+    )
+    if negative_component != "prior_fy":
+        assert (
+            pit.loc[pit.timestamp.lt("2020-04-03"), "capex_cash_paid_ttm"]
+            .eq(100.0)
+            .all()
+        )
+    raw_spec = profile.interim.get("financial_cashflow")
+    evidence = read_dataset(
+        layout.instance_root(
+            layout.interim_data_root(raw_spec.source_id, raw_spec.data_id),
+            targets[raw_spec.data_id]["instance_identity"],
+        )
+    )
+    assert (
+        evidence.loc[
+            evidence.version_identity.eq("original")
+            & evidence.report_period.eq(bad_period),
+            "capex_cash_paid",
+        ]
+        .eq(-5.0)
+        .all()
+    )
+    assert (
+        evidence.loc[evidence.is_corrected, "capex_cash_paid"].eq(restored_value).all()
+    )
+
+
 def _synthetic_financial_frames() -> dict[str, pd.DataFrame]:
     assets = ("000001", "000002", "000003")
     periods = pd.to_datetime(
@@ -883,6 +1019,278 @@ def test_public_panel_keeps_calendar_endpoints_without_market_bars(
     missing_rows = saved.loc[saved.timestamp.eq(dates[missing])]
     assert len(missing_rows) == 3
     assert missing_rows[["close", "adj_close", "is_trading"]].isna().all().all()
+
+
+@pytest.mark.parametrize("block_rows", [300, 65536])
+@pytest.mark.parametrize("known_closed", [False, True])
+def test_market_model_keeps_only_known_closed_history_and_aligned_returns(
+    tmp_path, monkeypatch, block_rows, known_closed
+):
+    from fractions import Fraction
+
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.research.filtering import a_share_eligibility
+
+    dates = pd.bdate_range("2020-01-02", periods=650).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    for data_id in ("stock_master", "stock_info_annual"):
+        frames[data_id]["listing_date"] = dates[0]
+    bars = frames["market_bars_1d"]
+    for position, asset in enumerate(("000001", "000002", "000003")):
+        mask = bars.source_asset_id.eq(asset)
+        returns = 0.01 * np.sin(np.arange(650) * 0.23 + position) + 0.003 * np.cos(
+            np.arange(650) * 0.13 + position
+        )
+        if asset == "000001" and known_closed:
+            returns[640] = 0.0
+        prices = (20.0 + position) * np.cumprod(1.0 + returns)
+        for column in ("open", "close", "adj_open", "adj_close"):
+            bars.loc[mask, column] = prices
+        bars.loc[mask, "high"] = prices + 0.5
+        bars.loc[mask, "low"] = prices - 0.5
+        bars.loc[mask, "period_return"] = returns
+        bars.loc[mask, "amount"] = prices * 100.0
+        if asset != "000001":
+            bars.loc[mask, "market_type"] = 4
+    missing = bars.source_asset_id.eq("000001") & bars.timestamp.eq(dates[640])
+    if known_closed:
+        bars.loc[missing, "filling_flag"] = 2
+    else:
+        frames["market_bars_1d"] = bars.loc[~missing].copy()
+    calendar = frames["trading_calendar"]
+    other = calendar.assign(source_market_type=4)
+    if known_closed:
+        calendar.loc[calendar.calendar_date.eq(dates[640]), "is_trading_day"] = False
+    frames["trading_calendar"] = pd.concat((calendar, other), ignore_index=True)
+    profile = _windowed_source_profile(frames, [])
+    layout = StorageLayout(tmp_path)
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=tmp_path / "raw",
+        start_date=str(dates[0].date()),
+        end_date=str(dates[-1].date()),
+        data_ids=("market_panel_1d", "market_model_factors"),
+    )
+    assert result["status"] == "COMPLETE", result["blockers"]
+    targets = {item["target_id"]: item for item in result["target_results"]}
+
+    def restored(data_id):
+        spec = profile.processed.get(data_id)
+        return read_dataset(
+            layout.instance_root(
+                layout.processed_data_root(spec.market_id, spec.kind, data_id),
+                targets[data_id]["instance_identity"],
+            )
+        )
+
+    panel = restored("market_panel_1d").sort_values(["timestamp", "asset_id"])
+    factors = restored("market_model_factors").sort_values(["timestamp", "asset_id"])
+    pd.testing.assert_frame_equal(
+        factors.loc[:, ["market_id", "asset_id", "timestamp"]].reset_index(drop=True),
+        panel.loc[:, ["market_id", "asset_id", "timestamp"]].reset_index(drop=True),
+        check_exact=True,
+    )
+    actual = factors.loc[factors.asset_id.eq("000001")].set_index("timestamp")
+    assert (
+        actual.loc[dates[639], ["beta_252d", "residual_volatility_60d"]].notna().all()
+    )
+    if not known_closed:
+        assert (
+            actual.loc[dates[641], ["beta_252d", "residual_volatility_60d"]]
+            .isna()
+            .all()
+        )
+        return
+    assert dates[640] not in actual.index
+    assert (
+        actual.loc[dates[641], ["beta_252d", "residual_volatility_60d"]].notna().all()
+    )
+    previous_caps = {}
+    history, residuals = [], []
+    pending = Fraction(1)
+    expected_beta = expected_volatility = np.nan
+    for timestamp, cross in panel.groupby("timestamp", sort=False):
+        eligible = cross.loc[a_share_eligibility(cross, "pv_expanded")]
+        denominator = sum(previous_caps.get(asset, 0.0) for asset in eligible.asset_id)
+        market = (
+            sum(
+                previous_caps.get(row.asset_id, 0.0) * row.period_return
+                for row in eligible.itertuples()
+            )
+            / denominator
+            if denominator
+            else np.nan
+        )
+        stock = cross.loc[cross.asset_id.eq("000001")]
+        if stock.empty:
+            pending *= 1 + Fraction.from_float(market)
+        else:
+            interval = (
+                float(pending * (1 + Fraction.from_float(market)) - 1)
+                if np.isfinite(market)
+                else np.nan
+            )
+            pending = Fraction(1)
+            value = stock.period_return.iloc[0]
+            if np.isfinite(interval) and np.isfinite(value):
+                history.append((interval, value))
+            else:
+                history.clear()
+            residual = np.nan
+            if len(history) >= 252:
+                values = np.array(history[-252:])
+                alpha, expected_beta = np.linalg.lstsq(
+                    np.column_stack((np.ones(252), values[:, 0])),
+                    values[:, 1],
+                    rcond=None,
+                )[0]
+                residual = values[-1, 1] - alpha - expected_beta * values[-1, 0]
+            residuals.append(residual)
+            if len(residuals) >= 60:
+                expected_volatility = np.std(residuals[-60:], ddof=0)
+            if timestamp == dates[641]:
+                assert actual.loc[timestamp, "beta_252d"] == pytest.approx(
+                    expected_beta, rel=1e-12
+                )
+                assert actual.loc[
+                    timestamp, "residual_volatility_60d"
+                ] == pytest.approx(expected_volatility, rel=1e-12, abs=1e-16)
+        previous_caps.update(
+            dict(zip(cross.asset_id, cross.float_market_cap, strict=True))
+        )
+    assert actual.iloc[-1].beta_252d == pytest.approx(expected_beta, rel=1e-12)
+    assert actual.iloc[-1].residual_volatility_60d == pytest.approx(
+        expected_volatility, rel=1e-12, abs=1e-16
+    )
+
+
+@pytest.mark.parametrize("block_rows", [3, 65536])
+def test_listing_age_keeps_prior_market_sessions_in_native_narrow_panel(
+    tmp_path, monkeypatch, block_rows
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.research.filtering import a_share_eligibility
+
+    dates = pd.bdate_range("2020-01-02", periods=256).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    for data_id in ("stock_master", "stock_info_annual"):
+        frames[data_id]["listing_date"] = dates[0]
+    bars = frames["market_bars_1d"]
+    bars.loc[
+        bars.source_asset_id.eq("000001") & bars.timestamp.ge(dates[254]), "market_type"
+    ] = 4
+    moved = frames["trading_calendar"].assign(source_market_type=4)
+    moved.loc[moved.calendar_date.isin(dates[:10]), "is_trading_day"] = False
+    frames["trading_calendar"] = pd.concat(
+        (frames["trading_calendar"], moved), ignore_index=True
+    )
+    profile = _windowed_source_profile(frames, [])
+    layout = StorageLayout(tmp_path)
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=tmp_path / "raw",
+        start_date=str(dates[-4].date()),
+        end_date=str(dates[-1].date()),
+        data_ids=("market_panel_1d",),
+    )
+    assert result["status"] == "COMPLETE", result["blockers"]
+    target = next(
+        item
+        for item in result["target_results"]
+        if item["target_id"] == "market_panel_1d"
+    )
+    spec = profile.processed.get("market_panel_1d")
+    saved = (
+        read_dataset(
+            layout.instance_root(
+                layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+                target["instance_identity"],
+            )
+        )
+        .sort_values(["timestamp", "asset_id"])
+        .reset_index(drop=True)
+    )
+    moved_asset = saved.loc[saved.asset_id.eq("000001")]
+    assert moved_asset.timestamp.tolist() == dates[-4:].tolist()
+    assert moved_asset.market_type.tolist() == [1, 1, 4, 4]
+    assert moved_asset.listing_age_trading_days.tolist() == [253, 254, 255, 256]
+    assert str(moved_asset.listing_age_trading_days.dtype) == "Int64"
+    assert a_share_eligibility(moved_asset, "pv_all").all()
+    assert not saved.duplicated(["market_id", "asset_id", "timestamp"]).any()
+
+
+@pytest.mark.parametrize("block_rows", [3, 65536])
+@pytest.mark.parametrize("start_index", [0, 2])
+def test_closed_source_market_event_survives_native_projection_and_unknown_barrier(
+    tmp_path, monkeypatch, block_rows, start_index
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
+    frames = _synthetic_interim_frames(dates)
+    for data_id in ("stock_master", "stock_info_annual"):
+        frames[data_id]["listing_date"] = dates[0]
+    bars = frames["market_bars_1d"]
+    bars.loc[bars.timestamp.ge(dates[1]), "market_type"] = 4
+    bars.loc[bars.timestamp.eq(dates[1]), "filling_flag"] = 2
+    frames["market_bars_1d"] = bars.loc[bars.timestamp.ne(dates[2])].copy()
+    calendar = frames["trading_calendar"]
+    moved = calendar.assign(source_market_type=4)
+    calendar.loc[calendar.calendar_date.isin(dates[1:3]), "is_trading_day"] = False
+    moved.loc[moved.calendar_date.eq(dates[1]), "is_trading_day"] = False
+    frames["trading_calendar"] = pd.concat((calendar, moved), ignore_index=True)
+    profile = _windowed_source_profile(frames, [])
+    layout = StorageLayout(tmp_path)
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=tmp_path / "raw",
+        start_date=str(dates[start_index].date()),
+        end_date=str(dates[-1].date()),
+        data_ids=("market_panel_1d", "price_volume_facts"),
+    )
+    assert result["status"] == "COMPLETE", result["blockers"]
+    targets = {item["target_id"]: item for item in result["target_results"]}
+
+    def restored(data_id):
+        spec = profile.processed.get(data_id)
+        return (
+            read_dataset(
+                layout.instance_root(
+                    layout.processed_data_root(spec.market_id, spec.kind, data_id),
+                    targets[data_id]["instance_identity"],
+                )
+            )
+            .sort_values(["timestamp", "asset_id"])
+            .reset_index(drop=True)
+        )
+
+    panel = restored("market_panel_1d")
+    expected_dates = dates[start_index:].difference(dates[1:2])
+    assert panel.timestamp.drop_duplicates().tolist() == expected_dates.tolist()
+    assert len(panel) == 3 * len(expected_dates)
+    assert not panel.duplicated(["market_id", "asset_id", "timestamp"]).any()
+    assert panel.loc[panel.timestamp.ge(dates[2]), "market_type"].eq(4).all()
+    assert (
+        panel.loc[panel.timestamp.eq(dates[2]), ["close", "adj_close", "is_trading"]]
+        .isna()
+        .all()
+        .all()
+    )
+    factors = restored("price_volume_facts")
+    assert factors.loc[factors.timestamp.eq(dates[3]), "reversal_1d"].isna().all()
+    assert factors.loc[factors.timestamp.eq(dates[4]), "reversal_1d"].notna().all()
 
 
 @pytest.mark.parametrize("block_rows", [3, 65536])

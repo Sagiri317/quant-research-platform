@@ -205,8 +205,23 @@ def crypto_rank_case(
 
 
 @pytest.mark.parametrize("missing_rank_input", (False, True))
-def test_crypto_rank_roundtrip_and_frozen_holdout(tmp_path, missing_rank_input):
+def test_crypto_rank_roundtrip_and_frozen_holdout(
+    tmp_path, monkeypatch, missing_rank_input
+):
     case = crypto_rank_case(tmp_path, missing_rank_input=missing_rank_input)
+    from quant_research_platform.research.predictions import runner
+    from quant_research_platform.storage.datasets import reading
+
+    opened = []
+    original_open = reading.open_dataset_session
+
+    def open_session(*args, **kwargs):
+        session = original_open(*args, **kwargs)
+        opened.append(session)
+        return session
+
+    monkeypatch.setattr(reading, "open_dataset_session", open_session)
+    monkeypatch.setattr(runner, "open_dataset_session", open_session)
     for entry in case.saved.final_models:
         algorithm = entry["model_metadata"]["model_algorithm"]
         expected = (
@@ -286,6 +301,41 @@ def test_crypto_rank_roundtrip_and_frozen_holdout(tmp_path, missing_rank_input):
                     rows += len(frame)
                 assert rows == 10
     assert observed == {entry["model_id"] for entry in case.saved.final_models}
+    assert len(opened) == 1
+    opened[0].verify()
+
+
+def test_crypto_prediction_scope_rejects_native_source_change_between_models(tmp_path):
+    from quant_research_platform.storage.identity import (
+        filesystem_glob,
+        open_filesystem_file,
+    )
+
+    case = crypto_rank_case(tmp_path)
+    root = case.layout.target_root(
+        case.dataset.data_id,
+        case.layout.research_dataset_root("crypto", case.dataset.data_id),
+    )
+    with closing_iterator(
+        build_crypto_predictions(
+            layout=case.layout,
+            dataset_catalog=case.profile.research_datasets,
+            persisted_model=case.saved,
+            time_window=case.holdout,
+            access_window="holdout",
+        )
+    ) as results:
+        first = next(results)
+        with first:
+            initial = pd.concat(list(first.output_chunks), ignore_index=True)
+        assert len(initial) == 10
+        part = next(filesystem_glob(root / "data", "**/part-*.parquet"))
+        with open_filesystem_file(part, "ab") as handle:
+            handle.write(b"x")
+        second = next(results)
+        with pytest.raises(ValueError, match="^dataset_file_identity_changed$"):
+            with second:
+                list(second.output_chunks)
 
 
 def test_rank_economic_consumers_use_frozen_training_label_units(tmp_path):
@@ -483,3 +533,117 @@ def test_crypto_validation_ic_uses_declared_training_scope(tmp_path, training_as
     assert metrics["validation_mse"] == pytest.approx(
         np.mean((validation.prediction_score - validation["label"]) ** 2), abs=1e-28
     )
+
+
+@pytest.mark.parametrize("member_kind", ("validation", "model_state"))
+def test_crypto_new_reader_preserves_immutable_and_lazy_acceptance_contract(
+    tmp_path, member_kind
+):
+    import hashlib
+    import json
+    import pickle
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.storage.experiments import (
+        read_model_trial_ledger_reference,
+        research_run_trial_references,
+    )
+    from quant_research_platform.storage.identity import (
+        filesystem_read_bytes,
+        filesystem_write_bytes,
+        native_filesystem_path,
+        open_filesystem_file,
+    )
+    from quant_research_platform.storage.manifests import read_bounded_qrp_json
+    from quant_research_platform.storage.parquet import parquet_table_writer
+
+    case = crypto_rank_case(
+        tmp_path,
+        algorithms=("linear_regression",),
+        training_assets=("btc_usdt",),
+        time_series_inputs=True,
+    )
+    original_entry = case.saved.models[0]
+    reference = next(
+        item
+        for item in research_run_trial_references(case.layout, "run_rank_roundtrip")
+        if item["semantic_identity"] == original_entry["trial_semantic_identity"]
+    )
+    _plan, records = read_model_trial_ledger_reference(case.layout, reference)
+    assert records[0].metrics["validation_ic"] == pytest.approx(1.0)
+    persisted.read_crypto_model_member(case.saved, case.saved.final_models[0])
+    manifest_path = case.root / "manifest.json"
+    _raw, manifest = read_bounded_qrp_json(manifest_path)
+    original_manifest = deepcopy(manifest)
+    if member_kind == "validation":
+        from quant_research_platform.markets.implementations.crypto.portfolio import (
+            _validation_rows,
+        )
+
+        relative = original_entry["validation_prediction_path"]
+        with pq.ParquetFile(native_filesystem_path(case.root / relative)) as reader:
+            schema = reader.schema_arrow
+            frame = reader.read().to_pandas()
+        frame["prediction_score"] = -frame.prediction_score
+        with open_filesystem_file(case.root / relative, "wb") as handle:
+            with parquet_table_writer(
+                handle, compression="zstd", schema=schema
+            ) as write:
+                write(pa.Table.from_pandas(frame, schema=schema, preserve_index=False))
+    else:
+        relative = f"models/final/{case.saved.final_models[0]['model_id']}.pkl"
+        filesystem_write_bytes(
+            case.root / relative, pickle.dumps({"state": "rewritten"})
+        )
+    scientific_identity = case.saved.envelope["instance_identity"]
+    with pytest.raises(
+        ValueError, match="^semantic_artifact_member_integrity_invalid$"
+    ):
+        persisted.read_crypto_model_artifact(
+            case.root, expected_identity=scientific_identity, trial_layout=case.layout
+        )
+    changed = filesystem_read_bytes(case.root / relative)
+    for member in manifest["members"]:
+        if member["path"] == relative:
+            member.update(size=len(changed), sha256=hashlib.sha256(changed).hexdigest())
+    filesystem_write_bytes(manifest_path, (json.dumps(manifest) + "\n").encode("utf-8"))
+    assert manifest["common_manifest"] == original_manifest["common_manifest"]
+    assert manifest["operational_metadata"] == original_manifest["operational_metadata"]
+    with pytest.raises(ValueError, match="^dataset_metadata_file_identity_changed$"):
+        persisted.read_crypto_model_artifact(
+            case.root,
+            expected_identity=scientific_identity,
+            trial_layout=case.layout,
+            expected_member_identities=case.saved.member_identities,
+        )
+    fresh = persisted.read_crypto_model_artifact(
+        case.root, expected_identity=scientific_identity, trial_layout=case.layout
+    )
+    if member_kind == "validation":
+        with closing_iterator(
+            fresh.validation_chunks(
+                fold_id=original_entry["fold_id"], model_id=original_entry["model_id"]
+            )
+        ) as chunks:
+            actual = pd.concat(list(chunks), ignore_index=True)
+        pd.testing.assert_frame_equal(actual, frame, check_exact=True)
+        with closing_iterator(
+            _validation_rows(
+                fresh,
+                fold_id=original_entry["fold_id"],
+                model_id=original_entry["model_id"],
+                asset_id="btc_usdt",
+            )
+        ) as consumer:
+            consumed = list(consumer)
+        assert consumed == list(actual.itertuples(index=False, name=None))
+        assert np.corrcoef(actual["label"], actual.prediction_score)[
+            0, 1
+        ] == pytest.approx(-1.0)
+        _plan, unchanged = read_model_trial_ledger_reference(case.layout, reference)
+        assert unchanged == records
+    else:
+        with pytest.raises(ValueError, match="^model_state_metadata_mismatch$"):
+            persisted.read_crypto_model_member(fresh, fresh.final_models[0])

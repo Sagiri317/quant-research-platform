@@ -30,24 +30,22 @@ def test_manifest_review_safe_and_internal_writes_are_utf8_and_safe(
     assert loaded["source_id"] == "csmar"
 
 
-@pytest.mark.parametrize(
-    ("writer_name", "safety_name"),
-    (("write_internal_artifact_manifest", "assert_internal_artifact_metadata_safe"),),
-)
 def test_manifest_writers_render_the_snapshot_checked_for_safety(
-    writer_name: str, safety_name: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     payload = {"schema_id": "qrp-test", "value": "safe"}
-    original = getattr(manifests, safety_name)
+    original = manifests.assert_internal_artifact_metadata_safe
 
     def mutate_caller_after_check(value):
         result = original(value)
         payload["value"] = "C:" + chr(92) + "private" + chr(92) + "report"
         return result
 
-    monkeypatch.setattr(manifests, safety_name, mutate_caller_after_check)
-    path = tmp_path / writer_name / "manifest.json"
-    getattr(manifests, writer_name)(path, payload)
+    monkeypatch.setattr(
+        manifests, "assert_internal_artifact_metadata_safe", mutate_caller_after_check
+    )
+    path = tmp_path / "manifest.json"
+    manifests.write_internal_artifact_manifest(path, payload)
     assert manifests.read_manifest(path)["value"] == "safe"
 
 

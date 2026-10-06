@@ -478,14 +478,18 @@ def _apply_output_column_rules_validated(
     *,
     overrides: Mapping[str, Mapping[str, object]],
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    base_keep = list(INTERIM_COLUMNS_BY_DATA_ID.get(data_id, tuple(frame.columns)))
     override = overrides.get(data_id, {})
     manual_keep = list(override.get("keep", []))
     manual_drop = list(override.get("drop", []))
 
-    keep_order = list(dict.fromkeys([*base_keep, *manual_keep]))
-    available_keep = [column for column in keep_order if column in frame.columns]
-    final_columns = [column for column in available_keep if column not in manual_drop]
+    missing_keep = [column for column in manual_keep if column not in frame.columns]
+    if missing_keep:
+        raise ValueError("csmar_kept_columns_missing: " + ", ".join(missing_keep))
+    final_columns = [
+        column
+        for column in _output_columns(data_id, overrides)
+        if column in frame.columns
+    ]
 
     dropped = [column for column in frame.columns if column not in final_columns]
     auto_dropped = {
@@ -509,6 +513,17 @@ def _apply_output_column_rules_validated(
         "manual_drop": manual_drop,
     }
     return frame[final_columns].copy(), report
+
+
+def _output_columns(data_id, overrides):
+    override = overrides.get(data_id, {})
+    return tuple(
+        column
+        for column in dict.fromkeys(
+            (*INTERIM_COLUMNS_BY_DATA_ID[data_id], *override.get("keep", ()))
+        )
+        if column not in override.get("drop", ())
+    )
 
 
 def render_column_pruning_report(reports: list[dict[str, object]]) -> str:
@@ -604,6 +619,8 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
 def normalize_raw_frame(
     frame: pd.DataFrame,
     data_id: str,
+    *,
+    keep_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     mapped = map_columns(frame, data_id)
     if "stock_code" in mapped.columns:
@@ -801,7 +818,21 @@ def normalize_raw_frame(
         result["turnover"] = pd.Series(
             float("nan"), index=result.index, dtype="float64"
         )
-        result = result.loc[:, MARKET_BARS_INTERIM_COLUMNS]
+        result = result.loc[
+            :,
+            list(
+                dict.fromkeys(
+                    (
+                        *MARKET_BARS_INTERIM_COLUMNS,
+                        *(
+                            column
+                            for column in keep_columns
+                            if column in result.columns
+                        ),
+                    )
+                )
+            ),
+        ]
         result = result.sort_values(["source_asset_id", "timestamp"], kind="mergesort")
         result.reset_index(drop=True, inplace=True)
         return result
@@ -1240,7 +1271,6 @@ def materialize_interim_data(
 ) -> InterimImportResult:
     if type(chunksize) is not int or chunksize <= 0:
         raise ValueError("invalid_csmar_chunksize")
-    catalog = interim_catalog()
     source_raw_root = raw_root or layout.raw_source_root(SourceId(SOURCE_ID))
     overrides = (
         load_column_overrides(override_path)
@@ -1301,7 +1331,7 @@ def materialize_interim_data(
             )
             input_files = ((item[1], item[2]) for item in input_records)
             pending.discard(data_id)
-            spec = catalog.get(data_id)
+            spec = _interim_spec(data_id, _output_columns(data_id, overrides))
             artifact_root = require_artifact_root(
                 layout.target_root(
                     spec.data_id, layout.interim_data_root(spec.source_id, spec.data_id)
@@ -1448,7 +1478,9 @@ def _transform_interim_chunk(
     end_date: str | None,
     overrides: Mapping[str, Mapping[str, object]],
 ) -> tuple[pd.DataFrame, dict[str, object]]:
-    normalized = normalize_raw_frame(chunk, data_id)
+    normalized = normalize_raw_frame(
+        chunk, data_id, keep_columns=tuple(overrides.get(data_id, {}).get("keep", ()))
+    )
     source_row_counts = normalized.attrs.pop("source_row_counts", None)
     filtered = _filter_normalized_frame(
         normalized,

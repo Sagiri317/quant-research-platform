@@ -17,7 +17,6 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import (
     _research_dataset_access_window,
-    iter_research_dataset_chunks,
 )
 from quant_research_platform.research.datasets.validation import (
     iter_validated_research_input_chunks,
@@ -334,6 +333,25 @@ def build_crypto_predictions(
     model_ids = tuple(
         dict.fromkeys(entry["model_id"] for entry in persisted_model.models)
     )
+    dataset_session = None
+
+    def input_chunks(columns, window):
+        nonlocal dataset_session
+        if dataset_session is None:
+            root = layout.target_root(
+                dataset_id, layout.research_dataset_root(dataset.market_id, dataset_id)
+            )
+            dataset_session = open_dataset_session(root, columns=None, time_window=None)
+        resolved = resolve_columns_from_schema(
+            tuple(dataset_session.arrow_schema.names),
+            spec=dataset_session.spec,
+            columns=columns,
+        )
+        projection = replace(
+            dataset_session, logical_columns=resolved, physical_columns=resolved
+        )
+        return iter_dataset_chunks(projection.filtered_view(window))
+
     for model_id in model_ids:
         entries = tuple(
             entry
@@ -379,13 +397,7 @@ def build_crypto_predictions(
                     )
                 )
                 source = iter_validated_research_input_chunks(
-                    iter_research_dataset_chunks(
-                        layout,
-                        market_id=dataset.market_id,
-                        dataset_id=dataset_id,
-                        time_window=window,
-                        columns=columns,
-                    ),
+                    input_chunks(columns, window),
                     dataset_spec=dataset,
                     input_columns=inputs,
                 )

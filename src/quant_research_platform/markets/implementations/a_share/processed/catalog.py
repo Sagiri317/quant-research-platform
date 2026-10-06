@@ -183,6 +183,7 @@ def processed_catalog() -> ProcessedDataCatalog:
                 ProcessedDataKind.FACTOR,
                 (*PLATFORM_ASSET_TIME_KEY, *MARKET_MODEL_FACTORS),
                 processed_input_data_ids=(MARKET_PANEL_ID,),
+                source_input_data_ids=("trading_calendar", "market_bars_1d"),
                 factor_columns=MARKET_MODEL_FACTORS,
             ),
             _spec(

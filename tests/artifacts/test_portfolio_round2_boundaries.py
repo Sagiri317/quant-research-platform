@@ -12,8 +12,6 @@ from quant_research_platform.contracts.business_manifest import (
 )
 from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
-    PortfolioLedgerBatch,
-    PortfolioValuation,
 )
 from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
 from quant_research_platform.storage.identity import filesystem_exists
@@ -110,23 +108,3 @@ def test_finite_offset_cash_reconciliation_survives_real_publication(
         tmp_path / "invalid" / "instances" / envelope.instance_identity
     )
     assert _file_bytes(old_root) == original
-
-
-def _batch(sequence, assets, *, cash=100.0):
-    return PortfolioLedgerBatch(
-        sequence,
-        (),
-        (),
-        tuple(
-            row
-            for phase in ("before", "after", "end")
-            for row in (
-                PortfolioValuation(sequence, "__cash__", phase, cash, cash),
-                *(
-                    PortfolioValuation(sequence, f"asset_{index}", phase, 0.0, 0.0)
-                    for index in range(assets)
-                ),
-            )
-        ),
-        (),
-    )

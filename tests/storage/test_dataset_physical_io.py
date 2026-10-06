@@ -478,8 +478,8 @@ def test_writer_persisted_readback_preserves_schema_and_rows(
         persisted.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
             drop=True
         ),
-        frame.sort_values(["market_id", "asset_id", "timestamp"]).reset_index(
-            drop=True
-        ),
-        check_dtype=False,
+        frame.astype({"timestamp": "datetime64[ns]"})
+        .sort_values(["market_id", "asset_id", "timestamp"])
+        .reset_index(drop=True),
+        check_exact=True,
     )

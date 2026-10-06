@@ -206,8 +206,8 @@ def import_funding_history(
                     value = mark = forecast = None
 
     def validate(root):
-        checked = _manifest(root, symbol)
-        for _item in _records(root, checked):
+        checked, settlements, _identity = _manifest(root, symbol)
+        for _item in _records(root, checked, settlements=settlements):
             pass
         with closing_iterator(open_filesystem_file(path, "rb")) as handle:
             digest = hashlib.file_digest(handle, "sha256").hexdigest()

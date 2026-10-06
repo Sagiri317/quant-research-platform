@@ -68,6 +68,7 @@ def compute_listing_age_trading_days(
     observation_date_column: str,
     listing_date_column: str,
     market_type_column: str | None = None,
+    market_history: pd.DataFrame | None = None,
 ) -> pd.Series:
     """Count open trading sessions from listing date through observation date."""
 
@@ -113,15 +114,58 @@ def compute_listing_age_trading_days(
         normalized["is_trading_day"],
         error="invalid_is_trading_day",
     )
-    available_market_types = strict_integer_series(
-        normalized.loc[trading, "source_market_type"],
+    source_market_types = strict_integer_series(
+        normalized["source_market_type"],
         error="invalid_source_market_type",
-    ).dropna()
+    )
+    available_market_types = source_market_types.loc[trading]
+    market_sessions = {
+        int(market_type): pd.DatetimeIndex(
+            sorted(
+                normalized.loc[
+                    trading & source_market_types.eq(market_type),
+                    "calendar_date",
+                ].unique()
+            )
+        )
+        for market_type in source_market_types.unique()
+    }
+    if market_history is not None:
+        observation_groups = frame.groupby("asset_id", sort=False).groups
+        for asset_id, history in market_history.groupby("asset_id", sort=False):
+            indices = observation_groups.get(asset_id)
+            if indices is None:
+                continue
+            indices = frame.loc[indices].index[valid.loc[indices]]
+            if not len(indices):
+                continue
+            history = history.sort_values("timestamp", kind="mergesort")
+            records = tuple(history.itertuples(index=False))
+            result.loc[indices] = 0
+            for index, record in enumerate(records):
+                sessions = market_sessions[record.market_type]
+                left = sessions.searchsorted(
+                    listing_dates.loc[indices].to_numpy(dtype="datetime64[ns]"), "left"
+                )
+                if index:
+                    left = left.clip(
+                        min=sessions.searchsorted(record.timestamp, "left")
+                    )
+                right = sessions.searchsorted(
+                    observation_dates.loc[indices].to_numpy(dtype="datetime64[ns]"),
+                    "right",
+                )
+                if index + 1 < len(records):
+                    right = right.clip(
+                        max=sessions.searchsorted(records[index + 1].timestamp, "left")
+                    )
+                result.loc[indices] += (right - left).clip(min=0)
+            assigned.loc[indices] = True
     for market_type in sorted(int(value) for value in available_market_types.unique()):
-        market_mask = valid & market_types.eq(market_type)
+        market_mask = valid & ~assigned & market_types.eq(market_type)
         if not bool(market_mask.any()):
             continue
-        sessions = market_type_trading_sessions(normalized, market_type)
+        sessions = market_sessions[market_type]
         if sessions.empty:
             continue
         result.loc[market_mask] = _count_sessions_between(

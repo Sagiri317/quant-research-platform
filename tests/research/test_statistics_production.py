@@ -127,6 +127,321 @@ class _PredictionLookup:
         return (values, np.ones(len(frame), dtype=bool))
 
 
+def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_path):
+    from functools import partial
+
+    from quant_research_platform.artifacts.outputs import (
+        read_prediction_output_bundle,
+        write_prediction_outputs,
+    )
+    from quant_research_platform.catalog.models import ModelCatalog
+    from quant_research_platform.contracts.models import model_spec_payload
+    from quant_research_platform.contracts.predictions import PredictionSpec
+    from quant_research_platform.profiles.research import (
+        A_SHARE_PROFILE_ID,
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.research.models import persisted, production
+    from quant_research_platform.research.predictions.runner import (
+        build_prediction_result_from_persisted_model,
+    )
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+    from quant_research_platform.workflows.research import _output_spec_for_target
+
+    factor = CORE6_FACTORS[0]
+    dates = pd.bdate_range("2023-01-02", periods=48)
+    cutoff = dates[44]
+    window = TimeWindow(dates[0].date(), cutoff.date())
+    history = pd.to_datetime(
+        ["2014-01-02", "2016-01-04", "2021-12-29"]
+        + [f"2022-{month:02d}-{day:02d}" for month in (1, 4, 7, 10) for day in (4, 5)]
+        + ["2022-03-31", "2022-06-30", "2022-09-30", "2022-12-30"]
+    ).sort_values()
+    frame = pd.DataFrame(
+        [
+            {
+                "market_id": "a_share",
+                "asset_id": f"asset_{asset}",
+                "timestamp": timestamp,
+                "eligible": True,
+                factor: float(asset - 5.0 + index * 0.001),
+                "forward_return_5d": 0.1
+                + 0.4 * asset
+                + 0.03 * asset**2
+                + 0.02 * np.sin(index + asset),
+                "forward_return_20d": -0.2 - 0.7 * asset + 0.02 * np.cos(index + asset),
+                "forward_return_5d_available_at": timestamp + pd.offsets.BDay(6),
+                "forward_return_20d_available_at": timestamp + pd.offsets.BDay(21),
+            }
+            for index, timestamp in enumerate(history.append(dates))
+            for asset in range(12)
+        ]
+    )
+    for horizon in (5, 20):
+        label = f"forward_return_{horizon}d"
+        unavailable = frame[f"{label}_available_at"].gt(cutoff)
+        frame.loc[unavailable, label] = np.nan
+        frame.loc[unavailable, f"{label}_available_at"] = pd.NaT
+    spec = make_demo_research_dataset_spec(
+        data_id="pv_all",
+        factor_columns=(factor,),
+        label_columns=(
+            "forward_return_5d",
+            "forward_return_5d_available_at",
+            "forward_return_20d",
+            "forward_return_20d_available_at",
+        ),
+        filter_columns=("eligible",),
+        context_columns=(),
+    )
+    dataset_catalog = ResearchDatasetCatalog((spec,))
+    identities = []
+    mature_dates = {}
+    for horizon in (5, 20):
+        primary = f"forward_return_{horizon}d"
+        configuration = research_configuration()
+        model = next(
+            item
+            for item in configuration["models"]
+            if item["model_algorithm"] == "linear_regression"
+        )
+        model.update(
+            model_id="horizon_linear",
+            input_factor_columns=[factor],
+            input_feature_columns=[],
+            label_column=primary,
+        )
+        model.pop("parameter_candidates", None)
+        configuration.update(
+            models=[model],
+            portfolios=[],
+            comparison_model_id=model["model_id"],
+            primary_portfolio_id=None,
+        )
+        configuration["evaluation"].update(
+            factors=[factor],
+            labels=["forward_return_5d", "forward_return_20d"],
+            primary_label=primary,
+        )
+        bound = bind_research_configuration(
+            research_profile(A_SHARE_PROFILE_ID), configuration
+        )
+        assert (
+            bound.protocol("pv_all").manifest()["research_configuration"]["evaluation"][
+                "primary_label"
+            ]
+            == primary
+        )
+        models = ModelCatalog.from_configuration(configuration["models"])
+        protocol = shared_model_protocol(
+            models.list(), development_end=cutoff.date().isoformat()
+        )
+        protocol.update(
+            scenario_id=spec.data_id,
+            root_seed=42,
+            selection_group="global",
+            development_window={
+                "start": dates[0].date().isoformat(),
+                "end": cutoff.date().isoformat(),
+            },
+            model_chronology={
+                "scoring_lookback_months": 12,
+                "warmup_window": {
+                    "start": (dates[0] - pd.DateOffset(months=12)).date().isoformat(),
+                    "end": (dates[0] - pd.Timedelta(days=1)).date().isoformat(),
+                },
+            },
+            research_configuration=configuration,
+        )
+        protocol["statistics"].update(
+            factor_fdr_families={"fixture": [factor]},
+            fama_macbeth_core_factors=[factor],
+        )
+        assert protocol["statistics"]["hac_lag"] == 19
+        layout = StorageLayout(tmp_path / str(horizon))
+        data_identity = canonical_json_hash(
+            {"fixture": "two_horizons", "dataset": spec.data_id}
+        )
+        root = layout.instance_root(
+            layout.research_dataset_root("a_share", spec.data_id), data_identity
+        )
+        write_dataset(root, frame, spec=spec)
+        layout = layout.with_target_roots({spec.data_id: root})
+        session = open_dataset_session(root, columns=None, time_window=None)
+        model_id = "horizon_models"
+        envelope = build_business_manifest_envelope(
+            logical_artifact_id=model_id,
+            schema_identity=canonical_json_hash({"models": model_id}),
+            protocol_or_spec_identity=canonical_json_hash(protocol),
+            software_identity="b" * 64,
+            research_window={
+                "start": "2022-01-01",
+                "end": cutoff.date().isoformat(),
+                "access": "development",
+            },
+            upstream_identities={spec.data_id: data_identity},
+            semantic_metadata={
+                "target_contract": {
+                    "protocol": protocol,
+                    "model_specs": [model_spec_payload(item) for item in models.list()],
+                }
+            },
+        )
+
+        results = partial(
+            production.build_model_selection_result,
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            model_catalog=models,
+            dataset_id=spec.data_id,
+            model_ids=tuple(item.model_id for item in models.list()),
+            time_window=TimeWindow("2022-01-01", cutoff.date()),
+            protocol_manifest=protocol,
+            run_id="run_horizon",
+            research_protocol_identity=canonical_json_hash(protocol),
+            model_target_id=model_id,
+            backend_versions={"internal": "fixture"},
+            dataset_session=session,
+        )
+
+        model_root = persisted.write_quarterly_model_artifact(
+            layout.project_root / "models",
+            model_id=model_id,
+            envelope=envelope,
+            model_results=results,
+            trial_layout=layout,
+            verify_source=session.verify,
+        )
+        saved = persisted.read_quarterly_model_artifact(
+            model_root,
+            expected_identity=envelope.instance_identity,
+            trial_layout=layout,
+        )
+        assert all(
+            entry["model_metadata"]["label_column"] == primary
+            for entry in saved.final_models
+        )
+        prediction = PredictionSpec(
+            prediction_id="horizon_predictions",
+            model_id=model_id,
+            research_dataset_id=spec.data_id,
+            train_end=None,
+            test_start=window.start.isoformat(),
+            test_end=window.end.isoformat(),
+            prediction_mode="a_share_oos",
+            prediction_column="raw_prediction",
+        )
+        with build_prediction_result_from_persisted_model(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            prediction_spec=prediction,
+            persisted_model=saved,
+            selection_group="global",
+        ) as result:
+            prediction_root = write_prediction_outputs(
+                spec=prediction,
+                output_spec=_output_spec_for_target(
+                    prediction.prediction_id, "a_share", "prediction"
+                ),
+                layout=layout,
+                output_chunks=result.output_chunks,
+                model_metadata=result.model_metadata,
+                prediction_metadata_factory=result.prediction_metadata_factory,
+            )
+        metadata, lookup = read_prediction_output_bundle(
+            prediction_root, expected_output_id=prediction.prediction_id
+        )
+        assert (
+            metadata["metadata"]["model_metadata"]["model_artifact_identity"]
+            == envelope.instance_identity
+        )
+        keys = frame.loc[
+            frame.timestamp.between(dates[0], cutoff), ["timestamp", "asset_id"]
+        ].copy()
+        keys["family_id"] = model["model_id"]
+        scores, found = lookup.values_for_frame(keys, mark_matched=False)
+        assert all(found) and np.isfinite(scores).all()
+        assert len(keys) == 45 * 12 and not keys.duplicated().any()
+        tables = build_a_share_statistics_tables(
+            layout=layout,
+            dataset_catalog=dataset_catalog,
+            dataset_id=spec.data_id,
+            prediction_id=prediction.prediction_id,
+            persisted_model=saved,
+            protocol_manifest=protocol,
+            time_window=window,
+            prediction_lookup=lookup,
+            global_statistics=None,
+        )
+        statistics_envelope = build_business_manifest_envelope(
+            logical_artifact_id="horizon_statistics",
+            schema_identity=canonical_json_hash({"statistics": "horizon"}),
+            protocol_or_spec_identity=canonical_json_hash(protocol),
+            software_identity="b" * 64,
+            research_window={
+                "start": window.start.isoformat(),
+                "end": window.end.isoformat(),
+                "access": "development",
+            },
+            upstream_identities={
+                spec.data_id: data_identity,
+                model_id: envelope.instance_identity,
+            },
+            semantic_metadata={"primary_label": primary, "hac_lag": 19},
+        )
+        statistics_root = write_statistics_artifact(
+            layout.project_root / "statistics",
+            envelope=statistics_envelope,
+            tables=tables,
+        )
+        statistics = read_statistics_artifact(
+            statistics_root, expected_identity=statistics_envelope.instance_identity
+        )
+        identities.append(statistics_envelope.instance_identity)
+        expected = frame.loc[
+            frame[f"{primary}_available_at"].le(cutoff) & frame.timestamp.le(cutoff)
+        ]
+        expected_dates = pd.DatetimeIndex(sorted(expected.timestamp.unique())).astype(
+            "datetime64[ns]"
+        )
+        with statistics.table("fama_macbeth_periods.parquet") as periods:
+            coefficients = periods.loc[periods.regression_id.eq("single:" + factor)]
+            assert str(coefficients.timestamp.dtype) == "datetime64[ns]"
+            assert not coefficients.duplicated(
+                ["regression_id", "coefficient_id", "timestamp"]
+            ).any()
+            assert coefficients.status.eq("DEFINED").all()
+            for coefficient_id in ("intercept", factor):
+                actual = coefficients.loc[
+                    coefficients.coefficient_id.eq(coefficient_id)
+                ].sort_values("timestamp")
+                pd.testing.assert_index_equal(
+                    pd.DatetimeIndex(actual.timestamp),
+                    expected_dates,
+                    check_names=False,
+                )
+                oracle = [
+                    np.linalg.lstsq(
+                        np.column_stack((np.ones(len(group)), group[factor])),
+                        group[primary],
+                        rcond=None,
+                    )[0][0 if coefficient_id == "intercept" else 1]
+                    for _date, group in expected.groupby("timestamp", sort=True)
+                ]
+                np.testing.assert_allclose(actual.value, oracle, rtol=2e-14, atol=2e-14)
+                assert actual.observation_count.eq(12).all()
+        with statistics.table("fama_macbeth.parquet") as summary:
+            assert summary.period_count.eq(len(expected_dates)).all()
+            assert summary.status.eq("DEFINED").all()
+        mature_dates[horizon] = expected_dates[expected_dates >= dates[0]]
+        assert lookup.coverage_counts() == (0, 0)
+        session.verify()
+    assert identities[0] != identities[1]
+    assert len(mature_dates[5]) == 39 and len(mature_dates[20]) == 24
+    assert len(mature_dates[5].difference(mature_dates[20])) == 15
+
+
 @pytest.mark.parametrize("full_factor_history", (False, True))
 def test_family_comparison_production_matches_arch_on_persisted_common_date_losses(
     tmp_path: Path, full_factor_history: bool

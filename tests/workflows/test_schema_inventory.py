@@ -499,50 +499,6 @@ def test_schema_inventory_rejects_important_column_coercion(
             pass
 
 
-def _valid_inventory_payload() -> dict[str, object]:
-    columns = ("market_id", "asset_id", "timestamp", "value")
-    dtypes = {
-        "market_id": "object",
-        "asset_id": "object",
-        "timestamp": "datetime64[ns]",
-        "value": "float64",
-    }
-    primary_key = ("market_id", "asset_id", "timestamp")
-    partition_columns = ("year",)
-    return {
-        "schema_id": "qrp-schema-inventory",
-        "datasets": [
-            {
-                "artifact_id": "inventory_factor",
-                "layer": "processed",
-                "kind": "factor",
-                "logical_relative_root": (
-                    "data/processed/a_share/factor/inventory_factor"
-                ),
-                "columns": list(columns),
-                "dtypes": dtypes,
-                "primary_key": list(primary_key),
-                "partition_columns": list(partition_columns),
-                "file_count": 1,
-                "row_count": 3,
-                "row_count_by_year": {"2026": 3},
-                "min_timestamp": "2026-01-01",
-                "max_timestamp": "2026-01-03",
-                "duplicate_primary_key_count": 0,
-                "null_key_counts": {column: 0 for column in primary_key},
-                "selected_important_column_null_counts": {"value": 0},
-                "schema_hash": schema_inventory._schema_hash(
-                    columns=columns,
-                    dtypes=dtypes,
-                    primary_key=primary_key,
-                    partition_columns=partition_columns,
-                ),
-                "warnings": [],
-            }
-        ],
-    }
-
-
 @pytest.mark.parametrize(
     "time_column", ("timestamp", "report_period", "effective_date")
 )

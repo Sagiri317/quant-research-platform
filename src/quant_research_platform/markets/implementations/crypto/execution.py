@@ -298,13 +298,6 @@ def _book_value(event: BookState) -> BookState:
     return value
 
 
-def _book_key(
-    event: BookState | BookBoundary,
-) -> tuple[int, ...]:
-    value = event
-    return observation_order_key(value)
-
-
 def _checked_book_events(
     events: Iterable[BookState | BookBoundary],
 ) -> Iterator[BookState | BookBoundary]:
@@ -578,7 +571,7 @@ def simulate_taker(
             event: BookState | BookBoundary,
         ) -> None:
             nonlocal latest_state, terminal_mid, terminal_timestamp
-            terminal_timestamp = _book_key(event)[0]
+            terminal_timestamp = observation_order_key(event)[0]
             apply_funding(terminal_timestamp)
             if isinstance(event, BookBoundary):
                 pending.advance(
@@ -619,10 +612,10 @@ def simulate_taker(
             nonlocal market_event_count, next_event
             while (
                 next_event is not None
-                and _book_key(next_event)[0] <= target
+                and observation_order_key(next_event)[0] <= target
                 and (
                     observation_stop is None
-                    or _book_key(next_event)[0] < observation_stop
+                    or observation_order_key(next_event)[0] < observation_stop
                 )
             ):
                 event = next_event
@@ -1025,7 +1018,7 @@ def simulate_taker(
             while orders:
                 advance(orders[0][2] * _NANOSECONDS_PER_MILLISECOND)
             while next_event is not None:
-                consume_until(_book_key(next_event)[0])
+                consume_until(observation_order_key(next_event)[0])
             end_timestamp = max(
                 action_timestamp, terminal_timestamp, economics.last_timestamp
             )
@@ -1793,11 +1786,12 @@ def _market_events(
         while book_next is not None or trade_next is not None:
             if trade_next is None or (
                 book_next is not None
-                and _book_key(book_next) <= observation_order_key(trade_next)
+                and observation_order_key(book_next)
+                <= observation_order_key(trade_next)
             ):
                 pending_event = book_next
                 assert book_next is not None
-                key = _book_key(book_next)
+                key = observation_order_key(book_next)
                 book_next = next(book_events, None)
             else:
                 pending_event = trade_next
@@ -1966,10 +1960,8 @@ def simulate_maker(
 
         def expire_orders(timestamp):
             # Only the decision-time TTL schedules expiry; observed events cancel gaps.
-            for side, order in tuple(active.items()):
-                if order.valid_until_ns <= timestamp:
-                    active.pop(side)
-                    finish_order(order, timestamp, cancelled=True)
+            for order in _maker_expired_orders(active, timestamp):
+                finish_order(order, timestamp, cancelled=True)
             for _ in range(len(commands)):
                 command = commands.popleft()
                 order = command[2]

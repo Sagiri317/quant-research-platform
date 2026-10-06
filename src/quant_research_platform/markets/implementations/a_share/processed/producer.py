@@ -59,6 +59,7 @@ from quant_research_platform.research.labels import engine as label_engine
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.reading import (
+    _prepare_in_filter,
     iter_dataset_chunks,
     materialize_dataset_session,
     open_dataset_session,
@@ -96,9 +97,6 @@ def produce_a_share_processed_data(
 ):
     """Publish chronological blocks while retaining input and output owners."""
     processed = processed_catalog or a_share_processed_catalog()
-    source = {}
-    source_sessions = {}
-    dependencies = {}
     source_sessions = {}
     source = {}
     for data_id in spec.source_input_data_ids:
@@ -162,6 +160,10 @@ def produce_a_share_processed_data(
                 definition.family == "expectations" for definition in factor_definitions
             ):
                 requested.add("close")
+            if any(
+                definition.family == "market_model" for definition in factor_definitions
+            ):
+                requested.add("market_type")
             columns = tuple(
                 column for column in dependency.required_columns if column in requested
             )
@@ -213,7 +215,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     calendar = (
         unified_trading_sessions(source["trading_calendar"]) if panel_source else None
     )
-    sessions, asset_types = _processed_axis(
+    sessions, asset_types, market_history = _processed_axis(
         reference,
         panel_source=panel_source,
         calendar=source["trading_calendar"] if panel_source else None,
@@ -250,6 +252,48 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
         events = _financial_pit_events(source)
     asset_count = max(1, len(asset_types))
     block_sessions = max(1, DEFAULT_BATCH_ROWS // asset_count)
+    if any(definition.family == "market_model" for definition in definitions):
+        _source_dates, _source_assets, market_history = _processed_axis(
+            source_sessions["market_bars_1d"],
+            panel_source=True,
+            calendar=source["trading_calendar"],
+            validation_window=time_window,
+        )
+
+        def panels():
+            for start in range(
+                0,
+                bisect_right(sessions, upper)
+                if closed
+                else bisect_left(sessions, upper),
+                block_sessions,
+            ):
+                core = sessions[start : start + block_sessions]
+                yield materialize_dataset_session(
+                    reference.filtered_view(TimeWindow(core[0], core[-1]))
+                )
+
+        with closing_iterator(panels()) as frames:
+            with closing_iterator(
+                factor_engine._market_model_frames(
+                    frames,
+                    trading_calendar=source["trading_calendar"],
+                    market_history=market_history,
+                )
+            ) as calculated:
+                for output in calculated:
+                    output = output.loc[
+                        output.timestamp.ge(lower)
+                        & (
+                            output.timestamp.le(upper)
+                            if closed
+                            else output.timestamp.lt(upper)
+                        ),
+                        list(spec.required_columns),
+                    ]
+                    if not output.empty:
+                        yield output.reset_index(drop=True)
+        return
     first = 0 if panel_source else bisect_left(sessions, lower)
     stop = bisect_right(sessions, upper) if closed else bisect_left(sessions, upper)
     history = None
@@ -279,6 +323,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
             asset_market_types=asset_types if panel_source else None,
             suspension_history=history,
             financial_events=events,
+            market_history=market_history,
         )
         output = (
             output.loc[output["timestamp"].between(core[0], core[-1])]
@@ -318,13 +363,6 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
             )
             del combined, ordered
         if panel_source:
-            bars = current_source["market_bars_1d"]
-            asset_types.update(
-                bars.loc[bars["market_type"].isin(CURRENT_MARKET_TYPES)]
-                .sort_values("timestamp", kind="mergesort")
-                .drop_duplicates("source_asset_id", keep="last")
-                .set_index("source_asset_id")["market_type"]
-            )
             output = output.loc[output["timestamp"].ge(lower)].reset_index(drop=True)
         if not output.empty:
             yield output
@@ -332,7 +370,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
 
 
 def _benchmark_frames(source, session):
-    sessions, assets = _processed_axis(
+    sessions, assets, _market_history = _processed_axis(
         session, panel_source=False, asset_column="constituent_asset_id"
     )
     block_size = max(1, DEFAULT_BATCH_ROWS // max(1, 2 * len(assets)))
@@ -371,6 +409,7 @@ def _processed_axis(
     view = replace(session, logical_columns=columns, physical_columns=columns)
     dates = set()
     assets = {}
+    first_market_events = {}
     with closing_iterator(iter_dataset_chunks(view, batch_rows=65536)) as chunks:
         for frame in chunks:
             if panel_source:
@@ -394,6 +433,20 @@ def _processed_axis(
                 if not observed.empty:
                     validate_market_bar_calendar(observed, calendar)
                 del observed
+                first = (
+                    frame.groupby([asset_column, "market_type"], sort=False)[
+                        "timestamp"
+                    ]
+                    .min()
+                    .reset_index()
+                )
+                for asset, market_type, timestamp in first.itertuples(
+                    index=False, name=None
+                ):
+                    key = (asset, market_type)
+                    first_market_events[key] = min(
+                        timestamp, first_market_events.get(key, timestamp)
+                    )
                 frame = frame.loc[frame["filling_flag"].ne(2)]
             new_dates = set(pd.to_datetime(frame["timestamp"]).unique()) - dates
             first = frame.drop_duplicates(asset_column)
@@ -405,7 +458,53 @@ def _processed_axis(
     sessions = tuple(sorted(pd.Timestamp(value) for value in dates))
     asset_types = pd.Series(assets)
     del dates, assets
-    return (sessions, asset_types)
+    market_history = None
+    if panel_source:
+        first = pd.DataFrame(
+            [
+                (asset, timestamp, market_type)
+                for (asset, market_type), timestamp in first_market_events.items()
+            ],
+            columns=("asset_id", "timestamp", "market_type"),
+        ).sort_values(["asset_id", "timestamp"], kind="mergesort")
+        asset_types = first.drop_duplicates("asset_id").set_index("asset_id")[
+            "market_type"
+        ]
+        migrating = tuple(
+            first.loc[first.asset_id.duplicated(keep=False), "asset_id"].unique()
+        )
+        market_history = first
+        if migrating:
+            columns = (asset_column, "timestamp", "market_type")
+            view = replace(
+                session,
+                logical_columns=columns,
+                physical_columns=columns,
+                parquet_filters=(
+                    *(session.parquet_filters or ()),
+                    (
+                        asset_column,
+                        "in",
+                        _prepare_in_filter(
+                            session.arrow_schema.field(asset_column), migrating
+                        ),
+                    ),
+                ),
+            )
+            history = materialize_dataset_session(view).rename(
+                columns={asset_column: "asset_id"}
+            )
+            history = history.loc[
+                history.market_type.isin(CURRENT_MARKET_TYPES)
+            ].sort_values(["asset_id", "timestamp"], kind="mergesort")
+            changed = history.market_type.ne(
+                history.groupby("asset_id", sort=False).market_type.shift()
+            ).fillna(True)
+            market_history = pd.concat(
+                (first.loc[~first.asset_id.isin(migrating)], history.loc[changed]),
+                ignore_index=True,
+            )
+    return sessions, asset_types, market_history
 
 
 def _prepare_panel_source(source):
@@ -433,6 +532,7 @@ def _compute_processed_frame(
     asset_market_types=None,
     suspension_history=None,
     financial_events=None,
+    market_history=None,
 ):
     if spec.data_id == "market_panel_1d":
         panel = compute_market_panel(
@@ -441,6 +541,7 @@ def _compute_processed_frame(
             session_window=panel_sessions,
             asset_market_types=asset_market_types,
             suspension_history=suspension_history,
+            market_history=market_history,
         )
         return (
             pd.DataFrame(columns=spec.required_columns)
@@ -504,6 +605,8 @@ def _compute_processed_frame(
             output_window=None
             if panel_sessions is None
             else TimeWindow(panel_sessions[0], panel_sessions[-1]),
+            trading_calendar=source.get("trading_calendar"),
+            market_history=market_history,
         )
         if "has_legal_fundamental_pit" in spec.required_columns:
             calculated = calculated.merge(

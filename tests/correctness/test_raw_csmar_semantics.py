@@ -57,6 +57,115 @@ def _analyst_rows():
     ]
 
 
+@pytest.mark.parametrize("chunksize", (1, 100))
+@pytest.mark.parametrize(
+    "data_id,source_column,kept_column",
+    (
+        ("market_bars_1d", "Dretnd", "return_without_dividend"),
+        ("stock_master", "Markettype", "market_type"),
+        ("market_cap", "Nshrb", "b_float_shares"),
+    ),
+)
+def test_csmar_keep_override_persists_declared_source_projection(
+    tmp_path, chunksize, data_id, source_column, kept_column
+):
+    import json
+
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
+    from tests.helpers.a_share_raw import _write_csmar
+
+    raw = tmp_path / "raw"
+    filesystem_mkdir(raw)
+    row = dict.fromkeys(raw_exports.RAW_TABLE_CONTRACTS[data_id].required_columns, 1.0)
+    row.update(Stkcd="000001")
+    if data_id == "market_bars_1d":
+        row.update(
+            Trddt="2020-01-02",
+            Markettype=1,
+            Trdsta=0,
+            Filling=0,
+            Ahshrtrd_D=0.0,
+            Ahvaltrd_D=0.0,
+            LimitStatus=0,
+        )
+    elif data_id == "stock_master":
+        row.update(
+            Stknme="synthetic",
+            Listdt="2020-01-02",
+            DelistedDate="",
+            Statdt="2020-01-02",
+            Statco="normal",
+            Markettype=4,
+        )
+    else:
+        row.update(Shrchgdt="2020-01-02")
+    row[source_column] = (
+        4
+        if data_id == "stock_master"
+        else (-0.125 if data_id == "market_bars_1d" else 0.125)
+    )
+    extra = (
+        ()
+        if source_column in row
+        and source_column in raw_exports.RAW_TABLE_CONTRACTS[data_id].required_columns
+        else (source_column,)
+    )
+    _write_csmar(
+        raw, data_id, [row, {**row, "Stkcd": "000002"}, row], extra_columns=extra
+    )
+    raw_bytes = _file_bytes(raw)
+    default = interim.materialize_interim_data(
+        layout=StorageLayout(tmp_path / "default"),
+        raw_root=raw,
+        data_ids=(data_id,),
+        chunksize=chunksize,
+    )
+    default_frame = (
+        read_dataset(default.artifact_roots[data_id])
+        .sort_values("source_asset_id")
+        .reset_index(drop=True)
+    )
+    assert kept_column not in default_frame
+    overrides = tmp_path / "keep.json"
+    filesystem_write_text(
+        overrides,
+        json.dumps({data_id: {"keep": [kept_column], "drop": []}}),
+        encoding="utf-8",
+    )
+    result = interim.materialize_interim_data(
+        layout=StorageLayout(tmp_path / "kept"),
+        raw_root=raw,
+        data_ids=(data_id,),
+        chunksize=chunksize,
+        override_path=overrides,
+    )
+    root = result.artifact_roots[data_id]
+    saved = read_dataset(root).sort_values("source_asset_id").reset_index(drop=True)
+    assert kept_column in saved
+    assert saved[kept_column].tolist() == [row[source_column]] * 2
+    assert str(saved[kept_column].dtype) == "float64"
+    from quant_research_platform.storage.manifests import read_bounded_qrp_json
+
+    _raw_spec, declared = read_bounded_qrp_json(root / "spec.json")
+    assert declared["column_roles"][kept_column] == "context"
+    assert set(declared["column_roles"]) == set(saved.columns)
+    pd.testing.assert_frame_equal(
+        saved.loc[:, default_frame.columns], default_frame, check_exact=True
+    )
+    assert saved.source_asset_id.tolist() == ["000001", "000002"]
+    assert str(saved.timestamp.dtype) == "datetime64[ns]"
+    assert (
+        read_dataset_manifest_evidence(root)["producer_diagnostics"][
+            "exact_duplicate_count"
+        ]
+        == 1
+    )
+    assert kept_column in result.pruning_report_text
+    assert _file_bytes(raw) == raw_bytes
+
+
 @pytest.mark.parametrize("chunksize", (1, 3, 100))
 def test_analyst_raw_reports_persist_and_feed_institution_consensus(
     tmp_path, chunksize

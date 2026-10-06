@@ -10,12 +10,12 @@ def test_a_share_ledger_failure_preserves_primary_and_old_good(
     tmp_path, monkeypatch, stage
 ):
     primary = RuntimeError("consumer_failure")
-    validate = persisted._validate_a_share_model_parameters
+    validate = persisted._validate_model_parameters
 
-    def fail(metadata, parameters):
+    def fail(metadata, parameters, **kwargs):
         if ("fit_cutoff" in metadata) == (stage == "refit"):
             raise primary
-        return validate(metadata, parameters)
+        return validate(metadata, parameters, **kwargs)
 
     case = shared_model_case(tmp_path)
     old_good = {
@@ -23,7 +23,7 @@ def test_a_share_ledger_failure_preserves_primary_and_old_good(
         for path in case.root.rglob("*")
         if path.is_file()
     }
-    monkeypatch.setattr(persisted, "_validate_a_share_model_parameters", fail)
+    monkeypatch.setattr(persisted, "_validate_model_parameters", fail)
     with pytest.raises(RuntimeError) as caught:
         persisted.read_quarterly_model_artifact(case.root, trial_layout=case.layout)
     assert caught.value is primary

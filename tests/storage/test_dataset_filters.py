@@ -260,10 +260,16 @@ def test_filtered_empty_chunk_final_verify_preserves_caller_primary(
             raise RuntimeError("primary_failure")
 
 
-def test_categorical_empty_result_preserves_complete_domain(tmp_path: Path) -> None:
+@pytest.mark.parametrize("ordered", (False, True))
+def test_categorical_empty_result_preserves_complete_domain(
+    tmp_path: Path, ordered
+) -> None:
     root = make_dataset_artifact_root(tmp_path, "categorical_empty_domain")
     frame = make_default_dataset_frame()
-    frame["value"] = pd.Categorical(frame["value"].astype(str))
+    categories = ["unused", *reversed(frame["value"].astype(str).dropna().unique())]
+    frame["value"] = pd.Categorical(
+        frame["value"].astype(str), categories=categories, ordered=ordered
+    )
     write_dataset(
         root, frame, spec=make_processed_dataset_spec("categorical_empty_domain")
     )
@@ -277,6 +283,10 @@ def test_categorical_empty_result_preserves_complete_domain(tmp_path: Path) -> N
     assert len(chunks) == 1
     assert chunks[0].empty
     assert isinstance(chunks[0]["value"].dtype, pd.CategoricalDtype)
+    assert chunks[0]["value"].cat.ordered is ordered
+    assert chunks[0]["value"].cat.categories.tolist() == (
+        categories if ordered else sorted(categories)
+    )
 
 
 def test_session_filter_reuses_prepared_values(tmp_path: Path, monkeypatch) -> None:

@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import argparse
 import datetime as dt
+import errno
 import gzip
 import hashlib
 import json
 import os
+import socket
 import sys
 import threading
 import time
 import uuid
 from collections import Counter
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +24,7 @@ from typing import Any
 import httpx
 import psutil
 from websockets.exceptions import WebSocketException
+from websockets.sync.client import ClientConnection
 from websockets.sync.client import connect as _connect_websocket
 
 from quant_research_platform.contracts.json_codec import (
@@ -644,10 +647,6 @@ class _InvalidPayload(Exception):
     pass
 
 
-class _ReaderQuiescenceFailure(RuntimeError):
-    pass
-
-
 class _StreamReader(threading.Thread):
     def __init__(
         self,
@@ -670,9 +669,19 @@ class _StreamReader(threading.Thread):
         self.config = config
         self.tick_size = tick_size
         self.ready = threading.Event()
+        self.finished = threading.Event()
         self.failure: BaseException | None = None
+        self._network_lock = threading.Lock()
+        self._active_websocket: ClientConnection | None = None
+        self._request_socket: socket.socket | None = None
 
     def run(self) -> None:
+        try:
+            self._run_stream()
+        finally:
+            self.finished.set()
+
+    def _run_stream(self) -> None:
         backoff = 1.0
         reconnect = False
         while not self.stop.is_set():
@@ -697,7 +706,59 @@ class _StreamReader(threading.Thread):
                 break
             break
 
+    def _create_connection(self, *args, **kwargs) -> ClientConnection:
+        connection = ClientConnection(*args, **kwargs)
+        with self._network_lock:
+            self._active_websocket = connection
+            if self.stop.is_set():
+                connection.close_socket()
+        return connection
+
+    def _own_request_socket(self, request_socket: socket.socket | None) -> None:
+        with self._network_lock:
+            self._request_socket = request_socket
+            if request_socket is not None and self.stop.is_set():
+                self._shutdown_request_socket(request_socket)
+
+    @staticmethod
+    def _shutdown_request_socket(request_socket: socket.socket) -> None:
+        try:
+            request_socket.shutdown(socket.SHUT_RDWR)
+        except OSError as error:
+            if error.errno not in {errno.EBADF, errno.ENOTCONN, errno.ENOTSOCK}:
+                raise
+
+    def cancel(self) -> None:
+        self.stop.set()
+        failure = None
+        with self._network_lock:
+            resources = (
+                self._active_websocket.close_socket
+                if self._active_websocket is not None
+                else None,
+                (lambda: self._shutdown_request_socket(self._request_socket))
+                if self._request_socket is not None
+                else None,
+            )
+            for close in resources:
+                if close is None:
+                    continue
+                try:
+                    close()
+                except BaseException as error:
+                    if failure is None:
+                        failure = error
+                    else:
+                        failure.add_note(
+                            "Binance network cancellation also failed: "
+                            + type(error).__name__
+                        )
+        if failure is not None:
+            raise failure
+
     def _read_connection(self, *, reconnect: bool) -> None:
+        if self.stop.is_set():
+            return
         connection_id = uuid.uuid4().hex
         segment_id = uuid.uuid4().hex if self.stream.data_kind == "depth" else None
         websocket: Any | None = None
@@ -722,9 +783,12 @@ class _StreamReader(threading.Thread):
                     max_size=MAX_WS_MESSAGE_BYTES,
                     max_queue=MAX_WS_QUEUE,
                     user_agent_header="qrp-binance-recorder/0.1",
+                    create_connection=self._create_connection,
                 )
             except (OSError, TimeoutError, WebSocketException) as exc:
                 raise _ConnectionProblem() from exc
+            if self.stop.is_set():
+                raise _ConnectionProblem()
             self.stats.opened(
                 self.stream,
                 reconnect=reconnect,
@@ -750,7 +814,11 @@ class _StreamReader(threading.Thread):
                     connection_id=connection_id,
                     segment_id=segment_id,
                     reconstructor=depth_book,
+                    stop=self.stop,
+                    network_owner=self._own_request_socket,
                 )
+            if self.stop.is_set():
+                raise _ConnectionProblem()
             self.ready.set()
             last_message_at = time.monotonic()
             while True:
@@ -842,6 +910,9 @@ class _StreamReader(threading.Thread):
             freeze_close()
             raise
         finally:
+            with self._network_lock:
+                self._active_websocket = None
+                self._request_socket = None
             primary = sys.exception()
             first_failure: BaseException | None = None
             cleanups = []
@@ -886,19 +957,34 @@ def _http_get_json(
     path: str,
     *,
     params: dict[str, str] | None = None,
+    stop: threading.Event | None = None,
+    network_owner: Callable[[socket.socket | None], None] | None = None,
 ) -> tuple[Any, str, int]:
+    def trace(event, info):
+        if network_owner is not None and event in {
+            "connection.connect_tcp.complete",
+            "connection.start_tls.complete",
+        }:
+            network_owner(info["return_value"].get_extra_info("socket"))
+        if stop is not None and stop.is_set():
+            raise _ConnectionProblem()
+
     try:
-        with httpx.stream(
-            "GET",
-            base_url + path,
-            params=params,
-            headers={
-                "Accept": "application/json",
-                "Accept-Encoding": "identity",
-                "User-Agent": "qrp-binance-recorder/0.1",
-            },
-            timeout=REST_REQUEST_TIMEOUT_SECONDS,
-        ) as response:
+        with (
+            httpx.Client() as client,
+            client.stream(
+                "GET",
+                base_url + path,
+                params=params,
+                headers={
+                    "Accept": "application/json",
+                    "Accept-Encoding": "identity",
+                    "User-Agent": "qrp-binance-recorder/0.1",
+                },
+                timeout=REST_REQUEST_TIMEOUT_SECONDS,
+                extensions={"trace": trace} if network_owner is not None else None,
+            ) as response,
+        ):
             try:
                 response.raise_for_status()
             except httpx.HTTPStatusError as exc:
@@ -908,6 +994,8 @@ def _http_get_json(
                 raise ValueError("binance_recorder_rest_content_encoding_invalid")
             raw = bytearray()
             for chunk in response.iter_raw(chunk_size=64 * 1024):
+                if stop is not None and stop.is_set():
+                    raise _ConnectionProblem()
                 if len(chunk) > MAX_REST_RESPONSE_BYTES - len(raw):
                     raise ValueError("binance_recorder_rest_response_too_large")
                 raw.extend(chunk)
@@ -915,6 +1003,11 @@ def _http_get_json(
         raise TimeoutError("binance_recorder_rest_timeout") from exc
     except httpx.HTTPError as exc:
         raise OSError("binance_recorder_rest_request_failed") from exc
+    finally:
+        if network_owner is not None:
+            network_owner(None)
+    if stop is not None and stop.is_set():
+        raise _ConnectionProblem()
     try:
         payload = parse_qrp_json_object(bytes(raw))
     except (UnicodeError, ValueError) as exc:
@@ -1028,6 +1121,8 @@ def _record_depth_snapshot(
     connection_id: str,
     segment_id: str,
     reconstructor: DepthReconstructor,
+    stop: threading.Event,
+    network_owner: Callable[[socket.socket | None], None],
 ) -> None:
     market_type = stream.market_type
     base_url, endpoint = (
@@ -1044,9 +1139,13 @@ def _record_depth_snapshot(
                 "symbol": stream.symbol,
                 "limit": str(SNAPSHOT_LIMITS[market_type]),
             },
+            stop=stop,
+            network_owner=network_owner,
         )
     except (TimeoutError, OSError) as error:
         raise _ConnectionProblem() from error
+    if stop.is_set():
+        raise _ConnectionProblem()
     snapshot = _validate_snapshot(payload, market_type=market_type)
     capture_seq = writer.write(
         symbol=stream.symbol,
@@ -1092,6 +1191,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
     stats = _CaptureStats(writer=writer)
     stop = threading.Event()
     readers: list[_StreamReader] = []
+    started_readers: list[_StreamReader] = []
     started_at = _utc_now()
     started_clock = time.monotonic()
     cpu_start = time.process_time()
@@ -1118,9 +1218,15 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                 for stream in streams
             ]
             for reader in readers:
-                reader.start()
+                try:
+                    reader.start()
+                except BaseException:
+                    if reader.ident is not None:
+                        started_readers.append(reader)
+                    raise
+                started_readers.append(reader)
             deadline = time.monotonic() + config.connect_timeout_seconds
-            for reader in readers:
+            for reader in started_readers:
                 while True:
                     for pending_reader in readers:
                         if pending_reader.failure is not None:
@@ -1152,18 +1258,32 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
             join_failed = False
             for reader in readers:
                 try:
-                    reader.join(timeout=20)
-                    if reader.is_alive():
-                        join_failed = True
+                    reader.cancel()
                 except BaseException as cleanup_error:
                     join_failed = True
                     if active_primary is not None:
                         active_primary.add_note(
-                            "Binance reader join also failed: "
+                            "Binance reader cancel also failed: "
                             f"{type(cleanup_error).__name__}"
                         )
                     else:
                         active_primary = cleanup_error
+            for reader in started_readers:
+                while True:
+                    try:
+                        reader.join(timeout=None)
+                        reader.finished.wait()
+                    except BaseException as cleanup_error:
+                        join_failed = True
+                        if active_primary is not None:
+                            active_primary.add_note(
+                                "Binance reader join also failed: "
+                                + type(cleanup_error).__name__
+                            )
+                        else:
+                            active_primary = cleanup_error
+                    if reader.finished.is_set() and not reader.is_alive():
+                        break
             for reader in readers:
                 if reader.failure is not None and reader.failure is not active_primary:
                     if active_primary is None:
@@ -1174,10 +1294,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                             + type(reader.failure).__name__
                         )
             if join_failed:
-                if active_primary is None:
-                    active_primary = _ReaderQuiescenceFailure(
-                        "binance_recorder_reader_quiescence_timeout"
-                    )
+                assert active_primary is not None
                 try:
                     writer.abort()
                 except BaseException as cleanup_error:

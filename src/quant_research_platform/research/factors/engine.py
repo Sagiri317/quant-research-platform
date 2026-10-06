@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Iterable, Iterator, Sequence
 
 import pandas as pd
 
@@ -22,6 +22,8 @@ def calculate_factors_for_panel(
     *,
     definitions: Sequence[FactorDefinition],
     output_window: TimeWindow | None = None,
+    trading_calendar: pd.DataFrame | None = None,
+    market_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     requested = tuple(definitions)
     _require_factor_input_columns(panel_frame, requested)
@@ -37,22 +39,13 @@ def calculate_factors_for_panel(
     if not requested:
         return output_source.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
     if families == ("market_model",):
-        from quant_research_platform.compute.market_model import MarketModelRiskState
-        from quant_research_platform.research.filtering import a_share_eligibility
-
-        state = MarketModelRiskState()
-        pieces = []
-        for _, cross in panel_frame.sort_values("timestamp", kind="mergesort").groupby(
-            "timestamp", sort=False
-        ):
-            cross = cross.assign(eligible=a_share_eligibility(cross, "pv_expanded"))
-            styles = state.observe(cross)
-            piece = cross.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
-            piece["beta_252d"] = piece.asset_id.map(styles.beta)
-            piece["residual_volatility_60d"] = piece.asset_id.map(
-                styles.residual_volatility
+        pieces = list(
+            _market_model_frames(
+                (panel_frame,),
+                trading_calendar=trading_calendar,
+                market_history=market_history,
             )
-            pieces.append(piece)
+        )
         calculated = (
             pd.concat(pieces, ignore_index=True)
             if pieces
@@ -93,6 +86,77 @@ def calculate_factors_for_panel(
         calculated,
         output_columns=tuple(definition.output_column for definition in requested),
     )
+
+
+def _market_model_frames(
+    panels: Iterable[pd.DataFrame],
+    *,
+    trading_calendar: pd.DataFrame | None,
+    market_history: pd.DataFrame | None,
+) -> Iterator[pd.DataFrame]:
+    from quant_research_platform.compute.market_model import MarketModelRiskState
+    from quant_research_platform.contracts.validation import (
+        strict_bool_series,
+        strict_integer_series,
+        strict_timestamp_series,
+    )
+    from quant_research_platform.research.filtering import a_share_eligibility
+
+    open_markets = None
+    if trading_calendar is not None:
+        calendar = trading_calendar.assign(
+            calendar_date=strict_timestamp_series(
+                trading_calendar.calendar_date, error="invalid_calendar_date"
+            ).dt.normalize(),
+            source_market_type=strict_integer_series(
+                trading_calendar.source_market_type, error="invalid_source_market_type"
+            ),
+            is_trading_day=strict_bool_series(
+                trading_calendar.is_trading_day, error="invalid_is_trading_day"
+            ),
+        )
+        if calendar.duplicated(["calendar_date", "source_market_type"]).any():
+            raise ValueError("duplicate_trading_calendar_key")
+        open_markets = {
+            timestamp: frozenset(group.loc[group.is_trading_day, "source_market_type"])
+            for timestamp, group in calendar.groupby("calendar_date", sort=False)
+        }
+    events = (
+        iter(())
+        if market_history is None
+        else iter(
+            market_history.sort_values("timestamp", kind="mergesort").itertuples(
+                index=False
+            )
+        )
+    )
+    event = next(events, None)
+    membership = {}
+    state = MarketModelRiskState()
+    for panel in panels:
+        pieces = []
+        for timestamp, cross in panel.sort_values(
+            "timestamp", kind="mergesort"
+        ).groupby("timestamp", sort=False):
+            while event is not None and event.timestamp <= timestamp:
+                membership[event.asset_id] = event.market_type
+                event = next(events, None)
+            cross = cross.assign(eligible=a_share_eligibility(cross, "pv_expanded"))
+            styles = state.observe(
+                cross,
+                open_market_types=None
+                if open_markets is None
+                else open_markets[timestamp.normalize()],
+                asset_market_types=membership,
+            )
+            piece = cross.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
+            piece["beta_252d"] = piece.asset_id.map(styles.beta)
+            piece["residual_volatility_60d"] = piece.asset_id.map(
+                styles.residual_volatility
+            )
+            pieces.append(piece)
+        if pieces:
+            yield pd.concat(pieces, ignore_index=True)
 
 
 def factor_panel_input_columns(

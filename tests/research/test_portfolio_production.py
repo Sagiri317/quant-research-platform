@@ -1257,46 +1257,34 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         assert min((timestamp for timestamp, _asset in lookup.matched)) >= pd.Timestamp(
             "2022-12-01"
         )
-    for interrupt in (True,):
-        completed = []
-        primary = KeyboardInterrupt("calibration_state_interrupted")
-        actual_complete = production._completed_calibration_rows
+    completed = []
+    primary = KeyboardInterrupt("calibration_state_interrupted")
+    actual_complete = production._completed_calibration_rows
 
-        def observed_completion(
-            *args,
-            actual_complete=actual_complete,
-            completed=completed,
-            interrupt=interrupt,
-            primary=primary,
-            **kwargs,
-        ):
-            rows = actual_complete(*args, **kwargs)
-            completed.append(len(rows))
-            if interrupt and len(completed) == 2:
-                rows = None
-                raise primary
-            return rows
+    def observed_completion(*args, **kwargs):
+        rows = actual_complete(*args, **kwargs)
+        completed.append(len(rows))
+        if len(completed) == 2:
+            rows = None
+            raise primary
+        return rows
 
-        with monkeypatch.context() as patch:
-            patch.setattr(production, "_build_session", actual_build)
-            patch.setattr(
-                production, "_completed_calibration_rows", observed_completion
-            )
-            failing, _ = _build_producer(
-                tmp_path / ("interrupt" if interrupt else "cap"),
-                patch,
-                frames=frames,
-                fee_frame=fee_frame,
-                output_window=output_window,
-                input_window=TimeWindow("2022-11-14", "2023-01-10"),
-                candidate=candidate,
-                prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
-            )
-            with pytest.raises(KeyboardInterrupt) as caught:
-                list(failing)
-            assert completed
-            if interrupt:
-                assert caught.value is primary
+    with monkeypatch.context() as patch:
+        patch.setattr(production, "_build_session", actual_build)
+        patch.setattr(production, "_completed_calibration_rows", observed_completion)
+        failing, _ = _build_producer(
+            tmp_path / "interrupt",
+            patch,
+            frames=frames,
+            fee_frame=fee_frame,
+            output_window=output_window,
+            input_window=TimeWindow("2022-11-14", "2023-01-10"),
+            candidate=candidate,
+            prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
+        )
+        with pytest.raises(KeyboardInterrupt) as caught:
+            list(failing)
+        assert completed and caught.value is primary
 
 
 @pytest.mark.parametrize("missing_prediction", [False, True])

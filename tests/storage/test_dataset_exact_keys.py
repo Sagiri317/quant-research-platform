@@ -204,9 +204,8 @@ def test_dataset_writer_accepts_dictionary_encoded_primary_keys(
         frame["asset_id"].astype(str).tolist()
     )
     part = next(filesystem_glob(root / "data", "**/part-*.parquet"))
-    persisted_key_schema = pa.schema(
-        [pq.ParquetFile(native_filesystem_path(part)).schema_arrow.field("asset_id")]
-    )
+    with pq.ParquetFile(native_filesystem_path(part)) as parquet:
+        persisted_key_schema = pa.schema([parquet.schema_arrow.field("asset_id")])
     assert tracked_schemas
     assert all(
         pa.schema([schema.field("asset_id")]) == persisted_key_schema

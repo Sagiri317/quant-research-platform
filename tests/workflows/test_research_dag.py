@@ -1345,6 +1345,96 @@ def _calendar_rebuild_profile(
     )
 
 
+def test_plan_reuse_requires_native_physical_members(tmp_path):
+    raw_root = tmp_path / "raw"
+    marker = raw_root / "csmar" / "source.raw"
+    filesystem_mkdir(marker.parent, parents=True)
+    filesystem_write_bytes(marker, b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
+    layout = StorageLayout(project_root=tmp_path)
+    request = dict(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    built = research.data_materialize(**request)
+    root = layout.instance_root(
+        layout.interim_data_root("csmar", data_id),
+        built["target_results"][0]["instance_identity"],
+    )
+    manifest = root / "_manifest" / "manifest.json"
+    before = filesystem_read_bytes(manifest)
+    qualified = research.data_materialize(**request, plan=True)
+    assert qualified["status"] == "COMPLETE"
+    assert qualified["targets"][0]["decision"] == "REUSE"
+    (member,) = tuple(filesystem_glob(root / "data", "**/*.parquet"))
+    filesystem_unlink(member)
+    rejected = research.data_materialize(**request, plan=True)
+    assert rejected["status"] == "BLOCKED"
+    assert rejected["targets"][0]["decision"] == "BLOCKED"
+    assert rejected["targets"][0]["blocker"] == "persisted_instance_invalid"
+    executed = research.data_materialize(**request)
+    assert executed["status"] == "BLOCKED"
+    assert executed["target_results"][0]["reason"] == "persisted_instance_invalid"
+    assert filesystem_read_bytes(manifest) == before
+    assert calls["count"] == 1
+
+
+def test_reuse_retains_one_native_qualification_and_rejects_later_change(
+    tmp_path, monkeypatch
+):
+    raw_root = tmp_path / "raw"
+    marker = raw_root / "csmar" / "source.raw"
+    filesystem_mkdir(marker.parent, parents=True)
+    filesystem_write_bytes(marker, b"stable")
+    profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
+    layout = StorageLayout(project_root=tmp_path)
+    request = dict(
+        profile=profile,
+        layout=layout,
+        raw_root=raw_root,
+        start_date="2020-01-01",
+        end_date="2020-12-31",
+        data_ids=(data_id,),
+    )
+    built = research.data_materialize(**request)
+    root = layout.instance_root(
+        layout.interim_data_root("csmar", data_id),
+        built["target_results"][0]["instance_identity"],
+    )
+    observed = []
+    inspect = research.inspect_dataset_session
+
+    def inspect_native(session):
+        observed.append(session.root)
+        return inspect(session)
+
+    monkeypatch.setattr(research, "inspect_dataset_session", inspect_native)
+    reused = research.data_materialize(**request)
+    assert reused["status"] == "COMPLETE"
+    assert reused["target_results"][0]["status"] == "REUSED"
+    assert observed == [root]
+    plan = research._plan_targets
+
+    def mutate_after_plan(**kwargs):
+        result = plan(**kwargs)
+        (member,) = tuple(filesystem_glob(root / "data", "**/*.parquet"))
+        filesystem_write_bytes(member, filesystem_read_bytes(member) + b"\0")
+        return result
+
+    monkeypatch.setattr(research, "_plan_targets", mutate_after_plan)
+    changed = research.data_materialize(**request)
+    assert changed["status"] == "FAILED"
+    assert changed["target_results"][0]["reason"] == (
+        "interim_build_failed:dataset_file_identity_changed"
+    )
+    assert observed == [root, root]
+    assert calls["count"] == 1
+
+
 @pytest.mark.parametrize(
     ("variant", "comparison_status"),
     (
@@ -2411,7 +2501,14 @@ def test_target_local_validation_preserves_independent_production(
             content = bytearray(filesystem_read_bytes(part))
             content[4] ^= 1
             filesystem_write_bytes(part, bytes(content))
-        actual_inspect = research.inspect_physical_dataset
+        planned = research.data_materialize(**kwargs, plan=True)
+        planned_target = next(
+            item for item in planned["targets"] if item["target_id"] == a
+        )
+        assert planned_target["decision"] == ("BLOCKED" if primary is None else "REUSE")
+        if primary is None:
+            assert planned_target["blocker"] == "persisted_instance_invalid"
+        actual_inspect = research.inspect_dataset_session
 
         def inspect(*args, **inner):
             calls.append(a)
@@ -2419,14 +2516,7 @@ def test_target_local_validation_preserves_independent_production(
                 raise primary
             return actual_inspect(*args, **inner)
 
-        monkeypatch.setattr(research, "inspect_physical_dataset", inspect)
-        planned = research.data_materialize(**kwargs, plan=True)
-        assert (
-            next(item for item in planned["targets"] if item["target_id"] == a)[
-                "decision"
-            ]
-            == "REUSE"
-        )
+        monkeypatch.setattr(research, "inspect_dataset_session", inspect)
     if primary is not None:
         with pytest.raises(type(primary)) as raised:
             research.data_materialize(**kwargs)
@@ -2435,13 +2525,13 @@ def test_target_local_validation_preserves_independent_production(
         return
     result = research.data_materialize(**kwargs)
     results = {item["target_id"]: item for item in result["target_results"]}
-    assert result["status"] == "FAILED"
-    assert calls == [a, c]
-    assert results[a]["status"] == "FAILED"
+    assert result["status"] == ("FAILED" if phase == "build" else "BLOCKED")
+    assert calls == ([a, c] if phase == "build" else [c])
+    assert results[a]["status"] == ("FAILED" if phase == "build" else "BLOCKED")
     if phase == "build":
         assert "duplicate_dataset_primary_key" in results[a]["reason"]
     else:
-        assert results[a]["reason"].startswith(f"{kind.value.lower()}_build_failed:")
+        assert results[a]["reason"] == "persisted_instance_invalid"
     assert results[b]["status"] == "BLOCKED"
     assert results[b]["reason"] == f"dependency_blocked: {a}"
     assert results[c]["status"] == "BUILT"

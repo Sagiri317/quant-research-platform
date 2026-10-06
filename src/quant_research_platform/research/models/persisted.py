@@ -995,7 +995,11 @@ def _validate_a_share_model_payload(
                     )
                 ):
                     raise ValueError("model_trial_parameters_misaligned")
-                _validate_a_share_model_parameters(metadata, expected_parameters)
+                _validate_model_parameters(
+                    metadata,
+                    expected_parameters,
+                    error="model_trial_parameters_misaligned",
+                )
                 member = entry["validation_prediction"]
                 path = f"models/{quarter}/{family_id}/{entry['model_id']}.parquet"
                 if member.get("path") != path or member != member_records.get(path):
@@ -1220,7 +1224,9 @@ def _validate_a_share_model_payload(
             or (pd.Timestamp(metadata["train_end"]) > cutoff)
         ):
             raise ValueError("model_trial_refit_misaligned")
-        _validate_a_share_model_parameters(metadata, normalized)
+        _validate_model_parameters(
+            metadata, normalized, error="model_trial_parameters_misaligned"
+        )
         relative = f"models/final/{group}/{family_id}.pkl"
         required.add(relative)
         member_value = _read_model_member(
@@ -1242,7 +1248,7 @@ def _validate_a_share_model_payload(
     )
 
 
-def _validate_a_share_model_parameters(metadata, parameters):
+def _validate_model_parameters(metadata, parameters, *, error):
     for key in (
         "model_algorithm",
         "random_seed",
@@ -1255,7 +1261,7 @@ def _validate_a_share_model_parameters(metadata, parameters):
         "training_weighting",
     ):
         if metadata[key] != parameters[key]:
-            raise ValueError("model_trial_parameters_misaligned")
+            raise ValueError(error)
 
 
 def read_quarterly_predictor(artifact, selection_group, family_id):
@@ -1644,27 +1650,6 @@ def _validate_crypto_model_payload(
     if tuple(registered_specs) != model_ids:
         raise ValueError("crypto_model_members_invalid")
 
-    def validate_parameters(metadata, parameters):
-        validate_model_metadata_core(metadata)
-        for key in (
-            "model_algorithm",
-            "random_seed",
-            "label_column",
-            "input_factor_columns",
-            "input_feature_columns",
-            "sample_filter_mode",
-            "hyperparameters",
-            "max_train_rows",
-            "training_weighting",
-        ):
-            if metadata[key] != parameters[key]:
-                raise ValueError("crypto_model_parameters_misaligned")
-        if (
-            metadata["input_columns"]
-            != parameters["input_factor_columns"] + parameters["input_feature_columns"]
-        ):
-            raise ValueError("crypto_model_parameters_misaligned")
-
     def validate_fit_bounds(metadata, windows, cutoff):
         first, last = (
             pd.Timestamp(metadata[key]) for key in ("train_start", "train_end")
@@ -1778,7 +1763,12 @@ def _validate_crypto_model_payload(
                 )
             ):
                 raise ValueError("crypto_model_trial_binding_invalid")
-            validate_parameters(entry["model_metadata"], parameters)
+            validate_model_metadata_core(entry["model_metadata"])
+            _validate_model_parameters(
+                entry["model_metadata"],
+                parameters,
+                error="crypto_model_parameters_misaligned",
+            )
             validate_fit_bounds(entry["model_metadata"], (fold.train,), fold.train.end)
             path = entry["validation_prediction_path"]
             if path != f"models/{fold.fold_id}/validation/{entry['model_id']}.parquet":
@@ -1904,7 +1894,10 @@ def _validate_crypto_model_payload(
             )
         ):
             raise ValueError("crypto_model_refit_binding_invalid")
-        validate_parameters(metadata, parameters)
+        validate_model_metadata_core(metadata)
+        _validate_model_parameters(
+            metadata, parameters, error="crypto_model_parameters_misaligned"
+        )
         validate_fit_bounds(metadata, refit_plan.fit_windows, refit_plan.fit_cutoff)
         required.add(f"models/final/{entry['model_id']}.pkl")
     if references or {member["path"] for member in members} != required:

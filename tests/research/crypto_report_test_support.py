@@ -30,100 +30,82 @@ def check_crypto_report_lifecycle(
             if filesystem_is_file(path)
         }
 
-    actual_write = research.write_research_report_artifact
-    actual_read = research.read_research_report_artifact
-
-    def write(*args, **kwargs):
-        return actual_write(*args, **kwargs)
-
-    def read(*args, **kwargs):
-        return actual_read(*args, **kwargs)
-
     report_target = f"{HFT_RESEARCH_DATASET_ID}_report_artifact"
     logical = layout.semantic_artifact_root("crypto", report_target)
-    with monkeypatch.context() as patch:
-        patch.setattr(research, "write_research_report_artifact", write)
-        patch.setattr(research, "read_research_report_artifact", read)
-        report = research.report_build(
-            profile=profile, layout=layout, run_id=reused_run["run_id"]
-        )
-        assert (
-            report["status"] == "COMPLETE"
-            and report["target_result"]["status"] == "BUILT"
-        )
-        again = research.report_build(
-            profile=profile, layout=layout, run_id=reused_run["run_id"]
-        )
-        assert again["target_result"]["status"] == "REUSED"
-        assert again["report"] == report["report"]
-        old_root = layout.instance_root(
-            logical, report["target_result"]["instance_identity"]
-        )
-        before = files(old_root)
-        instances = {path.name for path in filesystem_iterdir(logical / "instances")}
-        primary = KeyboardInterrupt("report_write_interrupted")
-        real_evidence = report_artifact.write_json_evidence
+    report = research.report_build(
+        profile=profile, layout=layout, run_id=reused_run["run_id"]
+    )
+    assert (
+        report["status"] == "COMPLETE" and report["target_result"]["status"] == "BUILT"
+    )
+    again = research.report_build(
+        profile=profile, layout=layout, run_id=reused_run["run_id"]
+    )
+    assert again["target_result"]["status"] == "REUSED"
+    assert again["report"] == report["report"]
+    old_root = layout.instance_root(
+        logical, report["target_result"]["instance_identity"]
+    )
+    before = files(old_root)
+    instances = {path.name for path in filesystem_iterdir(logical / "instances")}
+    primary = KeyboardInterrupt("report_write_interrupted")
+    real_evidence = report_artifact.write_json_evidence
 
-        def evidence(path, payload):
-            if path.name == "report.json":
-                raise primary
-            return real_evidence(path, payload)
+    def evidence(path, payload):
+        if path.name == "report.json":
+            raise primary
+        return real_evidence(path, payload)
 
-        with monkeypatch.context() as failure:
-            failure.setattr(report_artifact, "write_json_evidence", evidence)
-            with pytest.raises(KeyboardInterrupt) as raised:
-                research.report_build(
-                    profile=profile, layout=layout, run_id=blocked_run["run_id"]
-                )
-            assert raised.value is primary
-        assert {
-            path.name for path in filesystem_iterdir(logical / "instances")
-        } == instances
-        assert files(old_root) == before
-        partial = research.report_build(
-            profile=profile, layout=layout, run_id=blocked_run["run_id"]
+    with monkeypatch.context() as failure:
+        failure.setattr(report_artifact, "write_json_evidence", evidence)
+        with pytest.raises(KeyboardInterrupt) as raised:
+            research.report_build(
+                profile=profile, layout=layout, run_id=blocked_run["run_id"]
+            )
+        assert raised.value is primary
+    assert {
+        path.name for path in filesystem_iterdir(logical / "instances")
+    } == instances
+    assert files(old_root) == before
+    partial = research.report_build(
+        profile=profile, layout=layout, run_id=blocked_run["run_id"]
+    )
+    assert (
+        partial["status"] == "BLOCKED" and partial["target_result"]["status"] == "BUILT"
+    )
+    assert partial["report"]["sections"]["models and validation"]["status"] == "DEFINED"
+    assert any(
+        row["status"] == "BLOCKED"
+        for row in partial["report"]["sections"]["portfolio"]["candidates"]
+    )
+    panel = profile.processed.get(HFT_PANEL_DATA_ID)
+    root = layout.instance_root(
+        layout.processed_data_root(panel.market_id, panel.kind, panel.data_id),
+        targets[HFT_PANEL_DATA_ID]["instance_identity"],
+    )
+    metadata = root / "_manifest" / "manifest.json"
+    saved = filesystem_read_bytes(metadata)
+    changed = json.loads(saved)
+    changed.pop("producer_diagnostics")
+    filesystem_write_text(metadata, json.dumps(changed), encoding="utf-8")
+    try:
+        failed = research.report_build(
+            profile=profile, layout=layout, run_id=complete_run["run_id"]
         )
         assert (
-            partial["status"] == "BLOCKED"
-            and partial["target_result"]["status"] == "BUILT"
+            failed["status"] == "FAILED"
+            and failed["target_result"]["status"] == "BUILT"
         )
-        assert (
-            partial["report"]["sections"]["models and validation"]["status"]
-            == "DEFINED"
-        )
+        section = failed["report"]["sections"]["Data/Coverage"]
+        assert section["status"] == "FAILED"
         assert any(
-            row["status"] == "BLOCKED"
-            for row in partial["report"]["sections"]["portfolio"]["candidates"]
+            row["target_id"] == HFT_PANEL_DATA_ID
+            and row["reason"] == "crypto_dataset_evidence_invalid"
+            for row in section["issues"]
         )
-        panel = profile.processed.get(HFT_PANEL_DATA_ID)
-        root = layout.instance_root(
-            layout.processed_data_root(panel.market_id, panel.kind, panel.data_id),
-            targets[HFT_PANEL_DATA_ID]["instance_identity"],
+        assert (
+            failed["report"]["sections"]["models and validation"]["status"] == "DEFINED"
         )
-        metadata = root / "_manifest" / "manifest.json"
-        saved = filesystem_read_bytes(metadata)
-        changed = json.loads(saved)
-        changed.pop("producer_diagnostics")
-        filesystem_write_text(metadata, json.dumps(changed), encoding="utf-8")
-        try:
-            failed = research.report_build(
-                profile=profile, layout=layout, run_id=complete_run["run_id"]
-            )
-            assert (
-                failed["status"] == "FAILED"
-                and failed["target_result"]["status"] == "BUILT"
-            )
-            section = failed["report"]["sections"]["Data/Coverage"]
-            assert section["status"] == "FAILED"
-            assert any(
-                row["target_id"] == HFT_PANEL_DATA_ID
-                and row["reason"] == "crypto_dataset_evidence_invalid"
-                for row in section["issues"]
-            )
-            assert (
-                failed["report"]["sections"]["models and validation"]["status"]
-                == "DEFINED"
-            )
-        finally:
-            filesystem_write_bytes(metadata, saved)
-        assert files(old_root) == before
+    finally:
+        filesystem_write_bytes(metadata, saved)
+    assert files(old_root) == before

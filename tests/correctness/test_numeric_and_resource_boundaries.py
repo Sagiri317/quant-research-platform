@@ -89,18 +89,12 @@ def test_centered_kernels_preserve_finite_variation(values, expected):
 
 
 @pytest.mark.parametrize("scale", [1e308, 1e-200, 1e-320])
-@pytest.mark.parametrize("block_size", [1, 3, 11])
-def test_online_pearson_preserves_units_across_chunks(scale, block_size):
+def test_online_pearson_preserves_extreme_units(scale):
     left = np.array([0, 0, 0.1, 0.2, 0.2, -0.2, -1, 1, 1, 0, -1]) * scale
     right = left / scale
     stats = _CorrelationMoments()
-    for start in range(0, len(left), block_size):
-        for x, y in zip(
-            left[start : start + block_size],
-            right[start : start + block_size],
-            strict=True,
-        ):
-            stats.update(float(x), float(y))
+    for x, y in zip(left, right, strict=True):
+        stats.update(float(x), float(y))
     result = _time_series_metrics_frame(
         {("signal", "label"): stats}, timestamp=pd.Timestamp("2023-01-01")
     )

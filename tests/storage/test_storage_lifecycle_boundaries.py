@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import io
-import json
 import os
 import subprocess
 from contextlib import contextmanager
@@ -27,14 +26,6 @@ _PRIMARY_EXCEPTION_TYPES = (
     SystemExit,
     GeneratorExit,
 )
-
-
-def _file_bytes(root: Path) -> dict[Path, bytes]:
-    return {
-        (parent / name).relative_to(root): identity.filesystem_read_bytes(parent / name)
-        for parent, _directories, files in identity.filesystem_walk(root)
-        for name in files
-    }
 
 
 @pytest.mark.parametrize("primary_type", (*_PRIMARY_EXCEPTION_TYPES, OSError))
@@ -72,10 +63,6 @@ def test_content_hash_close_preserves_primary_and_closes_file(
         assert raised.value.__notes__ == ["iterator close also failed: OSError"]
     finally:
         raw.close()
-
-
-def _open_inventory_for_failure(data_root: Path):
-    return inventory_owner.DatasetSessionInventory(data_root=data_root)
 
 
 @pytest.mark.parametrize("long_path", (False, True))
@@ -174,31 +161,6 @@ class _BodyAndCloseFailingHandle:
 
     def close(self) -> None:
         raise OSError("close_secondary")
-
-
-def _patch_open_session_metadata_preflight(
-    monkeypatch: pytest.MonkeyPatch, root: Path
-) -> tuple[dict[str, str], dict[str, str]]:
-    spec = {"schema_id": "qrp-dataset-spec"}
-    manifest = {"schema_id": "qrp-dataset-manifest", "content_hash": "0" * 64}
-    identity.filesystem_mkdir(root / "data", parents=True)
-    identity.filesystem_mkdir(root / "_manifest")
-    identity.filesystem_write_text(
-        root / "spec.json", json.dumps(spec), encoding="utf-8"
-    )
-    identity.filesystem_write_text(
-        root / "_manifest" / "manifest.json", json.dumps(manifest), encoding="utf-8"
-    )
-    monkeypatch.setattr(
-        dataset_reading, "validate_dataset_spec_payload", lambda *_a, **_k: None
-    )
-    monkeypatch.setattr(
-        dataset_reading, "validate_dataset_manifest_payload", lambda *_a, **_k: None
-    )
-    monkeypatch.setattr(
-        dataset_reading, "validate_dataset_manifest_consumable", lambda *_a, **_k: None
-    )
-    return (spec, manifest)
 
 
 @pytest.mark.parametrize("long_path", (False, True))

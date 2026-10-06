@@ -228,8 +228,6 @@ class PortfolioLedgerBatch:
             or not row.fill_id
             or type(row.order_id) is not str
             or not row.order_id
-            or not isfinite(row.quantity)
-            or not isfinite(row.notional)
             or row.quantity == 0
             or row.notional == 0
             or (row.quantity > 0) != (row.notional > 0)
@@ -239,7 +237,6 @@ class PortfolioLedgerBatch:
         if len({row.flow_id for row in self.cashflows}) != len(self.cashflows) or any(
             type(row.flow_id) is not str
             or not row.flow_id
-            or not isfinite(row.amount)
             or row.kind
             not in {
                 "principal",
@@ -264,11 +261,7 @@ class PortfolioLedgerBatch:
             for phase in ("before", "after", "end")
         }
         if sum(map(len, phases.values())) != len(self.valuations) or any(
-            not all(
-                isfinite(value)
-                for value in (row.quantity, row.value, row.mark_price, row.cost_basis)
-            )
-            or row.mark_price < 0
+            row.mark_price < 0
             or not isclose(
                 row.value,
                 row.quantity * row.mark_price - row.cost_basis,
@@ -351,7 +344,6 @@ class PortfolioLedgerBatch:
                 row.fill_id is not None
                 and (type(row.fill_id) is not str or not row.fill_id)
             )
-            or (row.number is not None and not isfinite(row.number))
             or (row.text is not None and type(row.text) is not str)
             or (row.number is not None and row.text is not None)
             for row in self.diagnostics

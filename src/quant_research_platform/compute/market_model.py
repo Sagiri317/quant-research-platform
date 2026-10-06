@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 from array import array
+from collections.abc import Mapping
 from dataclasses import dataclass
+from fractions import Fraction
 from math import frexp, ldexp
 
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.validation import strict_finite_numeric_series
+from quant_research_platform.contracts.validation import (
+    strict_finite_numeric_series,
+    strict_integer_series,
+)
 
 
 @dataclass(frozen=True)
@@ -28,13 +33,23 @@ class MarketModelRiskState:
         self._market_returns: dict[str, array] = {}
         self._residuals: dict[str, array] = {}
         self._previous_weights: dict[str, float] = {}
+        self._asset_markets: dict[str, int] = {}
+        self._pending_market_gross: dict[str, Fraction | None] = {}
 
-    def observe(self, panel: pd.DataFrame) -> MarketModelRiskStyles:
+    def observe(
+        self,
+        panel: pd.DataFrame,
+        *,
+        open_market_types: frozenset[int] | None = None,
+        asset_market_types: Mapping[str, int] | None = None,
+    ) -> MarketModelRiskStyles:
         required = {
             "asset_id",
             "period_return",
             "float_market_cap",
         }
+        if open_market_types is not None:
+            required.add("market_type")
         if not isinstance(panel, pd.DataFrame) or not required.issubset(panel.columns):
             raise ValueError("market_model_risk_columns_invalid")
         if "eligible" in panel.columns:
@@ -47,6 +62,10 @@ class MarketModelRiskState:
             :, list(required) + (["eligible"] if "eligible" in panel else [])
         ].copy()
         frame["asset_id"] = frame["asset_id"].astype("string")
+        if open_market_types is not None:
+            frame["market_type"] = strict_integer_series(
+                frame["market_type"], error="market_model_risk_market_type_invalid"
+            )
         for column in ("period_return", "float_market_cap"):
             frame[column] = strict_finite_numeric_series(
                 frame[column],
@@ -62,10 +81,30 @@ class MarketModelRiskState:
         ):
             raise ValueError("market_model_risk_key_invalid")
         frame = frame.sort_values("asset_id", kind="mergesort").reset_index(drop=True)
-        for asset in self._returns.keys() - set(frame.asset_id):
+        if open_market_types is not None:
+            self._asset_markets.update(
+                zip(frame.asset_id, frame.market_type, strict=True)
+            )
+            if asset_market_types is not None:
+                self._asset_markets.update(
+                    (asset, asset_market_types[asset])
+                    for asset in self._returns
+                    if asset in asset_market_types
+                )
+        absent = self._returns.keys() - set(frame.asset_id)
+        closed_assets = {
+            asset
+            for asset in absent
+            if open_market_types is not None
+            and self._asset_markets[asset] not in open_market_types
+        }
+        for asset in absent - closed_assets:
             del self._returns[asset]
             del self._market_returns[asset]
             del self._residuals[asset]
+            self._previous_weights.pop(asset, None)
+            self._asset_markets.pop(asset, None)
+            self._pending_market_gross.pop(asset, None)
 
         weighted = [
             (
@@ -101,6 +140,13 @@ class MarketModelRiskState:
             if market_denominator > 0.0
             else np.nan
         )
+        for asset in closed_assets:
+            gross = self._pending_market_gross.get(asset, Fraction(1))
+            self._pending_market_gross[asset] = (
+                gross * (1 + Fraction.from_float(float(market_return)))
+                if gross is not None and np.isfinite(market_return)
+                else None
+            )
 
         betas: dict[str, float] = {}
         volatilities: dict[str, float] = {}
@@ -114,9 +160,17 @@ class MarketModelRiskState:
             returns = self._returns.setdefault(asset, array("d"))
             markets = self._market_returns.setdefault(asset, array("d"))
             residuals = self._residuals.setdefault(asset, array("d"))
-            if np.isfinite(market_return) and np.isfinite(return_value):
+            interval_market_return = market_return
+            if asset in self._pending_market_gross:
+                gross = self._pending_market_gross.pop(asset)
+                interval_market_return = (
+                    float(gross * (1 + Fraction.from_float(float(market_return))) - 1)
+                    if gross is not None and np.isfinite(market_return)
+                    else np.nan
+                )
+            if np.isfinite(interval_market_return) and np.isfinite(return_value):
                 returns.append(return_value)
-                markets.append(market_return)
+                markets.append(interval_market_return)
                 if len(returns) > self.window:
                     returns.pop(0)
                     markets.pop(0)
@@ -156,9 +210,22 @@ class MarketModelRiskState:
                 )
             volatilities[asset] = volatility
         self._previous_weights = {
-            asset: current_weight
-            for asset, _return, _previous_weight, current_weight, _eligible in weighted
-            if np.isfinite(current_weight)
+            **{
+                asset: self._previous_weights[asset]
+                for asset in closed_assets
+                if asset in self._previous_weights
+            },
+            **{
+                asset: current_weight
+                for (
+                    asset,
+                    _return,
+                    _previous_weight,
+                    current_weight,
+                    _eligible,
+                ) in weighted
+                if np.isfinite(current_weight)
+            },
         }
 
         return MarketModelRiskStyles(

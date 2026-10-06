@@ -61,10 +61,15 @@ def compute_market_panel(
     session_window: pd.DatetimeIndex | None = None,
     asset_market_types: pd.Series | None = None,
     suspension_history: pd.DataFrame | None = None,
+    market_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     """Build one slab from prepared facts, retaining suspension rows."""
 
     bars = _canonical_bars(market_bars)
+    if market_history is None:
+        market_history = bars.loc[
+            :, ["asset_id", "timestamp", "market_type"]
+        ].sort_values(["asset_id", "timestamp"], kind="mergesort")
     if bars.empty and asset_market_types is None:
         return bars
     sessions = unified_trading_sessions(trading_calendar)
@@ -86,6 +91,7 @@ def compute_market_panel(
         stock_master,
         session_window,
         asset_market_types=asset_market_types,
+        market_history=market_history,
     )
     open_session = pd.Series(False, index=dense.index)
     for market_type, group in dense.groupby("market_type", sort=False):
@@ -120,6 +126,7 @@ def compute_market_panel(
         observation_date_column="timestamp",
         listing_date_column="listing_date",
         market_type_column="market_type",
+        market_history=market_history,
     )
     return dense.sort_values(
         ["timestamp", "market_id", "asset_id"], kind="mergesort"
@@ -290,6 +297,7 @@ def _dense_lifecycle_panel(
     sessions: pd.DatetimeIndex,
     *,
     asset_market_types: pd.Series | None = None,
+    market_history: pd.DataFrame,
 ) -> pd.DataFrame:
     if asset_market_types is None:
         asset_market_types = bars.drop_duplicates("asset_id").set_index("asset_id")[
@@ -299,6 +307,7 @@ def _dense_lifecycle_panel(
     rows: list[pd.DataFrame] = []
     stock_groups = stocks.groupby("asset_id", sort=False).indices
     bar_groups = bars.groupby("asset_id", sort=False).indices
+    market_groups = market_history.groupby("asset_id", sort=False).indices
     for asset_id in assets:
         stock = stocks.iloc[stock_groups.get(asset_id, [])]
         if stock.empty:
@@ -330,11 +339,12 @@ def _dense_lifecycle_panel(
             how="left",
             validate="one_to_one",
         )
+        membership = market_history.iloc[market_groups.get(asset_id, [])]
+        positions = membership.timestamp.searchsorted(dates, side="right") - 1
         base["market_type"] = (
-            base["market_type"]
-            .ffill()
-            .fillna(asset_market_types.loc[asset_id])
-            .astype("object")
+            membership.market_type.iloc[positions.clip(min=0)].to_numpy()
+            if not membership.empty
+            else asset_market_types.loc[asset_id]
         )
         rows.append(base)
     if not rows:

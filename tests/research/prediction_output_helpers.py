@@ -8,10 +8,6 @@ import pandas as pd
 from quant_research_platform.artifacts.outputs import (
     write_prediction_outputs as write_prediction_outputs_in_workflow,
 )
-from quant_research_platform.contracts.filtering import (
-    filter_definition,
-    required_filter_columns,
-)
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
@@ -66,39 +62,3 @@ def write_prediction_result(layout: StorageLayout, result) -> Path:
             model_metadata=result.model_metadata,
             prediction_metadata_factory=result.prediction_metadata_factory,
         )
-
-
-def synthetic_prediction_model_metadata(
-    spec: PredictionSpec, input_columns: tuple[str, ...]
-) -> dict[str, object]:
-    return {
-        "model_algorithm": "linear_regression",
-        "sample_filter_mode": spec.sample_filter_mode,
-        "filter_columns_used": list(required_filter_columns(spec.sample_filter_mode)),
-        "filter_definition": filter_definition(spec.sample_filter_mode),
-        "rows_input": 1,
-        "rows_after_filter_mode": 1,
-        "rows_after_input_label_dropna": 1,
-        "train_start": spec.train_end,
-        "train_end": spec.train_end,
-        "test_start": None,
-        "test_end": None,
-        "oos_start": None,
-        "oos_end": None,
-        "input_factor_columns": list(input_columns),
-        "input_feature_columns": [],
-        "input_columns": list(input_columns),
-        "input_count": len(input_columns),
-        "label_column": "label",
-        "hyperparameters": {},
-        "resolved_hyperparameters": {},
-        "random_seed": None,
-        "max_train_rows": 1,
-        "training_weighting": {"method": "equal_timestamp", "half_life": None},
-        "scaler": None,
-        "dependency_status": {
-            "status": "available",
-            "package": "internal",
-        },
-        "feature_importance": {column: 1.0 for column in input_columns},
-    }

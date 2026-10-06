@@ -178,6 +178,82 @@ def _publish_funding_archive(root, date, *, include_funding=True):
     return destination
 
 
+@pytest.mark.parametrize("changed_field", ("time", "rate", "mark"))
+def test_native_settlements_are_authoritative_after_coordinated_csv_rewrite(
+    tmp_path, changed_field
+):
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.storage.manifests import read_manifest
+    from quant_research_platform.storage.raw_snapshots import (
+        iter_csv_snapshot,
+        write_csv_snapshot,
+    )
+
+    destination = _publish_funding_archive(tmp_path, "2026-09-01")
+    window = TimeWindow("2026-09-01T00:00:00", "2026-09-01T00:09:59")
+    with open_tardis_archive(destination) as archive:
+        (original_root,) = archive.funding_roots("BTCUSDT", time_window=window)
+        original_manifest = read_manifest(original_root / "response.metadata.json")
+        original_bytes = (original_root.parent / "settlements.json").read_bytes()
+        rows = list(
+            iter_csv_snapshot(
+                original_root, expected_manifest=original_manifest, max_bytes=1024**2
+            )
+        )
+        changed = []
+        for row in rows:
+            if row[0] == "settlement":
+                row = list(row)
+                index = {"time": 1, "rate": 3, "mark": 4}[changed_field]
+                row[index] = (
+                    row[index] + 1
+                    if changed_field == "time"
+                    else 0.9
+                    if changed_field == "rate"
+                    else 201.0
+                )
+                row = tuple(row)
+            changed.append(row)
+        rewritten = tmp_path / "coordinated" / "observations"
+        rewritten.parent.mkdir()
+        (rewritten.parent / "settlements.json").write_bytes(original_bytes)
+
+        def validate_csv(root):
+            manifest = read_manifest(root / "response.metadata.json")
+            assert tuple(
+                iter_csv_snapshot(root, expected_manifest=manifest, max_bytes=1024**2)
+            ) == tuple(changed)
+
+        write_csv_snapshot(
+            rewritten,
+            columns=original_manifest["columns"],
+            rows=changed,
+            metadata=original_manifest["metadata"],
+            max_bytes=1024**2,
+            validate=validate_csv,
+        )
+        rewritten_manifest = read_manifest(rewritten / "response.metadata.json")
+        assert canonical_json_hash(rewritten_manifest) != canonical_json_hash(
+            original_manifest
+        )
+        with pytest.raises(
+            ValueError, match="^binance_funding_settlement_projection_invalid$"
+        ):
+            with read_funding_observations((rewritten,), symbol="BTCUSDT"):
+                pytest.fail(
+                    "a new manifest cannot change the original settlement facts"
+                )
+        with read_funding_observations((original_root,), symbol="BTCUSDT") as source:
+            assert [
+                (event.timestamp_ns, event.rate, event.mark_price)
+                for event in source.events
+            ] == [(pd.Timestamp("2026-09-01T00:00:10Z").value, 0.1, 200.0)]
+            assert len(tuple(source.forecasts)) == 1
+        assert (
+            original_root.parent / "settlements.json"
+        ).read_bytes() == original_bytes
+
+
 def test_selected_validation_funding_never_reads_other_months(tmp_path, monkeypatch):
     import quant_research_platform.sources.binance.funding as funding
 
@@ -228,6 +304,58 @@ def test_selected_validation_funding_never_reads_other_months(tmp_path, monkeypa
         == expected_identity
     )
     assert inspected and set(inspected) == set(roots)
+
+
+@pytest.mark.parametrize("mode", ("complete", "early", "source_changed", "primary"))
+def test_native_funding_scope_decodes_once_and_rechecks_original_on_exit(
+    tmp_path, monkeypatch, mode
+):
+    import quant_research_platform.sources.binance.funding as funding
+
+    destination = _publish_funding_archive(tmp_path, "2026-09-01")
+    root = destination / "funding/BTCUSDT/observations"
+    original = funding._settlement_response
+    decoded = []
+    primary = MemoryError("consumer primary")
+
+    def decode(*args, **kwargs):
+        result = original(*args, **kwargs)
+        decoded.append(result)
+        return result
+
+    monkeypatch.setattr(funding, "_settlement_response", decode)
+
+    def consume():
+        with read_funding_observations((root,), symbol="BTCUSDT") as source:
+            assert len(source.events) == 1
+            assert (source.events[0].rate, source.events[0].mark_price) == (0.1, 200.0)
+            if mode == "complete":
+                assert len(tuple(source.forecasts)) == 1
+            else:
+                assert next(source.forecasts).cashflows == (
+                    (pd.Timestamp("2026-09-01T00:00:10Z").value, -5.0),
+                )
+            if mode in {"source_changed", "primary"}:
+                path = root.parent / "settlements.json"
+                path.write_bytes(path.read_bytes() + b" ")
+            if mode == "primary":
+                raise primary
+
+    if mode == "source_changed":
+        with pytest.raises(
+            ValueError, match="^binance_funding_settlement_source_changed$"
+        ):
+            consume()
+    elif mode == "primary":
+        with pytest.raises(MemoryError) as raised:
+            consume()
+        assert raised.value is primary
+        assert primary.__notes__ == [
+            "Funding source verification also failed: ValueError"
+        ]
+    else:
+        consume()
+    assert len(decoded) == 1
 
 
 def test_separate_native_funding_archives_cannot_supply_continuous_months(tmp_path):
@@ -416,7 +544,7 @@ def test_effective_limit_cannot_certify_a_truncated_settlement_window(tmp_path):
 
 
 @pytest.mark.parametrize("body_fails", [False, True])
-def test_settlement_hash_handle_close_preserves_primary(
+def test_settlement_read_handle_close_preserves_primary(
     tmp_path, monkeypatch, body_fails
 ):
     import quant_research_platform.sources.binance.funding as funding
@@ -434,10 +562,10 @@ def test_settlement_hash_handle_close_preserves_primary(
         def __getattr__(self, name):
             return getattr(self.handle, name)
 
-        def readinto(self, buffer):
+        def read(self, size=-1):
             if body_fails:
                 raise primary
-            return self.handle.readinto(buffer)
+            return self.handle.read(size)
 
         def close(self):
             self.handle.close()

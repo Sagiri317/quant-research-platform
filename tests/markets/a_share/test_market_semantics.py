@@ -1392,3 +1392,43 @@ def test_listing_age_keeps_unavailable_master_date_unknown():
     )
     assert pd.isna(ages.iloc[0])
     assert ages.iloc[1:].tolist() == [2, 0]
+
+
+def test_listing_age_history_accepts_calendar_codes_and_absent_closed_assets():
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        compute_listing_age_trading_days,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=3).as_unit("ns")
+    calendar = pd.DataFrame(
+        {
+            "calendar_date": dates.tolist() * 2,
+            "source_market_type": ["1"] * 3 + ["4"] * 3,
+            "is_trading_day": [False] * 3 + [True] * 3,
+        }
+    )
+    observed = pd.DataFrame(
+        {
+            "asset_id": ["moved"],
+            "timestamp": dates[-1],
+            "listing_date": dates[0],
+            "market_type": 4,
+        },
+        index=[7],
+    )
+    history = pd.DataFrame(
+        {
+            "asset_id": ["absent", "moved", "moved"],
+            "timestamp": [dates[0], dates[0], dates[1]],
+            "market_type": [1, 1, 4],
+        }
+    )
+    ages = compute_listing_age_trading_days(
+        observed,
+        calendar,
+        observation_date_column="timestamp",
+        listing_date_column="listing_date",
+        market_type_column="market_type",
+        market_history=history,
+    )
+    pd.testing.assert_series_equal(ages, pd.Series([2], index=[7], dtype="Int64"))

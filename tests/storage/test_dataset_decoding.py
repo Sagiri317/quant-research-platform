@@ -279,7 +279,6 @@ def test_mixed_row_group_encoding_only_changes_selected_native_layout(
         assert parquet.metadata.row_group(1).column(0).encodings == (
             "PLAIN_DICTIONARY",
         )
-    layouts = []
     constructors = []
     pulls = []
 
@@ -292,9 +291,6 @@ def test_mixed_row_group_encoding_only_changes_selected_native_layout(
             return getattr(self.inner, name)
 
         def iter_batches(self, **kwargs):
-            layouts.append(
-                pa.types.is_dictionary(self.inner.schema_arrow.field("value").type)
-            )
             for batch in self.inner.iter_batches(**kwargs):
                 pulls.append(batch.num_rows)
                 yield batch
@@ -1090,8 +1086,6 @@ def test_parquet_early_close_propagates_cleanup_and_identity_failures(
     readers = 2 if reader_kind == "prediction" else 1
     assert len(handles) == readers and all(not handle.closed for handle in handles)
     assert not reader_closed and (not iterator_closed)
-    if use_dictionary:
-        pass
     if failure == "identity":
         before = filesystem_stat(path)
         with open_filesystem_file(path, "ab") as handle:

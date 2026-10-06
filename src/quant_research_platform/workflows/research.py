@@ -111,10 +111,16 @@ from quant_research_platform.storage.datasets.comparison import compare_datasets
 from quant_research_platform.storage.datasets.inspection import (
     inspect_dataset as inspect_physical_dataset,
 )
+from quant_research_platform.storage.datasets.inspection import (
+    inspect_dataset_session,
+)
 from quant_research_platform.storage.datasets.instances import (
     discover_dataset_instances,
 )
-from quant_research_platform.storage.datasets.reading import open_dataset_session
+from quant_research_platform.storage.datasets.reading import (
+    DatasetSession,
+    open_dataset_session,
+)
 from quant_research_platform.storage.datasets.schema import (
     COMMON_MANIFEST_METADATA_KEY,
     data_spec_payload,
@@ -306,6 +312,7 @@ def _plan_targets(
     software_identity: ProductionSoftwareIdentity | None = None,
     reference_sink: dict[str, TargetPlan] | None = None,
     instance_sink: list[tuple[_TargetRequest, TargetPlan]] | None = None,
+    reuse_sessions: dict[Path, DatasetSession] | None = None,
 ) -> dict[str, object]:
     if action == "report build":
         raise ValueError("report_run_id_required")
@@ -488,6 +495,7 @@ def _plan_targets(
                         layout=layout,
                         target_id=spec.target_id,
                         requested_identity=requested_identity,
+                        reuse_sessions=reuse_sessions,
                     )
                     if (
                         blocker == "persisted_instance_invalid"
@@ -1157,6 +1165,7 @@ def _execute_targets(
     )
     planned_references: dict[str, TargetPlan] = {}
     instance_plans: list[tuple[_TargetRequest, TargetPlan]] = []
+    reuse_sessions: dict[Path, DatasetSession] = {}
     _plan_targets(
         profile=profile,
         action=action,
@@ -1169,6 +1178,7 @@ def _execute_targets(
         software_identity=software,
         reference_sink=planned_references,
         instance_sink=instance_plans,
+        reuse_sessions=reuse_sessions,
     )
     plans = {request.key: plan.payload() for request, plan in instance_plans}
     instance_results: dict[tuple[str, TimeWindow], TargetResult] = {}
@@ -1232,6 +1242,14 @@ def _execute_targets(
                         planned=planned,
                         raw_root=source_root,
                         time_window=request.time_window,
+                        session=reuse_sessions.get(
+                            _target_instance_root(
+                                profile,
+                                layout,
+                                spec.target_id,
+                                planned["requested_identity"],
+                            )
+                        ),
                     )
                 else:
                     if is_candidate and candidate_workspace is None:
@@ -2411,6 +2429,7 @@ def _reuse_target(
     planned: dict[str, object],
     raw_root: Path,
     time_window: TimeWindow,
+    session: DatasetSession | None = None,
 ) -> TargetResult:
     requested_identity = planned["requested_identity"]
     matching_identity = planned["matching_instance_identity"]
@@ -2509,15 +2528,18 @@ def _reuse_target(
                 status=TargetStatus.BLOCKED,
                 reason="source_identity_invalid",
             )
-    inspect_physical_dataset(
-        root,
-        time_window=time_window
-        if any(
-            getattr(role, "value", role) == "timestamp"
-            for role in data_spec.column_roles.values()
+    if session is None:
+        inspect_physical_dataset(
+            root,
+            time_window=time_window
+            if any(
+                getattr(role, "value", role) == "timestamp"
+                for role in data_spec.column_roles.values()
+            )
+            else None,
         )
-        else None,
-    )
+    else:
+        session.verify()
     return TargetResult(
         target_id=spec.target_id,
         status=TargetStatus.REUSED,
@@ -2528,8 +2550,14 @@ def _reuse_target(
 def _validate_published_target(
     root: Path,
     expected_identity: str,
+    *,
+    session: DatasetSession | None = None,
 ) -> dict[str, object]:
-    manifest = read_dataset_manifest_evidence(root)
+    manifest = (
+        session.manifest
+        if session is not None
+        else read_dataset_manifest_evidence(root)
+    )
     envelope = validate_business_manifest_envelope(
         manifest[COMMON_MANIFEST_METADATA_KEY]
     )
@@ -3206,6 +3234,7 @@ def _matching_instance(
     layout: StorageLayout,
     target_id: str,
     requested_identity: str,
+    reuse_sessions: dict[Path, DatasetSession] | None = None,
 ) -> tuple[str | None, str | None]:
     logical_root = _target_logical_root(profile, layout, target_id)
     if logical_root is None:
@@ -3219,14 +3248,29 @@ def _matching_instance(
             filesystem_stat(instance_root)
         except FileNotFoundError:
             return None, None
-        if _catalog_data_spec(profile, target_id) is None:
+        data_spec = _catalog_data_spec(profile, target_id)
+        if data_spec is None:
             envelope = read_semantic_artifact(
                 instance_root, expected_identity=requested_identity
             )
         else:
-            envelope = _validate_published_target(instance_root, requested_identity)
+            session = (
+                None if reuse_sessions is None else reuse_sessions.get(instance_root)
+            )
+            if session is None:
+                session = open_dataset_session(
+                    instance_root, columns=None, time_window=None
+                )
+                inspect_dataset_session(session)
+            else:
+                session.verify()
+            envelope = _validate_published_target(
+                instance_root, requested_identity, session=session
+            )
         if envelope["logical_artifact_id"] != target_id:
             raise ValueError("persisted_instance_logical_id_mismatch")
+        if reuse_sessions is not None and data_spec is not None:
+            reuse_sessions[instance_root] = session
     except (ValueError, KeyError, FileNotFoundError, NotADirectoryError):
         return None, "persisted_instance_invalid"
     return requested_identity, None
