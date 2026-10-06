@@ -396,6 +396,55 @@ def test_lease_overflow_release_and_leak_poison() -> None:
     assert not leaked._lock.closed  # noqa: SLF001
 
 
+def test_lease_release_does_not_retain_a_sparse_high_water_table() -> None:
+    policy = capture_test_policy(available_memory_bytes=16 * MIB)
+    with runtime_resource_policy_scope(policy):
+        first = policy.lease("first", 17)
+        second = policy.lease("second", 23)
+        temporary = [policy.lease("temporary", 32) for _ in range(50_000)]
+        for lease in temporary:
+            lease.close()
+        assert first.active and second.active
+        assert policy.used_memory_bytes == 40
+        assert policy._leases == {first, second}  # noqa: SLF001
+        assert policy._leases.__sizeof__() <= {first, second}.__sizeof__() * 8  # noqa: SLF001
+        first.grow(13)
+        second.shrink_to(7)
+        assert policy.used_memory_bytes == 37
+        first.close()
+        second.close()
+        assert policy.used_memory_bytes == 0
+
+
+def test_lease_compaction_failure_keeps_release_and_primary(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    policy = capture_test_policy(available_memory_bytes=MIB)
+    primary = ValueError("synthetic_body_failure")
+
+    def unavailable_set(_leases):
+        raise MemoryError("synthetic_compaction_failure")
+
+    with runtime_resource_policy_scope(policy):
+        retained = policy.lease("retained", 17)
+        released = policy.lease("released", 23)
+        with monkeypatch.context() as fault:
+            fault.setattr(resources, "set", unavailable_set, raising=False)
+            with pytest.raises(ValueError) as caught:
+                with released:
+                    raise primary
+            assert caught.value is primary
+            assert primary.__notes__ == [
+                "runtime memory lease release also failed: MemoryError"
+            ]
+            assert not released.active
+            assert retained.active
+            assert policy.used_memory_bytes == 17
+            assert policy._leases == {retained}  # noqa: SLF001
+            released.close()
+        retained.close()
+
+
 def test_concurrent_lease_admission_is_atomic(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

@@ -278,6 +278,11 @@ class RuntimeResourcePolicy:
                 self._require_active_root()
             self._leases.discard(lease)
             lease.active = False
+            # Compact at power-of-two release boundaries after writer bursts;
+            # admission scans must follow live leases, not historical set slots.
+            remaining = len(self._leases)
+            if remaining & (remaining - 1) == 0:
+                object.__setattr__(self, "_leases", set(self._leases))
 
     def _used_memory_bytes(self) -> int:
         return sum(lease.reserved_bytes for lease in self._leases)
