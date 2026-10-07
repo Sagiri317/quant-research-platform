@@ -115,7 +115,9 @@ def _transform_values(
     if transform.transform == "fillna_zero":
         return values.fillna(0.0)
     if transform.transform == "fillna_median":
-        medians = values.groupby(timestamps, sort=False).transform("median")
+        medians = values.groupby(timestamps, sort=False).transform(
+            lambda item: _quantile(item, 0.5)
+        )
         return values.fillna(medians)
     raise ValueError(f"unsupported_feature_transform: {transform.transform}")
 
@@ -126,9 +128,23 @@ def _winsorize(
     quantiles: tuple[float, float] | None,
 ) -> pd.Series:
     lower_q, upper_q = quantiles or (0.01, 0.99)
-    lower = grouped.transform(lambda item: item.quantile(lower_q))
-    upper = grouped.transform(lambda item: item.quantile(upper_q))
+    lower = grouped.transform(lambda item: _quantile(item, lower_q))
+    upper = grouped.transform(lambda item: _quantile(item, upper_q))
     return values.clip(lower=lower, upper=upper)
+
+
+def _quantile(values: pd.Series, quantile: float) -> float:
+    """Interpolate finite order statistics before rounding to binary64."""
+    ordered = values.dropna().sort_values().to_numpy()
+    if not len(ordered):
+        return np.nan
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    weight = Fraction(position - lower)
+    return float(
+        (1 - weight) * Fraction(float(ordered[lower]))
+        + weight * Fraction(float(ordered[min(lower + 1, len(ordered) - 1)]))
+    )
 
 
 def _integer_coordinates(values):
@@ -387,7 +403,9 @@ def _apply_fillna(
     if fillna_policy == "zero":
         return values.fillna(0.0)
     if fillna_policy == "median":
-        medians = values.groupby(timestamps, sort=False).transform("median")
+        medians = values.groupby(timestamps, sort=False).transform(
+            lambda item: _quantile(item, 0.5)
+        )
         return values.fillna(medians)
     raise ValueError("unsupported_feature_transform_fillna_policy")
 

@@ -20,11 +20,13 @@ from quant_research_platform.research.features.transforms import (
     model_input_validity_columns,
 )
 from quant_research_platform.research.protocols.a_share import (
+    _inference_blocker,
     analysis_windows,
     label_catalog,
 )
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics import (
+    _apply_fdr,
     cross_sectional_rank_ic,
     fama_macbeth_period,
     hac_mean,
@@ -74,11 +76,7 @@ def build_a_share_statistics_tables(
         access_window=protocol_manifest["access_window"],
         selection_groups=(selection_group,),
     )
-    joint_blocker = (
-        "expectations_robustness_excluded"
-        if protocol_manifest.get("expectations", {}).get("role") == "robustness"
-        else None
-    )
+    joint_blocker = _inference_blocker(protocol_manifest)
     primary_label = protocol_manifest["research_configuration"]["evaluation"][
         "primary_label"
     ]
@@ -461,7 +459,7 @@ def _paired_group_rankic(
     )
     fdr_method = (
         None
-        if protocol_manifest.get("expectations", {}).get("role") == "robustness"
+        if _inference_blocker(protocol_manifest) is not None
         else declaration["fdr_method"]
     )
     inference = (
@@ -582,15 +580,16 @@ def _factor_summary(
         present = tuple(factor for factor in planned_factors if factor in factors)
         assigned.update(present)
         family_frame = rank_by_date.reindex(columns=["timestamp", *planned_factors])
+        inference = time_series_inference_summary(
+            family_frame,
+            identity_column="timestamp",
+            max_lags=max_lags,
+            fdr_method=None,
+            fdr_alpha=0.05,
+            fdr_family_size=len(planned_factors),
+        ).rename(columns={"timestamp": "factor_id"})
         for method in methods:
-            part = time_series_inference_summary(
-                family_frame,
-                identity_column="timestamp",
-                max_lags=max_lags,
-                fdr_method=method,
-                fdr_alpha=0.05,
-                fdr_family_size=len(planned_factors),
-            ).rename(columns={"timestamp": "factor_id"})
+            part = _apply_fdr(inference.copy(), method, 0.05, len(planned_factors))
             if method is None:
                 part["fdr_method"] = "NOT_APPLICABLE"
             part.insert(0, "family_id", family_id)

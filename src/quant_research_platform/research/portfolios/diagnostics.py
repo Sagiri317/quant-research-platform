@@ -27,6 +27,7 @@ from quant_research_platform.research.portfolios.risk import (
     holding_attribution,
 )
 from quant_research_platform.research.portfolios.schedules import holding_intervals
+from quant_research_platform.research.protocols.a_share import _inference_blocker
 from quant_research_platform.research.statistics import (
     _return_sharpes,
     cscv_pbo,
@@ -1395,12 +1396,8 @@ def _portfolio_statistics_tables(
                     )
                 )
         blocks = protocol_manifest["statistics"]["cscv_blocks"]
-        if protocol_manifest.get("expectations", {}).get("role") == "robustness":
-            value, status, reason = (
-                np.nan,
-                "UNDEFINED",
-                "expectations_robustness_excluded",
-            )
+        if (robustness_blocker := _inference_blocker(protocol_manifest)) is not None:
+            value, status, reason = np.nan, "UNDEFINED", robustness_blocker
         elif not inference_ids:
             value, status, reason = (
                 np.nan,
@@ -1581,14 +1578,17 @@ def _group_portfolio_comparison(matrix, protocol_manifest):
     inference_blocker = _model_inference_blocker(
         access_window=access, selection_groups=("global", "quarterly")
     )
-    if protocol_manifest.get("expectations", {}).get("role") == "robustness":
-        inference_blocker = "expectations_robustness_excluded"
+    fdr_method = (
+        None
+        if _inference_blocker(protocol_manifest) is not None
+        else declaration["fdr_method"]
+    )
     inference = (
         time_series_inference_summary(
             differences,
             identity_column="timestamp",
             max_lags=statistics["hac_lag"],
-            fdr_method=declaration["fdr_method"],
+            fdr_method=fdr_method,
             fdr_alpha=declaration["alpha"],
             fdr_family_size=len(candidate_ids),
         ).set_index("timestamp")
@@ -1618,7 +1618,7 @@ def _group_portfolio_comparison(matrix, protocol_manifest):
             "bootstrap_seed": declaration["seed"],
             "confidence": declaration["confidence"],
             "fdr_family_size": len(candidate_ids),
-            "fdr_method": declaration["fdr_method"],
+            "fdr_method": fdr_method or "NOT_APPLICABLE",
             "fdr_alpha": declaration["alpha"],
             **dict.fromkeys(
                 (

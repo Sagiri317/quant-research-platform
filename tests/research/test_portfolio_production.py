@@ -471,10 +471,13 @@ def _build_producer(
     return (output(), calls)
 
 
+@pytest.mark.parametrize("unknown_unrelated_amount", (False, True))
 def test_simple_producer_publishes_one_bounded_ledger_and_reuses_it(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, unknown_unrelated_amount
 ) -> None:
     frames, fee_frame, output_window = _inputs()
+    if unknown_unrelated_amount:
+        frames["panel"].loc[frames["panel"].asset_id.eq("a"), "amount"] = np.nan
     chunks, _calls = _build_producer(
         tmp_path,
         monkeypatch,
@@ -1544,22 +1547,18 @@ def test_simple_producer_prediction_coverage_fails_closed(
         list(output)
 
 
+@pytest.mark.parametrize("unknown_quote", (False, True))
 def test_simple_producer_missing_held_return_is_blocked(
-    tmp_path: Path, monkeypatch
+    tmp_path: Path, monkeypatch, unknown_quote
 ) -> None:
     frames, fee_frame, output_window = _inputs()
-    frames["panel"] = (
-        frames["panel"]
-        .loc[
-            ~(
-                frames["panel"]["asset_id"].eq("b")
-                & pd.to_datetime(frames["panel"]["timestamp"])
-                .dt.normalize()
-                .eq(pd.Timestamp("2023-01-05"))
-            )
-        ]
-        .copy()
+    unknown = frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.eq(
+        pd.Timestamp("2023-01-05")
     )
+    if unknown_quote:
+        frames["panel"].loc[unknown, ["amount", "adj_open", "adj_close"]] = np.nan
+    else:
+        frames["panel"] = frames["panel"].loc[~unknown].copy()
     output, _calls = _build_producer(
         tmp_path,
         monkeypatch,
@@ -2387,3 +2386,55 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
     pd.testing.assert_frame_equal(
         decision(projected).loc[expected.index], expected, check_exact=True
     )
+
+
+@pytest.mark.parametrize("invalid", (-1.0, float("inf"), -float("inf")))
+def test_amount_history_rejects_invalid_present_amounts(invalid):
+    panel = pd.DataFrame({"asset_id": ["unrelated"], "amount": [invalid]})
+    with pytest.raises(ValueError, match="portfolio_amount_invalid"):
+        production._update_amount_history(panel, {}, pd.Series(dtype="float64"))
+
+
+def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
+    history = {}
+    holdings = pd.Series(dtype="float64")
+    for index in range(40):
+        amount = np.nan if index == 20 else 1000.0
+        production._update_amount_history(
+            pd.DataFrame(
+                {"asset_id": ["known", "unrelated"], "amount": [1000.0, amount]}
+            ),
+            history,
+            holdings,
+        )
+        assert np.mean(history["known"]) == 1000.0
+        if index >= 20:
+            assert len(history["unrelated"]) == 20
+            assert np.isnan(np.mean(history["unrelated"]))
+    production._update_amount_history(
+        pd.DataFrame({"asset_id": ["known", "unrelated"], "amount": [1000.0, 1000.0]}),
+        history,
+        holdings,
+    )
+    assert np.mean(history["unrelated"]) == 1000.0
+
+
+def test_simple_producer_blocks_when_required_adv_contains_unknown_session(
+    tmp_path, monkeypatch
+):
+    frames, fee_frame, output_window = _inputs()
+    unknown = frames["panel"].asset_id.eq("b") & frames["panel"].timestamp.eq(
+        pd.Timestamp("2022-12-28")
+    )
+    frames["panel"].loc[unknown, "amount"] = np.nan
+    output, _calls = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=output_window,
+    )
+    with pytest.raises(
+        PortfolioTargetBlocked, match="portfolio_adv_warmup_insufficient"
+    ):
+        list(output)

@@ -67,7 +67,6 @@ class PredictionSpec:
     test_end: str | None = None
     prediction_column: str = PREDICTION_SCORE_COLUMN
     primary_key: tuple[str, ...] | None = None
-    run_type: str = "prediction"
     prediction_mode: str = "minimal_oos"
     sample_filter_mode: SampleFilterMode = "eligible"
     is_oos: bool = True

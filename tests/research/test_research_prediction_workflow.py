@@ -142,7 +142,7 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
                 for date_index in range(1, len(dates) + 1)
                 for asset_index in range(1, 4)
             ],
-            "forward_return_20d_available_at": [
+            "model_target_available_at": [
                 date + pd.offsets.BDay(20) for date in dates for _ in range(3)
             ],
         }

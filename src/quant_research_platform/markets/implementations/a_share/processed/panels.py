@@ -62,6 +62,7 @@ def compute_market_panel(
     asset_market_types: pd.Series | None = None,
     suspension_history: pd.DataFrame | None = None,
     market_history: pd.DataFrame | None = None,
+    observed_market_sessions: dict[int, pd.DatetimeIndex] | None = None,
 ) -> pd.DataFrame:
     """Build one slab from prepared facts, retaining suspension rows."""
 
@@ -70,14 +71,19 @@ def compute_market_panel(
         market_history = bars.loc[
             :, ["asset_id", "timestamp", "market_type"]
         ].sort_values(["asset_id", "timestamp"], kind="mergesort")
+    if observed_market_sessions is None:
+        observed_market_sessions = {
+            market: pd.DatetimeIndex(group.timestamp.unique()).sort_values()
+            for market, group in bars.loc[bars.filling_flag.isin((0, 1))].groupby(
+                "market_type", sort=False
+            )
+        }
     if bars.empty and asset_market_types is None:
         return bars
     sessions = unified_trading_sessions(trading_calendar)
     calendar_bars = bars
     if session_window is not None and not session_window.empty:
-        calendar_bars = bars.loc[
-            bars["timestamp"].between(session_window[0], session_window[-1])
-        ]
+        calendar_bars = bars.loc[bars["timestamp"].isin(session_window)]
     validate_market_bar_calendar(calendar_bars, trading_calendar)
     if session_window is None:
         session_window = sessions[
@@ -120,7 +126,12 @@ def compute_market_panel(
     dense["delisting_date"] = dense["delisting_date"].where(
         dense["delisting_date"] != delisting_sentinel
     )
-    facts = compute_listing_session_facts(dense, trading_calendar, market_history)
+    facts = compute_listing_session_facts(
+        dense,
+        trading_calendar,
+        market_history,
+        observed_market_sessions=observed_market_sessions,
+    )
     dense[facts.columns] = facts
     return dense.sort_values(
         ["timestamp", "market_id", "asset_id"], kind="mergesort"

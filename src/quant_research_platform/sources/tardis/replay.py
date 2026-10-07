@@ -120,11 +120,6 @@ def _validate_manifest(value):
     )
     if type(value["files"]) is not list or not value["files"]:
         raise ValueError("tardis_manifest_invalid")
-    streams = {
-        f"{symbol}@{_stream_suffix(channel, value['exchange'])}"
-        for symbol in value["symbols"]
-        for channel in value["requested_channels"]
-    }
     first = value["files"][0]
     if (
         type(first) is not dict
@@ -135,6 +130,12 @@ def _validate_manifest(value):
         raise ValueError("tardis_manifest_invalid")
     for number, item in enumerate(value["files"]):
         offset = first["offset_minutes"] + number * SLICE_MINUTES
+        member_day = _date(value["date"]) + dt.timedelta(days=offset // 1440)
+        streams = {
+            f"{symbol}@{_stream_suffix(channel, value['exchange'], member_day)}"
+            for symbol in value["symbols"]
+            for channel in value["requested_channels"]
+        }
         if (
             type(item) is not dict
             or set(item) != _FILE_KEYS

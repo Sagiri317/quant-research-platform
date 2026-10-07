@@ -148,7 +148,7 @@ def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
             "x": [1.0, 2.0, 3.0, 4.0],
             "model_target": [1.0, 2.0, 3.0, 4.0],
             "eligible": [True, True, True, False],
-            "forward_return_20d_available_at": pd.to_datetime(
+            "model_target_available_at": pd.to_datetime(
                 ["2018-01-01", "2018-01-02", "2019-01-03", "2018-01-04"]
             ),
         }
@@ -1447,3 +1447,104 @@ def test_quarterly_model_core_rejects_contract_drift(tmp_path, field, value):
     with pytest.raises(ValueError, match="invalid_model_metadata"):
         read_quarterly_model_artifact(root, trial_layout=case.layout)
     assert _file_bytes(case.root) == before
+
+
+@pytest.mark.parametrize("half_life", (None, 756))
+def test_overridden_base_parameters_preserve_native_model_science(tmp_path, half_life):
+    from copy import deepcopy
+
+    from quant_research_platform.contracts.experiments import (
+        trial_ledger_semantic_payload,
+    )
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.profiles.research import bind_research_configuration
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration()
+    model = next(
+        item
+        for item in config["models"]
+        if item["model_algorithm"] == "ridge_regression"
+    )
+    model.update(
+        input_factor_columns=[config["evaluation"]["factors"][0]],
+        input_feature_columns=[],
+        hyperparameters={"alpha": 10.0},
+        training_weighting={"method": "equal_timestamp", "half_life": half_life},
+        parameter_candidates=[
+            {"regularization_strength": 0.01},
+            {"regularization_strength": 0.1},
+        ],
+    )
+    config.update(
+        models=[model],
+        portfolios=[],
+        primary_portfolio_id=None,
+        comparison_model_id=model["model_id"],
+    )
+    changed = deepcopy(config)
+    changed["models"][0]["hyperparameters"] = {
+        "alpha": -1.0,
+        "random_state": 999,
+        "unused_native_option": True,
+    }
+    protocols, cases = [], []
+    for index, submitted in enumerate((config, changed)):
+        bound = bind_research_configuration(research_profile(), submitted)
+        protocol = bound.protocol(submitted["scenario_id"])
+        projected = protocol.target_manifest(
+            protocol.model_selection_target_id, "MODEL"
+        )
+        protocols.append(protocol)
+        specs = tuple(bound.models.list())
+        assert dict(specs[0].hyperparameters) == {}
+        case = shared_model_case(
+            tmp_path / str(index),
+            specs=specs,
+            protocol=shared_model_protocol(
+                specs, configurations=projected["research_configuration"]["models"]
+            ),
+        )
+        for entry in case.artifact.final_models:
+            metadata = entry["model_metadata"]
+            assert metadata["training_weighting"]["half_life"] == half_life
+            predictor = read_quarterly_predictor(
+                case.artifact, entry["selection_group"], model["model_id"]
+            )
+            fitting.validate_model_state(predictor, metadata)
+            assert metadata["hyperparameters"]["alpha"] == pytest.approx(
+                metadata["rows_after_input_label_dropna"]
+                * model["parameter_candidates"][0]["regularization_strength"]
+            )
+        cases.append(case)
+    assert protocols[0].manifest() != protocols[1].manifest()
+    assert (
+        protocols[1].configuration()["models"][0]["hyperparameters"]
+        == changed["models"][0]["hyperparameters"]
+    )
+    assert protocols[0].target_manifest(
+        protocols[0].model_selection_target_id, "MODEL"
+    ) == protocols[1].target_manifest(protocols[1].model_selection_target_id, "MODEL")
+    assert cases[0].envelope.instance_identity == cases[1].envelope.instance_identity
+    assert cases[0].artifact.member_records == cases[1].artifact.member_records
+    assert cases[0].artifact.candidate_models == cases[1].artifact.candidate_models
+    assert cases[0].artifact.final_models == cases[1].artifact.final_models
+    ledgers = [
+        [
+            trial_ledger_semantic_payload(
+                *read_model_trial_ledger_reference(case.layout, reference)
+            )
+            for reference in case.artifact.trial_ledgers
+        ]
+        for case in cases
+    ]
+    assert ledgers[0] == ledgers[1]
+    changed["models"][0]["parameter_candidates"][0]["regularization_strength"] = 0.02
+    actual_change = bind_research_configuration(research_profile(), changed).protocol(
+        changed["scenario_id"]
+    )
+    assert canonical_json_hash(
+        actual_change.target_manifest(actual_change.model_selection_target_id, "MODEL")
+    ) != canonical_json_hash(
+        protocols[0].target_manifest(protocols[0].model_selection_target_id, "MODEL")
+    )

@@ -25,9 +25,10 @@ from tests.helpers.output_frames import (
 )
 
 
+@pytest.mark.parametrize("validation_only", (False, True))
 @pytest.mark.parametrize("deep_root", (False, True))
 def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
-    tmp_path: Path, deep_root: bool
+    tmp_path: Path, monkeypatch, deep_root: bool, validation_only: bool
 ) -> None:
     if deep_root:
         while len(str(tmp_path)) <= 270:
@@ -84,14 +85,32 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
         model_metadata=model,
         prediction_metadata_factory=lambda: metadata,
     )
-    _manifest, lookup = bundle_validation.read_prediction_output_bundle(
+    reader = (
+        bundle_validation._validate_prediction_output_bundle
+        if validation_only
+        else bundle_validation.read_prediction_output_bundle
+    )
+    index_type = bundle_validation.ExactPrimaryKeyIndex
+    indexes = []
+
+    def capture_index(**kwargs):
+        index = index_type(**kwargs)
+        indexes.append(index)
+        return index
+
+    monkeypatch.setattr(bundle_validation, "ExactPrimaryKeyIndex", capture_index)
+    _manifest, lookup = reader(
         root,
         expected_output_id=spec.prediction_id,
         time_window=TimeWindow(times[1], times[1]),
     )
-    values, found = lookup.values_for_frame(frame, mark_matched=True)
-    assert list(found) == [0, 1, 0]
-    assert values[1] == 2.0
+    assert len(indexes) == (1 if validation_only else 2)
+    if validation_only:
+        assert lookup is None
+    else:
+        values, found = lookup.values_for_frame(frame, mark_matched=True)
+        assert list(found) == [0, 1, 0]
+        assert values[1] == 2.0
     path = root / "prediction.parquet"
     if deep_root:
         assert len(str(path)) > 260
@@ -107,12 +126,32 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
         )
         pq.write_table(altered, native_filesystem_path(path))
         with pytest.raises(ValueError, match="^persisted_prediction_window_mismatch$"):
-            bundle_validation.read_prediction_output_bundle(
+            reader(
                 root,
                 expected_output_id=spec.prediction_id,
                 time_window=TimeWindow(times[1], times[1]),
             )
             pytest.fail("out-of-window source row reached the filtered reader")
+    for column, values, error in (
+        (
+            "timestamp",
+            [times[1], times[1], times[2]],
+            "duplicate_persisted_prediction_keys",
+        ),
+        ("prediction_score", [float("nan"), 2.0, 3.0], "invalid_exact_float_value"),
+    ):
+        altered = original.set_column(
+            original.schema.get_field_index(column),
+            original.schema.field(column),
+            pa.array(values, type=original.schema.field(column).type),
+        )
+        pq.write_table(altered, native_filesystem_path(path))
+        with pytest.raises(ValueError, match=f"^{error}$"):
+            reader(
+                root,
+                expected_output_id=spec.prediction_id,
+                time_window=TimeWindow(times[1], times[1]),
+            )
 
 
 def _write_bundle(root: Path) -> None:
@@ -472,6 +511,7 @@ def test_validate_output_bundle_propagates_final_secondary_without_primary(
     } == {"caught_is_secondary": True, "observer_hits": 1, "root_hits": 2}
 
 
+@pytest.mark.parametrize("validation_only", (False, True))
 @pytest.mark.parametrize(
     ("boundary", "failure"),
     (
@@ -484,7 +524,7 @@ def test_validate_output_bundle_propagates_final_secondary_without_primary(
     ),
 )
 def test_prediction_bundle_preserves_source_failure(
-    tmp_path, monkeypatch, boundary, failure
+    tmp_path, monkeypatch, boundary, failure, validation_only
 ):
     import errno
 
@@ -512,18 +552,22 @@ def test_prediction_bundle_preserves_source_failure(
             return original(candidate, *args, **kwargs)
 
         monkeypatch.setattr(os, operation, fail_io)
+    reader = (
+        bundle_validation._validate_prediction_output_bundle
+        if validation_only
+        else bundle_validation.read_prediction_output_bundle
+    )
     with pytest.raises(type(primary)) as caught:
-        bundle_validation.read_prediction_output_bundle(
-            root, expected_output_id="pred-run"
-        )
+        reader(root, expected_output_id="pred-run")
         pytest.fail("fatal source failure was swallowed")
     assert caught.value is primary
 
 
+@pytest.mark.parametrize("validation_only", (False, True))
 @pytest.mark.parametrize("intraday", (False, True))
 @pytest.mark.parametrize("end_shift", (-1, 0, 1))
 def test_prediction_effective_end_matches_all_rows_before_filtering(
-    tmp_path, monkeypatch, intraday, end_shift
+    tmp_path, monkeypatch, intraday, end_shift, validation_only
 ):
     from dataclasses import replace
 
@@ -593,22 +637,28 @@ def test_prediction_effective_end_matches_all_rows_before_filtering(
         yield from original_batches(parquet, **kwargs)
 
     monkeypatch.setattr(pq.ParquetFile, "iter_batches", one_row_batches)
+    reader = (
+        bundle_validation._validate_prediction_output_bundle
+        if validation_only
+        else bundle_validation.read_prediction_output_bundle
+    )
     for window in (None, TimeWindow(times[0], times[0])):
         if end_shift:
             with pytest.raises(
                 ValueError, match="^persisted_prediction_effective_end_mismatch$"
             ):
-                bundle_validation.read_prediction_output_bundle(
-                    root, expected_output_id=spec.prediction_id, time_window=window
-                )
+                reader(root, expected_output_id=spec.prediction_id, time_window=window)
         else:
-            _manifest, lookup = bundle_validation.read_prediction_output_bundle(
+            _manifest, lookup = reader(
                 root, expected_output_id=spec.prediction_id, time_window=window
             )
-            assert lookup.row_count == (3 if window is None else 1)
-            values, found = lookup.values_for_frame(frame, mark_matched=False)
-            assert list(found) == ([1, 1, 1] if window is None else [1, 0, 0])
-            assert values[0] == 1.0
+            if validation_only:
+                assert lookup is None
+            else:
+                assert lookup.row_count == (3 if window is None else 1)
+                values, found = lookup.values_for_frame(frame, mark_matched=False)
+                assert list(found) == ([1, 1, 1] if window is None else [1, 0, 0])
+                assert values[0] == 1.0
     assert len(scans) == 2
 
 

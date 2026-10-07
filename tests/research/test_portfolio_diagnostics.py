@@ -1115,10 +1115,14 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
         semantic_metadata={},
     )
 
-    def produce(selected_ledgers, *, robustness=False):
+    def produce(selected_ledgers, *, robustness=False, access_window="development"):
         manifest = selected_protocol.manifest()
+        manifest["access_window"] = access_window
         if robustness:
             manifest["expectations"] = {"freshness_days": 180, "role": "robustness"}
+        if robustness == "training_weighting":
+            manifest["expectations"]["role"] = "primary"
+            manifest["training_weighting"] = {"role": "robustness"}
         return _portfolio_statistics_tables(
             ledgers=selected_ledgers,
             candidates=candidates,
@@ -1267,7 +1271,9 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
         assert pbo.status.eq("UNDEFINED").all()
         assert pbo.reason.eq("expectations_robustness_excluded").all()
         comparison = robust["portfolio_group_comparison"]
-        assert comparison.reason.eq("expectations_robustness_excluded").all()
+        assert comparison.reason.eq(reason).all()
+        assert comparison.fdr_method.eq("NOT_APPLICABLE").all()
+        assert comparison.fdr_adjusted_p_value.isna().all()
         assert comparison.global_mean.notna().all()
         robust_root = write_statistics_artifact(
             tmp_path / "robustness_statistics",
@@ -1283,6 +1289,42 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
                 .eq("expectations_robustness_excluded")
                 .all()
             )
+        for variant in ("expectations", "training_weighting"):
+            holdout_tables = produce(
+                ledgers, robustness=variant, access_window="holdout"
+            )
+            comparison = holdout_tables["portfolio_group_comparison"]
+            assert comparison.portfolio_id.is_unique
+            assert comparison.status.eq("DEFINED").all()
+            assert comparison.bootstrap_status.eq("DEFINED").all()
+            assert comparison.p_value.notna().all()
+            assert comparison.fdr_method.eq("NOT_APPLICABLE").all()
+            assert comparison.fdr_adjusted_p_value.isna().all()
+            expected = f"{variant}_robustness_excluded"
+            assert (
+                holdout_tables["portfolio_robustness"]
+                .query("test_id == 'cscv_pbo'")
+                .reason.eq(expected)
+                .all()
+            )
+            holdout_root = write_statistics_artifact(
+                tmp_path / variant,
+                envelope=envelope,
+                tables=holdout_tables,
+                table_group="portfolio",
+            )
+            with read_statistics_artifact(
+                holdout_root, expected_identity=envelope.instance_identity
+            ).table("portfolio_group_comparison.parquet") as saved:
+                assert saved.status.eq("DEFINED").all()
+                assert saved.bootstrap_status.eq("DEFINED").all()
+                assert saved.fdr_method.eq("NOT_APPLICABLE").all()
+                assert saved.fdr_adjusted_p_value.isna().all()
+                pd.testing.assert_frame_equal(
+                    saved.loc[:, ["portfolio_id", "mean_difference", "p_value"]],
+                    comparison.loc[:, ["portfolio_id", "mean_difference", "p_value"]],
+                    check_exact=True,
+                )
         altered_ledgers = dict(ledgers)
         for column, candidate in enumerate(blocked):
             extreme = np.where(np.arange(73) % 2, -0.2, 0.5 + column / 10)

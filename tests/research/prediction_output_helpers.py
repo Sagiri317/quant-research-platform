@@ -50,7 +50,7 @@ def write_prediction_result(layout: StorageLayout, result) -> Path:
         output_definition_id="prediction_outputs",
         run_id="test_run",
         market_id=MarketId("a_share"),
-        run_type=result.spec.run_type,
+        run_type="prediction",
         scope=OutputScope.LOCAL_ONLY,
     )
     with result:

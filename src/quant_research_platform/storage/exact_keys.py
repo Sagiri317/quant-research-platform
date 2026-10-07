@@ -97,10 +97,7 @@ class ExactPrimaryKeyIndex:
                 table.column(value_column),
                 strict=True,
             ):
-                value = scalar.as_py()
-                if value is None or not math.isfinite(float(value)):
-                    raise ValueError("invalid_exact_float_value")
-                yield (namespace, key, struct.pack(">d", float(value)))
+                yield (namespace, key, _float_value_payload(scalar))
 
         return table.num_rows - self._insert_rows(rows())
 
@@ -290,6 +287,13 @@ class ExactPrimaryKeyIndex:
                     allow_nonfinite=True,
                 )
             yield (namespace, key_payload, value_payload)
+
+
+def _float_value_payload(scalar: pa.Scalar) -> bytes:
+    value = scalar.as_py()
+    if value is None or not math.isfinite(float(value)):
+        raise ValueError("invalid_exact_float_value")
+    return struct.pack(">d", float(value))
 
 
 def _append_arrow_scalar_payload(

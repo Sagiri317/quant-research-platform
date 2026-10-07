@@ -9,7 +9,6 @@ from quant_research_platform.compute.dataframe.cross_section import (
     _pearson_correlation_from_moments,
     _pearson_correlation_result,
     compute_ic_and_grouped_label_values,
-    compute_ic_and_grouped_label_values_from_validated_panel,
 )
 from quant_research_platform.compute.panels import ComputePanelSpec
 from tests.helpers.compute_inputs import make_cross_section_compute_panel
@@ -32,13 +31,13 @@ def test_dataframe_cross_section_metrics() -> None:
     assert not grouped.empty
 
 
-def test_dataframe_cross_section_validated_panel() -> None:
+def test_dataframe_cross_section_preserves_extra_columns() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
     frame = make_cross_section_compute_panel().assign(
         segment=["a", "a", "a", "b", "b", "b"]
     )
 
-    ic, grouped = compute_ic_and_grouped_label_values_from_validated_panel(
+    ic, grouped = compute_ic_and_grouped_label_values(
         frame,
         spec,
         n_groups=2,
@@ -50,6 +49,12 @@ def test_dataframe_cross_section_validated_panel() -> None:
 def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
 
+    with pytest.raises(ValueError, match="panel is missing columns"):
+        compute_ic_and_grouped_label_values(
+            make_cross_section_compute_panel().drop(columns=["asset"]),
+            spec,
+            n_groups=True,
+        )
     with pytest.raises(TypeError, match="n_groups must be an integer"):
         compute_ic_and_grouped_label_values(
             make_cross_section_compute_panel(),

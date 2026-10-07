@@ -860,6 +860,8 @@ forward EP = median forecast EPS / unadjusted signal-day close  # 前瞻盈利�
 但不将其候选或结果混入 90 日正式选型及 FDR、SPA、StepM、PBO 推断域。
 180 日运行内部保留训练、验证和原排序作为稳健性诊断；基础描述、HAC、基准及归因仍按原定义计算。
 正式联合检验与 PBO 标注 `expectations_robustness_excluded`，不将全部稳健性结果改成未定义。
+统计合同按实际评估因子和模型输入派生此角色；只由模型消费分析师因子时仍执行相同排除。
+冻结test的G/Q保留单项HAC与bootstrap，联合FDR标为`NOT_APPLICABLE`。
 机构日中位数与跨机构中位数的临时精确值保留到最终 EPS/close 比值，落盘仍为现有 Float64。
 
 预期修订、超预期、PEAD 和业绩预告属于扩展研究方向，不属于本协议的预期4模块。
@@ -1141,7 +1143,10 @@ refit 不伪造重叠 train/validation，也不建立假的第四角色。
 | 树模型 | 随机森林、sklearn GradientBoostingRegressor（GBRT）、XGBoost、LightGBM |
 
 研究 JSON 的 `models`、输入列、`hyperparameters` 和 `parameter_candidates` 冻结实际候选，
-不由算法能力表隐式补齐。随仓配置的模型数量见 §5.7：普通配置选择8种，
+不由算法能力表隐式补齐。声明`parameter_candidates`时，季度预检、拟合、refit与reader均消费该候选序列；
+被覆盖的基础`hyperparameters`只保留在完整运行provenance，不影响MODEL科学合同或开发冻结复用。
+实际候选、输入、标签、种子与权重等其他冻结事实仍须完全匹配。
+随仓配置的模型数量见 §5.7：普通配置选择8种，
 `pv_expanded.json` 选择9种；GBRT 是通用可配置能力，随仓 A 股配置未将其列入试验集合。
 这一区分不代表任何模型已经通过真实研究验收。
 
@@ -1179,6 +1184,9 @@ fit、持久化、reload、transform 和 predict 共用 ModelMatrixScaler。
 预注册稳健性通过 ModelSpec/config 的 `training_weighting={"method":"equal_timestamp","half_life":756}` 执行；
 按有序训练时点的年龄乘 `0.5 ** (age / half_life)` 后重新归一化为 `sum=N_train`。
 该合同进入模型与trial身份、metadata及冻结复用，supervised缩放/拟合与rank ensemble方向/IC权重共用。
+756-period配置单独运行，派生`training_weighting.role=robustness`；不得与其他half-life模型混入同一选型实例。
+其内部训练、验证排序与单项HAC/bootstrap仍保留，正式FDR、SPA、StepM、MCS与PBO排除该实例，
+原因使用`training_weighting_robustness_excluded`；冻结test的G/Q单项比较保留，联合FDR为`NOT_APPLICABLE`。
 主方案的half_life为null；756-period稳健性作为预注册配置，不用留出结果选择模型或参数。
 
 缩放器的加权均值/标准差使用精确的最终训练样本权重。

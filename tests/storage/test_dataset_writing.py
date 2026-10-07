@@ -655,14 +655,28 @@ def test_public_writer_omits_caller_attrs_before_copy_and_arrow_serialization(
     assert manifest["producer_diagnostics"] == {"label": "preserved"}
 
 
-@pytest.mark.parametrize("drift_kind", ("numeric_type", "nested_field"))
-def test_public_writer_rejects_nonnull_object_schema_drift(tmp_path, drift_kind):
+@pytest.mark.parametrize(
+    ("initial", "changed"),
+    (
+        (1, 2.0),
+        ({"initial": 1}, {"initial": 2, "added": 3}),
+        ({"initial": 1, "removed": 2}, {"initial": 3}),
+        ({"initial": [1]}, {"initial": [2.0]}),
+        ({"initial": None}, {"initial": 2, "added": 3}),
+    ),
+    ids=(
+        "numeric-type",
+        "added-field",
+        "removed-field",
+        "nested-type",
+        "pending-field",
+    ),
+)
+def test_public_writer_rejects_nonnull_object_schema_drift(tmp_path, initial, changed):
     from quant_research_platform.contracts.columns import ColumnRole
 
     first = make_default_dataset_frame().iloc[:1].copy()
     second = make_default_dataset_frame().iloc[1:2].copy()
-    initial = 1 if drift_kind == "numeric_type" else {"initial": 1}
-    changed = 2.0 if drift_kind == "numeric_type" else {"initial": 2, "added": 3}
     first["value"] = pd.Series([initial], index=first.index, dtype=object)
     second["value"] = pd.Series([changed], index=second.index, dtype=object)
     root = make_dataset_artifact_root(tmp_path, "object_numeric_drift")
@@ -737,3 +751,253 @@ def test_public_writer_preserves_nullable_object_strings_independent_of_row_orde
     assert len(actual) == 6000
     assert actual["note"].isna().sum() == 5500
     pd.testing.assert_frame_equal(frame, before)
+
+
+@pytest.mark.parametrize("cross_year", (False, True))
+@pytest.mark.parametrize(
+    "values",
+    (
+        [[], [1], []],
+        [[None], [1], [None]],
+        [{"leaf": None}, {"leaf": 1}, {"leaf": None}],
+        [None, [1], None],
+        [None, {"leaf": 1}, None],
+        [
+            [{"branch": {"left": None, "right": None}}],
+            [{"branch": {"left": 1, "right": None}}],
+            [{"branch": {"left": None, "right": 2}}],
+        ],
+        [[None], [{"branch": [None]}], [{"branch": [1]}]],
+    ),
+    ids=(
+        "empty-list",
+        "null-list",
+        "null-struct",
+        "null-to-list",
+        "null-to-struct",
+        "partial-deep-resolution",
+        "null-to-deep-container",
+    ),
+)
+def test_writer_resolves_nested_nulls_independently_of_parts_and_chunks(
+    tmp_path, monkeypatch, values, cross_year
+):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.contracts.columns import ColumnRole
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.storage.datasets.schema import (
+        physical_schema_from_schema,
+    )
+
+    frame = make_default_dataset_frame()
+    frame["timestamp"] = pd.to_datetime(
+        ["2024-12-31", "2025-01-01", "2026-01-01"]
+        if cross_year
+        else ["2024-01-01", "2024-01-02", "2024-01-03"]
+    ).astype("datetime64[ns]")
+    frame["value"] = pd.Series(values, dtype=object)
+    before = frame.copy(deep=True)
+    spec = make_processed_dataset_spec("nested_null", value_role=ColumnRole.CONTEXT)
+    key = list(spec.primary_key)
+    expected = frame.sort_values(key).reset_index(drop=True)
+    expected_values = pa.Table.from_pandas(expected, preserve_index=False)[
+        "value"
+    ].to_pylist()
+    manifests = []
+    for mode in ("whole", "chunks", "bounded"):
+        root = make_dataset_artifact_root(tmp_path / mode, spec.data_id)
+        if mode == "bounded":
+            monkeypatch.setattr(dataset_writing, "DEFAULT_BATCH_ROWS", 1)
+        data = (
+            tuple(frame.iloc[index : index + 1].copy() for index in range(len(frame)))
+            if mode == "chunks"
+            else frame
+        )
+        write_dataset(root, data, spec=spec)
+        actual = read_dataset(root).sort_values(key).reset_index(drop=True)
+        pd.testing.assert_frame_equal(actual, expected)
+        assert actual["value"].dtype == object
+        assert (
+            actual[key].to_records(index=False).tolist()
+            == expected[key].to_records(index=False).tolist()
+        )
+        manifest = json.loads((root / "_manifest" / "manifest.json").read_text())
+        assert manifest["row_count"] == len(frame)
+        expected_partitions = {
+            f"year={year}": int(count)
+            for year, count in frame["timestamp"].dt.year.value_counts().items()
+        }
+        assert manifest["partition_row_counts"] == expected_partitions
+        assert manifest["partition_count"] == len(expected_partitions)
+        assert manifest["file_count"] == (
+            len(expected_partitions) if mode == "whole" else len(frame)
+        )
+        assert manifest["primary_key"] == key
+        assert manifest["schema_hash"] == canonical_json_hash(
+            manifest["physical_schema"]
+        )
+        assert manifest["logical_dtype_hash"] == canonical_json_hash(
+            manifest["logical_dtypes"]
+        )
+        assert manifest["validation_status"] == "PASS"
+        persisted_rows = []
+        for path in sorted((root / "data").rglob("*.parquet")):
+            with pq.ParquetFile(path) as parquet:
+                schema = parquet.schema_arrow
+                assert (
+                    physical_schema_from_schema(schema) == manifest["physical_schema"]
+                )
+                assert json.loads(schema.metadata[b"qrp.logical-dtypes"])["columns"][
+                    -1
+                ] == {"name": "value", "kind": "object", "dtype": "object"}
+                persisted_rows.extend(parquet.read().to_pylist())
+        persisted_rows.sort(key=lambda row: tuple(row[column] for column in key))
+        assert [row["value"] for row in persisted_rows] == expected_values
+        manifests.append(manifest)
+    assert all(
+        manifest["physical_schema"] == manifests[0]["physical_schema"]
+        for manifest in manifests
+    )
+    assert all(
+        manifest["logical_dtypes"] == manifests[0]["logical_dtypes"]
+        for manifest in manifests
+    )
+    pd.testing.assert_frame_equal(frame, before)
+
+
+@pytest.mark.parametrize("values", ([[None], [None]], [{"leaf": None}, {"leaf": None}]))
+def test_writer_rejects_unresolved_nested_nulls_without_publishing(tmp_path, values):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["value"] = pd.Series(values, index=frame.index, dtype=object)
+    root = make_dataset_artifact_root(tmp_path, "unresolved_nested")
+    with pytest.raises(ValueError, match="unsupported_dataset_arrow_type"):
+        write_dataset(
+            root,
+            tuple(frame.iloc[index : index + 1].copy() for index in range(len(frame))),
+            spec=make_processed_dataset_spec(
+                "unresolved_nested", value_role=ColumnRole.CONTEXT
+            ),
+        )
+    assert not root.exists()
+    assert list(root.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    "primary_type", (RuntimeError, KeyboardInterrupt, SystemExit, GeneratorExit)
+)
+@pytest.mark.parametrize("close_failure", (False, True))
+def test_pending_nested_parquet_failure_closes_resources_and_preserves_primary(
+    tmp_path, monkeypatch, primary_type, close_failure
+):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["value"] = pd.Series([[None], [1]], index=frame.index, dtype=object)
+    root = make_dataset_artifact_root(tmp_path, "pending_close")
+    events = []
+    primary = primary_type("pending_read_primary")
+    original_read = dataset_writing.pq.ParquetFile.read
+    original_close = dataset_writing.pq.ParquetFile.close
+
+    def fail_read(self, *args, **kwargs):
+        original_read(self, *args, **kwargs)
+        events.append("read")
+        raise primary
+
+    def close(self, *args, **kwargs):
+        original_close(self, *args, **kwargs)
+        assert self.reader.closed
+        events.append("parquet-close")
+        if close_failure:
+            raise OSError("pending_close_secondary")
+
+    def chunks():
+        try:
+            yield frame.iloc[:1].copy()
+            yield frame.iloc[1:].copy()
+        finally:
+            events.append("input-close")
+
+    monkeypatch.setattr(dataset_writing.pq.ParquetFile, "read", fail_read)
+    monkeypatch.setattr(dataset_writing.pq.ParquetFile, "close", close)
+    with pytest.raises(primary_type, match="pending_read_primary") as raised:
+        dataset_writing.write_dataset(
+            root,
+            chunks(),
+            spec=make_processed_dataset_spec(
+                "pending_close", value_role=ColumnRole.CONTEXT
+            ),
+        )
+    assert raised.value is primary
+    assert events == ["read", "parquet-close", "input-close"]
+    if close_failure:
+        assert raised.value.__notes__ == ["iterator close also failed: OSError"]
+    assert not root.exists()
+    assert list(root.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("failure_stage", ("close", "rewrite"))
+def test_pending_nested_parquet_rewrite_failure_occurs_after_close(
+    tmp_path, monkeypatch, failure_stage
+):
+    from quant_research_platform.contracts.columns import ColumnRole
+
+    frame = make_default_dataset_frame().iloc[:2].copy()
+    frame["value"] = pd.Series([[None], [1]], index=frame.index, dtype=object)
+    root = make_dataset_artifact_root(tmp_path, "pending_rewrite")
+    events = []
+    write_calls = 0
+    original_write = dataset_writing.write_parquet_file
+    original_read = dataset_writing.pq.ParquetFile.read
+    original_close = dataset_writing.pq.ParquetFile.close
+
+    def read(self, *args, **kwargs):
+        result = original_read(self, *args, **kwargs)
+        events.append("read")
+        return result
+
+    def close(self, *args, **kwargs):
+        original_close(self, *args, **kwargs)
+        assert self.reader.closed
+        events.append("parquet-close")
+        if failure_stage == "close":
+            raise OSError("pending_close_failure")
+
+    def write(table, path):
+        nonlocal write_calls
+        write_calls += 1
+        if write_calls == 3:
+            events.append("rewrite")
+            assert events[:2] == ["read", "parquet-close"]
+            raise OSError("pending_rewrite_failure")
+        return original_write(table, path)
+
+    def chunks():
+        try:
+            yield frame.iloc[:1].copy()
+            yield frame.iloc[1:].copy()
+        finally:
+            events.append("input-close")
+
+    monkeypatch.setattr(dataset_writing.pq.ParquetFile, "read", read)
+    monkeypatch.setattr(dataset_writing.pq.ParquetFile, "close", close)
+    monkeypatch.setattr(dataset_writing, "write_parquet_file", write)
+    with pytest.raises(OSError, match=f"pending_{failure_stage}_failure"):
+        dataset_writing.write_dataset(
+            root,
+            chunks(),
+            spec=make_processed_dataset_spec(
+                "pending_rewrite", value_role=ColumnRole.CONTEXT
+            ),
+        )
+    assert events == (
+        ["read", "parquet-close", "input-close"]
+        if failure_stage == "close"
+        else ["read", "parquet-close", "rewrite", "input-close"]
+    )
+    assert not root.exists()
+    assert list(root.parent.iterdir()) == []

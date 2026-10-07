@@ -19,6 +19,9 @@ from quant_research_platform.artifacts.outputs import (
     write_evaluation_outputs_from_chunks,
     write_prediction_outputs,
 )
+from quant_research_platform.artifacts.outputs.bundle_validation import (
+    _validate_prediction_output_bundle,
+)
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     validate_evaluation_output_metadata_shape,
 )
@@ -700,7 +703,30 @@ def research_run(
                 for model_id in protocol.model_ids_for_target(target.target_id)
             )
         )
-        preflight_model_specs(profile.models.get(model_id) for model_id in model_ids)
+        specs = tuple(profile.models.get(model_id) for model_id in model_ids)
+        if str(profile.market_id) == "a_share":
+            from quant_research_platform.research.models.production import (
+                _selection_model_specs,
+            )
+
+            configurations = {
+                item["model_id"]: item for item in protocol.configuration()["models"]
+            }
+            specs = tuple(
+                candidate
+                for spec in specs
+                for candidate in _selection_model_specs(
+                    spec,
+                    configurations[spec.model_id].get(
+                        "parameter_candidates",
+                        [configurations[spec.model_id]["hyperparameters"]],
+                    ),
+                    n_train=1,
+                    root_seed=protocol.root_seed,
+                    quarter_id="preflight",
+                )
+            )
+        preflight_model_specs(specs)
     preflight_blocker = None
     if holdout:
         protocol, preflight_blocker = _frozen_holdout_protocol(
@@ -851,10 +877,22 @@ def _frozen_holdout_protocol(
         layout.research_run_path(development_run_id),
         expected_profile_id=profile.profile_id,
     )
+    recorded_protocol = record.payload()["protocol"]
+    requested_protocol = protocol.manifest()
+    if str(profile.market_id) == "a_share":
+        from quant_research_platform.catalog.models import (
+            _effective_model_configurations,
+        )
+
+        for manifest in (recorded_protocol, requested_protocol):
+            configuration = manifest["research_configuration"]
+            configuration["models"] = _effective_model_configurations(
+                configuration["models"]
+            )
     if (
         record.status is not RunStatus.COMPLETE
         or record.scenario_id != protocol.scenario_id
-        or record.payload()["protocol"] != protocol.manifest()
+        or recorded_protocol != requested_protocol
         or record.research_window["access"] != "development"
         or pd.Timestamp(record.research_window["start"])
         != pd.Timestamp(protocol.manifest()["development_window"]["start"])
@@ -2660,7 +2698,7 @@ def _validate_semantic_target_root(
             )
             for model_id in protocol.model_ids_for_target(model_target):
                 output_id = f"{model_id}_prediction"
-                (manifest, _lookup) = read_prediction_output_bundle(
+                (manifest, _lookup) = _validate_prediction_output_bundle(
                     root / "outputs" / output_id,
                     expected_output_id=output_id,
                     expected_run_id=f"run_{output_id}",
@@ -2720,7 +2758,7 @@ def _validate_semantic_target_root(
         return
     if binding.kind is ProducerKind.PREDICTION:
         try:
-            (manifest, _lookup) = read_prediction_output_bundle(
+            (manifest, _lookup) = _validate_prediction_output_bundle(
                 root / "outputs" / spec.target_id,
                 expected_output_id=spec.target_id,
                 expected_run_id=f"run_{spec.target_id}",

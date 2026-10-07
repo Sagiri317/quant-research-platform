@@ -5,6 +5,8 @@ from __future__ import annotations
 from array import array
 from dataclasses import dataclass
 from decimal import Decimal, localcontext
+from fractions import Fraction
+from math import lcm
 
 import numpy as np
 import pandas as pd
@@ -14,6 +16,7 @@ from quant_research_platform.contracts.validation import (
 )
 from quant_research_platform.research.features.transforms import (
     _industry_group_codes,
+    _integer_coordinates,
     _mad_winsorize,
 )
 from quant_research_platform.research.models.scaler import ModelMatrixScaler
@@ -343,7 +346,6 @@ class FactorRiskState:
         frame = preprocess_risk_styles(frame, style_columns=self.style_columns)
         group_codes = _industry_group_codes(frame)
         current_industries = sorted(set(group_codes))
-        self._industry_codes.update(current_industries)
         industry_columns = tuple(f"industry_{code}" for code in current_industries)
         exposure_columns = (*industry_columns, *self.style_columns)
         design = np.column_stack(
@@ -360,19 +362,33 @@ class FactorRiskState:
         if design.shape[1] != len(exposure_columns):
             raise ValueError("factor_risk_exposure_columns_invalid")
         p = design.shape[1]
-        if len(frame) < max(self.config.minimum_cross_section, 5 * p):
-            return
-        if np.linalg.matrix_rank(design) != p:
+        if (
+            len(frame) < max(self.config.minimum_cross_section, 5 * p)
+            or np.linalg.matrix_rank(design) != p
+        ):
+            self._industry_codes.update(current_industries)
             return
         weights = np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64"))
         root_weights = np.sqrt(weights)
+        root_weights /= root_weights.max()
         returns = frame["asset_return"].to_numpy(dtype="float64")
+        exponent = np.frexp(np.abs(returns).max())[1]
+        scaled_returns = np.ldexp(returns, -exponent)
+        origin = scaled_returns[0]
         coefficients = np.linalg.lstsq(
             design * root_weights[:, None],
-            returns * root_weights,
+            (scaled_returns - origin) * root_weights,
             rcond=None,
         )[0]
-        residuals = returns - design @ coefficients
+        with np.errstate(over="ignore"):
+            residuals = np.ldexp(
+                (scaled_returns - origin) - design @ coefficients, exponent
+            )
+            coefficients[: len(industry_columns)] += origin
+            coefficients = np.ldexp(coefficients, exponent)
+        if not np.isfinite(coefficients).all() or not np.isfinite(residuals).all():
+            raise ValueError("factor_risk_fit_non_finite")
+        self._industry_codes.update(current_industries)
         assets = pd.Index(frame["asset_id"].astype(str), name="asset_id")
         return FactorReturnFit(
             pd.DataFrame(design, index=assets, columns=exposure_columns),
@@ -491,8 +507,16 @@ class FactorRiskState:
             if len(values) >= self.config.minimum_specific_dates:
                 ages = self._session_count - np.asarray(self._residual_sessions[asset])
                 weights = _ewma_weights(ages, self.config.specific_half_life)
-                if weights.dtype == object or np.any(
-                    np.abs(values) > np.sqrt(np.finfo(np.float64).max)
+                if (
+                    weights.dtype == object
+                    or np.any(np.abs(values) > np.sqrt(np.finfo(np.float64).max))
+                    or np.any(
+                        (np.asarray(values) != 0)
+                        & (
+                            np.abs(values) * np.sqrt(weights)
+                            < np.sqrt(np.finfo(np.float64).tiny)
+                        )
+                    )
                 ):
                     with localcontext() as context:
                         context.prec = 80
@@ -527,6 +551,55 @@ class FactorRiskState:
         )
 
 
+def _covariance_is_psd(covariance: np.ndarray) -> bool:
+    """Test the lower triangle against the existing absolute PSD bound."""
+
+    coordinates, _scale = _integer_coordinates([*covariance.flat, 1e-12])
+    matrix = np.asarray(coordinates[:-1], dtype=object).reshape(covariance.shape)
+    upper = np.triu_indices(len(matrix), 1)
+    matrix[upper] = matrix.T[upper]
+    matrix[np.diag_indices(len(matrix))] += coordinates[-1]
+    # An invertible congruence with exact diagonal dominance certifies PSD.
+    symmetric = np.tril(covariance) + np.tril(covariance, -1).T
+    symmetric[np.diag_indices(len(matrix))] += 1e-12
+    try:
+        inverse = np.tril(np.linalg.inv(np.linalg.cholesky(symmetric)))
+    except np.linalg.LinAlgError:
+        pass
+    else:
+        if np.isfinite(inverse).all() and np.all(inverse.diagonal() != 0):
+            transform, _scale = _integer_coordinates(inverse.flat)
+            transform = np.asarray(transform, dtype=object).reshape(matrix.shape)
+            congruence = transform @ matrix @ transform.T
+            if all(
+                congruence[row, row]
+                >= sum(
+                    abs(value)
+                    for column, value in enumerate(congruence[row])
+                    if column != row
+                )
+                for row in range(len(matrix))
+            ):
+                return True
+    # Fraction-free elimination decides cases without that certificate.
+    previous = 1
+    for column in range(len(matrix)):
+        pivot = matrix[column, column]
+        if pivot < 0:
+            return False
+        trailing = matrix[column + 1 :, column]
+        if pivot == 0:
+            if any(trailing):
+                return False
+            continue
+        remainder = matrix[column + 1 :, column + 1 :]
+        matrix[column + 1 :, column + 1 :] = (
+            pivot * remainder - trailing[:, None] * trailing[None, :]
+        ) // previous
+        previous = pivot
+    return True
+
+
 def _ewma_covariance(
     values: np.ndarray,
     *,
@@ -537,37 +610,44 @@ def _ewma_covariance(
     columns: tuple[str, ...],
 ) -> pd.DataFrame:
     weights = _ewma_weights(ages, half_life)
-    with localcontext() as context:
-        context.prec = 80
-        if weights.dtype == object or np.any(
-            np.abs(values) > np.sqrt(np.finfo(np.float64).max)
-        ):
-            weights = np.array(
+    coordinates, scale = _integer_coordinates(values.flat)
+    coordinates = np.asarray(coordinates, dtype=object).reshape(values.shape)
+    ratios = [weight.as_integer_ratio() for weight in weights]
+    weight_scale = lcm(*(denominator for _, denominator in ratios))
+    weights = np.asarray(
+        [
+            numerator * (weight_scale // denominator)
+            for numerator, denominator in ratios
+        ],
+        dtype=object,
+    )
+    total = sum(weights)
+    first = weights @ coordinates
+    second = coordinates.T @ (coordinates * weights[:, None])
+    numerators = total * second - first[:, None] * first[None, :]
+    denominator = total**2 * scale**2
+    shrinkage = Fraction(float(diagonal_shrinkage))
+    annualization = Fraction(float(annualization_factor))
+    try:
+        covariance = np.array(
+            [
                 [
-                    weight
-                    if isinstance(weight, Decimal)
-                    else Decimal.from_float(float(weight))
-                    for weight in weights
-                ],
-                dtype=object,
-            )
-            values = np.array(
-                [[Decimal.from_float(float(value)) for value in row] for row in values],
-                dtype=object,
-            )
-            diagonal_shrinkage = Decimal.from_float(float(diagonal_shrinkage))
-            annualization_factor = Decimal.from_float(float(annualization_factor))
-        centered = values - np.average(values, axis=0, weights=weights)
-        covariance = (centered * weights[:, None]).T @ centered
-        covariance = (
-            1 - diagonal_shrinkage
-        ) * covariance + diagonal_shrinkage * np.diag(np.diag(covariance))
-        covariance = np.asarray(
-            (covariance + covariance.T) / 2 * annualization_factor, dtype="float64"
+                    float(
+                        Fraction(int(numerators[left, right]), int(denominator))
+                        * (1 if left == right else 1 - shrinkage)
+                        * annualization
+                    )
+                    for right in range(values.shape[1])
+                ]
+                for left in range(values.shape[1])
+            ],
+            dtype="float64",
         )
+    except OverflowError:
+        raise ValueError("factor_risk_covariance_non_finite") from None
     if not np.isfinite(covariance).all():
         raise ValueError("factor_risk_covariance_non_finite")
-    if np.linalg.eigvalsh(covariance).min(initial=0.0) < -1e-12:
+    if not _covariance_is_psd(covariance):
         raise ValueError("factor_risk_covariance_not_psd")
     return pd.DataFrame(covariance, index=columns, columns=columns)
 

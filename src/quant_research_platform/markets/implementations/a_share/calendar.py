@@ -65,6 +65,8 @@ def compute_listing_session_facts(
     frame: pd.DataFrame,
     calendar: pd.DataFrame,
     market_history: pd.DataFrame,
+    *,
+    observed_market_sessions: dict[int, pd.DatetimeIndex] | None = None,
 ) -> pd.DataFrame:
     """Derive exact age and proven eligibility from evidenced market membership."""
     normalized = _require_normalized_calendar(calendar)
@@ -106,6 +108,12 @@ def compute_listing_session_facts(
         for market in market_types.unique()
     }
     calendar_dates = pd.DatetimeIndex(sorted(normalized["calendar_date"].unique()))
+    unconfirmed_sessions = {}
+    for market, observed in (observed_market_sessions or {}).items():
+        original = sessions_by_market.get(market, pd.DatetimeIndex([]))
+        unconfirmed_sessions[market] = observed.difference(original)
+        sessions_by_market[market] = original.union(observed)
+        calendar_dates = calendar_dates.union(observed)
     dates_by_market = {
         market: pd.DatetimeIndex(
             sorted(normalized.loc[market_types.eq(market), "calendar_date"].unique())
@@ -127,10 +135,7 @@ def compute_listing_session_facts(
         )
         for position, record in enumerate(records):
             active = observations.loc[indices].ge(record.timestamp)
-            if record.market_type not in dates_by_market:
-                exact &= ~active
-                continue
-            sessions = sessions_by_market[record.market_type]
+            sessions = sessions_by_market.get(record.market_type, pd.DatetimeIndex([]))
             starts = (
                 listings.loc[indices]
                 .fillna(record.timestamp)
@@ -154,6 +159,9 @@ def compute_listing_session_facts(
                 ends = ends.clip(
                     upper=records[position + 1].timestamp - pd.Timedelta(days=1)
                 )
+            if record.market_type not in dates_by_market:
+                exact &= ~active
+                continue
             known_dates = dates_by_market[record.market_type]
             required_count = calendar_dates.searchsorted(
                 ends, side="right"
@@ -166,6 +174,13 @@ def compute_listing_session_facts(
                 & ends.le(known_dates[-1])
                 & (required_count == covered_count)
             )
+            unconfirmed = unconfirmed_sessions.get(
+                record.market_type, pd.DatetimeIndex([])
+            )
+            covered &= (
+                unconfirmed.searchsorted(ends, side="right")
+                - unconfirmed.searchsorted(starts, side="left")
+            ) == 0
             exact &= ~active | covered
         result.loc[indices[exact], "listing_age_trading_days"] = counts.loc[exact]
         result.loc[indices[exact], "has_252_trading_sessions"] = counts.loc[exact].ge(

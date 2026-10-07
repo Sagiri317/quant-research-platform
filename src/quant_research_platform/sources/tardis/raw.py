@@ -98,10 +98,19 @@ def _request_scope(exchange, symbols, channels):
         raise ValueError("tardis_request_scope_invalid")
 
 
-def _stream_suffix(channel, exchange):
+def _stream_suffix(channel, exchange, day):
     if channel == "depth":
-        return "depth@0ms" if exchange == EXCHANGE else "depth@100ms"
-    return "markPrice@1s" if channel == "markPrice" else channel
+        if exchange == EXCHANGE:
+            # Tardis documents the date, but not the intraday transition time.
+            if day == dt.date(2020, 1, 7):
+                raise ValueError("tardis_depth_frequency_transition_unproven")
+            return "depth@100ms" if day < dt.date(2020, 1, 7) else "depth@0ms"
+        return "depth@100ms"
+    if channel == "markPrice":
+        if day == dt.date(2020, 2, 13):
+            raise ValueError("tardis_mark_price_frequency_transition_unproven")
+        return "markPrice" if day < dt.date(2020, 2, 13) else "markPrice@1s"
+    return channel
 
 
 def _validate_state(channel, symbol, native):
@@ -290,7 +299,9 @@ def iter_native_slice(
             if len(parts) < 2 or parts[0] not in symbols or parts[1] not in channels:
                 raise ValueError("tardis_native_channel_invalid")
             channel = parts[1]
-            suffix = _stream_suffix(channel, exchange)
+            suffix = _stream_suffix(
+                channel, exchange, day + dt.timedelta(days=offset_minutes // 1440)
+            )
             if value["stream"] != parts[0] + "@" + suffix:
                 raise ValueError("tardis_native_frequency_unsupported")
             native = value["data"]
@@ -448,6 +459,13 @@ def _publish_slices(
         raise ValueError("tardis_slice_range_invalid")
     if type(byte_budget) is not int or byte_budget <= 0:
         raise ValueError("tardis_download_budget_invalid")
+    for offset in range(
+        offset_minutes, offset_minutes + slice_count * SLICE_MINUTES, SLICE_MINUTES
+    ):
+        for channel in channels:
+            _stream_suffix(
+                channel, exchange, _date(date) + dt.timedelta(days=offset // 1440)
+            )
 
     def write(root):
         require_free_disk_headroom(root, reserve_bytes=byte_budget)
@@ -484,7 +502,7 @@ def _publish_slices(
                 size = 0
                 with (
                     open_slice(offset) as response,
-                    open_filesystem_file(target, "xb") as output,
+                    closing_iterator(open_filesystem_file(target, "xb")) as output,
                 ):
                     while block := response.read(min(_COPY_BYTES, remaining + 1)):
                         if len(block) > remaining:
@@ -693,7 +711,7 @@ def download_slices(
             if error.code in (401, 403):
                 raise PermissionError("tardis_access_not_authorized") from None
             raise ValueError(f"tardis_http_status_{error.code}") from None
-        with response:
+        with closing_iterator(response):
             if (
                 response.status != 200
                 or response.headers.get("Content-Encoding") != "gzip"

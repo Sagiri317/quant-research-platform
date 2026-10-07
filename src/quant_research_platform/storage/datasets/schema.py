@@ -545,6 +545,31 @@ def _require_runtime_string_tuple(
     return value
 
 
+def arrow_type_has_null(data_type: pa.DataType) -> bool:
+    return pa.types.is_null(data_type) or any(
+        arrow_type_has_null(data_type.field(index).type)
+        for index in range(data_type.num_fields)
+    )
+
+
+def arrow_type_resolves_null(old: pa.DataType, new: pa.DataType) -> bool:
+    if pa.types.is_null(old):
+        return True
+    if old.id != new.id or old.num_fields != new.num_fields:
+        return False
+    if not old.num_fields:
+        return old == new
+    if pa.types.is_fixed_size_list(old) and old.list_size != new.list_size:
+        return False
+    if pa.types.is_map(old) and old.keys_sorted != new.keys_sorted:
+        return False
+    return all(
+        old.field(index).with_type(new.field(index).type) == new.field(index)
+        and arrow_type_resolves_null(old.field(index).type, new.field(index).type)
+        for index in range(old.num_fields)
+    )
+
+
 def physical_schema_from_schema(schema: pa.Schema) -> list[dict[str, Any]]:
     if not isinstance(schema, pa.Schema):
         raise TypeError("dataset_arrow_schema_required")

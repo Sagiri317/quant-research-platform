@@ -14,6 +14,7 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
 )
+from quant_research_platform.research.portfolios.risk import _covariance_is_psd
 
 
 @dataclass(frozen=True)
@@ -94,7 +95,7 @@ def optimize_portfolio(
     ).to_numpy(dtype="float64")
     if not np.isfinite(covariance).all() or not np.allclose(covariance, covariance.T):
         raise ValueError("optimizer_covariance_invalid")
-    if float(np.linalg.eigvalsh(covariance).min(initial=0.0)) < -1e-12:
+    if not _covariance_is_psd(covariance):
         raise ValueError("optimizer_covariance_not_psd")
     data = assets.copy().reset_index(drop=True)
     if data["asset_id"].duplicated().any():

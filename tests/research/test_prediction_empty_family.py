@@ -7,6 +7,9 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.artifacts.outputs import read_prediction_output_bundle
+from quant_research_platform.artifacts.outputs.bundle_validation import (
+    _validate_prediction_output_bundle,
+)
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.time import TimeWindow
@@ -198,6 +201,11 @@ def test_native_development_family_domain_wide_narrow_and_empty(empty_family_cas
         manifest, lookup = read_prediction_output_bundle(
             root, expected_output_id=name, family_selection="book_to_market"
         )
+        validated_manifest, discarded = _validate_prediction_output_bundle(
+            root, expected_output_id=name, family_selection="book_to_market"
+        )
+        assert discarded is None
+        assert validated_manifest == manifest
         assert manifest["metadata"]["prediction_metadata"]["prediction_rows"] == sum(
             counts.values()
         )
@@ -248,6 +256,13 @@ def test_native_development_family_domain_wide_narrow_and_empty(empty_family_cas
             family_selection="earnings_yield",
             time_window=TimeWindow("2019-01-03", "2019-01-03"),
         )
+        _, discarded = _validate_prediction_output_bundle(
+            root,
+            expected_output_id=name,
+            family_selection="earnings_yield",
+            time_window=TimeWindow("2019-01-03", "2019-01-03"),
+        )
+        assert discarded is None
         assert empty_lookup.row_count == 0
         list(
             _iter_prediction_joined_chunks(
@@ -442,3 +457,56 @@ def test_frozen_holdout_aggregates_empty_family_without_refit(
     )
     assert reloaded.member_records == case.artifact.member_records
     assert reloaded.selections == case.artifact.selections
+
+
+@pytest.mark.parametrize("column", ("raw_prediction", "alpha_score"))
+@pytest.mark.parametrize("mutation", ("null", "infinite", "nonnumeric"))
+def test_native_validation_and_lookup_preserve_score_failure_domain(
+    empty_family_case, column, mutation
+):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    case = empty_family_case
+    name = f"bad_{column}_{mutation}"
+    root = write_prediction_result(
+        case.layout, _result(case, name, "2019-01-02", "2019-01-03")
+    )
+    path = root / "prediction.parquet"
+    table = pq.read_table(path)
+    affected = table.column("family_id").to_pylist()
+    values = table.column(column).to_pylist()
+    bad = {"null": None, "infinite": float("inf"), "nonnumeric": "bad"}[mutation]
+    if mutation == "nonnumeric":
+        values = [str(value) for value in values]
+    values = [
+        bad if family == "earnings_yield" else value
+        for family, value in zip(affected, values, strict=True)
+    ]
+    table = table.set_column(
+        table.schema.get_field_index(column), column, pa.array(values)
+    )
+    pq.write_table(table, path)
+    error = (
+        "could not convert string to float"
+        if mutation == "nonnumeric"
+        else "^invalid_exact_float_value$"
+    )
+    for reader in (read_prediction_output_bundle, _validate_prediction_output_bundle):
+        for family, window in (
+            (None, None),
+            ("earnings_yield", None),
+            ("book_to_market", None),
+            (None, TimeWindow("2019-01-03", "2019-01-03")),
+            ("earnings_yield", TimeWindow("2019-01-03", "2019-01-03")),
+        ):
+            kwargs = dict(
+                expected_output_id=name, family_selection=family, time_window=window
+            )
+            if column == "raw_prediction" or (
+                window is None and family != "book_to_market"
+            ):
+                with pytest.raises(ValueError, match=error):
+                    reader(root, **kwargs)
+            else:
+                reader(root, **kwargs)

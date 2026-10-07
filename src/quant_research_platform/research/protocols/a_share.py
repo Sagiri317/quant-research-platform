@@ -270,6 +270,15 @@ class AShareProtocol:
                 if self.forecast_freshness_days == 180
                 else "primary",
             },
+            "training_weighting": {
+                "role": "robustness"
+                if self.configuration_json is not None
+                and any(
+                    model.get("training_weighting", {}).get("half_life") == 756
+                    for model in self.configuration()["models"]
+                )
+                else "primary",
+            },
             "risk": asdict(self.risk_config),
             "optimizer": asdict(self.optimizer_config),
             "statistics": {
@@ -327,6 +336,10 @@ class AShareProtocol:
 
     def target_manifest(self, target_id, producer_kind):
         """Bind consumed facts; upstream identities bind target inputs."""
+        from quant_research_platform.catalog.models import (
+            _effective_model_configurations,
+        )
+
         full = self.manifest()
         if producer_kind == "REPORT":
             return full
@@ -347,7 +360,11 @@ class AShareProtocol:
                     )
                 }
             )
-            base["research_configuration"] = {"models": self.configuration()["models"]}
+            base["research_configuration"] = {
+                "models": _effective_model_configurations(
+                    self.configuration()["models"]
+                )
+            }
         elif producer_kind == "PREDICTION":
             base["selection_group"] = self.selection_group_for_target(target_id)
         elif producer_kind == "EVALUATION":
@@ -403,10 +420,25 @@ class AShareProtocol:
                 base["statistics"] = full["statistics"]
             if self.frozen_development is not None:
                 base["frozen_development"] = self.frozen_development
-        if producer_kind == "STATISTIC" and set(self.factor_columns).intersection(
-            EXPECTATIONS_FACTORS
-        ):
-            base["expectations"] = full["expectations"]
+        if producer_kind == "STATISTIC":
+            base["training_weighting"] = full["training_weighting"]
+            configuration = self.configuration()
+            consumed = set(self.factor_columns)
+            if configuration is not None:
+                for model in configuration["models"]:
+                    consumed.update(model["input_factor_columns"])
+                    consumed.update(
+                        column.removeprefix(prefix)
+                        for column in model["input_feature_columns"]
+                        for prefix in (
+                            "feature_",
+                            "feature_missing_",
+                            "feature_observed_",
+                        )
+                        if column.startswith(prefix)
+                    )
+            if consumed.intersection(EXPECTATIONS_FACTORS):
+                base["expectations"] = full["expectations"]
         return base
 
     def target_window(self, action, data_spec, window, target_id=None):
@@ -747,6 +779,15 @@ class AShareProtocol:
         if action == "data materialize":
             return ()
         raise ValueError("unknown_a_share_action")
+
+
+def _inference_blocker(manifest):
+    """Exclude independent robustness runs only from formal joint inference."""
+    if manifest.get("expectations", {}).get("role") == "robustness":
+        return "expectations_robustness_excluded"
+    if manifest.get("training_weighting", {}).get("role") == "robustness":
+        return "training_weighting_robustness_excluded"
+    return None
 
 
 def model_folds(

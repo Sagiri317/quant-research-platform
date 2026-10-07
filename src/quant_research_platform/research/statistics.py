@@ -844,6 +844,11 @@ def time_series_inference_summary(
             }
         )
     result = pd.DataFrame(rows)
+    return _apply_fdr(result, fdr_method, fdr_alpha, family_size)
+
+
+def _apply_fdr(result, fdr_method, fdr_alpha, family_size):
+    """Apply the full declared family to an existing individual-inference table."""
     defined = result["status"].eq("DEFINED")
     if fdr_method is None:
         result["fdr_method"] = None

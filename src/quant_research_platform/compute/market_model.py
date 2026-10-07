@@ -65,7 +65,9 @@ class MarketModelRiskState:
         frame["asset_id"] = frame["asset_id"].astype("string")
         if open_market_types is not None:
             frame["market_type"] = strict_integer_series(
-                frame["market_type"], error="market_model_risk_market_type_invalid"
+                frame["market_type"],
+                error="market_model_risk_market_type_invalid",
+                allow_null=True,
             )
         for column in ("period_return", "float_market_cap"):
             frame[column] = strict_finite_numeric_series(
@@ -73,18 +75,25 @@ class MarketModelRiskState:
                 error="market_model_risk_numeric_invalid",
                 allow_null=True,
             ).astype("float64")
-        eligible = frame.loc[frame.eligible] if "eligible" in frame else frame
-        if eligible[["period_return", "float_market_cap"]].isna().any().any():
-            raise ValueError("market_model_risk_numeric_invalid")
         if (
             frame["asset_id"].duplicated().any()
             or frame["float_market_cap"].le(0.0).any()
         ):
             raise ValueError("market_model_risk_key_invalid")
+        if open_market_types is not None:
+            known = frame["market_type"].notna()
+            frame["eligible"] = (
+                frame["eligible"] if "eligible" in frame else True
+            ) & known
+            frame.loc[~known, ["period_return", "float_market_cap"]] = np.nan
+        eligible = frame.loc[frame.eligible] if "eligible" in frame else frame
+        if eligible[["period_return", "float_market_cap"]].isna().any().any():
+            raise ValueError("market_model_risk_numeric_invalid")
         frame = frame.sort_values("asset_id", kind="mergesort").reset_index(drop=True)
         if open_market_types is not None:
+            known = frame.loc[frame.market_type.notna()]
             self._asset_markets.update(
-                zip(frame.asset_id, frame.market_type, strict=True)
+                zip(known.asset_id, known.market_type, strict=True)
             )
             if asset_market_types is not None:
                 self._asset_markets.update(
@@ -97,6 +106,7 @@ class MarketModelRiskState:
             asset
             for asset in absent
             if open_market_types is not None
+            and asset in self._asset_markets
             and self._asset_markets[asset] not in open_market_types
         }
         for asset in absent - closed_assets:

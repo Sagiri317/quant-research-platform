@@ -29,21 +29,6 @@ def compute_ic_and_grouped_label_values(
     """Compute timestamp-signal IC and grouped label values."""
 
     panel = validate_compute_panel(frame, spec)
-    return compute_ic_and_grouped_label_values_from_validated_panel(
-        panel,
-        spec,
-        n_groups=n_groups,
-    )
-
-
-def compute_ic_and_grouped_label_values_from_validated_panel(
-    panel: pd.DataFrame,
-    spec: ComputePanelSpec,
-    *,
-    n_groups: int = 5,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
-    """Compute IC and grouped label values from a validated panel."""
-
     if not isinstance(n_groups, int) or isinstance(n_groups, bool):
         raise TypeError("n_groups must be an integer.")
     if n_groups < 2:

@@ -168,7 +168,10 @@ def download_dataset(output_root, *, exchange, dataset_type, symbol, date, byte_
             if error.code in {401, 403}:
                 raise PermissionError("tardis_access_not_authorized") from None
             raise ValueError(f"tardis_http_status_{error.code}") from None
-        with response, open_filesystem_file(path, "xb") as output:
+        with (
+            closing_iterator(response),
+            closing_iterator(open_filesystem_file(path, "xb")) as output,
+        ):
             if response.status != 200:
                 raise ValueError("tardis_http_response_invalid")
             while block := response.read(_COPY_BYTES):

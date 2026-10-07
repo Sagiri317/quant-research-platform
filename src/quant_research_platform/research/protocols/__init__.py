@@ -169,7 +169,9 @@ def bind_research_selection(profile, library, configuration):
     for item in config["models"]:
         if item.get("random_seed", ROOT_SEED) not in (None, ROOT_SEED):
             raise ValueError("research_root_seed_must_be_42")
-        parameters = item.get("hyperparameters", {})
+        parameters = (
+            {} if "parameter_candidates" in item else item.get("hyperparameters", {})
+        )
         candidate_parameters = item.get("parameter_candidates", [])
         for values in (parameters, *candidate_parameters):
             if "random_state" in values:
@@ -184,8 +186,15 @@ def bind_research_selection(profile, library, configuration):
     models = model_catalog.list()
     for item in config["models"]:
         model = model_catalog.get(item["model_id"])
-        item["hyperparameters"] = _thaw_model_hyperparameters(model.hyperparameters)
+        if "parameter_candidates" not in item:
+            item["hyperparameters"] = _thaw_model_hyperparameters(model.hyperparameters)
+        else:
+            item.setdefault("hyperparameters", {})
         item["training_weighting"] = model.training_weighting.payload()
+    if a_share_market:
+        half_lives = {model.training_weighting.half_life for model in models}
+        if 756 in half_lives and len(half_lives) > 1:
+            raise ValueError("a_share_training_weighting_research_roles_mixed")
     model_configurations = {item["model_id"]: item for item in config["models"]}
     canonical_factors = []
     for model in models:

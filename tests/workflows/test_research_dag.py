@@ -2845,9 +2845,9 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
     )
 
     def bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003
-        return manifest, object()
+        return manifest, None
 
-    monkeypatch.setattr(research, "read_prediction_output_bundle", bundle)
+    monkeypatch.setattr(research, "_validate_prediction_output_bundle", bundle)
     monkeypatch.setattr(
         research, "_target_instance_root", lambda *_args: tmp_path / "model"
     )

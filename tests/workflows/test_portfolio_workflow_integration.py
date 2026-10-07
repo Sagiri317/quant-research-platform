@@ -1008,6 +1008,26 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         layout.research_run_path(development["run_id"])
     )
     assert development_record.trial_ledgers
+    requested_ridge = next(
+        model
+        for model in configuration["models"]
+        if model["model_algorithm"] == "ridge_regression"
+    )
+    submitted_base = dict(requested_ridge["hyperparameters"])
+    requested_ridge["hyperparameters"] = {
+        "alpha": -1.0,
+        "random_state": 999,
+        "unused_native_option": True,
+    }
+    recorded_ridge = next(
+        model
+        for model in development_record.payload()["protocol"]["research_configuration"][
+            "models"
+        ]
+        if model["model_algorithm"] == "ridge_regression"
+    )
+    assert recorded_ridge["hyperparameters"] == submitted_base
+    assert recorded_ridge["hyperparameters"] != requested_ridge["hyperparameters"]
     from quant_research_platform.research.datasets.io import (
         iter_research_dataset_chunks,
     )
@@ -1080,6 +1100,19 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         holdout=True,
         development_run_id=development["run_id"],
     )
+    from copy import deepcopy
+
+    actual_candidate_change = deepcopy(configuration)
+    changed_ridge = next(
+        model
+        for model in actual_candidate_change["models"]
+        if model["model_algorithm"] == "ridge_regression"
+    )
+    changed_ridge["parameter_candidates"][0]["regularization_strength"] = 0.2
+    with pytest.raises(ValueError, match="holdout_development_run_invalid"):
+        research.research_run(
+            **{**request, "research_plan": actual_candidate_change}, plan=True
+        )
     with pytest.raises(
         PermissionError, match="holdout_frozen_development_identity_unavailable"
     ):

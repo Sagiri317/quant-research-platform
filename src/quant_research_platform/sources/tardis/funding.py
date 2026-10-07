@@ -158,10 +158,10 @@ def import_funding_history(
             with closing_iterator(records):
                 value = mark = forecast = None
                 for _number, timestamp, value in records:
-                    if (
-                        value is None
-                        or value["stream"] != symbol.lower() + "@markPrice@1s"
-                    ):
+                    if value is None or value["stream"].split("@")[:2] != [
+                        symbol.lower(),
+                        "markPrice",
+                    ]:
                         value = None
                         continue
                     observed = strict_iso_timestamp(

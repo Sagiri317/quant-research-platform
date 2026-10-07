@@ -1358,11 +1358,7 @@ def _update_amount_history(
                 raise PortfolioTargetBlocked("portfolio_held_asset_missing_from_panel")
             del history[asset]
     amounts = pd.to_numeric(panel["amount"], errors="raise").astype("float64")
-    if (
-        amounts.isna().any()
-        or not np.isfinite(amounts.to_numpy()).all()
-        or amounts.lt(0).any()
-    ):
+    if not np.isfinite(amounts.dropna().to_numpy()).all() or amounts.lt(0).any():
         raise ValueError("portfolio_amount_invalid")
     for asset, amount in zip(panel["asset_id"].astype(str), amounts, strict=True):
         history.setdefault(asset, deque(maxlen=20)).append(float(amount))

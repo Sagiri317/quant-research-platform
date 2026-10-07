@@ -833,3 +833,69 @@ def test_instance_metadata_preserves_typed_mapping_and_error_order() -> None:
                 "producer_diagnostics": object(),
             },
         )
+
+
+@pytest.mark.parametrize(
+    ("old", "new", "accepted"),
+    (
+        (pa.list_(pa.null()), pa.list_(pa.int64()), True),
+        (
+            pa.list_(pa.struct([pa.field("leaf", pa.null())])),
+            pa.list_(pa.struct([pa.field("leaf", pa.int64())])),
+            True,
+        ),
+        (
+            pa.list_(pa.field("item", pa.null())),
+            pa.list_(pa.field("element", pa.int64())),
+            False,
+        ),
+        (
+            pa.struct([pa.field("leaf", pa.null(), nullable=True)]),
+            pa.struct([pa.field("leaf", pa.int64(), nullable=False)]),
+            False,
+        ),
+        (
+            pa.struct([pa.field("leaf", pa.null())]),
+            pa.struct([pa.field("leaf", pa.int64()), pa.field("added", pa.int64())]),
+            False,
+        ),
+        (
+            pa.struct([pa.field("leaf", pa.null()), pa.field("known", pa.int64())]),
+            pa.struct([pa.field("leaf", pa.int64()), pa.field("known", pa.float64())]),
+            False,
+        ),
+        (pa.list_(pa.null(), 2), pa.list_(pa.int64(), 3), False),
+        (pa.list_(pa.null()), pa.large_list(pa.int64()), False),
+    ),
+    ids=(
+        "list-leaf",
+        "deep-leaf",
+        "field-name",
+        "nullable",
+        "field-count",
+        "known-type",
+        "fixed-length",
+        "container-kind",
+    ),
+)
+def test_null_resolution_preserves_arrow_structure(old, new, accepted):
+    assert dataset_schema.arrow_type_has_null(old)
+    assert dataset_schema.arrow_type_resolves_null(old, new) is accepted
+    assert not dataset_schema.arrow_type_has_null(new)
+
+
+@pytest.mark.parametrize("value_type", (pa.null(), pa.int64()))
+def test_null_resolution_does_not_alias_list_item_and_element(value_type):
+    old = pa.list_(pa.field("item", value_type))
+    new = pa.list_(pa.field("element", value_type))
+    assert old == new
+    assert not dataset_schema.arrow_type_resolves_null(old, new)
+
+
+def test_null_resolution_preserves_map_key_order_contract():
+    old = pa.map_(pa.string(), pa.null(), keys_sorted=False)
+    changed = pa.map_(pa.string(), pa.int64(), keys_sorted=True)
+    resolved = pa.map_(pa.string(), pa.int64(), keys_sorted=False)
+    assert dataset_schema.arrow_type_has_null(old)
+    assert not dataset_schema.arrow_type_resolves_null(old, changed)
+    assert dataset_schema.arrow_type_resolves_null(old, resolved)

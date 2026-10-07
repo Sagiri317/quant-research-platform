@@ -45,6 +45,8 @@ from quant_research_platform.storage.datasets.reading import (
     iter_frame_chunks,
 )
 from quant_research_platform.storage.datasets.schema import (
+    arrow_type_has_null,
+    arrow_type_resolves_null,
     data_spec_payload,
     encode_logical_category_value,
     logical_dtype_metadata_bytes,
@@ -182,8 +184,9 @@ class _WriteStats:
             except (pa.ArrowInvalid, pa.ArrowTypeError) as error:
                 raise ValueError("dataset_schema_mismatch") from error
             if any(
-                old.type != new.type and not pa.types.is_null(old.type)
-                for old, new in zip(self._arrow_schema, unified, strict=True)
+                not arrow_type_resolves_null(old.type, new.type)
+                for source in (self._arrow_schema, physical_schema)
+                for old, new in zip(source, unified, strict=True)
             ):
                 raise ValueError("dataset_schema_mismatch")
             self._arrow_schema = unified
@@ -402,10 +405,12 @@ def _write_contents(
     def observe_pending() -> None:
         schema = accumulator._arrow_schema
         assert schema is not None
-        if any(pa.types.is_null(field.type) for field in schema):
+        if any(arrow_type_has_null(field.type) for field in schema):
             return
         for pending in pending_parts:
-            with pq.ParquetFile(native_filesystem_path(pending)) as parquet:
+            with closing_iterator(
+                pq.ParquetFile(native_filesystem_path(pending))
+            ) as parquet:
                 table = parquet.read()
             resolved = table.cast(
                 schema.with_metadata(table.schema.metadata), safe=True
@@ -454,7 +459,8 @@ def _write_contents(
                 write_parquet_file(persisted, path)
                 assert accumulator._arrow_schema is not None
                 if any(
-                    pa.types.is_null(field.type) for field in accumulator._arrow_schema
+                    arrow_type_has_null(field.type)
+                    for field in accumulator._arrow_schema
                 ):
                     pending_parts.append(path)
                 else:

@@ -702,6 +702,64 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         assert paired.reason.eq("global_development_selection_reuses_validation").all()
         assert paired.bootstrap_reason.eq(blocked_reason).all()
     if not full_factor_history:
+        robustness_protocol = {
+            **quarterly_protocol,
+            "training_weighting": {"half_life": 756, "role": "robustness"},
+        }
+        robustness_tables = build_a_share_statistics_tables(
+            layout=layout,
+            dataset_catalog=ResearchDatasetCatalog((spec,)),
+            dataset_id="pv_all",
+            prediction_id="quarterly_prediction",
+            persisted_model=model,
+            protocol_manifest=robustness_protocol,
+            time_window=TimeWindow(dates[0], cutoff),
+            prediction_lookup=Lookup(),
+            global_statistics=artifact,
+        )
+        for table in ("prediction_diagnostics", "model_comparison"):
+            pd.testing.assert_frame_equal(
+                robustness_tables[table], paired_tables[table], check_exact=True
+            )
+        pd.testing.assert_frame_equal(
+            robustness_tables["model_trials"],
+            paired_tables["model_trials"],
+            check_exact=True,
+        )
+        assert robustness_tables["factor_diagnostics"].status.eq("DEFINED").all()
+        assert (
+            robustness_tables["factor_diagnostics"]
+            .fdr_method.eq("NOT_APPLICABLE")
+            .all()
+        )
+        assert (
+            robustness_tables["model_group_comparison"]
+            .fdr_method.eq("NOT_APPLICABLE")
+            .all()
+        )
+        for table in ("model_reality_checks", "robustness"):
+            assert robustness_tables[table].status.eq("UNDEFINED").all()
+            assert (
+                robustness_tables[table]
+                .reason.eq("training_weighting_robustness_excluded")
+                .all()
+            )
+        robust_root = write_statistics_artifact(
+            layout.semantic_artifact_root("a_share", "pv_all_robust_statistics"),
+            envelope=paired_envelope,
+            tables=robustness_tables,
+        )
+        robust_artifact = read_statistics_artifact(
+            robust_root, expected_identity=paired_envelope.instance_identity
+        )
+        with robust_artifact.table("factor_diagnostics.parquet") as table:
+            assert table.status.eq("DEFINED").all()
+            assert table.fdr_method.eq("NOT_APPLICABLE").all()
+            assert table.p_value.notna().all()
+            assert table.fdr_adjusted_p_value.isna().all()
+        with robust_artifact.table("model_reality_checks.parquet") as table:
+            assert table.value.isna().all()
+            assert table.reason.eq("training_weighting_robustness_excluded").all()
         for mutation in ("key", "count", "asset_identity", "family"):
             malformed = {name: table.copy() for name, table in global_tables.items()}
             losses_table = malformed["model_losses"]
@@ -1123,6 +1181,13 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     }
     with artifact.table("model_group_comparison.parquet") as table:
         assert table.empty
+    with artifact.table("factor_diagnostics.parquet") as table:
+        pd.testing.assert_frame_equal(
+            table,
+            factors.assign(reason=factors.reason.fillna("")),
+            check_dtype=False,
+            check_exact=True,
+        )
     for member in members:
         with artifact.table(member) as table:
             assert not table.empty

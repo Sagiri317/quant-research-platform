@@ -27,7 +27,10 @@ from quant_research_platform.contracts.time import (
     is_datetime_value,
     time_value_isoformat,
 )
-from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
+from quant_research_platform.storage.exact_keys import (
+    ExactPrimaryKeyIndex,
+    _float_value_payload,
+)
 from quant_research_platform.storage.identity import (
     filesystem_scandir,
     filesystem_stat,
@@ -215,6 +218,30 @@ def read_prediction_output_bundle(
     time_window=None,
     family_selection: str | None = None,
 ) -> tuple[dict[str, object], _PredictionLookup]:
+    manifest, lookup = _validate_prediction_output_bundle(
+        root,
+        expected_output_id=expected_output_id,
+        expected_run_id=expected_run_id,
+        expected_member_identities=expected_member_identities,
+        time_window=time_window,
+        family_selection=family_selection,
+        collect_lookup=True,
+    )
+    if lookup is None:
+        raise ValueError("prediction_output_unreadable")
+    return (manifest, lookup)
+
+
+def _validate_prediction_output_bundle(
+    root: Path,
+    *,
+    expected_output_id: str,
+    expected_run_id: str | None = None,
+    expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
+    time_window=None,
+    family_selection: str | None = None,
+    collect_lookup: bool = False,
+) -> tuple[dict[str, object], _PredictionLookup | None]:
     lookup: _PredictionLookup | None = None
 
     def read_prediction(
@@ -257,13 +284,14 @@ def read_prediction_output_bundle(
         )
         try:
             key_index = ExactPrimaryKeyIndex(primary_key=primary_key)
-            lookup = _PredictionLookup(
-                index=ExactPrimaryKeyIndex(primary_key=primary_key),
-                primary_key=primary_key,
-                prediction_column=lookup_column,
-                family_selection=family_selection,
-                champions=metadata["model_metadata"].get("champion_by_quarter", {}),
-            )
+            if collect_lookup:
+                lookup = _PredictionLookup(
+                    index=ExactPrimaryKeyIndex(primary_key=primary_key),
+                    primary_key=primary_key,
+                    prediction_column=lookup_column,
+                    family_selection=family_selection,
+                    champions=metadata["model_metadata"].get("champion_by_quarter", {}),
+                )
             with _opened_parquet(
                 prediction_path, expected_identity=prediction_identity
             ) as (parquet, _identity, _handle):
@@ -377,7 +405,11 @@ def read_prediction_output_bundle(
                         if family_keep is not None:
                             table = table.filter(family_keep)
                     if table.num_rows:
-                        lookup.add_table(table)
+                        if lookup is not None:
+                            lookup.add_table(table)
+                        elif lookup_column != prediction_column:
+                            for scalar in table.column(lookup_column):
+                                _float_value_payload(scalar)
                 if window_rows == 0:
                     raise ValueError("empty_prediction_window")
                 if (
@@ -397,8 +429,6 @@ def read_prediction_output_bundle(
         expected_member_identities=expected_member_identities,
         observer=read_prediction,
     )
-    if lookup is None:
-        raise ValueError("prediction_output_unreadable")
     return (manifest, lookup)
 
 

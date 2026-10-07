@@ -217,7 +217,7 @@ def test_supervised_models_persist_a_training_only_scaler() -> None:
             "asset_id": ["a", "b", "a", "b"],
             "feature": [1.0, 2.0, 3.0, 4.0],
             "model_target": [0.1, 0.2, 0.3, 0.4],
-            "forward_return_20d_available_at": pd.to_datetime(
+            "model_target_available_at": pd.to_datetime(
                 ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
             ),
             "eligible": True,
@@ -299,7 +299,7 @@ def test_model_fitting_excludes_labels_unavailable_at_fitting_cutoff() -> None:
             "asset_id": ["a", "b", "a", "b"],
             "feature": [1.0, 2.0, 3.0, 4.0],
             "model_target": [0.1, 0.2, 0.3, 0.4],
-            "forward_return_20d_available_at": pd.to_datetime(
+            "model_target_available_at": pd.to_datetime(
                 ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
             ),
             "eligible": True,
@@ -332,7 +332,7 @@ def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
             "factor_a": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
             "factor_b": [3.0, 2.0, 1.0, 3.0, 2.0, np.nan],
             "model_target": [1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
-            "forward_return_20d_available_at": pd.to_datetime(
+            "model_target_available_at": pd.to_datetime(
                 ["2024-01-02"] * 3 + ["2024-01-03"] * 3
             ),
             "eligible": True,

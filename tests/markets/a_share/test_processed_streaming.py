@@ -1159,6 +1159,9 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
             assert actual.loc[unknown, "market_type"].isna().all()
             assert actual.has_252_trading_sessions.isna().all()
             assert not a_share_eligibility(actual, "pv_expanded").any()
+        elif gap == "calendar":
+            assert actual.has_252_trading_sessions.all()
+            assert a_share_eligibility(actual, "pv_expanded").all()
         else:
             assert actual.has_252_trading_sessions.iloc[:3].isna().all()
             assert actual.has_252_trading_sessions.iloc[3:].all()
@@ -1166,3 +1169,134 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
                 a_share_eligibility(actual, "pv_expanded").tolist()
                 == [False] * 3 + [True] * 15
             )
+
+
+@pytest.mark.parametrize("batch_rows", (6, 3000))
+@pytest.mark.parametrize("unknown_quote", (False, True))
+def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
+    tmp_path, monkeypatch, batch_rows, unknown_quote
+):
+    dates = pd.bdate_range("2020-01-02", periods=300).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    bars = source["market_bars_1d"]
+    own = bars.source_asset_id.eq("000001")
+    bars.loc[own & bars.timestamp.lt(dates[200]), "market_type"] = 4
+    closed = dates[60:90]
+    bars.loc[own & bars.timestamp.isin(closed), "filling_flag"] = 2
+    bars.loc[own & bars.timestamp.eq(dates[95]), "filling_flag"] = 1
+    if unknown_quote:
+        source["market_bars_1d"] = bars.loc[
+            ~(own & bars.timestamp.eq(dates[245]))
+        ].copy()
+    second = source["trading_calendar"].assign(source_market_type=4)
+    second.loc[second.calendar_date.isin(closed), "is_trading_day"] = False
+    source["trading_calendar"] = pd.concat(
+        (source["trading_calendar"], second), ignore_index=True
+    )
+    profile = research_profile()
+    panel_spec = profile.processed.get("market_panel_1d")
+    spec = profile.processed.get("price_volume_facts")
+    panel = producer._compute_processed_frame(
+        panel_spec,
+        source={
+            **producer._prepare_panel_source(source),
+            "market_bars_1d": source["market_bars_1d"],
+        },
+        dependencies={},
+        trading_sessions=tuple(dates),
+    )
+    own_panel = panel.loc[panel.asset_id.eq("000001")].set_index("timestamp")
+    assert not own_panel.index.isin(closed).any()
+    assert dates[95] in own_panel.index
+    assert dates[245] in own_panel.index
+    if unknown_quote:
+        assert pd.isna(own_panel.loc[dates[245], "amount"])
+    expected = producer._compute_processed_frame(
+        spec,
+        source={},
+        dependencies={"market_panel_1d": panel},
+        trading_sessions=tuple(dates),
+    )
+    core = dates[-10:]
+    expected = (
+        expected.loc[expected.timestamp.isin(core)]
+        .sort_values(["timestamp", "market_id", "asset_id"], kind="mergesort")
+        .reset_index(drop=True)
+    )
+    layout = StorageLayout(tmp_path)
+    write_dataset(
+        layout.processed_data_root(
+            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
+        ),
+        panel,
+        spec=panel_spec,
+    )
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with producer.produce_a_share_processed_data(
+        spec,
+        layout=layout,
+        time_window=TimeWindow(core[0], core[-1]),
+        processed_catalog=profile.processed,
+        source_catalog=profile.interim,
+    ) as (frames, metadata, verify):
+        write_dataset(
+            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
+        )
+    actual = read_dataset(root)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
+    assert actual.momentum_252_20.notna().all()
+    row = actual.loc[actual.asset_id.eq("000001")].iloc[0]
+    position = own_panel.index.get_loc(core[0])
+    assert row.momentum_252_20 == (
+        own_panel.iloc[position - 20].adj_close
+        / own_panel.iloc[position - 252].adj_close
+        - 1
+    )
+
+
+@pytest.mark.parametrize("batch_rows", (6, 3000))
+def test_historical_calendar_gap_keeps_exact_age_unknown_across_slabs(
+    tmp_path, monkeypatch, batch_rows
+):
+    dates = pd.bdate_range("2020-01-02", periods=260).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    source["stock_master"]["listing_date"] = [dates[0], dates[0], dates[200]]
+    source["stock_master"]["timestamp"] = source["stock_master"]["listing_date"]
+    source["trading_calendar"] = (
+        source["trading_calendar"]
+        .loc[source["trading_calendar"].calendar_date.ne(dates[100])]
+        .copy()
+    )
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    for data_id in spec.source_input_data_ids:
+        source_spec = profile.interim.get(data_id)
+        write_dataset(
+            layout.interim_data_root(source_spec.source_id, data_id),
+            source[data_id],
+            spec=source_spec,
+        )
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with producer.produce_a_share_processed_data(
+        spec,
+        layout=layout,
+        time_window=TimeWindow(dates[250], dates[-1]),
+        processed_catalog=profile.processed,
+        source_catalog=profile.interim,
+    ) as (frames, metadata, verify):
+        write_dataset(
+            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
+        )
+    actual = read_dataset(root)
+    old = actual.loc[actual.asset_id.ne("000003")]
+    assert old.listing_age_trading_days.isna().all()
+    assert (
+        old.loc[old.timestamp.eq(dates[250]), "has_252_trading_sessions"].isna().all()
+    )
+    assert old.loc[old.timestamp.gt(dates[250]), "has_252_trading_sessions"].all()
+    recent = actual.loc[actual.asset_id.eq("000003")]
+    assert recent.listing_age_trading_days.tolist() == list(range(51, 61))
+    assert not recent.has_252_trading_sessions.any()
