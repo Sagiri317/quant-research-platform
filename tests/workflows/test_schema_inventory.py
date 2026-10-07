@@ -50,15 +50,16 @@ def _collect_inventory(
         return {"schema_id": "qrp-schema-inventory", "datasets": list(items)}
 
 
-@pytest.mark.parametrize("partitions", ((), ("year",)))
+@pytest.mark.parametrize("layout_kind", ("year", "reference"))
 @pytest.mark.parametrize("context", (False, True))
 def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
-    tmp_path, monkeypatch, partitions, context
+    tmp_path, monkeypatch, layout_kind, context
 ):
     from dataclasses import replace
 
     from tests.storage.low_level_fixtures import make_processed_dataset_spec
 
+    partitions = ("year",) if layout_kind == "year" else ()
     spec = make_processed_dataset_spec("statistics", partition_columns=partitions)
     spec = replace(spec, column_roles={**spec.column_roles, "note": ColumnRole.CONTEXT})
     root = StorageLayout(tmp_path).processed_data_root(
@@ -73,7 +74,7 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
             "note": pd.Series([None, "known", None], dtype="string"),
         }
     )
-    if not partitions:
+    if layout_kind == "reference":
         spec = replace(
             spec,
             grain=DataGrain.ASSET_REFERENCE,
@@ -87,20 +88,24 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
         frame = frame.drop(columns="timestamp")
     write_dataset(root, frame, spec=spec)
     projections = []
-    original = schema_inventory.iter_dataset_chunks
+    from quant_research_platform.storage.datasets import inspection
+
+    original = inspection.iter_dataset_file_batches
 
     def record(session, **kwargs):
-        projections.append(session.logical_columns)
+        projections.append(kwargs["columns"])
         yield from original(session, **kwargs)
 
-    monkeypatch.setattr(schema_inventory, "iter_dataset_chunks", record)
+    monkeypatch.setattr(inspection, "iter_dataset_file_batches", record)
     (item,) = _collect_inventory(
         tmp_path,
         important_null_count_columns=("asset_id", "value", "note")
         if context
         else ("asset_id", "value"),
     )["datasets"]
-    assert item["row_count_by_year"] == ({"2020": 1, "2021": 2} if partitions else {})
+    assert item["row_count_by_year"] == (
+        {"2020": 1, "2021": 2} if layout_kind != "reference" else {}
+    )
     assert item["null_key_counts"] == {key: 0 for key in spec.primary_key}
     expected_nulls = {
         "asset_id": 0,
@@ -109,10 +114,8 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
     if context:
         expected_nulls["note"] = 2
     assert item["selected_important_column_null_counts"] == expected_nulls
-    expected_columns = (("timestamp",) if partitions else ()) + (
-        ("note",) if context else ()
-    )
-    assert projections == ([expected_columns] if expected_columns else [])
+    assert len(projections) == 1
+    assert set(projections[0]) == set(frame.columns)
 
 
 @pytest.mark.parametrize("instances", (False, True))
@@ -494,7 +497,7 @@ def test_schema_inventory_rejects_replacement_between_open_and_stats(
     write_dataset(current_root, frame(2), spec=spec)
     write_dataset(replacement_root, frame(3), spec=spec)
     real_open = schema_inventory.open_dataset_session
-    real_aggregate = schema_inventory._aggregate_dataset_stats
+    real_inspect = schema_inventory._inspection_runtime_metadata
     open_count = 0
 
     def record_open(root: Path, **kwargs):
@@ -503,14 +506,15 @@ def test_schema_inventory_rejects_replacement_between_open_and_stats(
         return real_open(root, **kwargs)
 
     def replace_before_stats(session, *args, **kwargs):  # noqa: ANN001
+        result = real_inspect(session, *args, **kwargs)
         filesystem_rename(current_root, backup_root)
         filesystem_rename(replacement_root, current_root)
-        return real_aggregate(session, *args, **kwargs)
+        return result
 
     monkeypatch.setattr(schema_inventory, "open_dataset_session", record_open)
     monkeypatch.setattr(
         schema_inventory,
-        "_aggregate_dataset_stats",
+        "_inspection_runtime_metadata",
         replace_before_stats,
     )
 
@@ -655,3 +659,46 @@ def test_inventory_uses_declared_time_and_closes_early_context(
     finally:
         if items is not None:
             items.close()
+
+
+@pytest.mark.parametrize("forged", (False, True))
+def test_inventory_nonkey_time_does_not_define_year_axis(tmp_path, forged):
+    spec = InterimDataSpec(
+        data_id="nullable_time",
+        source_id="fixture",
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_REFERENCE,
+        column_roles={
+            "asset_id": ColumnRole.KEY,
+            "timestamp": ColumnRole.TIMESTAMP,
+            "value": ColumnRole.CONTEXT,
+        },
+        primary_key=("asset_id",),
+        partition_columns=(),
+    )
+    root = StorageLayout(tmp_path).interim_data_root("fixture", spec.data_id)
+    write_dataset(
+        root,
+        pd.DataFrame(
+            {
+                "asset_id": ["a", "b"],
+                "timestamp": pd.to_datetime([None, "2021-01-04"]),
+                "value": [1.0, 2.0],
+            }
+        ),
+        spec=spec,
+    )
+    if forged:
+        path = root / "_manifest" / "manifest.json"
+        manifest = json.loads(filesystem_read_text(path, encoding="utf-8"))
+        manifest["null_count_summary"]["asset_id"] = 1
+        filesystem_write_text(path, json.dumps(manifest) + "\n", encoding="utf-8")
+    if forged:
+        with pytest.raises(ValueError, match="dataset_manifest_summary_mismatch"):
+            _collect_inventory(tmp_path)
+    else:
+        (item,) = _collect_inventory(
+            tmp_path, important_null_count_columns=("timestamp",)
+        )["datasets"]
+        assert item["row_count_by_year"] == {}
+        assert item["selected_important_column_null_counts"] == {"timestamp": 1}

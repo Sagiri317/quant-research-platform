@@ -77,7 +77,10 @@ def inspection_from_persisted_session(
 
 
 def _inspection_runtime_metadata(
-    context: DatasetSession, *, batch_rows: int = DEFAULT_BATCH_ROWS
+    context: DatasetSession,
+    *,
+    batch_rows: int = DEFAULT_BATCH_ROWS,
+    frame_observer=None,
 ) -> dict[str, Any]:
     spec = context.spec
     primary_key = tuple(str(column) for column in spec["primary_key"])
@@ -118,6 +121,8 @@ def _inspection_runtime_metadata(
         partition_row_counts[partition] = partition_row_counts.get(partition, 0) + len(
             frame
         )
+        if frame_observer is not None:
+            frame_observer(frame)
     if context.time_window is None:
         for path in context.all_paths:
             partition_row_counts.setdefault(

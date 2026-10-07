@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from collections.abc import Collection, Iterable, Iterator
 from contextlib import contextmanager
-from dataclasses import replace
 from datetime import date
 from pathlib import Path, PurePosixPath
 from typing import Any
@@ -15,20 +14,19 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.atomic import (
     atomic_write_chunks,
     is_atomic_directory_staging_name,
 )
 from quant_research_platform.storage.datasets.inspection import (
-    inspect_dataset_session,
+    _inspection_runtime_metadata,
 )
 from quant_research_platform.storage.datasets.paths import _matches_artifact_path
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
-    iter_dataset_chunks,
     open_dataset_session,
 )
+from quant_research_platform.storage.datasets.schema import physical_schema_columns
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_walk,
@@ -367,125 +365,87 @@ def _inventory_item_from_session(
     session: DatasetSession,
     important_null_count_columns: frozenset[str],
 ) -> dict[str, Any]:
-    inspection = inspect_dataset_session(session)
-    logical_root = artifact_root.relative_to(project_root).as_posix()
-    spec_payload = inspection.spec
-    columns = inspection.columns
+    columns = physical_schema_columns(session.schema)
+    spec_payload = session.spec
     primary_key = tuple(spec_payload["primary_key"])
     partition_columns = tuple(spec_payload["partition_columns"])
-    stats = _aggregate_dataset_stats(
-        session,
-        columns,
-        important_null_count_columns=important_null_count_columns,
-        exact_duplicate_count=int(inspection.manifest["duplicate_primary_key_count"]),
+    important_columns = tuple(
+        column for column in columns if column in important_null_count_columns
     )
-    session.verify()
-    layer, _, kind, artifact_id = _logical_identifiers(logical_root)
-    item = {
-        "artifact_id": artifact_id,
-        "layer": layer,
-        "kind": kind,
-        "logical_relative_root": logical_root,
-        "columns": list(columns),
-        "dtypes": stats["dtypes"],
-        "primary_key": list(primary_key),
-        "partition_columns": list(partition_columns),
-        "file_count": inspection.file_count,
-        "row_count": inspection.row_count,
-        "row_count_by_year": stats["row_count_by_year"],
-        "min_timestamp": inspection.date_min,
-        "max_timestamp": inspection.date_max,
-        "duplicate_primary_key_count": stats["duplicate_primary_key_count"],
-        "null_key_counts": stats["null_key_counts"],
-        "selected_important_column_null_counts": stats[
-            "selected_important_column_null_counts"
-        ],
-        "schema_hash": _schema_hash(
-            columns=columns,
-            dtypes=stats["dtypes"],
-            primary_key=primary_key,
-            partition_columns=partition_columns,
-        ),
-        "warnings": [],
+    scanned_null_counts = {
+        column: 0
+        for column in important_columns
+        if column not in primary_key
+        and spec_payload["column_roles"][column] not in {"factor", "label"}
     }
-    return item
+    row_count_by_year: dict[str, int] = {}
+    timestamp_null_count = 0
 
+    def observe(frame):
+        nonlocal timestamp_null_count
+        if session.timestamp_column is not None:
+            timestamps = strict_timestamp_series(
+                frame[session.timestamp_column],
+                error="schema_inventory_invalid_timestamp",
+                allow_null=True,
+            ).dropna()
+            timestamp_null_count += len(frame) - len(timestamps)
+            for year, count in timestamps.dt.year.value_counts().items():
+                year = str(year)
+                row_count_by_year[year] = row_count_by_year.get(year, 0) + int(count)
+        for column in scanned_null_counts:
+            scanned_null_counts[column] += int(frame[column].isna().sum())
 
-def _aggregate_dataset_stats(
-    session: DatasetSession,
-    columns: tuple[str, ...],
-    *,
-    important_null_count_columns: frozenset[str],
-    exact_duplicate_count: int,
-) -> dict[str, Any]:
+    inspection = _inspection_runtime_metadata(session, frame_observer=observe)
+    if timestamp_null_count:
+        raise ValueError("schema_inventory_invalid_timestamp")
+    verified_null_counts = {
+        **session.manifest["null_count_summary"],
+        **{
+            column: session.manifest[f"{role}_nan_profile"].get(column, 0)
+            for column, role in spec_payload["column_roles"].items()
+            if role in {"factor", "label"}
+        },
+        **scanned_null_counts,
+    }
     dtypes = {
         descriptor["name"]: (
             "category" if descriptor["kind"] == "categorical" else descriptor["dtype"]
         )
         for descriptor in session.logical_dtypes["columns"]
     }
-    row_count_by_year: dict[str, int] = {}
-    null_key_counts = dict(session.manifest["null_count_summary"])
-    important_columns = tuple(
-        column for column in columns if column in important_null_count_columns
-    )
-    verified_null_counts = {
-        **null_key_counts,
-        **{
-            column: session.manifest[f"{role}_nan_profile"].get(column, 0)
-            for column, role in session.spec["column_roles"].items()
-            if role in {"factor", "label"}
-        },
-    }
-    important_null_counts = {
-        column: verified_null_counts.get(column, 0) for column in important_columns
-    }
-    scanned_important_columns = tuple(
-        column for column in important_columns if column not in verified_null_counts
-    )
-    duplicate_primary_key_count = exact_duplicate_count
-    statistic_columns = tuple(
-        column
-        for column in columns
-        if column == session.timestamp_column or column in scanned_important_columns
-    )
-    chunks = (
-        iter_dataset_chunks(
-            replace(
-                session,
-                logical_columns=statistic_columns,
-                physical_columns=statistic_columns,
-            ),
-            batch_rows=DEFAULT_BATCH_ROWS,
-        )
-        if statistic_columns
-        else iter(())
-    )
-    with closing_iterator(chunks):
-        for frame in chunks:
-            if session.timestamp_column is not None:
-                timestamps = strict_timestamp_series(
-                    frame[session.timestamp_column],
-                    error="schema_inventory_invalid_timestamp",
-                ).dropna()
-                if not timestamps.empty:
-                    year_counts = timestamps.dt.year.value_counts()
-                    for year, count in year_counts.items():
-                        year = str(year)
-                        row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
-                            count
-                        )
-            for column in scanned_important_columns:
-                important_null_counts[column] += int(frame[column].isna().sum())
-
+    dtypes = {column: dtypes[column] for column in columns}
+    session.verify()
+    logical_root = artifact_root.relative_to(project_root).as_posix()
+    layer, _, kind, artifact_id = _logical_identifiers(logical_root)
     return {
-        "dtypes": {column: dtypes[column] for column in columns},
+        "artifact_id": artifact_id,
+        "layer": layer,
+        "kind": kind,
+        "logical_relative_root": logical_root,
+        "columns": list(columns),
+        "dtypes": dtypes,
+        "primary_key": list(primary_key),
+        "partition_columns": list(partition_columns),
+        "file_count": inspection["file_count"],
+        "row_count": inspection["row_count"],
         "row_count_by_year": dict(sorted(row_count_by_year.items())),
-        "null_key_counts": dict(sorted(null_key_counts.items())),
-        "duplicate_primary_key_count": duplicate_primary_key_count,
-        "selected_important_column_null_counts": dict(
-            sorted(important_null_counts.items())
+        "min_timestamp": inspection["date_min"],
+        "max_timestamp": inspection["date_max"],
+        "duplicate_primary_key_count": int(
+            session.manifest["duplicate_primary_key_count"]
         ),
+        "null_key_counts": dict(sorted(session.manifest["null_count_summary"].items())),
+        "selected_important_column_null_counts": {
+            column: verified_null_counts[column] for column in sorted(important_columns)
+        },
+        "schema_hash": _schema_hash(
+            columns=columns,
+            dtypes=dtypes,
+            primary_key=primary_key,
+            partition_columns=partition_columns,
+        ),
+        "warnings": [],
     }
 
 

@@ -412,6 +412,40 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         unified_trading_sessions=lambda frame: pd.DatetimeIndex(frame.calendar_date),
     )
     assert benchmark_scans == [len(benchmark), len(benchmark)]
+    assert owned["portfolio_daily"].candidate_id.tolist() == [
+        candidate.candidate_id for _ in frames for candidate in candidates
+    ]
+    assert (
+        not owned["portfolio_daily"]
+        .duplicated(["candidate_id", "entry_at", "end_at"])
+        .any()
+    )
+    for candidate in candidates:
+        actual = owned["portfolio_daily"].loc[
+            owned["portfolio_daily"].candidate_id.eq(candidate.candidate_id)
+        ]
+        if candidate.benchmark_id is not None:
+            np.testing.assert_allclose(
+                actual.relative_wealth,
+                np.array([1.04, 1.005, 1.035]) / np.array([1.01, 1.03, 1.04]),
+                rtol=1e-15,
+                atol=0,
+            )
+        else:
+            assert actual.relative_wealth.isna().all()
+    participation = selected_protocol.manifest()["execution_assumptions"][
+        "adv_sensitivities"
+    ]
+    assert list(
+        owned["portfolio_capacity"][["candidate_id", "participation"]].itertuples(
+            index=False, name=None
+        )
+    ) == [
+        (candidate.candidate_id, value)
+        for _ in range(2)
+        for candidate in candidates
+        for value in participation
+    ]
     root = write_statistics_artifact(
         tmp_path / "statistics",
         envelope=envelope,

@@ -855,9 +855,10 @@ def test_last_session_revision_preserves_processed_pit_ttm_and_factor_prefix():
         events = producer._financial_pit_events(source)
         facts = producer._fundamental_pit_frame(
             spec,
-            source=source,
             panel=panel.loc[panel.timestamp.isin(sessions)],
-            events=events,
+            pit=materialize_pit_fundamentals(
+                panel.loc[panel.timestamp.isin(sessions)], events
+            ),
         )
         facts["total_market_cap"] = 1000.0
         return events, facts, calculate_fundamental_factors(facts)
@@ -915,9 +916,8 @@ def test_financial_ttm_and_stock_mean_preserve_finite_results(scale) -> None:
     )
     facts = producer._fundamental_pit_frame(
         research_profile().processed.get("fundamental_pit"),
-        source={},
         panel=observations.assign(market_id="a_share"),
-        events=stocks,
+        pit=materialize_pit_fundamentals(observations, stocks),
     )
     assert facts["average_total_assets"].iloc[0] == scale
     assert facts["average_parent_equity"].iloc[0] == scale
@@ -968,7 +968,9 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
     )
     spec = research_profile().processed.get("fundamental_pit")
     actual = producer._fundamental_pit_frame(
-        spec, source={}, panel=panel, events=construct_ttm_events(events)
+        spec,
+        panel=panel,
+        pit=materialize_pit_fundamentals(panel, construct_ttm_events(events)),
     )
     from quant_research_platform.storage.layout import StorageLayout
 
@@ -1013,3 +1015,30 @@ def test_ttm_annual_revisions_use_constant_time_known_period_lookup(size, monkey
     result = construct_ttm_events(events)
     assert result.ttm_value.tolist() == events.value.tolist()
     assert sizes == [1] * size
+
+
+@pytest.mark.parametrize("damage", ("source", "observation", "schema"))
+def test_pit_preparation_preserves_full_source_error_priority(damage):
+    observations = pd.DataFrame(
+        {"asset_id": ["observed"], "timestamp": pd.to_datetime(["2025-01-02"])}
+    )
+    events = pd.DataFrame(
+        {
+            "asset_id": ["unobserved"],
+            "metric_id": ["total_assets"],
+            "report_period": pd.to_datetime(["2010-12-31"]),
+            "available_at": pd.to_datetime(["2011-04-01"]),
+            "is_corrected": [False],
+            "version_identity": ["original"],
+            "value": [float("inf")],
+        }
+    )
+    error = "pit_value_invalid"
+    if damage == "observation":
+        observations = pd.concat([observations, observations], ignore_index=True)
+        error = "pit_observation_key_duplicate"
+    elif damage == "schema":
+        observations = observations.drop(columns="timestamp")
+        error = "pit_financial_schema_invalid"
+    with pytest.raises(ValueError, match=error):
+        materialize_pit_fundamentals(observations, events)

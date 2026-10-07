@@ -259,6 +259,7 @@ def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):
 
 def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
     tmp_path,
+    monkeypatch,
 ):
     dates = pd.bdate_range("2020-01-02", periods=492)
     source = _synthetic_interim_frames(dates)
@@ -332,13 +333,39 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
                 else source,
                 dependencies={key: eager[key] for key in spec.processed_input_data_ids},
                 trading_sessions=tuple(dates),
+                financial_pit=producer._prepare_pit_fundamentals(
+                    producer._financial_pit_events(source)
+                )(producer._pit_observations(eager["market_panel_1d"]))
+                if data_id == "fundamental_pit"
+                else None,
             )
             .sort_values(["timestamp", "market_id", "asset_id"], kind="mergesort")
             .reset_index(drop=True)
         )
+    prepare = producer._prepare_pit_fundamentals
+    preparations = []
+    observation_counts = []
+
+    def observed_prepare(events):
+        preparations.append(True)
+        calculate = prepare(events)
+
+        def observed_query(observations):
+            observation_counts.append(len(observations))
+            return calculate(observations)
+
+        return observed_query
+
+    monkeypatch.setattr(producer, "_prepare_pit_fundamentals", observed_prepare)
+    default_batch_rows = producer.DEFAULT_BATCH_ROWS
     for data_id in target_ids:
         spec = profile.processed.get(data_id)
         root = layout.processed_data_root(spec.market_id, spec.kind, data_id)
+        monkeypatch.setattr(
+            producer,
+            "DEFAULT_BATCH_ROWS",
+            200 if data_id == "fundamental_pit" else default_batch_rows,
+        )
         with producer.produce_a_share_processed_data(
             spec,
             layout=layout,
@@ -364,6 +391,9 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
         pd.testing.assert_frame_equal(
             pd.concat(chunks, ignore_index=True), eager[data_id], check_exact=True
         )
+    assert preparations == [True]
+    assert len(observation_counts) > 1
+    assert sum(observation_counts) == len(eager["market_panel_1d"])
     mask = eager["execution_mask"]
     assert mask.loc[
         mask["asset_id"].eq("000001") & mask["timestamp"].eq(dates[63]), "can_enter"
@@ -667,7 +697,8 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
 def test_processed_narrow_output_uses_existing_panel_history(
     tmp_path, monkeypatch, target
 ):
-    dates = pd.bdate_range("2020-01-02", periods=420).as_unit("ns")
+    # Proven listing eligibility precedes the market-model and residual windows.
+    dates = pd.bdate_range("2020-01-02", periods=620).as_unit("ns")
     source = _synthetic_interim_frames(dates)
     calendar = pd.bdate_range(dates[0] - pd.offsets.BDay(300), dates[-1]).as_unit("ns")
     source["trading_calendar"] = pd.DataFrame(

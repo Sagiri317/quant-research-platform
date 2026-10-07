@@ -39,9 +39,10 @@ from quant_research_platform.markets.implementations.a_share.execution import (
 from quant_research_platform.markets.implementations.a_share.fundamentals import (
     FINANCIAL_VALUE_COLUMNS,
     FLOW_METRIC_IDS,
+    _pit_observations,
+    _prepare_pit_fundamentals,
     construct_ttm_events,
     financial_events_from_interim,
-    materialize_pit_fundamentals,
 )
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog as a_share_processed_catalog,
@@ -55,7 +56,7 @@ from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.factors import engine as factor_engine
 from quant_research_platform.research.factors.expectations.calculations import (
     FORECAST_FRESHNESS_DAYS,
-    build_expectations_features,
+    _prepare_expectations,
 )
 from quant_research_platform.research.labels import engine as label_engine
 from quant_research_platform.research.protocols import a_share
@@ -309,6 +310,8 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     first = 0 if panel_source else bisect_left(sessions, lower)
     stop = bisect_right(sessions, upper) if closed else bisect_left(sessions, upper)
     history = None
+    expectations = None
+    financial_calculate = None
     if panel_source and first < stop:
         source = _prepare_panel_source(source)
     for start in range(first, stop, block_sessions):
@@ -337,6 +340,25 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
         if panel_source:
             view = reference.filtered_view(read_window)
             current_source["market_bars_1d"] = materialize_dataset_session(view)
+        if expectations is None and any(
+            definition.family == "expectations" for definition in definitions
+        ):
+            analyst = source.get("analyst_forecast")
+            if analyst is None or analyst.empty:
+                raise ValueError("BLOCKED_EXTERNAL_DATA: analyst_forecast")
+            expectations = _prepare_expectations(
+                analyst.rename(columns={"source_asset_id": "asset_id"}),
+                trading_sessions=sessions,
+                freshness_days=json.loads(spec.parameters_json).get(
+                    "freshness_days", FORECAST_FRESHNESS_DAYS
+                ),
+            )
+        financial_pit = None
+        if spec.data_id == "fundamental_pit":
+            observations = _pit_observations(frames["market_panel_1d"])
+            if financial_calculate is None:
+                financial_calculate = _prepare_pit_fundamentals(events)
+            financial_pit = financial_calculate(observations)
         output = _compute_processed_frame(
             spec,
             source=current_source,
@@ -346,7 +368,8 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
             panel_sessions=pd.DatetimeIndex(core),
             asset_market_types=asset_types if panel_source else None,
             suspension_history=history,
-            financial_events=events,
+            financial_pit=financial_pit,
+            expectations=expectations,
             market_history=market_history,
         )
         output = (
@@ -586,7 +609,8 @@ def _compute_processed_frame(
     panel_sessions=None,
     asset_market_types=None,
     suspension_history=None,
-    financial_events=None,
+    financial_pit=None,
+    expectations=None,
     market_history=None,
 ):
     if spec.data_id == "market_panel_1d":
@@ -610,9 +634,8 @@ def _compute_processed_frame(
     if spec.data_id == "fundamental_pit":
         return _fundamental_pit_frame(
             spec,
-            source=source,
             panel=dependencies.get("market_panel_1d"),
-            events=financial_events,
+            pit=financial_pit,
         )
     if spec.kind is ProcessedDataKind.FACTOR:
         definitions = tuple(
@@ -621,19 +644,8 @@ def _compute_processed_frame(
             if definition.output_column in spec.required_columns
         )
         if "expectations" in {definition.family for definition in definitions}:
-            analyst = source.get("analyst_forecast")
-            if analyst is None or analyst.empty:
-                raise ValueError("BLOCKED_EXTERNAL_DATA: analyst_forecast")
-            records = analyst.rename(columns={"source_asset_id": "asset_id"})
             panel = dependencies["market_panel_1d"]
-            features = build_expectations_features(
-                records,
-                panel.loc[:, ["asset_id", "timestamp", "close"]],
-                trading_sessions=trading_sessions,
-                freshness_days=json.loads(spec.parameters_json).get(
-                    "freshness_days", FORECAST_FRESHNESS_DAYS
-                ),
-            )
+            features = expectations(panel.loc[:, ["asset_id", "timestamp", "close"]])
             return (
                 panel.loc[:, ["market_id", "asset_id", "timestamp"]]
                 .merge(
@@ -735,15 +747,11 @@ def _financial_pit_events(source):
 def _fundamental_pit_frame(
     spec: ProcessedDataSpec,
     *,
-    source: dict[str, pd.DataFrame],
     panel: pd.DataFrame | None,
-    events: pd.DataFrame | None = None,
+    pit: pd.DataFrame,
 ) -> pd.DataFrame:
     if panel is None:
         raise ValueError("fundamental_pit_market_panel_required")
-    if events is None:
-        events = _financial_pit_events(source)
-    pit = materialize_pit_fundamentals(panel.loc[:, ["asset_id", "timestamp"]], events)
     values = pit.pivot_table(
         index=["asset_id", "timestamp"],
         columns="metric_id",

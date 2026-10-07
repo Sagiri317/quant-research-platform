@@ -336,19 +336,29 @@ def _build_dataset_session(
     first_metadata = inventory.metadata_for(first_path)
     schema = physical_schema_from_schema(first_metadata.schema)
     logical_dtypes: dict[str, Any] | None = None
+    previous_dtype_payload: bytes | None = None
     observed_rows = 0
     observed_file_bytes = 0
     observed_partition_rows: dict[str, int] = {}
     for path, metadata in inventory.iter_entries():
         if physical_schema_from_schema(metadata.schema) != schema:
             raise ValueError("dataset_schema_mismatch")
-        current_dtypes = parse_logical_dtype_metadata(metadata.logical_dtype_payload)
-        validate_persisted_logical_schema(metadata.schema, current_dtypes)
-        logical_dtypes = (
-            merge_logical_dtype_payloads([current_dtypes])
-            if logical_dtypes is None
-            else merge_logical_dtype_payloads([logical_dtypes, current_dtypes])
+        changed_dtypes = (
+            logical_dtypes is None
+            or metadata.logical_dtype_payload != previous_dtype_payload
         )
+        if changed_dtypes:
+            current_dtypes = parse_logical_dtype_metadata(
+                metadata.logical_dtype_payload
+            )
+        validate_persisted_logical_schema(metadata.schema, current_dtypes)
+        if changed_dtypes:
+            logical_dtypes = (
+                merge_logical_dtype_payloads([current_dtypes])
+                if logical_dtypes is None
+                else merge_logical_dtype_payloads([logical_dtypes, current_dtypes])
+            )
+            previous_dtype_payload = metadata.logical_dtype_payload
         observed_rows += metadata.row_count
         observed_file_bytes += metadata.file_size_bytes
         partition = relative_partition_label(data_root, path)

@@ -244,6 +244,10 @@ def test_analyst_raw_reports_persist_and_feed_institution_consensus(
         source={"analyst_forecast": saved},
         dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(sessions),
+        expectations=producer._prepare_expectations(
+            saved.rename(columns={"source_asset_id": "asset_id"}),
+            trading_sessions=sessions,
+        ),
     )
     processed_root = layout.processed_data_root(
         "a_share", "factor", "expectations_factors"
@@ -287,21 +291,36 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
     assert counts["raw_rows"] == counts["excluded_missing_required_rows"] == 3
     assert counts["retained_after_date_filter_rows"] == 0
     sessions = pd.bdate_range("2025-01-03", periods=2).as_unit("ns")
-    panel = pd.DataFrame(
-        {
-            "market_id": "a_share",
-            "asset_id": "000001",
-            "timestamp": sessions,
-            "close": 10.0,
-        }
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.storage.datasets import write_dataset
+    from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
+
+    profile = research_profile()
+    panel_spec = profile.processed.get("market_panel_1d")
+    facts = _synthetic_interim_frames(sessions)
+    panel = producer._compute_processed_frame(
+        panel_spec,
+        source={
+            **producer._prepare_panel_source(facts),
+            "market_bars_1d": facts["market_bars_1d"],
+        },
+        dependencies={},
+        trading_sessions=sessions,
+    )
+    write_dataset(
+        layout.processed_data_root("a_share", panel_spec.kind, panel_spec.data_id),
+        panel,
+        spec=panel_spec,
     )
     with pytest.raises(ValueError, match="BLOCKED_EXTERNAL_DATA: analyst_forecast"):
-        producer._compute_processed_frame(
-            research_profile().processed.get("expectations_factors"),
-            source={"analyst_forecast": empty},
-            dependencies={"market_panel_1d": panel},
-            trading_sessions=tuple(sessions),
-        )
+        with producer.produce_a_share_processed_data(
+            profile.processed.get("expectations_factors"),
+            layout=layout,
+            time_window=TimeWindow(sessions[0], sessions[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+        ) as (frames, _metadata, _verify):
+            list(frames)
 
 
 def test_analyst_duplicate_report_key_is_folded_and_counted_across_chunks(tmp_path):

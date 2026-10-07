@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from fractions import Fraction
+from functools import partial
 
 import numpy as np
 import pandas as pd
@@ -340,6 +341,17 @@ def _ttm_value(known, report_period: pd.Timestamp) -> float | None:
         raise ValueError("invalid_ttm_value") from exc
 
 
+_PIT_EVENT_COLUMNS = {
+    "asset_id",
+    "metric_id",
+    "report_period",
+    "available_at",
+    "is_corrected",
+    "version_identity",
+    "value",
+}
+
+
 def materialize_pit_fundamentals(
     observations: pd.DataFrame,
     events: pd.DataFrame,
@@ -347,27 +359,29 @@ def materialize_pit_fundamentals(
     """As-of select the latest legal report period and its latest available revision."""
 
     required_observations = {"asset_id", "timestamp"}
-    required_events = {
-        "asset_id",
-        "metric_id",
-        "report_period",
-        "available_at",
-        "is_corrected",
-        "version_identity",
-        "value",
-    }
     if not required_observations.issubset(
         observations.columns
-    ) or not required_events.issubset(events.columns):
+    ) or not _PIT_EVENT_COLUMNS.issubset(events.columns):
         raise ValueError("pit_financial_schema_invalid")
+    left = _pit_observations(observations)
+    calculate = _prepare_pit_fundamentals(events)
+    return calculate(left)
+
+
+def _pit_observations(observations):
     left = observations.loc[:, ("asset_id", "timestamp")].copy()
     left["asset_id"] = strict_string_series(left["asset_id"], error="pit_asset_invalid")
     left["timestamp"] = strict_timestamp_series(
         left["timestamp"], error="pit_timestamp_invalid"
     ).dt.normalize()
-    if left.duplicated(list(required_observations)).any():
+    if left.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("pit_observation_key_duplicate")
-    right = events.loc[:, list(required_events)].copy()
+    return left
+
+
+def _prepare_pit_fundamentals(events):
+    """Validate all source events and order each stream once per request."""
+    right = events.loc[:, list(_PIT_EVENT_COLUMNS)].copy()
     right["asset_id"] = strict_string_series(
         right["asset_id"], error="pit_asset_invalid"
     )
@@ -399,9 +413,22 @@ def materialize_pit_fundamentals(
         ["asset_id", "metric_id", "report_period", "available_at"], keep=False
     ).any():
         raise ValueError("pit_revision_order_ambiguous")
-    if right.empty:
+    streams = tuple(
+        (
+            key,
+            stream.sort_values(
+                ["available_at", "report_period", "version_identity"], kind="mergesort"
+            ).reset_index(drop=True),
+        )
+        for key, stream in right.groupby(["asset_id", "metric_id"], sort=False)
+    )
+    return partial(_query_pit_fundamentals, streams=streams, right=right.iloc[:0])
+
+
+def _query_pit_fundamentals(left, *, streams, right):
+    if not streams:
         result = left.iloc[:0].copy()
-        for column in required_events.difference({"asset_id"}):
+        for column in _PIT_EVENT_COLUMNS.difference({"asset_id"}):
             result[column] = right[column]
         for prefix in ("beginning", "prior_year", "prior_fy"):
             result[f"{prefix}_report_period"] = pd.Series(dtype="datetime64[ns]")
@@ -409,13 +436,7 @@ def materialize_pit_fundamentals(
         return result
     frames: list[pd.DataFrame] = []
     observation_positions = left.groupby("asset_id", sort=False).indices
-    for (asset_id, metric_id), stream in right.groupby(
-        ["asset_id", "metric_id"], sort=False
-    ):
-        stream = stream.sort_values(
-            ["available_at", "report_period", "version_identity"],
-            kind="mergesort",
-        ).reset_index(drop=True)
+    for (asset_id, metric_id), stream in streams:
         asset_observations = left.iloc[
             observation_positions.get(asset_id, np.empty(0, dtype=np.intp))
         ].sort_values("timestamp", kind="mergesort")

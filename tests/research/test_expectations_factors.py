@@ -189,6 +189,10 @@ def test_expectations_processed_producer_persists_latest_declaration(
         source={"analyst_forecast": records},
         dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(sessions),
+        expectations=producer._prepare_expectations(
+            records.rename(columns={"source_asset_id": "asset_id"}),
+            trading_sessions=tuple(sessions),
+        ),
     )
     root = tmp_path / "data/processed/a_share/factor/expectations_factors"
     write_dataset(root, actual, spec=spec)
@@ -313,6 +317,10 @@ def test_fiscal_year_coverage_is_independent_in_persisted_producer(
         source={"analyst_forecast": records},
         dependencies={"market_panel_1d": panel},
         trading_sessions=tuple(sessions),
+        expectations=producer._prepare_expectations(
+            records.rename(columns={"source_asset_id": "asset_id"}),
+            trading_sessions=tuple(sessions),
+        ),
     )
     root = tmp_path / "data/processed/a_share/factor/expectations_factors"
     write_dataset(root, actual, spec=spec)
@@ -379,6 +387,10 @@ def test_extreme_finite_eps_medians_and_mad_persist_without_intermediate_overflo
         source={"analyst_forecast": records},
         dependencies={"market_panel_1d": panel},
         trading_sessions=dates,
+        expectations=producer._prepare_expectations(
+            records.rename(columns={"source_asset_id": "asset_id"}),
+            trading_sessions=dates,
+        ),
     )
     from quant_research_platform.storage.layout import StorageLayout
 
@@ -441,6 +453,10 @@ def test_half_subnormal_forecast_centers_survive_both_medians(
         source={"analyst_forecast": records},
         dependencies={"market_panel_1d": panel},
         trading_sessions=dates,
+        expectations=producer._prepare_expectations(
+            records.rename(columns={"source_asset_id": "asset_id"}),
+            trading_sessions=dates,
+        ),
     )
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
@@ -452,9 +468,10 @@ def test_half_subnormal_forecast_centers_survive_both_medians(
     assert saved.forward_earnings_yield_fy2.iloc[-1] == expected
 
 
+@pytest.mark.parametrize("batch_rows", (3, 10000))
 @pytest.mark.parametrize("freshness", (90, 180))
 def test_bound_freshness_drives_native_source_window_and_processed_identity(
-    tmp_path, freshness
+    tmp_path, freshness, batch_rows, monkeypatch
 ):
     import json
 
@@ -471,6 +488,15 @@ def test_bound_freshness_drives_native_source_window_and_processed_identity(
     from tests.helpers.research_configuration import research_configuration
     from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
 
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    prepared = []
+    prepare = producer._prepare_expectations
+
+    def counted_prepare(*args, **kwargs):
+        prepared.append(True)
+        return prepare(*args, **kwargs)
+
+    monkeypatch.setattr(producer, "_prepare_expectations", counted_prepare)
     config = research_configuration("a_share", "fusion_nf_expectations")
     config["evaluation"]["forecast_freshness_days"] = freshness
     profile = bind_research_configuration(research_profile(), config)
@@ -535,6 +561,7 @@ def test_bound_freshness_drives_native_source_window_and_processed_identity(
             root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
         )
     saved = read_dataset(root).query("asset_id == '000001'")
+    assert prepared == [True]
     if freshness == 90:
         assert saved.forward_earnings_yield_fy1.isna().all()
     else:
@@ -545,3 +572,37 @@ def test_bound_freshness_drives_native_source_window_and_processed_identity(
     assert profile.protocol(config["scenario_id"]).manifest()["expectations"][
         "role"
     ] == ("primary" if freshness == 90 else "robustness")
+
+
+@pytest.mark.parametrize("failure", ("source", "schema", "parameter"))
+def test_expectation_preparation_keeps_full_source_error_order(failure):
+    records = pd.DataFrame(
+        {
+            "asset_id": ["unobserved"],
+            "declare_date": pd.Timestamp("1990-01-01"),
+            "forecast_end_date": pd.Timestamp("1990-12-31"),
+            "institution_id": [""],
+            "forecast_eps": [1.0],
+        }
+    )
+    observations = pd.DataFrame(
+        {
+            "asset_id": ["observed"],
+            "timestamp": pd.Timestamp("2025-01-03"),
+            "close": [10.0],
+        }
+    )
+    if failure == "schema":
+        observations = observations.drop(columns="close")
+    expected = {
+        "source": "expectations_institution_id_invalid",
+        "schema": "expectations_input_columns_invalid",
+        "parameter": "expectations_freshness_invalid",
+    }[failure]
+    with pytest.raises(ValueError, match=expected):
+        build_expectations_features(
+            records,
+            observations,
+            trading_sessions=pd.bdate_range("2025-01-02", periods=3),
+            freshness_days=0 if failure == "parameter" else 90,
+        )

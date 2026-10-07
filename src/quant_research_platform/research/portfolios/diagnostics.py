@@ -951,6 +951,7 @@ def _portfolio_statistics_tables(
         robustness_rows,
     ) = ([], [], [], [], [], [])
     exposure_rows, factor_rows = ([], [])
+    daily_by_candidate = {candidate_id: [] for candidate_id in ids}
     benchmarks = {}
     for benchmark_id in dict.fromkeys(
         candidate.benchmark_id
@@ -1062,6 +1063,7 @@ def _portfolio_statistics_tables(
                             benchmark_status="DEFINED",
                         )
                 daily_rows.append(row)
+                daily_by_candidate[candidate_id].append(row)
                 after = pd.Series(
                     {
                         value.asset_id: value.value
@@ -1143,16 +1145,16 @@ def _portfolio_statistics_tables(
                     decision_date = pd.Timestamp(
                         facts[next(iter(deltas)), "decision_timestamp"].text
                     )
+                    available = {
+                        asset: facts[asset, "adv20"].number
+                        if (asset, "adv20") in facts
+                        else None
+                        for asset in deltas
+                    }
+                    adv_missing = any(value is None for value in available.values())
                     for participation in protocol_manifest["execution_assumptions"][
                         "adv_sensitivities"
                     ]:
-                        available = {
-                            asset: facts[asset, "adv20"].number
-                            if (asset, "adv20") in facts
-                            else None
-                            for asset in deltas
-                        }
-                        adv_missing = any(value is None for value in available.values())
                         capacities = (
                             {
                                 asset: available[asset] * participation / abs(delta)
@@ -1190,9 +1192,8 @@ def _portfolio_statistics_tables(
         candidate_id = candidate.candidate_id
         artifact = ledgers[candidate_id]
         previous_end, previous_nav = previous[candidate_id]
-        selected = pd.DataFrame(
-            [row for row in daily_rows if row["candidate_id"] == candidate_id]
-        )
+        candidate_rows = daily_by_candidate[candidate_id]
+        selected = pd.DataFrame(candidate_rows)
         if selected.empty:
             raise ValueError("portfolio_statistics_empty_candidate")
         wealth = (1 + selected.net_return).cumprod()
@@ -1238,7 +1239,7 @@ def _portfolio_statistics_tables(
             if selected.benchmark_status.eq("DEFINED").all():
                 relative = wealth / (1 + selected.benchmark_return).cumprod()
                 for row, value in zip(
-                    (r for r in daily_rows if r["candidate_id"] == candidate_id),
+                    candidate_rows,
                     relative,
                     strict=True,
                 ):
@@ -1458,13 +1459,15 @@ def _portfolio_statistics_tables(
             "reason",
         ),
     )
+    capacity_groups = capacity.groupby(
+        ["candidate_id", "participation"], sort=False
+    ).indices
     for candidate_id in ids:
         for participation in protocol_manifest["execution_assumptions"][
             "adv_sensitivities"
         ]:
-            sample = capacity.loc[
-                capacity.candidate_id.eq(candidate_id)
-                & capacity.participation.eq(participation)
+            sample = capacity.iloc[
+                capacity_groups.get((candidate_id, participation), [])
             ]
             periods = {"all": sample}
             if not sample.empty:

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from fractions import Fraction
+from functools import partial
 from statistics import median
 
 import numpy as np
@@ -30,6 +31,25 @@ def build_expectations_features(
 ) -> pd.DataFrame:
     """Aggregate the latest PIT annual forecasts for each asset/session."""
 
+    if not {"asset_id", "timestamp", "close"}.issubset(observations.columns):
+        raise ValueError("expectations_input_columns_invalid")
+    calculate = _prepare_expectations(
+        records,
+        trading_sessions=trading_sessions,
+        freshness_days=freshness_days,
+        minimum_institutions=minimum_institutions,
+    )
+    return calculate(observations)
+
+
+def _prepare_expectations(
+    records,
+    *,
+    trading_sessions,
+    freshness_days=FORECAST_FRESHNESS_DAYS,
+    minimum_institutions=3,
+):
+    """Prepare one immutable request's source, then query observation slabs."""
     required_records = {
         "asset_id",
         "declare_date",
@@ -37,10 +57,7 @@ def build_expectations_features(
         "institution_id",
         "forecast_eps",
     }
-    required_observations = {"asset_id", "timestamp", "close"}
-    if not required_records.issubset(
-        records.columns
-    ) or not required_observations.issubset(observations.columns):
+    if not required_records.issubset(records.columns):
         raise ValueError("expectations_input_columns_invalid")
     if type(freshness_days) is not int or freshness_days <= 0:
         raise ValueError("expectations_freshness_invalid")
@@ -93,6 +110,21 @@ def build_expectations_features(
         ["asset_id", "available_at", "declare_date"], kind="mergesort"
     )
 
+    return partial(
+        _expectations_for_observations,
+        forecast,
+        freshness_days=freshness_days,
+        minimum_institutions=minimum_institutions,
+    )
+
+
+def _expectations_for_observations(
+    forecast,
+    observations,
+    *,
+    freshness_days,
+    minimum_institutions,
+):
     output = observations.loc[:, ["asset_id", "timestamp", "close"]].copy()
     output["asset_id"] = strict_string_series(
         output["asset_id"], error="expectations_asset_id_invalid"
