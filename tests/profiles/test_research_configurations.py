@@ -88,6 +88,50 @@ def test_crypto_model_names_cannot_overwrite_evaluation_structure(model_id):
         assert signal.source_column == "prediction_score"
 
 
+@pytest.mark.parametrize("market", ["a_share", "crypto"])
+@pytest.mark.parametrize(
+    "model_id", ["champion", "winner", "Champion", "champion__config_0", "named_model"]
+)
+def test_champion_model_name_is_reserved_only_for_a_share_families(market, model_id):
+    from quant_research_platform.catalog.models import ModelCatalog
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration(
+        market, "core6" if market == "a_share" else "baseline"
+    )
+    model = next(
+        item
+        for item in config["models"]
+        if item["model_algorithm"] == "linear_regression"
+    )
+    model["model_id"] = model_id
+    config.update(models=[model], portfolios=[], comparison_model_id=model_id)
+    assert (
+        ModelCatalog.from_configuration(config["models"]).get(model_id).model_id
+        == model_id
+    )
+    profile = research_profile(
+        "a_share_csmar_choice" if market == "a_share" else "crypto_binance_hft"
+    )
+    if market == "a_share":
+        config["primary_portfolio_id"] = None
+    if market == "a_share" and model_id == "champion":
+        with pytest.raises(ValueError, match="^a_share_model_id_reserved$"):
+            bind_research_configuration(profile, config)
+    elif market == "crypto" and model_id == "Champion":
+        with pytest.raises(ValueError, match="^invalid_run_id$"):
+            bind_research_configuration(profile, config)
+    else:
+        selected = bind_research_configuration(profile, config)
+        assert selected.models.get(model_id).model_id == model_id
+        assert (
+            selected.protocol(config["scenario_id"]).configuration()["models"][0][
+                "model_id"
+            ]
+            == model_id
+        )
+
+
 def test_factor_only_selection_has_no_model_or_financial_dependency():
     profile = research_profile("a_share_csmar_choice")
     config = configuration(profile.profile_id, "pv_expanded")

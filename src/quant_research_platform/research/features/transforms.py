@@ -116,7 +116,7 @@ def _transform_values(
         return values.fillna(0.0)
     if transform.transform == "fillna_median":
         medians = values.groupby(timestamps, sort=False).transform(
-            lambda item: _quantile(item, 0.5)
+            lambda item: _quantile(item, 0.5)[0]
         )
         return values.fillna(medians)
     raise ValueError(f"unsupported_feature_transform: {transform.transform}")
@@ -127,24 +127,35 @@ def _winsorize(
     grouped: pd.core.groupby.SeriesGroupBy,
     quantiles: tuple[float, float] | None,
 ) -> pd.Series:
-    lower_q, upper_q = quantiles or (0.01, 0.99)
-    lower = grouped.transform(lambda item: _quantile(item, lower_q))
-    upper = grouped.transform(lambda item: _quantile(item, upper_q))
-    return values.clip(lower=lower, upper=upper)
+    lower = np.full(len(values), np.nan)
+    upper = np.full(len(values), np.nan)
+    for positions in grouped.indices.values():
+        lower[positions], upper[positions] = _quantile(
+            grouped.obj.iloc[positions], *(quantiles or (0.01, 0.99))
+        )
+    return values.clip(
+        lower=pd.Series(lower, index=values.index),
+        upper=pd.Series(upper, index=values.index),
+    )
 
 
-def _quantile(values: pd.Series, quantile: float) -> float:
-    """Interpolate finite order statistics before rounding to binary64."""
+def _quantile(values: pd.Series, *quantiles: float) -> tuple[float, ...]:
+    """Interpolate shared finite order statistics before rounding to binary64."""
     ordered = values.dropna().sort_values().to_numpy()
     if not len(ordered):
-        return np.nan
-    position = (len(ordered) - 1) * quantile
-    lower = int(position)
-    weight = Fraction(position - lower)
-    return float(
-        (1 - weight) * Fraction(float(ordered[lower]))
-        + weight * Fraction(float(ordered[min(lower + 1, len(ordered) - 1)]))
-    )
+        return (np.nan,) * len(quantiles)
+    result = []
+    for quantile in quantiles:
+        position = (len(ordered) - 1) * quantile
+        lower = int(position)
+        weight = Fraction(position - lower)
+        result.append(
+            float(
+                (1 - weight) * Fraction(float(ordered[lower]))
+                + weight * Fraction(float(ordered[min(lower + 1, len(ordered) - 1)]))
+            )
+        )
+    return tuple(result)
 
 
 def _integer_coordinates(values):
@@ -404,7 +415,7 @@ def _apply_fillna(
         return values.fillna(0.0)
     if fillna_policy == "median":
         medians = values.groupby(timestamps, sort=False).transform(
-            lambda item: _quantile(item, 0.5)
+            lambda item: _quantile(item, 0.5)[0]
         )
         return values.fillna(medians)
     raise ValueError("unsupported_feature_transform_fillna_policy")

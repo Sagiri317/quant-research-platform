@@ -2,6 +2,7 @@
 
 import gzip
 import hashlib
+import io
 import json
 from pathlib import Path
 
@@ -418,3 +419,219 @@ def test_import_iterator_close_preserves_first_failure(
     if body_fails:
         assert any("OSError" in note for note in primary.__notes__)
     assert not (tmp_path / "published").exists()
+
+
+class _DownloadResponse(io.BytesIO):
+    status = 200
+    headers = {"Content-Encoding": "gzip"}
+
+    def __init__(self, data, *, read_failure=None, close_failure=None):
+        super().__init__(data)
+        self.read_failure = read_failure
+        self.close_failure = close_failure
+        self.close_calls = 0
+
+    def read(self, size=-1):
+        if self.read_failure is not None:
+            raise self.read_failure
+        return super().read(size)
+
+    def close(self):
+        was_closed = self.closed
+        super().close()
+        if not was_closed:
+            self.close_calls += 1
+            if self.close_failure is not None:
+                raise self.close_failure
+
+
+def _download_archive(kind, root):
+    from quant_research_platform.sources.tardis.normalized import download_dataset
+    from quant_research_platform.sources.tardis.raw import download_slices
+
+    if kind == "native":
+        return download_slices(
+            root, date="2026-08-01", slice_count=1, byte_budget=1024**2
+        )
+    return download_dataset(
+        root,
+        exchange="bybit",
+        dataset_type="trades",
+        symbol="BTCUSDT",
+        date="2026-08-01",
+        byte_budget=1024**2,
+    )
+
+
+@pytest.mark.parametrize("kind", ["native", "normalized"])
+@pytest.mark.parametrize("status", [403, 500])
+@pytest.mark.parametrize("close_fails", [False, True])
+def test_http_error_response_is_closed_without_replacing_status_failure(
+    tmp_path, monkeypatch, kind, status, close_fails
+):
+    from urllib.error import HTTPError
+
+    body = _DownloadResponse(
+        b"synthetic error response",
+        close_failure=OSError("synthetic_close_failure") if close_fails else None,
+    )
+    response = HTTPError("https://synthetic.invalid/", status, "synthetic", {}, body)
+
+    def receive(*args, **kwargs):
+        raise response
+
+    monkeypatch.setattr("urllib.request.urlopen", receive)
+    destination = tmp_path / "published"
+    try:
+        with pytest.raises(PermissionError if status == 403 else ValueError) as caught:
+            _download_archive(kind, destination)
+        assert str(caught.value) == (
+            "tardis_access_not_authorized"
+            if status == 403
+            else "tardis_http_status_500"
+        )
+        assert body.closed and body.close_calls == 1
+        assert bool(getattr(caught.value, "__notes__", [])) == close_fails
+        if close_fails:
+            assert any("OSError" in note for note in caught.value.__notes__)
+        assert not destination.exists()
+        assert not list(tmp_path.glob(".a-*"))
+    finally:
+        body.close_failure = None
+        response.close()
+
+
+@pytest.mark.parametrize("kind", ["native", "normalized"])
+@pytest.mark.parametrize("failure_type", [None, OSError, KeyboardInterrupt, SystemExit])
+def test_download_response_close_preserves_primary_and_published_archive(
+    tmp_path, monkeypatch, kind, failure_type
+):
+    from quant_research_platform.storage.errors import OutputAlreadyExistsError
+
+    raw = gzip.compress(
+        b""
+        if kind == "native"
+        else (
+            b"exchange,symbol,timestamp,local_timestamp,id,side,price,amount\n"
+            b"bybit,BTCUSDT,1785542400000000,1785542400000001,1,buy,100,2\n"
+        ),
+        mtime=0,
+    )
+    previous = tmp_path / "previous"
+    previous_response = _DownloadResponse(raw)
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: previous_response)
+    _download_archive(kind, previous)
+    assert previous_response.closed and previous_response.close_calls == 1
+    original = {
+        path.relative_to(previous): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in previous.iterdir()
+    }
+    primary = None if failure_type is None else failure_type("synthetic_read_failure")
+    secondary = OSError("synthetic_close_failure")
+    response = _DownloadResponse(raw, read_failure=primary, close_failure=secondary)
+    monkeypatch.setattr("urllib.request.urlopen", lambda *a, **k: response)
+    destination = tmp_path / "candidate"
+    with pytest.raises(OSError if primary is None else failure_type) as caught:
+        _download_archive(kind, destination)
+    assert caught.value is (secondary if primary is None else primary)
+    assert response.closed and response.close_calls == 1
+    if primary is not None:
+        assert any("OSError" in note for note in primary.__notes__)
+    assert not destination.exists()
+    assert not list(tmp_path.glob(".a-*"))
+    with pytest.raises(OutputAlreadyExistsError):
+        _download_archive(kind, previous)
+    assert response.close_calls == 1
+    assert original == {
+        path.relative_to(previous): hashlib.sha256(path.read_bytes()).hexdigest()
+        for path in previous.iterdir()
+    }
+
+
+@pytest.mark.parametrize("member_kind", ["files", "gaps", "observation_intervals"])
+@pytest.mark.parametrize("during_read", [False, True])
+def test_declared_native_member_missing_is_invalid_not_unacquired(
+    tmp_path, member_kind, during_read
+):
+    from quant_research_platform.sources import (
+        market_source_identity,
+        open_market_source,
+    )
+    from quant_research_platform.sources.tardis.replay import native_source_identity
+
+    root = tmp_path / "published"
+    scope = dict(
+        exchange="binance-futures",
+        symbols=("btcusdt", "ethusdt"),
+        channels=("depth", "depthSnapshot", "aggTrade", "markPrice"),
+    )
+    assert market_source_identity(root, "synthetic") is None
+    assert native_source_identity(root, "synthetic", **scope) is None
+    manifest = import_slices(
+        root,
+        date="2026-08-01",
+        slices=_slices(tmp_path / "native", count=1),
+        byte_budget=1024**2,
+    )
+    assert market_source_identity(root, "synthetic") is not None
+    assert native_source_identity(root, "synthetic", **scope) is not None
+    member = (
+        manifest[member_kind][0] if member_kind == "files" else manifest[member_kind]
+    )
+    path = root / member["path"]
+    if during_read:
+        primary = KeyboardInterrupt("synthetic_consumer_failure")
+        with pytest.raises(KeyboardInterrupt) as caught:
+            with open_market_source(root):
+                path.unlink()
+                raise primary
+        assert caught.value is primary
+        assert any("ValueError" in note for note in primary.__notes__)
+    else:
+        path.unlink()
+    with pytest.raises(ValueError, match="identity"):
+        market_source_identity(root, "synthetic")
+    with pytest.raises(ValueError, match="identity"):
+        native_source_identity(root, "synthetic", **scope)
+    with pytest.raises(ValueError, match="identity"):
+        with open_market_source(root):
+            pass
+
+
+def test_native_manifest_removed_after_selection_is_identity_failure(
+    tmp_path, monkeypatch
+):
+    import quant_research_platform.sources.tardis.replay as replay
+    from quant_research_platform.sources import market_source_identity
+
+    root = tmp_path / "published"
+    import_slices(
+        root,
+        date="2026-08-01",
+        slices=_slices(tmp_path / "native", count=1),
+        byte_budget=1024**2,
+    )
+    original = replay._capture_raw_file_identity
+    calls = 0
+
+    def capture(path, **kwargs):
+        nonlocal calls
+        if path == root / "manifest.json":
+            calls += 1
+            if calls == 2:
+                path.unlink()
+        return original(path, **kwargs)
+
+    monkeypatch.setattr(replay, "_capture_raw_file_identity", capture)
+    with pytest.raises(ValueError, match="identity"):
+        market_source_identity(root, "synthetic")
+    assert calls == 2
+
+
+def test_verified_file_preserves_non_missing_contract_failure(tmp_path):
+    from quant_research_platform.sources.tardis.raw import _verified_file
+
+    with pytest.raises(ValueError, match="^invalid_dataset_part_files$") as caught:
+        with _verified_file(tmp_path):
+            pass
+    assert caught.value.__cause__ is None

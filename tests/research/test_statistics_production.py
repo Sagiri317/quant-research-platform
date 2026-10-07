@@ -1491,14 +1491,18 @@ def test_paired_model_rankic_consumes_the_statistic_target_manifest(has_observat
         assert paired.mean_difference.isna().all()
 
 
+@pytest.mark.parametrize("access", ("development", "holdout"))
 @pytest.mark.parametrize(
     "family_id", ("momentum_20d", "__prediction_alpha__", "timestamp")
 )
 def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
-    tmp_path: Path, family_id: str
+    tmp_path: Path, family_id: str, access: str
 ) -> None:
     factor = "momentum_20d"
-    dates = pd.bdate_range("2019-01-02", periods=3)
+    dates = pd.bdate_range(
+        "2024-01-02" if access == "holdout" else "2019-01-02", periods=3
+    )
+    quarter_id = str(dates[0].to_period("Q"))
     calendar = pd.bdate_range(dates[0], periods=len(dates) + 21)
     cutoff = calendar[-1]
     assets = [f"asset_{index}" for index in range(6)]
@@ -1532,6 +1536,7 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
         protocol["research_configuration"] = research_configuration(small_models=True)
         protocol.update(
             selection_group="global",
+            access_window=access,
             development_window={
                 "start": dates[0].date().isoformat(),
                 "end": cutoff.date().isoformat(),
@@ -1572,12 +1577,12 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
         class Models:
             family_ids = families
             payload = selection_payload
-            selections = {"global": {"2019Q1": selection_payload}}
+            selections = {"global": {quarter_id: selection_payload}}
 
             def prediction_models(self, _window, **_kwargs):
                 return [
                     {
-                        "quarter_id": "2019Q1",
+                        "quarter_id": quarter_id,
                         "family_id": family,
                         "model_id": family + "_fit",
                         "model_metadata": {
@@ -1619,7 +1624,7 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             research_window={
                 "start": str(dates[0].date()),
                 "end": str(cutoff.date()),
-                "access": "development",
+                "access": access,
             },
             upstream_identities={},
             semantic_metadata={},
@@ -1672,6 +1677,55 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
         assert tables["model_comparison"]["mean"].iloc[0] == pytest.approx(-2.0)
         assert tables["model_comparison"].prediction_id.tolist() == [selected_family]
         assert set(tables["model_trials"].family_id) == set(families)
+        quarterly_losses = losses.copy()
+        quarterly_losses["loss"] *= np.repeat([0.7, 0.8, 0.9], len(families))
+        paired = statistics_production._paired_group_rankic(
+            quarterly_losses,
+            global_statistics=artifact,
+            selection_group="quarterly",
+            family_ids=families,
+            protocol_manifest={**protocol, "selection_group": "quarterly"},
+        )
+        assert paired.family_id.tolist() == list(families)
+        assert paired.observation_count.eq(len(dates)).all()
+        assert paired.calendar_count.eq(len(dates)).all()
+        assert paired.fdr_family_size.eq(len(families)).all()
+        assert paired.mean_difference.tolist() == pytest.approx([-0.2, 0.2])
+        assert paired.status.eq("DEFINED" if access == "holdout" else "UNDEFINED").all()
+        assert paired.bootstrap_status.eq(
+            "DEFINED" if access == "holdout" else "UNDEFINED"
+        ).all()
+        if access == "development":
+            assert paired.reason.eq(
+                "global_development_selection_reuses_validation"
+            ).all()
+        else:
+            assert paired.standard_error.notna().all()
+            assert paired.fdr_adjusted_p_value.notna().all()
+            assert paired.bootstrap_lower.notna().all()
+        paired_tables = {
+            **tables,
+            "model_losses": quarterly_losses,
+            "model_group_comparison": paired,
+        }
+        paired_root = write_statistics_artifact(
+            tmp_path / f"paired_statistics_{position}",
+            envelope=envelope,
+            tables=paired_tables,
+        )
+        paired_artifact = read_statistics_artifact(
+            paired_root, expected_identity=envelope.instance_identity
+        )
+        with paired_artifact.table("model_group_comparison.parquet") as persisted:
+            pd.testing.assert_frame_equal(
+                persisted,
+                paired.assign(
+                    reason=paired.reason.fillna("").astype(str),
+                    bootstrap_reason=paired.bootstrap_reason.fillna("").astype(str),
+                ),
+                check_exact=True,
+            )
+            tables["model_group_comparison"] = persisted.copy()
         for table in tables.values():
             assert all(isinstance(column, str) for column in table.columns)
             for column in ("family_id", "prediction_id", "config_id"):

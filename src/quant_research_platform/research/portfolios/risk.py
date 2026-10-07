@@ -368,24 +368,97 @@ class FactorRiskState:
         ):
             self._industry_codes.update(current_industries)
             return
-        weights = np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64"))
-        root_weights = np.sqrt(weights)
-        root_weights /= root_weights.max()
+        weights, _ = _integer_coordinates(
+            np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64"))
+        )
+        weights = np.asarray(weights, dtype=object)
         returns = frame["asset_return"].to_numpy(dtype="float64")
-        exponent = np.frexp(np.abs(returns).max())[1]
-        scaled_returns = np.ldexp(returns, -exponent)
-        origin = scaled_returns[0]
-        coefficients = np.linalg.lstsq(
-            design * root_weights[:, None],
-            (scaled_returns - origin) * root_weights,
-            rcond=None,
-        )[0]
-        with np.errstate(over="ignore"):
-            residuals = np.ldexp(
-                (scaled_returns - origin) - design @ coefficients, exponent
+        responses, response_scale = _integer_coordinates(returns)
+        responses = np.asarray(responses, dtype=object)
+        dimension = len(self.style_columns)
+        styles, style_scale = _integer_coordinates(
+            design[:, len(industry_columns) :].flat
+        )
+        styles = np.asarray(styles, dtype=object).reshape(len(frame), dimension)
+        gram = np.zeros((dimension, dimension), dtype=object)
+        response = np.zeros(dimension, dtype=object)
+        summaries = {}
+        # Eliminate industry intercepts in exact weighted coordinates.
+        for code, selected in group_codes.groupby(
+            group_codes, sort=True
+        ).indices.items():
+            x, y, w = styles[selected], responses[selected], weights[selected]
+            total = int(sum(w))
+            first_x, first_y = w @ x, w @ y
+            second_x = x.T @ (x * w[:, None])
+            second_xy = x.T @ (y * w)
+            for left in range(dimension):
+                response[left] += Fraction(
+                    int(total * second_xy[left] - first_x[left] * first_y), total
+                )
+                for right in range(dimension):
+                    gram[left, right] += Fraction(
+                        int(
+                            total * second_x[left, right]
+                            - first_x[left] * first_x[right]
+                        ),
+                        total,
+                    )
+            summaries[code] = (total, first_x, first_y)
+        system = np.column_stack((gram, response))
+        system_scale = lcm(*(value.denominator for value in system.flat))
+        system = np.asarray(
+            [
+                value.numerator * (system_scale // value.denominator)
+                for value in system.flat
+            ],
+            dtype=object,
+        ).reshape(dimension, dimension + 1)
+        previous = 1
+        for column in range(dimension - 1):
+            pivot = system[column, column]
+            system[column + 1 :, column + 1 :] = (
+                pivot * system[column + 1 :, column + 1 :]
+                - system[column + 1 :, column, None]
+                * system[None, column, column + 1 :]
+            ) // previous
+            previous = pivot
+        slopes = [Fraction()] * dimension
+        for column in range(dimension - 1, -1, -1):
+            slopes[column] = (
+                Fraction(int(system[column, -1]))
+                - sum(
+                    system[column, right] * slopes[right]
+                    for right in range(column + 1, dimension)
+                )
+            ) / int(system[column, column])
+        slope_scale = lcm(*(slope.denominator for slope in slopes))
+        slopes = np.asarray(
+            [slope.numerator * (slope_scale // slope.denominator) for slope in slopes],
+            dtype=object,
+        )
+        intercepts = {
+            code: (total, int(first_y * slope_scale - first_x @ slopes))
+            for code, (total, first_x, first_y) in summaries.items()
+        }
+        scale = slope_scale * response_scale
+        try:
+            coefficients = np.asarray(
+                [
+                    intercepts[code][1] / (intercepts[code][0] * scale)
+                    for code in current_industries
+                ]
+                + [int(slope * style_scale) / scale for slope in slopes],
+                dtype="float64",
             )
-            coefficients[: len(industry_columns)] += origin
-            coefficients = np.ldexp(coefficients, exponent)
+            residuals = np.empty(len(frame), dtype="float64")
+            for position, (code, value) in enumerate(
+                zip(group_codes, responses * slope_scale - styles @ slopes, strict=True)
+            ):
+                total, intercept = intercepts[code]
+                residuals[position] = int(total * value - intercept) / (total * scale)
+        except OverflowError:
+            raise ValueError("factor_risk_fit_non_finite") from None
         if not np.isfinite(coefficients).all() or not np.isfinite(residuals).all():
             raise ValueError("factor_risk_fit_non_finite")
         self._industry_codes.update(current_industries)

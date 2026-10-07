@@ -18,6 +18,7 @@ from quant_research_platform.contracts.models import (
     A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
     CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
     ModelSpec,
+    _validate_a_share_model_family_ids,
     validate_model_metadata_core,
 )
 from quant_research_platform.contracts.predictions import (
@@ -177,6 +178,7 @@ def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, o
         )
     ):
         raise ValueError("invalid_model_metadata")
+    _validate_a_share_model_family_ids(next(iter(families.values())))
     return metadata
 
 

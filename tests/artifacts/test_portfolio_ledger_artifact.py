@@ -846,7 +846,7 @@ def test_portfolio_ledger_primary_error_survives_writer_close_failure(
             raise OSError("secondary_close_failure")
 
     monkeypatch.setattr(pq, "ParquetWriter", FailingCloseWriter)
-    monkeypatch.setattr(ledger_artifact, "_BUFFER_ROWS", 1)
+    monkeypatch.setattr(ledger_artifact, "DEFAULT_BATCH_ROWS", 1)
     with pytest.raises(ValueError, match="portfolio_ledger_schema_invalid") as raised:
         write_test_sessions(
             tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(first, second)

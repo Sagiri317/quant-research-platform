@@ -19,6 +19,7 @@ from quant_research_platform.contracts.models import (
     A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
     CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
     ModelSpec,
+    _validate_a_share_model_family_ids,
     model_spec_payload,
     validate_a_share_model_selection_metadata,
     validate_model_metadata_core,
@@ -797,6 +798,7 @@ def _validate_a_share_model_payload(
     if tuple(specs) != tuple(configurations):
         raise ValueError("model_trial_family_coverage_mismatch")
     family_ids = tuple(specs)
+    _validate_a_share_model_family_ids(family_ids)
     quarters = tuple(
         str(period)
         for period in pd.period_range(

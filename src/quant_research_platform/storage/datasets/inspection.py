@@ -6,6 +6,7 @@ from pathlib import Path
 from typing import Any
 
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.observation import DatasetSummaryObserver
 from quant_research_platform.storage.datasets.paths import relative_partition_label
@@ -104,25 +105,28 @@ def _inspection_runtime_metadata(
         column_roles=column_roles,
         exact_key_index=key_index,
     )
-    for path, frame in iter_dataset_file_batches(
-        context,
-        columns=tuple(context.arrow_schema.names),
-        batch_rows=batch_rows,
-        batch_observer=lambda batch, logical_frame: observer.observe_batch(
-            batch, frame=logical_frame
-        ),
-    ):
-        if frame.empty:
-            continue
-        if path != last_observed_path:
-            selected_file_count += 1
-            last_observed_path = path
-        partition = relative_partition_label(context.data_root, path)
-        partition_row_counts[partition] = partition_row_counts.get(partition, 0) + len(
-            frame
+    with closing_iterator(
+        iter_dataset_file_batches(
+            context,
+            columns=tuple(context.arrow_schema.names),
+            batch_rows=batch_rows,
+            batch_observer=lambda batch, logical_frame: observer.observe_batch(
+                batch, frame=logical_frame
+            ),
         )
-        if frame_observer is not None:
-            frame_observer(frame)
+    ) as batches:
+        for path, frame in batches:
+            if frame.empty:
+                continue
+            if path != last_observed_path:
+                selected_file_count += 1
+                last_observed_path = path
+            partition = relative_partition_label(context.data_root, path)
+            partition_row_counts[partition] = partition_row_counts.get(
+                partition, 0
+            ) + len(frame)
+            if frame_observer is not None:
+                frame_observer(frame)
     if context.time_window is None:
         for path in context.all_paths:
             partition_row_counts.setdefault(

@@ -1303,6 +1303,10 @@ GBRT 与 LightGBM 复用上述训练样本权重、仅训练期拟合的缩放�
 1. 按 §5.13 的 G 全正式验证窗或 Q 因果过去 12 个月窗，家族内以每日验证 RankIC 均值选择配置。
 2. 在研究 JSON 选定的家族优胜配置中，以同一组、同一截止和同一共同域选择优胜家族。
 
+A 股研究 JSON 的 `models[].model_id` 是具名模型家族身份；精确小写 `champion` 保留给组合预测选择器，不能作为 A 股模型家族名。
+此规则由同一 A 股模型合同约束配置绑定、生产、选择元数据及模型/预测产物读回，冲突原因为 `a_share_model_id_reserved`；预测 bundle reader 保留外层 `output_manifest_metadata_invalid` 及该原因链。
+`winner` 和其他拼写不被解释为优胜选择器，继续遵循各自原有身份合同；不扩展原有大小写/标识符语法，也不限制 Crypto 或通用 `ModelSpec` 的同名准入。
+
 精确并列时，按研究 JSON 中模型的声明顺序选择；候选清单只在配置中维护。
 家族内并列时按显式 `parameter_candidates` 顺序选择。随仓配置保留以下保守声明顺序：
 
@@ -1386,10 +1390,13 @@ N_train
 |---|---|
 | `candidate_id` | 配置内候选身份；协议分别派生 G/Q 两组身份 |
 | `construction` | `top20_equal_weight`、`top20_float_cap` 或 `benchmark_enhanced` |
-| `prediction_selector` | 已持久化预测中的具名模型或 `champion`，不借组合名称推断算法 |
+| `prediction_selector` | 已持久化预测中的具名 `model_id`，或保留选择器 `champion`，不借组合名称推断算法 |
 | `top_quantile` | 简单组合的最高分位比例，须满足 `0 < top_quantile <= 1`；增强组合为 `null` |
 | `rebalance_schedule` | `daily`、`weekly-last-trading-day` 或 `monthly-last-trading-day` |
 | `benchmark_id` | 增强组合的 CSI500/CSI1000 基准；简单组合为 `null` |
+
+`prediction_selector` 精确区分大小写；`champion` 读取同组、同季度选择记录中的 `selected_family_id`，留出读取开发期冻结的最终优胜家族。
+具名 selector 只读取所声明模型家族，不隐式映射 `winner` 或其他拼写。模型家族与候选身份分别由配置声明，不从 `candidate_id` 推断选择器。
 
 `top20_equal_weight` / `top20_float_cap` 是构建标识，名称中的 top20 不覆盖 `top_quantile`。
 增强组合所需 benchmark、风险及数据依赖由同一组合合同派生；配置不能省略必要事实。

@@ -588,12 +588,19 @@ def logical_dtype_payload_from_frame(
     )
     if any(column not in frame for column in selected):
         raise ValueError("dataset_column_not_found")
-    return {
+    payload = {
         "schema_id": "qrp-dataset-part-logical-dtypes",
         "columns": [
             _logical_dtype_descriptor(str(column), frame[column]) for column in selected
         ],
     }
+    for descriptor in payload["columns"]:
+        if descriptor["kind"] != "categorical" or descriptor["ordered"]:
+            continue
+        for category in descriptor["categories"]:
+            if category["type"] == "decimal" and "." in category["value"]:
+                category["value"] = category["value"].rstrip("0").rstrip(".")
+    return payload
 
 
 def logical_dtype_metadata_bytes(payload: Mapping[str, Any]) -> bytes:

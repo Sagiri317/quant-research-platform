@@ -20,6 +20,7 @@ from quant_research_platform.contracts.experiments import (
 )
 from quant_research_platform.contracts.models import (
     _model_algorithm_facts,
+    _validate_a_share_model_family_ids,
     model_spec_payload,
 )
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
@@ -227,6 +228,7 @@ def _build_a_share_models(
     select_models,
     on_observation,
 ):
+    _validate_a_share_model_family_ids(model_ids)
     folds = model_folds(
         sessions,
         chronology=chronology,

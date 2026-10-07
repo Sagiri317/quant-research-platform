@@ -5,7 +5,7 @@ from __future__ import annotations
 import codecs
 import re
 from collections.abc import Iterable, Mapping
-from pathlib import Path, PurePosixPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from typing import Any
 
 from quant_research_platform.contracts.outputs import validate_output_identifier
@@ -424,6 +424,14 @@ def internal_artifact_metadata_unsafe_reason(
         return "credential"
     if key is not None and key.lower() in _ROW_SAMPLE_KEYS and value:
         return "row_sample"
+    if key is not None and (
+        PurePosixPath(key).is_absolute()
+        or PureWindowsPath(key).is_absolute()
+        or _WINDOWS_DRIVE_PATH_RE.search(key)
+        or _UNC_PATH_RE.search(key)
+        or _POSIX_LOCAL_PATH_RE.search(key)
+    ):
+        return "absolute_path"
     typed_identifier = key in _TYPED_IDENTIFIER_KEYS
     if isinstance(value, Mapping):
         for item_key, item in value.items():

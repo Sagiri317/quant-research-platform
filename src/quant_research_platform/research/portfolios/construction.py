@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from fractions import Fraction
 from math import floor
 from typing import Literal
 
@@ -180,11 +181,15 @@ def _assign_leg(
         )
     else:
         assert capitals is not None
-        selected_capitals = capitals.reindex(selected)
-        selected_capitals = np.ldexp(
-            selected_capitals, -np.frexp(selected_capitals.max())[1]
+        selected_capitals = [
+            Fraction(float(value)) for value in capitals.reindex(selected)
+        ]
+        scale = Fraction(gross) / sum(selected_capitals)
+        weights = pd.Series(
+            [float(scale * value) for value in selected_capitals],
+            index=selected,
+            dtype="float64",
         )
-        weights = gross * selected_capitals / float(selected_capitals.sum())
     result.loc[selected] = sign * weights
 
 

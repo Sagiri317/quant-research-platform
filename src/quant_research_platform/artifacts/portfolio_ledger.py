@@ -23,6 +23,7 @@ from quant_research_platform.contracts.portfolios import (
     validate_portfolio_transition,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -75,7 +76,6 @@ _SCHEMAS = {
     )
     for name, columns in PORTFOLIO_LEDGER_TABLE_COLUMNS.items()
 }
-_BUFFER_ROWS = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -183,7 +183,7 @@ def write_portfolio_ledger_artifact(
                 for name in _TABLE_TYPES:
                     for row in getattr(batch, name):
                         buffers[name].append({"sequence": sequence, **asdict(row)})
-                        if len(buffers[name]) >= _BUFFER_ROWS:
+                        if len(buffers[name]) >= DEFAULT_BATCH_ROWS:
                             flush(name)
                 sequence += 1
 

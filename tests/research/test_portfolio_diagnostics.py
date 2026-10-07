@@ -952,10 +952,16 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
 
 
 @pytest.mark.parametrize(
-    ("constant", "swap_group_metadata"), ((False, False), (True, False), (False, True))
+    ("constant", "swap_group_metadata", "candidate_id"),
+    (
+        (False, False, None),
+        (True, False, None),
+        (False, True, None),
+        (False, False, "timestamp"),
+    ),
 )
 def test_mixed_group_ledgers_publish_qualified_universe_robustness(
-    tmp_path, constant, swap_group_metadata
+    tmp_path, constant, swap_group_metadata, candidate_id
 ):
     from dataclasses import replace
     from itertools import combinations
@@ -990,9 +996,20 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
     from tests.helpers.research_configuration import research_configuration
 
     dates = pd.bdate_range("2023-01-02", periods=75)
+    configuration = research_configuration(name="pv25")
+    if candidate_id is not None:
+        configuration["portfolios"][0]["candidate_id"] = candidate_id
+        configuration["primary_portfolio_id"] = candidate_id
     selected_protocol = bind_research_configuration(
-        research_profile(), research_configuration(name="pv25")
+        research_profile(), configuration
     ).protocol("pv_all")
+    if candidate_id is not None:
+        assert (
+            candidate_id
+            in selected_protocol.manifest()["statistics"]["group_comparison"][
+                "portfolio_ids"
+            ]
+        )
     candidates = selected_protocol.portfolio_candidates()
     if swap_group_metadata:
         targets = dict(
@@ -1258,6 +1275,48 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
             and rows.reason.eq("no_rebalance_requests").all()
         )
     if not swap_group_metadata:
+        holdout_tables = produce(ledgers, access_window="holdout")
+        comparison = holdout_tables["portfolio_group_comparison"]
+        assert comparison.portfolio_id.tolist() == [
+            item["candidate_id"] for item in configuration["portfolios"]
+        ]
+        assert comparison.status.eq("DEFINED").all()
+        assert comparison.bootstrap_status.eq("DEFINED").all()
+        assert comparison.fdr_method.eq("BY").all()
+        assert comparison.fdr_adjusted_p_value.notna().all()
+        np.testing.assert_allclose(
+            comparison.mean_difference,
+            -0.015 - returns.mean(axis=0),
+            rtol=0,
+            atol=1e-14,
+        )
+        holdout_envelope = build_business_manifest_envelope(
+            logical_artifact_id="pv_all_portfolio_statistics",
+            schema_identity=envelope.schema_identity,
+            protocol_or_spec_identity=envelope.protocol_or_spec_identity,
+            software_identity=envelope.software_identity,
+            research_window={**window, "access": "holdout"},
+            upstream_identities=envelope.upstream_identities,
+            semantic_metadata=envelope.semantic_metadata,
+        )
+        holdout_root = write_statistics_artifact(
+            tmp_path / "holdout_statistics",
+            envelope=holdout_envelope,
+            tables=holdout_tables,
+            table_group="portfolio",
+        )
+        with read_statistics_artifact(
+            holdout_root, expected_identity=holdout_envelope.instance_identity
+        ).table("portfolio_group_comparison.parquet") as persisted:
+            assert persisted.portfolio_id.tolist() == comparison.portfolio_id.tolist()
+            pd.testing.assert_frame_equal(
+                persisted,
+                comparison.assign(
+                    reason=comparison.reason.fillna("").astype(str),
+                    bootstrap_reason=comparison.bootstrap_reason.fillna("").astype(str),
+                ),
+                check_exact=True,
+            )
         robust = produce(ledgers, robustness=True)
         pd.testing.assert_frame_equal(
             robust["portfolio_performance"],

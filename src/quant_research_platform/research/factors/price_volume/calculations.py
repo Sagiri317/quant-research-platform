@@ -205,6 +205,35 @@ def _calculate_values(
             result = _log(result)
         output[first - start :][valid] = result
         return output
+    if factor in {"amount_cv_126d", "turnover_cv_126d"}:
+        if source_name not in sums:
+            sums[source_name] = _binary_prefix(source)
+        totals, _unit = sums[source_name]
+        square_totals = list(
+            accumulate(
+                (
+                    (right - left) ** 2
+                    for left, right in zip(totals[:-1], totals[1:], strict=True)
+                ),
+                initial=0,
+            )
+        )
+        result = np.full(np.count_nonzero(valid), np.nan)
+        for index, position in enumerate(np.flatnonzero(valid) + first + 1):
+            total = totals[position] - totals[position - size]
+            if total <= 0:
+                continue
+            squares = square_totals[position] - square_totals[position - size]
+            squared = Fraction(
+                size * (size * squares - total * total), (size - 1) * total * total
+            )
+            with localcontext() as context:
+                context.prec = 80
+                result[index] = float(
+                    (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
+                )
+        output[first - start :][valid] = result
+        return output
     current = matrix[valid]
     extra = {name: data[valid] for name, data in extra.items()}
     if factor.startswith("volatility_") or factor in {
@@ -234,33 +263,6 @@ def _calculate_values(
             (arithmetic_mean(row) for row in np.partition(current, -5, axis=1)[:, -5:]),
             dtype=float,
         )
-    elif factor in {"amount_cv_126d", "turnover_cv_126d"}:
-        if source_name not in sums:
-            sums[source_name] = _binary_prefix(source)
-        totals, _unit = sums[source_name]
-        square_totals = list(
-            accumulate(
-                (
-                    (right - left) ** 2
-                    for left, right in zip(totals[:-1], totals[1:], strict=True)
-                ),
-                initial=0,
-            )
-        )
-        result = np.full(len(current), np.nan)
-        for index, position in enumerate(np.flatnonzero(valid) + first + 1):
-            total = totals[position] - totals[position - size]
-            if total <= 0:
-                continue
-            squares = square_totals[position] - square_totals[position - size]
-            squared = Fraction(
-                size * (size * squares - total * total), (size - 1) * total * total
-            )
-            with localcontext() as context:
-                context.prec = 80
-                result[index] = float(
-                    (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
-                )
     elif factor == "abnormal_turnover_20_250":
         scale = np.max(np.abs(current), axis=1, keepdims=True)
         normalized = np.divide(

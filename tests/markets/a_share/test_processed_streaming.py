@@ -644,19 +644,24 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
         for data_id in spec.source_input_data_ids
     }
     compute = producer._compute_processed_frame
+    raw_caps_before = decoded["market_cap"].copy(deep=True)
+    prepared = producer._prepare_panel_source(decoded)
+    caps_before = prepared["market_cap"].copy(deep=True)
     expected = compute(
         spec,
         source={
-            **producer._prepare_panel_source(decoded),
+            **prepared,
             "market_bars_1d": decoded["market_bars_1d"],
         },
         dependencies={},
         trading_sessions=tuple(dates),
     )
     slabs = []
+    prepared_caps = []
 
     def observed(spec, **kwargs):
         slabs.append(tuple(kwargs["panel_sessions"]))
+        prepared_caps.append(kwargs["source"]["market_cap"])
         return compute(spec, **kwargs)
 
     monkeypatch.setattr(producer, "_compute_processed_frame", observed)
@@ -673,6 +678,11 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     actual = read_dataset(root)
     pd.testing.assert_frame_equal(actual, expected, check_exact=True)
     assert len(slabs) > 1
+    pd.testing.assert_frame_equal(
+        decoded["market_cap"], raw_caps_before, check_exact=True
+    )
+    for caps in prepared_caps:
+        pd.testing.assert_frame_equal(caps, caps_before, check_exact=True)
     assert any(dates[62] < slab[0] < dates[-1] for slab in slabs[1:])
     rows = actual.loc[actual.asset_id.eq("000002")].set_index("timestamp")
     assert (

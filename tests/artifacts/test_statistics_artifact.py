@@ -505,12 +505,31 @@ def test_research_table_counts_reject_lossy_coercion(
     tmp_path, tables, envelope, member, value
 ):
     name = member.removesuffix(".parquet")
+    if name == "model_group_comparison":
+        tables[name] = pd.DataFrame([_defined_group_comparison_row()])
     count = "period_count" if name == "fama_macbeth" else "observation_count"
     tables[name][count] = pd.Series([value], dtype=object)
     with pytest.raises(ValueError, match="statistics_table_count_invalid"):
         statistics.write_statistics_artifact(
             tmp_path / "rejected", envelope=envelope, tables=tables
         )
+
+
+@pytest.mark.parametrize("count", (32, 64))
+def test_group_comparison_integral_counts_round_trip(tmp_path, tables, envelope, count):
+    tables["model_group_comparison"] = pd.DataFrame([_defined_group_comparison_row()])
+    tables["model_group_comparison"]["observation_count"] = pd.Series(
+        [count], dtype=object
+    )
+    root = statistics.write_statistics_artifact(
+        tmp_path / "valid", envelope=envelope, tables=tables
+    )
+    artifact = statistics.read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with artifact.table("model_group_comparison.parquet") as frame:
+        assert frame.observation_count.tolist() == [count]
+        assert frame.calendar_count.tolist() == [64]
 
 
 @pytest.mark.parametrize(

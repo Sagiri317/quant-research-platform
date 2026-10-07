@@ -499,6 +499,21 @@ def test_logical_local_only_path_allowance_masks_only_the_path_value() -> None:
         ({"path": "/workspace/qrp/data/research/a_share/demo"}, "local_only_path"),
         ({"row_samples": [{"value": 1}]}, "row_sample"),
         ({"credential": "token=abcdef123456"}, "credential"),
+        ({"/srv/synthetic/report": 1}, "absolute_path"),
+        ({r"C:\synthetic\report": None}, "absolute_path"),
+        ({r"\\synthetic\share\report": {}}, "absolute_path"),
+        ({"nested": [{"/srv/synthetic/report": []}]}, "absolute_path"),
+        ({"nested": {r"C:\synthetic\report": [{"value": 1}]}}, "absolute_path"),
+        ({"nested": [{r"\\synthetic\share\report": {"value": 1}}]}, "absolute_path"),
+        ({"//synthetic/share/report": 1}, "absolute_path"),
+        ({"prefix /srv/synthetic/report": 1}, "absolute_path"),
+        ({"/": None}, "absolute_path"),
+        ({"C:\\": {}}, "absolute_path"),
+        ({"nested": [{"//synthetic/share/report": []}]}, "absolute_path"),
+        ({"nested": {"/": [{"value": 1}]}}, "absolute_path"),
+        ({"nested": [{"C:\\": {"value": 1}}]}, "absolute_path"),
+        ({"/srv/synthetic/report_token": {}}, "credential"),
+        ({"row_samples": [{"/srv/synthetic/report": 1}]}, "row_sample"),
     ],
 )
 def test_internal_artifact_metadata_safety_is_owned_by_runtime(
@@ -510,6 +525,27 @@ def test_internal_artifact_metadata_safety_is_owned_by_runtime(
         match=f"unsafe_internal_artifact_metadata: {reason}",
     ):
         assert_internal_artifact_metadata_safe(payload)
+
+
+def test_internal_metadata_preserves_schema_fields_and_typed_identifiers() -> None:
+    payload = {
+        "schema_id": "provider-schema",
+        "source_id": "choice",
+        "fields": [{"name": "api_key", "dtype": "string"}],
+        "key_columns": ["source_asset_id"],
+        "source_asset_id": "string",
+        "data_id": "dataset_600000",
+        "factor_id": "factor_000001",
+        "run_id": "run_000001",
+        "manifest_path": "data/research/demo/_manifest/manifest.json",
+        "empty": {"rows": []},
+        "relative_keys": {
+            "synthetic/share/report": 1,
+            r"synthetic\share\report": 2,
+            "C:relative": 3,
+        },
+    }
+    assert_internal_artifact_metadata_safe(payload)
 
 
 @pytest.mark.parametrize("key", ["_token", "_api_key", "🔑_token"])

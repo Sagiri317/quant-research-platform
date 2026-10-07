@@ -84,6 +84,43 @@ def test_winsorize_clips_by_timestamp_quantiles_instead_of_zscore() -> None:
     )
 
 
+def test_winsorization_preserves_positional_groups_and_duplicate_indexes():
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                [
+                    "2024-01-03",
+                    None,
+                    "2024-01-02",
+                    "2024-01-03",
+                    "2024-01-04",
+                    "2024-01-03",
+                    "2024-01-02",
+                    "2024-01-03",
+                    "2024-01-04",
+                    "2024-01-05",
+                ]
+            ),
+            "factor": [0.0, 7.0, -1e308, 10.0, np.nan, 100.0, 1e308, 10.0, np.nan, 5.0],
+        },
+        index=[3, 3, 1, 1, 3, 7, 3, 7, 1, 1],
+    )
+    before = frame.copy(deep=True)
+    spec = FeatureTransformSpec(
+        "positional", ("factor",), "winsorize", ("feature",), (0.25, 0.75)
+    )
+    actual = apply_feature_transforms(frame, (spec,))
+    expected = pd.Series(
+        [7.5, 7.0, -5e307, 10.0, np.nan, 32.5, 5e307, 10.0, np.nan, 5.0],
+        index=frame.index,
+        name="feature",
+    )
+    pd.testing.assert_series_equal(actual["feature"], expected, check_exact=True)
+    pd.testing.assert_frame_equal(frame, before, check_exact=True)
+    empty = apply_feature_transforms(frame.iloc[:0], (spec,))
+    assert empty.empty and empty["feature"].dtype == "float64"
+
+
 def test_fillna_transform_names_apply_their_fill_policy() -> None:
     frame = pd.DataFrame(
         {

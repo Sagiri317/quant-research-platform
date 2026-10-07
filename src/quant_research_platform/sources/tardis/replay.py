@@ -516,7 +516,9 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
     root = Path(root)
     with _raw_path_session(root) as verify_root:
         manifest_path = root / "manifest.json"
-        identity = _capture_raw_file_identity(manifest_path)
+        identity = _capture_raw_file_identity(
+            manifest_path, missing_is_file_not_found=False
+        )
         _raw = manifest = members = identities = _after_raw = after = run = None
         _raw, manifest = read_bounded_qrp_json(
             manifest_path, expected_identity=identity, max_bytes=identity.size
@@ -532,7 +534,10 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
             manifest["observation_intervals"],
         )
         identities = tuple(
-            _capture_raw_file_identity(root / item["path"]) for item in members
+            _capture_raw_file_identity(
+                root / item["path"], missing_is_file_not_found=False
+            )
+            for item in members
         )
 
         def verify_files():

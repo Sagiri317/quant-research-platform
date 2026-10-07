@@ -61,6 +61,17 @@ def test_manifest_writers_render_the_snapshot_checked_for_safety(
         ({"nested": {"Authorization": "Bearer SYNTHETIC_SECRET"}}, "credential"),
         ({"message": '{"password": "SYNTHETIC_SECRET"}'}, "credential"),
         ({"message": "{'auth': 'Basic SYNTHETIC_SECRET'}"}, "credential"),
+        ({"/srv/synthetic/report": 1}, "absolute_path"),
+        ({r"C:\synthetic\report": None}, "absolute_path"),
+        ({r"\\synthetic\share\report": {}}, "absolute_path"),
+        ({"nested": [{"/srv/synthetic/report": []}]}, "absolute_path"),
+        ({"//synthetic/share/report": 1}, "absolute_path"),
+        ({"prefix /srv/synthetic/report": 1}, "absolute_path"),
+        ({"/": None}, "absolute_path"),
+        ({"C:\\": {}}, "absolute_path"),
+        ({"nested": [{"//synthetic/share/report": []}]}, "absolute_path"),
+        ({"nested": {"/": [{"value": 1}]}}, "absolute_path"),
+        ({"nested": [{"C:\\": {"value": 1}}]}, "absolute_path"),
     ],
 )
 def test_internal_manifest_rejects_private_or_row_level_metadata(
@@ -72,7 +83,29 @@ def test_internal_manifest_rejects_private_or_row_level_metadata(
         manifests.write_internal_artifact_manifest(
             tmp_path / "manifest.json", {"schema_id": "qrp-dataset-manifest", **payload}
         )
-    assert not (tmp_path / "manifest.json").exists()
+    path = tmp_path / "manifest.json"
+    assert not path.exists()
+    safe = {
+        "schema_id": "qrp-dataset-manifest",
+        "source_id": "choice",
+        "data_id": "dataset_600000",
+        "manifest_path": "data/research/demo/_manifest/manifest.json",
+        "relative_keys": {
+            "synthetic/share/report": 1,
+            r"synthetic\share\report": 2,
+            "C:relative": 3,
+        },
+    }
+    manifests.write_internal_artifact_manifest(path, safe)
+    before = path.read_bytes()
+    with pytest.raises(
+        ValueError, match=f"unsafe_internal_artifact_metadata: {reason}"
+    ):
+        manifests.write_internal_artifact_manifest(
+            path, {"schema_id": "qrp-dataset-manifest", **payload}
+        )
+    assert path.read_bytes() == before
+    assert manifests.read_manifest(path) == safe
 
 
 def test_internal_manifest_keeps_provider_schema_field_names(tmp_path: Path) -> None:

@@ -83,7 +83,7 @@ def _rows(path, *, exchange, dataset_type, symbol, date, sha256):
     previous = lower
     with (
         _verified_file(path, expected_sha256=sha256) as raw,
-        gzip.GzipFile(fileobj=raw) as stream,
+        closing_iterator(gzip.GzipFile(fileobj=raw)) as stream,
     ):
         header = None
         number = -1
@@ -165,9 +165,10 @@ def download_dataset(output_root, *, exchange, dataset_type, symbol, date, byte_
         try:
             response = urllib.request.urlopen(url, timeout=60)
         except urllib.error.HTTPError as error:
-            if error.code in {401, 403}:
-                raise PermissionError("tardis_access_not_authorized") from None
-            raise ValueError(f"tardis_http_status_{error.code}") from None
+            with closing_iterator(error):
+                if error.code in {401, 403}:
+                    raise PermissionError("tardis_access_not_authorized") from None
+                raise ValueError(f"tardis_http_status_{error.code}") from None
         with (
             closing_iterator(response),
             closing_iterator(open_filesystem_file(path, "xb")) as output,
@@ -266,7 +267,11 @@ def _archive_manifest(root):
     if manifest["path"] != "data.csv.gz" or manifest["request_url"] != url:
         raise ValueError("tardis_normalized_manifest_invalid")
     path = root / "data.csv.gz"
-    if filesystem_stat(path).st_size != manifest["compressed_bytes"]:
+    try:
+        size = filesystem_stat(path).st_size
+    except (FileNotFoundError, NotADirectoryError) as error:
+        raise ValueError("tardis_raw_identity_changed") from error
+    if size != manifest["compressed_bytes"]:
         raise ValueError("tardis_raw_identity_changed")
     if (
         manifest["clock"] != "vendor_utc_microseconds"

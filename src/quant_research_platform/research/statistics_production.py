@@ -464,13 +464,15 @@ def _paired_group_rankic(
     )
     inference = (
         time_series_inference_summary(
-            differences.reset_index(),
+            differences.set_axis(range(len(family_ids)), axis=1).reset_index(),
             identity_column="timestamp",
             max_lags=statistics["hac_lag"],
             fdr_method=fdr_method,
             fdr_alpha=declaration["alpha"],
             fdr_family_size=len(family_ids),
-        ).set_index("timestamp")
+        )
+        .set_index("timestamp")
+        .set_axis(differences.columns)
         if inference_blocker is None and (not differences.empty)
         else None
     )

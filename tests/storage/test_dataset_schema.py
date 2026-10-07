@@ -4,7 +4,7 @@ import json
 from collections import UserDict
 from dataclasses import replace
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from pathlib import Path
 from types import MappingProxyType
 
@@ -24,6 +24,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage.datasets import (
     DatasetReadMode,
     compare_datasets,
+    inspect_dataset,
     read_dataset,
     write_dataset,
 )
@@ -677,6 +678,290 @@ def test_unordered_decimal_zero_category_has_one_canonical_domain(
     materialized = pd.Series([Decimal("-0.00"), Decimal("0")], dtype=final_dtype)
     assert materialized.cat.categories.size == 1
     assert materialized.tolist() == [Decimal("0"), Decimal("0")]
+
+
+@pytest.mark.parametrize(
+    ("left_domain", "right_domain", "expected_type", "expected_values"),
+    (
+        (("1.0", "2.00"), ("1.00", "3.00"), pa.decimal128(3, 2), ("1", "2", "3")),
+        (
+            ("12345678901234567890.0100", "2.00000"),
+            ("12345678901234567890.01000", "3.00000"),
+            pa.decimal128(25, 5),
+            ("12345678901234567890.01", "2", "3"),
+        ),
+    ),
+    ids=("equal-values", "precision-exceeds-context"),
+)
+def test_unordered_decimal_category_shards_match_whole_and_preserve_physical_type(
+    tmp_path: Path, left_domain, right_domain, expected_type, expected_values
+) -> None:
+    left = make_default_dataset_frame().iloc[:1].copy()
+    right = make_default_dataset_frame().iloc[1:].copy()
+    left["value"] = pd.Categorical(
+        [Decimal(left_domain[0])], categories=[Decimal(item) for item in left_domain]
+    )
+    right["value"] = pd.Categorical(
+        [Decimal(right_domain[0]), None],
+        categories=[Decimal(item) for item in right_domain],
+    )
+    assert pa.Array.from_pandas(left["value"].cat.categories).type == expected_type
+    assert pa.Array.from_pandas(right["value"].cat.categories).type == expected_type
+    whole = pd.concat(
+        (
+            left.assign(value=left["value"].astype(object)),
+            right.assign(value=right["value"].astype(object)),
+        ),
+        ignore_index=True,
+    )
+    whole["value"] = pd.Categorical(
+        whole["value"],
+        categories=[
+            Decimal(right_domain[0]),
+            Decimal(left_domain[1]),
+            Decimal(right_domain[1]),
+        ],
+    )
+    observed = []
+    metadata = []
+    with localcontext() as context:
+        context.prec = 2
+        for name, frames in (
+            ("whole", whole),
+            ("forward", (left, right)),
+            ("reverse", (right, left)),
+        ):
+            root = make_dataset_artifact_root(tmp_path, name)
+            write_dataset(
+                root,
+                frames,
+                spec=make_processed_dataset_spec(name, value_role=ColumnRole.CONTEXT),
+            )
+            inspection = inspect_dataset(root)
+            assert inspection.row_count == 3
+            session = dataset_reading.open_dataset_session(
+                root, columns=None, time_window=None
+            )
+            assert all(
+                pq.read_schema(native_filesystem_path(path)).field("value").type
+                == expected_type
+                for path in session.all_paths
+            )
+            materialized = read_dataset(root)
+            chunked = pd.concat(
+                list(read_dataset(root, mode=DatasetReadMode.CHUNKED)),
+                ignore_index=True,
+            )
+            selected = materialized.sort_values(["asset_id", "timestamp"]).reset_index(
+                drop=True
+            )
+            pd.testing.assert_frame_equal(
+                selected,
+                chunked.sort_values(["asset_id", "timestamp"]).reset_index(drop=True),
+            )
+            assert isinstance(selected["value"].dtype, pd.CategoricalDtype)
+            assert not selected["value"].cat.ordered
+            assert set(selected["value"].cat.categories) == {
+                Decimal(item) for item in expected_values
+            }
+            assert selected["value"].isna().sum() == 1
+            assert (
+                selected.loc[selected["value"].notna(), "value"].tolist()
+                == [Decimal(expected_values[0])] * 2
+            )
+            descriptor = next(
+                item
+                for item in inspection.manifest["logical_dtypes"]["columns"]
+                if item["name"] == "value"
+            )
+            assert {item["value"] for item in descriptor["categories"]} == set(
+                expected_values
+            )
+            assert {item["type"] for item in descriptor["categories"]} == {"decimal"}
+            metadata.append(
+                (
+                    inspection.manifest["logical_dtypes"],
+                    inspection.manifest["logical_dtype_hash"],
+                    inspection.manifest["physical_schema"],
+                )
+            )
+            observed.append(selected)
+    assert metadata[0] == metadata[1] == metadata[2]
+    for frame in observed[1:]:
+        pd.testing.assert_frame_equal(observed[0], frame)
+
+
+@pytest.mark.parametrize(
+    "domain",
+    (("1.00", "2.00"), ("2.00", "1.00"), ("1.00", "3.00"), ("1.0", "2.00")),
+    ids=(
+        "same-order",
+        "reversed-order",
+        "different-domain",
+        "different-representation",
+    ),
+)
+def test_ordered_decimal_category_shards_preserve_order_and_reject_domain_drift(
+    tmp_path: Path, domain
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "ordered_decimal")
+    left = make_default_dataset_frame().iloc[:1].copy()
+    right = make_default_dataset_frame().iloc[1:2].copy()
+    left["value"] = pd.Categorical(
+        [Decimal("1.00")], categories=[Decimal("1.00"), Decimal("2.00")], ordered=True
+    )
+    right["value"] = pd.Categorical(
+        [Decimal("1.00")], categories=[Decimal(item) for item in domain], ordered=True
+    )
+    assert pa.Array.from_pandas(left["value"].cat.categories).type == pa.decimal128(
+        3, 2
+    )
+    assert pa.Array.from_pandas(right["value"].cat.categories).type == pa.decimal128(
+        3, 2
+    )
+    spec = make_processed_dataset_spec("ordered_decimal", value_role=ColumnRole.CONTEXT)
+    if domain != ("1.00", "2.00"):
+        with pytest.raises(ValueError, match="dataset_ordered_categorical_mismatch"):
+            write_dataset(root, (left, right), spec=spec)
+        assert not filesystem_exists(root)
+    else:
+        write_dataset(root, (left, right), spec=spec)
+        for frame in (
+            read_dataset(root),
+            *read_dataset(root, mode=DatasetReadMode.CHUNKED),
+        ):
+            assert frame["value"].cat.ordered
+            assert [str(value) for value in frame["value"].cat.categories] == [
+                "1.00",
+                "2.00",
+            ]
+            assert [str(value) for value in frame["value"]] == ["1.00"] * len(frame)
+        assert inspect_dataset(root).row_count == 2
+
+
+@pytest.mark.parametrize("ordered", (False, True))
+def test_decimal_category_metadata_admits_existing_exact_representation(
+    ordered: bool,
+) -> None:
+    frame = pd.DataFrame(
+        {
+            "value": pd.Categorical(
+                [Decimal("1.00")], categories=[Decimal("1.00")], ordered=ordered
+            )
+        }
+    )
+    payload = logical_dtype_payload_from_frame(frame)
+    if ordered:
+        assert payload["columns"][0]["categories"] == [
+            {"type": "decimal", "value": "1.00"}
+        ]
+    payload["columns"][0]["categories"] = [{"type": "decimal", "value": "1.00"}]
+    assert dataset_schema.validate_logical_dtype_payload(payload) == payload
+    parsed = dataset_schema.parse_logical_dtype_metadata(
+        dataset_schema.logical_dtype_metadata_bytes(payload)
+    )
+    merged = dataset_schema.merge_logical_dtype_payloads([parsed])
+    assert merged == payload
+    dtype = dataset_schema.pandas_dtype_overrides_from_logical_payload(
+        merged, columns=("value",)
+    )["value"]
+    assert dtype.ordered is ordered
+    assert dtype.categories[0].as_tuple().exponent == -2
+
+
+@pytest.mark.parametrize("ordered", (False, True))
+def test_decimal_category_reader_accepts_existing_exact_metadata(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, ordered: bool
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "existing_decimal_metadata")
+    frame = make_default_dataset_frame()
+    frame["value"] = pd.Categorical(
+        [Decimal("1.00"), None, Decimal("1.00")],
+        categories=[Decimal("1.00"), Decimal("2.00")],
+        ordered=ordered,
+    )
+    current_frame_payload = dataset_writing.logical_dtype_payload_from_frame
+
+    def exact_frame_payload(current, *, columns=None):
+        payload = current_frame_payload(current, columns=columns)
+        for descriptor in payload["columns"]:
+            if descriptor["kind"] == "categorical":
+                descriptor["categories"] = [
+                    dataset_schema._typed_category_value_payload(value)
+                    for value in current[descriptor["name"]].cat.categories
+                ]
+        return payload
+
+    with monkeypatch.context() as patch:
+        patch.setattr(
+            dataset_writing, "logical_dtype_payload_from_frame", exact_frame_payload
+        )
+        write_dataset(
+            root,
+            frame,
+            spec=make_processed_dataset_spec(
+                "existing_decimal_metadata", value_role=ColumnRole.CONTEXT
+            ),
+        )
+    for observed in (
+        read_dataset(root),
+        *read_dataset(root, mode=DatasetReadMode.CHUNKED),
+    ):
+        assert observed["value"].cat.ordered is ordered
+        assert [str(value) for value in observed["value"].cat.categories] == [
+            "1.00",
+            "2.00",
+        ]
+    checked = inspect_dataset(root)
+    assert checked.row_count == 3
+    descriptor = next(
+        item
+        for item in checked.manifest["logical_dtypes"]["columns"]
+        if item["name"] == "value"
+    )
+    assert descriptor["categories"] == [
+        {"type": "decimal", "value": "1.00"},
+        {"type": "decimal", "value": "2.00"},
+    ]
+
+
+def test_decimal_category_identity_keeps_scalar_types_distinct() -> None:
+    identities = [
+        dataset_schema._typed_category_identity(
+            dataset_schema._typed_category_value_payload(value)
+        )
+        for value in (Decimal("1.00"), 1, 1.0, True, "1")
+    ]
+    assert len(set(identities)) == len(identities)
+    assert canonical_identity_bytes(Decimal("1.0")) != canonical_identity_bytes(
+        Decimal("1.00")
+    )
+
+
+@pytest.mark.parametrize(
+    "domain",
+    ((1, 3), (1.0, 3.0), (Decimal("1.000"), Decimal("3.000"))),
+    ids=("integer", "float", "decimal-scale"),
+)
+def test_decimal_category_shards_reject_physical_type_drift(
+    tmp_path: Path, domain
+) -> None:
+    root = make_dataset_artifact_root(tmp_path, "decimal_type_drift")
+    left = make_default_dataset_frame().iloc[:1].copy()
+    right = make_default_dataset_frame().iloc[1:2].copy()
+    left["value"] = pd.Categorical(
+        [Decimal("1.0")], categories=[Decimal("1.0"), Decimal("2.00")]
+    )
+    right["value"] = pd.Categorical([domain[0]], categories=domain)
+    with pytest.raises(ValueError, match="dataset_schema_mismatch"):
+        write_dataset(
+            root,
+            (left, right),
+            spec=make_processed_dataset_spec(
+                "decimal_type_drift", value_role=ColumnRole.CONTEXT
+            ),
+        )
+    assert not filesystem_exists(root)
 
 
 def test_empty_unordered_category_domain_unions_with_nonempty_domain(

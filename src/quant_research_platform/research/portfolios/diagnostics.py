@@ -1567,10 +1567,10 @@ def _group_portfolio_comparison(matrix, protocol_manifest):
         {
             "timestamp": matrix.index.get_level_values("end_at"),
             **{
-                candidate: (
+                index: (
                     matrix[f"quarterly_{candidate}"] - matrix[f"global_{candidate}"]
                 ).to_numpy()
-                for candidate in candidate_ids
+                for index, candidate in enumerate(candidate_ids)
             },
         }
     )
@@ -1591,13 +1591,15 @@ def _group_portfolio_comparison(matrix, protocol_manifest):
             fdr_method=fdr_method,
             fdr_alpha=declaration["alpha"],
             fdr_family_size=len(candidate_ids),
-        ).set_index("timestamp")
+        )
+        .set_index("timestamp")
+        .set_axis(candidate_ids)
         if inference_blocker is None
         else None
     )
     rows = []
-    for candidate in candidate_ids:
-        values = differences[candidate].to_numpy(dtype="float64")
+    for index, candidate in enumerate(candidate_ids):
+        values = differences[index].to_numpy(dtype="float64")
         row = {
             "portfolio_id": candidate,
             "comparison_role": "primary"

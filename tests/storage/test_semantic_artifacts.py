@@ -724,3 +724,51 @@ def test_parent_capture_is_preserved_even_for_same_content_replacement(
     filesystem_replace(replacement, path)
     with pytest.raises(ValueError, match="identity_changed"):
         read_semantic_artifact_record(root, expected_member_identities=identities)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "/srv/synthetic/report",
+        r"C:\synthetic\report",
+        r"\\synthetic\share\report",
+        "//synthetic/share/report",
+        "/",
+        "C:\\",
+    ],
+)
+def test_operational_metadata_schema_rejects_absolute_keys_before_write_and_read(
+    tmp_path: Path, key: str
+) -> None:
+    from quant_research_platform.contracts.json_codec import render_qrp_json_object
+    from quant_research_platform.storage.manifests import read_manifest
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact_operational_metadata,
+    )
+
+    root = _write_artifact(tmp_path)
+    before = _immediate_file_bytes(root)
+    before_instances = set(filesystem_iterdir(root.parent))
+    assert read_semantic_artifact_operational_metadata(root) == {}
+    with pytest.raises(
+        ValueError, match="^semantic_artifact_operational_metadata_invalid$"
+    ):
+        write_semantic_artifact(
+            tmp_path / "model",
+            _envelope(seed=1),
+            lambda staging: filesystem_write_bytes(staging / "model.bin", b"candidate"),
+            operational_metadata={key: 1},
+        )
+    assert set(filesystem_iterdir(root.parent)) == before_instances
+    assert _immediate_file_bytes(root) == before
+
+    manifest_path = root / "manifest.json"
+    forged = read_manifest(manifest_path)
+    forged["operational_metadata"] = {key: 1}
+    forged_bytes = (render_qrp_json_object(forged) + "\n").encode("utf-8")
+    filesystem_write_bytes(manifest_path, forged_bytes)
+    with pytest.raises(
+        ValueError, match="^semantic_artifact_operational_metadata_invalid$"
+    ):
+        read_semantic_artifact_operational_metadata(root)
+    assert filesystem_read_bytes(manifest_path) == forged_bytes

@@ -25,6 +25,7 @@ from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.labels import LabelDefinition
+from quant_research_platform.contracts.models import _validate_a_share_model_family_ids
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
     PortfolioCandidateSpec,
@@ -134,6 +135,10 @@ class AShareProtocol:
             raise ValueError("unknown_a_share_access_window")
         if self.root_seed != ROOT_SEED:
             raise ValueError("a_share_root_seed_must_be_frozen")
+        if self.configuration_json is not None:
+            _validate_a_share_model_family_ids(
+                item["model_id"] for item in self.configuration()["models"]
+            )
 
     @property
     def time_window(self) -> TimeWindow:

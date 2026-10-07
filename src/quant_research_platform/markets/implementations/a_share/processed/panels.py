@@ -436,10 +436,6 @@ def _asof_market_cap(panel: pd.DataFrame, caps: pd.DataFrame) -> pd.DataFrame:
     panel["asset_id"] = strict_string_series(
         panel["asset_id"], error="invalid_market_cap_asset_id"
     )
-    caps = caps.copy()
-    caps["asset_id"] = strict_string_series(
-        caps["asset_id"], error="invalid_market_cap_asset_id"
-    )
     outputs: list[pd.DataFrame] = []
     cap_groups = caps.groupby("asset_id", sort=False).indices
     for asset_id, group in panel.groupby("asset_id", sort=False):

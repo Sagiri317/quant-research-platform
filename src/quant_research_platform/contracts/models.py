@@ -590,6 +590,12 @@ _MODEL_SELECTION_TRIAL_METRIC_KEYS = frozenset(
 )
 
 
+def _validate_a_share_model_family_ids(family_ids) -> None:
+    """Keep the A-share champion selector distinct from named model families."""
+    if "champion" in family_ids:
+        raise ValueError("a_share_model_id_reserved")
+
+
 def validate_a_share_model_selection_metadata(value: object) -> None:
     """Validate one cutoff-bound decision over immutable candidate predictions."""
     required = {
@@ -731,6 +737,7 @@ def validate_a_share_model_selection_metadata(value: object) -> None:
     )
     if selected["selected_config_id"] != value["selected_model_id"]:
         raise ValueError("invalid_model_metadata")
+    _validate_a_share_model_family_ids(family_ids)
 
 
 def _validate_model_selection_trial_record(trial: object) -> None:

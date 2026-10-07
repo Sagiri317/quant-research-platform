@@ -492,7 +492,130 @@ def _republish(case, logical, *, mutate, operational=None):
     )
 
 
-@pytest.mark.parametrize("second_family", ["alpha__config_0", "renamed", None])
+def test_champion_family_is_rejected_before_a_share_production_reads(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.research.models import production
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("reserved family reached model chronology")
+
+    monkeypatch.setattr(production, "model_folds", forbidden)
+    spec = ModelSpec(
+        model_id="champion",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+    )
+    with pytest.raises(ValueError, match="^a_share_model_id_reserved$"):
+        shared_model_case(tmp_path, specs=(spec,))
+    assert not tuple(filesystem_glob(tmp_path / "models", "**/model.json"))
+
+
+def test_model_reader_rejects_champion_family_in_a_bound_contract(tmp_path):
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+
+    case = shared_model_case(tmp_path / "good", development_end="2019-03-31")
+    old_good = _file_bytes(case.root)
+    payload = case.envelope.payload()
+    contract = payload["semantic_metadata"]["target_contract"]
+    contract["model_specs"][0]["model_id"] = "champion"
+    contract["protocol"]["research_configuration"]["models"][0]["model_id"] = "champion"
+    case.envelope = build_business_manifest_envelope(
+        **{
+            key: value
+            for key, value in payload.items()
+            if key not in {"instance_identity", "status", "protocol_or_spec_identity"}
+        },
+        protocol_or_spec_identity=canonical_json_hash(contract["protocol"]),
+    )
+    root = _republish(
+        case, tmp_path / "conflict", mutate=lambda _relative, _payload: None
+    )
+    with pytest.raises(ValueError, match="^a_share_model_id_reserved$"):
+        read_quarterly_model_artifact(root, trial_layout=case.layout)
+    assert _file_bytes(case.root) == old_good
+
+
+def test_prediction_writer_and_reader_reject_champion_family_lineage(tmp_path):
+    from quant_research_platform.artifacts.outputs import read_prediction_output_bundle
+
+    case = shared_model_case(tmp_path, development_end="2019-03-31")
+    bundle = write_prediction_result(
+        case.layout, _prediction_result(case, end="2019-03-31")
+    )
+    old_good = _file_bytes(bundle)
+    conflict = _prediction_result(case, end="2019-03-31")
+    for model in conflict.model_metadata["quarterly_models"]:
+        model["family_id"] = "champion"
+    conflict.model_metadata["champion_by_quarter"] = {
+        quarter: "champion"
+        for quarter in conflict.model_metadata["champion_by_quarter"]
+    }
+    with pytest.raises(ValueError, match="^a_share_model_id_reserved$"):
+        write_prediction_result(case.layout, conflict)
+    assert _file_bytes(bundle) == old_good
+    path = bundle / "manifest.json"
+    manifest = json.loads(filesystem_read_bytes(path))
+    manifest["metadata"]["model_metadata"] = conflict.model_metadata
+    filesystem_write_bytes(path, json.dumps(manifest).encode())
+    with pytest.raises(
+        ValueError, match="^output_manifest_metadata_invalid$"
+    ) as failure:
+        read_prediction_output_bundle(bundle, expected_output_id="prediction_global")
+    assert str(failure.value.__cause__) == "a_share_model_id_reserved"
+
+
+@pytest.mark.parametrize("group", ["global", "quarterly"])
+def test_champion_selector_and_named_families_read_their_real_predictions(
+    tmp_path, group
+):
+    from quant_research_platform.artifacts.outputs import read_prediction_output_bundle
+
+    specs = tuple(
+        ModelSpec(
+            model_id=name,
+            model_algorithm="linear_regression",
+            input_factor_columns=(column,),
+            label_column="label",
+        )
+        for name, column in (("named_model", "x"), ("winner", "y"))
+    )
+    frame = shared_model_rows(specs, development_end="2019-03-31")
+    frame["x"] = np.sin(np.arange(len(frame)))
+    case = shared_model_case(
+        tmp_path, specs=specs, frame=frame, development_end="2019-03-31"
+    )
+    assert (
+        case.artifact.selection(group, "2019Q1", access_window="development")[
+            "selected_family_id"
+        ]
+        == "winner"
+    )
+    bundle = write_prediction_result(
+        case.layout, _prediction_result(case, group=group, end="2019-03-31")
+    )
+    query = frame.loc[frame.timestamp.ge("2019-01-01"), ["timestamp", "asset_id"]]
+    scores = {}
+    for selector in ("champion", "winner", "named_model"):
+        _, lookup = read_prediction_output_bundle(
+            bundle, expected_output_id=f"prediction_{group}", family_selection=selector
+        )
+        scores[selector], found = lookup.values_for_frame(query, mark_matched=True)
+        assert all(found)
+        assert lookup.row_count == len(query)
+        assert lookup.coverage_counts() == (0, 0)
+    np.testing.assert_array_equal(scores["champion"], scores["winner"])
+    assert not np.array_equal(scores["named_model"], scores["winner"])
+
+
+@pytest.mark.parametrize(
+    "second_family",
+    ["alpha__config_0", "renamed", "winner", "champion__config_0", None],
+)
 def test_validation_members_are_scoped_by_family(tmp_path, second_family):
     specs = [
         ModelSpec(

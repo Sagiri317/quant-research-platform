@@ -206,8 +206,16 @@ def _filename(date: str, offset: int, *, exchange=EXCHANGE) -> str:
 @contextmanager
 def _verified_file(path: Path, *, expected_sha256=None):
     require_unaliased_path(path, error="tardis_raw_identity_changed")
-    identity = dataset_file_identity(path)
-    with closing_iterator(open_filesystem_file(path, "rb")) as handle:
+    try:
+        identity = dataset_file_identity(path)
+        handle = open_filesystem_file(path, "rb")
+    except (FileNotFoundError, NotADirectoryError, ValueError) as error:
+        if isinstance(error, ValueError) and not isinstance(
+            error.__cause__, (FileNotFoundError, NotADirectoryError)
+        ):
+            raise
+        raise ValueError("tardis_raw_identity_changed") from error
+    with closing_iterator(handle):
         if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != identity:
             raise ValueError("tardis_raw_identity_changed")
         reader = _DigestingReader(handle) if expected_sha256 is not None else handle
@@ -708,9 +716,10 @@ def download_slices(
         try:
             response = urllib.request.urlopen(request, timeout=60)
         except urllib.error.HTTPError as error:
-            if error.code in (401, 403):
-                raise PermissionError("tardis_access_not_authorized") from None
-            raise ValueError(f"tardis_http_status_{error.code}") from None
+            with closing_iterator(error):
+                if error.code in (401, 403):
+                    raise PermissionError("tardis_access_not_authorized") from None
+                raise ValueError(f"tardis_http_status_{error.code}") from None
         with closing_iterator(response):
             if (
                 response.status != 200
