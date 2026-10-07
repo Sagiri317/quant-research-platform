@@ -1473,3 +1473,68 @@ def test_listing_facts_do_not_call_partial_market_calendar_an_exact_age():
     facts = compute_listing_session_facts(frame, calendar, history)
     assert facts.listing_age_trading_days.isna().all()
     assert facts.has_252_trading_sessions.tolist() == [True, True]
+
+
+def test_industry_batch_join_preserves_asset_order_and_unknown_barriers():
+    dates = pd.date_range("2020-01-01", periods=3).as_unit("ns")
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["000002", "000001", "000003", "000002", "000001", "000002"],
+            "timestamp": [dates[1], dates[1], dates[0], dates[0], dates[0], dates[2]],
+        }
+    )
+    for column in (
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    ):
+        panel[column] = pd.Series(pd.NA, index=panel.index, dtype="string")
+    panel["is_nonfinancial_industry"] = pd.Series(
+        pd.NA, index=panel.index, dtype="boolean"
+    )
+    history = pd.DataFrame(
+        {
+            "source_asset_id": ["000001", "000002", "000002"],
+            "timestamp": [dates[0], dates[0], dates[1]],
+            "industry_standard_id": "P0207",
+            "industry_level1_code": ["A", "B", "C"],
+            "industry_level1_name": ["first", "second", "unknown"],
+        }
+    )
+    versions = pd.DataFrame(
+        {
+            "industry_standard_id": ["P0207"],
+            "implement_date": pd.to_datetime(["2011-01-01"]).as_unit("ns"),
+            "abandon_date": pd.Series([pd.NaT], dtype="datetime64[ns]"),
+        }
+    )
+    changes = pd.DataFrame(
+        {
+            "source_asset_id": history.source_asset_id.iloc[:2],
+            "effective_date": history.timestamp.iloc[:2],
+            "announcement_date": dates[0] - pd.Timedelta(days=1),
+            "changed_item": "P0207行业代码",
+            "value_after": history.industry_level1_name.iloc[:2],
+        }
+    )
+    before = panel.copy(deep=True)
+    result = _asof_industry(
+        panel,
+        **_prepare_industry_inputs(
+            history, industry_versions=versions, industry_changes=changes
+        ),
+    )
+    assert result.asset_id.tolist() == ["000002"] * 3 + ["000001"] * 2 + ["000003"]
+    assert result.timestamp.tolist() == [*dates, dates[0], dates[1], dates[0]]
+    assert result.industry_level1_code.fillna("NULL").tolist() == [
+        "B",
+        "NULL",
+        "NULL",
+        "A",
+        "A",
+        "NULL",
+    ]
+    assert not result.duplicated(["asset_id", "timestamp"]).any()
+    assert str(result.industry_level1_code.dtype) == "string"
+    assert str(result.is_nonfinancial_industry.dtype) == "boolean"
+    pd.testing.assert_frame_equal(panel, before, check_exact=True)

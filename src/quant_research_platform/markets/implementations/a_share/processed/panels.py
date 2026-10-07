@@ -669,42 +669,39 @@ def _asof_industry(
             "_industry_event_timestamp",
             "_industry_known",
         ],
-    ].sort_values(["asset_id", "timestamp"], kind="mergesort")
-    output: list[pd.DataFrame] = []
-    history_groups = right.groupby("asset_id", sort=False).indices
-    for asset_id, group in panel.groupby("asset_id", sort=False):
-        current = pd.merge_asof(
-            group.sort_values("timestamp"),
-            right.iloc[history_groups.get(asset_id, [])],
-            on="timestamp",
-            by="asset_id",
-            direction="backward",
-            allow_exact_matches=True,
-            suffixes=("", "_industry"),
-        )
-        valid_standard = current["_industry_known"].fillna(False)
-        valid_standard &= _industry_version_active_mask(
-            current["industry_standard_id_industry"],
-            current["timestamp"],
-            industry_versions,
-            event_timestamps=current["_industry_event_timestamp"],
-        )
-        for column in (
-            "industry_standard_id",
-            "industry_level1_code",
-            "industry_level1_name",
-            "is_nonfinancial_industry",
-        ):
-            current[column] = current[f"{column}_industry"].combine_first(
-                current[column]
-            )
-            current.loc[~valid_standard, column] = pd.NA
-            current.drop(columns=f"{column}_industry", inplace=True)
-        current.drop(
-            columns=["_industry_event_timestamp", "_industry_known"], inplace=True
-        )
-        output.append(current)
-    result = pd.concat(output, ignore_index=True)
+    ]
+    current = pd.merge_asof(
+        panel.sort_values("timestamp", kind="mergesort"),
+        right,
+        on="timestamp",
+        by="asset_id",
+        direction="backward",
+        allow_exact_matches=True,
+        suffixes=("", "_industry"),
+    )
+    valid_standard = current["_industry_known"].fillna(False)
+    valid_standard &= _industry_version_active_mask(
+        current["industry_standard_id_industry"],
+        current["timestamp"],
+        industry_versions,
+        event_timestamps=current["_industry_event_timestamp"],
+    )
+    for column in (
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+        "is_nonfinancial_industry",
+    ):
+        current[column] = current[f"{column}_industry"].combine_first(current[column])
+        current.loc[~valid_standard, column] = pd.NA
+        current.drop(columns=f"{column}_industry", inplace=True)
+    current.drop(columns=["_industry_event_timestamp", "_industry_known"], inplace=True)
+    order = current["asset_id"].map(
+        {asset: i for i, asset in enumerate(panel["asset_id"].unique())}
+    )
+    result = current.iloc[
+        np.lexsort((current["timestamp"].to_numpy(), order.to_numpy()))
+    ].reset_index(drop=True)
     for column in (
         "industry_standard_id",
         "industry_level1_code",
