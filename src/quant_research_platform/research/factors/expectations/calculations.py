@@ -139,14 +139,15 @@ def _expectations_for_observations(
         raise ValueError("expectations_observation_key_duplicate")
     rows: list[dict[str, object] | None] = [None] * len(output)
     forecast_groups = forecast.groupby("asset_id", sort=False).indices
+    observation_times = output["timestamp"].array
+    observation_closes = output["close"].array
     for asset_id, positions in output.groupby("asset_id", sort=False).indices.items():
         asset_forecast = forecast.iloc[forecast_groups.get(asset_id, [])]
         events = iter(asset_forecast.itertuples(index=False))
         event = next(events, None)
         active = {}
-        for position in sorted(positions, key=lambda i: output.iloc[i].timestamp):
-            observation = output.iloc[position]
-            timestamp = observation.timestamp
+        for position in sorted(positions, key=observation_times.__getitem__):
+            timestamp = observation_times[position]
             while event is not None and event.available_at <= timestamp:
                 active[(event.forecast_end_date, event.institution_id)] = event
                 event = next(events, None)
@@ -157,9 +158,9 @@ def _expectations_for_observations(
                 if value.declare_date >= oldest and value.forecast_end_date >= timestamp
             }
             rows[position] = _features_for_observation(
-                observation.asset_id,
+                asset_id,
                 timestamp,
-                observation.close,
+                observation_closes[position],
                 active.values(),
                 minimum_institutions=minimum_institutions,
             )

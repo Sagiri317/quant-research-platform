@@ -254,3 +254,138 @@ def test_derivative_catchup_retains_no_expired_force_orders(monkeypatch, count):
     assert peak == 0
     assert result.time_since_observed_force_order.iloc[0] == 31
     assert result.observed_force_order_imbalance_30s.isna().all()
+
+
+def test_native_force_windows_preserve_exact_mass_resets_and_early_close(tmp_path):
+    import json
+    from fractions import Fraction
+
+    from quant_research_platform.markets.implementations.crypto.processed import catalog
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.sources import open_market_source
+    from quant_research_platform.sources.tardis.raw import STATE_CHANNELS, import_slices
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.sources.tardis.test_raw import _slices
+
+    origin = pd.Timestamp("2026-09-01", tz="UTC").value
+    native = []
+    for milliseconds, side, quantity in (
+        (50, "SELL", "0.1"),
+        (200, "BUY", "0.2"),
+        (4900, "SELL", "0.1"),
+        (5100, "BUY", "0.3"),
+        (8000, "SELL", "1e308"),
+        (8200, "BUY", "1e308"),
+        (33000, "SELL", "0.2"),
+        (36000, "BUY", "0.4"),
+        (36100, "SELL", "0.1"),
+        (64000, "BUY", "1"),
+        (65000, "SELL", "2"),
+        (71000, "BUY", "3"),
+    ):
+        if milliseconds == 36000:
+            native.append(b"\n")
+        stamp = pd.Timestamp(origin + milliseconds * 10**6, tz="UTC")
+        payload = {
+            "e": "forceOrder",
+            "E": origin // 10**6 + milliseconds,
+            "o": {
+                "s": "BTCUSDT",
+                "S": side,
+                "q": quantity,
+                "l": quantity,
+                "z": quantity,
+                "T": origin // 10**6 + milliseconds,
+            },
+        }
+        native.append(
+            (
+                stamp.isoformat().replace("+00:00", "Z")
+                + " "
+                + json.dumps({"stream": "btcusdt@forceOrder", "data": payload})
+                + "\n"
+            ).encode()
+        )
+    archive_root = tmp_path / "archive"
+    import_slices(
+        archive_root,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", b"".join(native), count=1),
+        byte_budget=1024**2,
+        channels=STATE_CHANNELS,
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": pd.date_range("2026-09-01", periods=701, freq="100ms"),
+            "segment_id": "first",
+            "mid": 100.0,
+        }
+    )
+    panel.loc[
+        panel.timestamp.ge(pd.Timestamp(origin + 10000 * 10**6)), "segment_id"
+    ] = "second"
+    spec = catalog.hft_processed_catalog().get(
+        "binance_futures_derivative_factors_100ms"
+    )
+
+    def calculate(selected, batch, name):
+        destination = StorageLayout(tmp_path / name).processed_data_root(
+            spec.market_id, spec.kind, spec.data_id
+        )
+        with open_market_source(archive_root) as archive:
+            factors = iter_derivative_factor_frames(
+                (selected.iloc[i : i + batch] for i in range(0, len(selected), batch)),
+                observations=archive.iter_state_observations(symbol="BTCUSDT"),
+                max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 10000),
+            )
+            write_dataset(destination, factors, spec=spec)
+        return read_dataset(destination)
+
+    whole = calculate(panel, len(panel), "whole")
+    split = calculate(panel, 17, "split")
+    pd.testing.assert_frame_equal(whole, split, check_exact=True)
+    beginning = pd.Timestamp(origin + 10000 * 10**6)
+    narrow = calculate(panel.loc[panel.timestamp.ge(beginning)], 31, "narrow")
+    pd.testing.assert_frame_equal(
+        whole.loc[whole.timestamp.ge(beginning)].reset_index(drop=True),
+        narrow,
+        check_exact=True,
+    )
+    by_time = whole.set_index("timestamp")
+    row = by_time.loc[pd.Timestamp(origin + 8300 * 10**6)]
+    expected = float(
+        (Fraction(0.3) - Fraction(0.1))
+        / (2 * Fraction(1e308) + Fraction(0.3) + Fraction(0.1))
+    )
+    assert row.observed_force_order_imbalance_5s == expected > 0
+    row = by_time.loc[beginning]
+    assert row.forceOrder_observed_at == pd.Timestamp(origin + 8200 * 10**6)
+    assert pd.isna(row.observed_force_order_imbalance_5s)
+    row = by_time.loc[pd.Timestamp(origin + 69000 * 10**6)]
+    assert row.observed_force_order_imbalance_5s == -1
+    assert row.observed_force_order_imbalance_30s == float(Fraction(-1, 3))
+    assert row.time_since_observed_force_order == 4
+    primary = RuntimeError("synthetic_consumer_stop")
+    for fail in (False, True):
+        try:
+            with open_market_source(archive_root) as archive:
+                observations = archive.iter_state_observations(symbol="BTCUSDT")
+                with closing_iterator(
+                    iter_derivative_factor_frames(
+                        (panel.iloc[i : i + 17] for i in range(0, len(panel), 17)),
+                        observations=observations,
+                        max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 10000),
+                    )
+                ) as values:
+                    assert len(next(values)) == 17
+                    if fail:
+                        raise primary
+        except RuntimeError as error:
+            assert fail and error is primary
+        else:
+            assert not fail
+        assert observations.gi_frame is None

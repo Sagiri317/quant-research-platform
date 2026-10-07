@@ -139,6 +139,30 @@ class ExactPrimaryKeyIndex:
         )
         return table.num_rows - self._insert_rows(rows)
 
+    def _compare_table(
+        self,
+        table: pa.Table,
+        *,
+        expected_namespace: str,
+        actual_namespace: str,
+        value_columns: Sequence[str],
+    ) -> tuple[int, int]:
+        expected = self._namespace(expected_namespace)
+        changed = 0
+
+        def rows():
+            nonlocal changed
+            for namespace, key, value in self._prepared_comparison_rows(
+                table, namespace=actual_namespace, value_columns=value_columns
+            ):
+                key = bytes(key)
+                if key in expected and expected[key] != value:
+                    changed += 1
+                yield namespace, key, None
+
+        duplicates = table.num_rows - self._insert_rows(rows())
+        return duplicates, changed
+
     def classify_comparison_table(
         self, table: pa.Table, *, namespace: str, value_columns: Sequence[str]
     ):
@@ -204,19 +228,6 @@ class ExactPrimaryKeyIndex:
             sum(key not in actual for key in expected),
             sum(key not in expected for key in actual),
         )
-
-    def comparison_counts(self, *, expected_namespace: str, actual_namespace: str):
-        expected, actual = (
-            self._namespace(expected_namespace),
-            self._namespace(actual_namespace),
-        )
-        missing, extra = self.difference_counts(
-            expected_namespace=expected_namespace, actual_namespace=actual_namespace
-        )
-        changed = sum(
-            (value != actual[key] for key, value in expected.items() if key in actual)
-        )
-        return (missing, extra, changed)
 
     def _validate_comparison_table_grammar(
         self, table: pa.Table, *, namespace: str, value_columns: Sequence[str]

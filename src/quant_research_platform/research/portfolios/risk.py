@@ -491,8 +491,8 @@ class FactorRiskState:
             if len(values) >= self.config.minimum_specific_dates:
                 ages = self._session_count - np.asarray(self._residual_sessions[asset])
                 weights = _ewma_weights(ages, self.config.specific_half_life)
-                if weights.dtype == object or any(
-                    abs(value) > np.sqrt(np.finfo(np.float64).max) for value in values
+                if weights.dtype == object or np.any(
+                    np.abs(values) > np.sqrt(np.finfo(np.float64).max)
                 ):
                     with localcontext() as context:
                         context.prec = 80

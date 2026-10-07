@@ -229,12 +229,15 @@ def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
         write_dataset(
             root, frame, spec=make_processed_dataset_spec(f"final_barrier_{side}")
         )
-    index_rows = dataset_comparison._index_dataset_rows
+    batches = dataset_comparison.iter_dataset_file_batches
+    injected = False
 
-    def index_then_mutate(context, **kwargs: object) -> None:
-        index_rows(context, **kwargs)
-        if kwargs["namespace"] != mutated_side:
+    def index_then_mutate(context, **kwargs: object):
+        nonlocal injected
+        yield from batches(context, **kwargs)
+        if context.root != roots[mutated_side]:
             return
+        injected = True
         part = next(filesystem_glob(context.root / "data", "**/*.parquet"))
         stat = filesystem_stat(part)
         os.utime(
@@ -242,8 +245,11 @@ def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
             ns=(stat.st_atime_ns, stat.st_mtime_ns + 10000000),
         )
 
-    monkeypatch.setattr(dataset_comparison, "_index_dataset_rows", index_then_mutate)
+    monkeypatch.setattr(
+        dataset_comparison, "iter_dataset_file_batches", index_then_mutate
+    )
     comparison = compare_datasets(roots["left"], roots["right"])
+    assert injected
     assert comparison.status == "INSPECTION_FAILED"
     assert comparison.summary == {"error": "dataset_inspection_failed"}
 
@@ -516,3 +522,47 @@ def test_aggregate_chunked_and_materialized_reads_match(tmp_path: Path) -> None:
     assert left_fingerprint == right_fingerprint
     comparison = dataset_comparison.compare_datasets(left, right)
     assert comparison.status == "MATCH"
+
+
+@pytest.mark.parametrize("common_value, changed", ((0.0, 1), (float("nan"), 0)))
+def test_exact_comparison_keeps_missing_extra_and_nullable_changed_counts(
+    tmp_path, common_value, changed
+):
+    roots = {
+        side: make_dataset_artifact_root(tmp_path, side) for side in ("left", "right")
+    }
+    frames = {
+        "left": pd.DataFrame(
+            {
+                "market_id": ["a_share", "a_share"],
+                "asset_id": ["a", "b"],
+                "timestamp": pd.to_datetime(["2020-01-01", "2020-01-01"]),
+                "value": [1.0, float("nan")],
+            }
+        ),
+        "right": pd.DataFrame(
+            {
+                "market_id": ["a_share", "a_share"],
+                "asset_id": ["b", "c"],
+                "timestamp": pd.to_datetime(["2020-01-01", "2020-01-01"]),
+                "value": [common_value, 2.0],
+            }
+        ),
+    }
+    for side, frame in frames.items():
+        write_dataset(
+            roots[side],
+            (frame.iloc[:1], frame.iloc[1:]),
+            spec=make_processed_dataset_spec(side),
+        )
+    sessions = {
+        side: dataset_reading.open_dataset_session(root, columns=None, time_window=None)
+        for side, root in roots.items()
+    }
+    assert dataset_comparison._exact_comparison_counts(
+        sessions["left"],
+        sessions["right"],
+        primary_key=("market_id", "asset_id", "timestamp"),
+    ) == {"missing_row_count": 1, "extra_row_count": 1, "changed_row_count": changed}
+    for session in sessions.values():
+        session.verify()

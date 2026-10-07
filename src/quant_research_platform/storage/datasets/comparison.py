@@ -109,9 +109,45 @@ def _exact_comparison_counts(
     left: DatasetSession, right: DatasetSession, *, primary_key: tuple[str, ...]
 ) -> dict[str, int]:
     index = ExactPrimaryKeyIndex(primary_key=primary_key)
+    changed = 0
     for context, namespace in ((left, "left"), (right, "right")):
-        _index_dataset_rows(context, index=index, namespace=namespace)
-    missing, extra, changed = index.comparison_counts(
+        value_columns = tuple(
+            column for column in context.logical_columns if column not in primary_key
+        )
+        duplicates = 0
+
+        def index_batch(
+            batch: pa.RecordBatch,
+            _frame: Any,
+            namespace=namespace,
+            value_columns=value_columns,
+        ) -> None:
+            nonlocal duplicates, changed
+            table = pa.Table.from_batches([batch])
+            if namespace == "left":
+                duplicates += index.add_comparison_table(
+                    table, namespace=namespace, value_columns=value_columns
+                )
+            else:
+                repeated, different = index._compare_table(
+                    table,
+                    expected_namespace="left",
+                    actual_namespace=namespace,
+                    value_columns=value_columns,
+                )
+                duplicates += repeated
+                changed += different
+
+        for _path, _frame in iter_dataset_file_batches(
+            context,
+            columns=(*primary_key, *value_columns),
+            batch_rows=DEFAULT_BATCH_ROWS,
+            batch_observer=index_batch,
+        ):
+            pass
+        if duplicates:
+            raise ValueError("dataset_primary_key_duplicate")
+    missing, extra = index.difference_counts(
         expected_namespace="left", actual_namespace="right"
     )
     return {
@@ -119,34 +155,6 @@ def _exact_comparison_counts(
         "extra_row_count": extra,
         "changed_row_count": changed,
     }
-
-
-def _index_dataset_rows(
-    context: DatasetSession, *, index: ExactPrimaryKeyIndex, namespace: str
-) -> None:
-    value_columns = tuple(
-        column for column in context.logical_columns if column not in index.primary_key
-    )
-    comparison_columns = (*index.primary_key, *value_columns)
-    duplicates = 0
-
-    def index_batch(batch: pa.RecordBatch, _frame: Any) -> None:
-        nonlocal duplicates
-        duplicates += index.add_comparison_table(
-            pa.Table.from_batches([batch]),
-            namespace=namespace,
-            value_columns=value_columns,
-        )
-
-    for _path, _frame in iter_dataset_file_batches(
-        context,
-        columns=comparison_columns,
-        batch_rows=DEFAULT_BATCH_ROWS,
-        batch_observer=index_batch,
-    ):
-        pass
-    if duplicates:
-        raise ValueError("dataset_primary_key_duplicate")
 
 
 def _comparison(

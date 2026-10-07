@@ -418,12 +418,16 @@ def _industry_frame(metadata, members):
             ):
                 raise ValueError("industry_snapshot_major_invalid")
             seen.add(code)
-            rows.append(
-                (
-                    code,
+            if not rows:
+                dates = (
                     pd.Timestamp(snapshot["publication_date"]) + pd.Timedelta(days=1),
                     pd.Timestamp(snapshot["observation_date"]),
                     pd.Timestamp(snapshot["publication_date"]),
+                )
+            rows.append(
+                (
+                    code,
+                    *dates,
                     snapshot["industry_standard_id"],
                     category,
                     major,

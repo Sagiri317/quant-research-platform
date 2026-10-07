@@ -700,3 +700,88 @@ def test_funding_nanosecond_adjacency_keeps_maximal_episode(next_start, continuo
     assert [(row[0], row[1]) for row in episodes] == (
         [(0, 21)] if continuous else [(0, 10), (11, 21)]
     )
+
+
+@pytest.mark.parametrize("missing", (False, True))
+def test_native_episode_cut_points_keep_half_open_endpoints_across_funding_roots(
+    tmp_path, missing
+):
+    import pandas as pd
+
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _qualified_episodes,
+    )
+    from quant_research_platform.sources.binance import replay
+    from quant_research_platform.sources.binance.funding import (
+        read_funding_observations,
+    )
+    from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+    from tests.sources.binance.test_replay import _write_coverage_history
+    from tests.sources.test_binance_funding import _write
+
+    start = pd.Timestamp("2020-01-01", tz="UTC").value
+    second = 10**9
+    descriptor = _write_coverage_history(tmp_path / "coverage", 3, 32)
+    index = replay.ObservationCoverageIndex(
+        tmp_path / "coverage",
+        descriptor,
+        markets={FUTURES_MARKET_TYPE},
+        decode_interval=replay._decode_recorder_interval,
+    )
+    stamps = (
+        start,
+        start + 1,
+        start + second,
+        start + 2 * second,
+        start + 2 * second + 1,
+        start + 3 * second - 1,
+        start + 5 * second,
+    )
+    roots = []
+    for number, (left, right) in enumerate(
+        ((start, start + 2 * second - 1), (start + 2 * second, start + 5 * second))
+    ):
+        raw = tmp_path / str(number) / "raw"
+        rows = [
+            (
+                "settlement",
+                stamp,
+                None,
+                None if missing and i % 2 == 0 else 0.0,
+                None if missing and i % 2 else 100.0,
+                None,
+            )
+            for i, stamp in enumerate(stamps)
+            if left <= stamp <= right
+        ]
+        _write(
+            raw,
+            rows=rows,
+            metadata_changes={
+                "coverage": {"start_ns": left, "end_ns": right, "status": "COMPLETE"}
+            },
+        )
+        roots.append(raw.parent / "funding" / "BTCUSDT")
+    books = {"book": (start, start + 5 * second + 1)}
+    bounds = ((start, start + 5 * second),)
+    with read_funding_observations(tuple(roots), symbol="BTCUSDT") as funding:
+        assert tuple(event.timestamp_ns for event in funding.events) == stamps
+        coverage = replay.ObservationCoverage(
+            index, FUTURES_MARKET_TYPE, "agg_trades", "BTCUSDT"
+        )
+        actual = list(_qualified_episodes(books, coverage, funding, bounds))
+        expected = [
+            (start, start + second),
+            (start + 2 * second, start + 3 * second),
+            (start + 4 * second, start + 5 * second),
+        ]
+        if missing:
+            expected[:2] = [
+                (start + 2, start + second),
+                (start + 2 * second + 2, start + 3 * second - 1),
+            ]
+        assert [(left, right) for left, right, *_ in actual] == expected
+        assert all(row[2] == "TRUNCATED" for row in actual)
+        early = _qualified_episodes(books, coverage, funding, bounds)
+        assert next(early) == actual[0]
+        early.close()

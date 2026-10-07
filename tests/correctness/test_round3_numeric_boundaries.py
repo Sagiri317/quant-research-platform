@@ -190,3 +190,30 @@ def test_bootstrap_and_hac_do_not_overflow_a_representable_mean():
     hac = hac_mean(values, max_lags=2)
     assert hac.mean / 1e308 == pytest.approx(0.95)
     assert np.isfinite(hac.standard_error)
+
+
+def test_rank_training_keeps_nullable_raw_domains_and_first_undefined_factor():
+    from quant_research_platform.research.models.rank_ensemble import (
+        EqualWeightRankEnsembleFactory,
+        ICWeightedRankEnsembleFactory,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "x0": pd.array([1, None, 2, 3], dtype="Int64"),
+            "x1": pd.array([None, 2, 3, 4], dtype="Float64"),
+            "timestamp": pd.to_datetime(["2020-01-01"] * 2 + ["2020-01-02"] * 2),
+            "label": [1.0, 2.0, 3.0, 4.0],
+        }
+    ).iloc[[2, 0, 3, 1]]
+    for factory in (EqualWeightRankEnsembleFactory, ICWeightedRankEnsembleFactory):
+        model = factory(("x0", "x1"), "label").fit(frame, frame.label.to_numpy())
+        assert model.label_calibration == (2.5, 2.0)
+        np.testing.assert_array_equal(model.predict(frame), [-0.25, 0.0, 0.25, 0.0])
+    invalid = frame.assign(x0=np.nan, x1="invalid")
+    with pytest.raises(
+        ValueError, match="^ensemble_direction_undefined:x0:no_valid_training_rankic$"
+    ):
+        EqualWeightRankEnsembleFactory(("x0", "x1"), "label").fit(
+            invalid, invalid.label.to_numpy()
+        )

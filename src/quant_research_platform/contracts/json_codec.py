@@ -58,16 +58,23 @@ def bounded_rendered_qrp_json_object_size(
     value: Mapping[str, Any], *, max_bytes: int
 ) -> int:
     """Return actual UTF-8 JSON size within the persisted format boundary."""
-    return _bounded_json_size(_json_native_object(value), max_bytes=max_bytes)
+    return _bounded_json_text_and_size(_json_native_object(value), max_bytes=max_bytes)[
+        1
+    ]
 
 
 def bounded_qrp_json_object_snapshot(
     value: Mapping[str, Any], *, max_bytes: int
 ) -> dict[str, Any]:
     """Snapshot native or frozen containers and validate their JSON format size."""
+    return _bounded_qrp_json_snapshot_text(value, max_bytes=max_bytes)[0]
+
+
+def _bounded_qrp_json_snapshot_text(
+    value: Mapping[str, Any], *, max_bytes: int
+) -> tuple[dict[str, Any], str]:
     payload = _json_native_object(value, allow_frozen=True)
-    _bounded_json_size(payload, max_bytes=max_bytes)
-    return payload
+    return payload, _bounded_json_text_and_size(payload, max_bytes=max_bytes)[0]
 
 
 def _render_native_json(payload: dict[str, Any]) -> str:
@@ -80,13 +87,16 @@ def _render_native_json(payload: dict[str, Any]) -> str:
     )
 
 
-def _bounded_json_size(payload: dict[str, Any], *, max_bytes: int) -> int:
+def _bounded_json_text_and_size(
+    payload: dict[str, Any], *, max_bytes: int
+) -> tuple[str, int]:
     if type(max_bytes) is not int or max_bytes < 0:
         raise ValueError("qrp_json_max_bytes_invalid")
-    size = len(_render_native_json(payload).encode("utf-8"))
+    text = _render_native_json(payload)
+    size = len(text.encode("utf-8"))
     if size > max_bytes:
         raise ValueError("qrp_json_render_exceeds_max_bytes")
-    return size
+    return text, size
 
 
 def canonical_json_hash(value: object) -> str:

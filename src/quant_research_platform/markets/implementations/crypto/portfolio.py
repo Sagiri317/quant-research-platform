@@ -1,6 +1,7 @@
 """Persisted research inputs to the event-driven perpetual ledger."""
 
 from array import array
+from bisect import bisect_left
 from contextlib import ExitStack
 from functools import partial
 from itertools import chain, groupby, islice, zip_longest
@@ -300,7 +301,11 @@ def _qualified_episodes(coverage, trade_coverage, funding, bounds):
             left = max(start, book[0], trade[0], funded[0])
             right = min(stop, edge)
             if left < right:
-                cuts = (stamp for stamp in bad_settlements if left <= stamp < right)
+                cuts = bad_settlements[
+                    bisect_left(bad_settlements, left) : bisect_left(
+                        bad_settlements, right
+                    )
+                ]
                 for cut in cuts:
                     if left < cut:
                         _yield_value = left, cut, "TRUNCATED", ("funding_coverage_end",)

@@ -625,3 +625,28 @@ def test_fee_csv_bounded_decoder_preserves_quoted_multiline_fields(tmp_path):
     sidecar.write_text(json.dumps(metadata), encoding="utf-8")
     result = load_a_share_fee_source(reference_root=raw)
     assert len(result.rows) == 5
+
+
+@pytest.mark.parametrize("publication", ("2025-01-01", "9999-12-31"))
+def test_industry_future_bad_row_precedes_date_projection(tmp_path, publication):
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    row = {
+        "code": "invalid",
+        "name": "synthetic issuer",
+        "category": "A",
+        "major": "",
+        "industry": "01",
+        "source_locator": "page:1",
+    }
+    root = write_industry_reference_fixture(
+        tmp_path / "raw",
+        observations=(("future", "CSRC2012", "2020-01-01", publication, [row]),),
+    )
+    with pytest.raises(ValueError, match="^industry_snapshot_row_invalid$"):
+        interim.materialize_interim_data(
+            layout=StorageLayout(tmp_path),
+            raw_root=root.parent,
+            data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
+            end_date="2020-12-31",
+        )

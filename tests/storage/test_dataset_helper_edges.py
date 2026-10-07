@@ -609,15 +609,15 @@ def test_exact_key_index_compares_persisted_row_values() -> None:
         )
         == 0
     )
-    assert (
-        index.add_comparison_table(
-            right, namespace="right", value_columns=("value", "nested")
-        )
-        == 0
-    )
-    assert index.comparison_counts(
+    assert index._compare_table(
+        right,
+        expected_namespace="left",
+        actual_namespace="right",
+        value_columns=("value", "nested"),
+    ) == (0, 1)
+    assert index.difference_counts(
         expected_namespace="left", actual_namespace="right"
-    ) == (1, 1, 1)
+    ) == (1, 1)
     map_type = pa.map_(pa.string(), pa.int64())
     index.add_comparison_table(
         pa.table(
@@ -629,19 +629,20 @@ def test_exact_key_index_compares_persisted_row_values() -> None:
         namespace="map-left",
         value_columns=("value",),
     )
-    index.add_comparison_table(
+    assert index._compare_table(
         pa.table(
             {
                 "asset_id": ["map"],
                 "value": pa.array([[("a", 1), ("b", 2)]], type=map_type),
             }
         ),
-        namespace="map-right",
+        expected_namespace="map-left",
+        actual_namespace="map-right",
         value_columns=("value",),
-    )
-    assert index.comparison_counts(
+    ) == (0, 0)
+    assert index.difference_counts(
         expected_namespace="map-left", actual_namespace="map-right"
-    ) == (0, 0, 0)
+    ) == (0, 0)
 
 
 def _nested_float_zero_array(case: str) -> pa.Array:
@@ -692,10 +693,15 @@ def test_nested_float_primary_key_zero_keeps_bit_identity(case: str) -> None:
     index = ExactPrimaryKeyIndex(primary_key=("key",))
     assert index.add_table(table, namespace="writer") == 0
     index.add_comparison_table(table.slice(0, 1), namespace="left", value_columns=())
-    index.add_comparison_table(table.slice(1, 1), namespace="right", value_columns=())
-    assert index.comparison_counts(
+    assert index._compare_table(
+        table.slice(1, 1),
+        expected_namespace="left",
+        actual_namespace="right",
+        value_columns=(),
+    ) == (0, 0)
+    assert index.difference_counts(
         expected_namespace="left", actual_namespace="right"
-    ) == (1, 1, 0)
+    ) == (1, 1)
 
 
 @pytest.mark.parametrize("nonfinite", (float("nan"), float("inf")))
@@ -1337,3 +1343,22 @@ def test_top_level_float_zero_key_encodings_agree(data_type):
     assert (
         index.add_comparison_table(table, namespace="comparison", value_columns=()) == 1
     )
+
+
+def test_exact_comparison_bad_late_key_keeps_right_batch_atomic():
+    index = ExactPrimaryKeyIndex(primary_key=("key",))
+    index.add_comparison_table(
+        pa.table({"key": [[0.0]], "value": [1.0]}),
+        namespace="left",
+        value_columns=("value",),
+    )
+    right = pa.table({"key": [[1.0], [float("inf")]], "value": [2.0, 3.0]})
+    with pytest.raises(ValueError, match="^invalid_dataset_primary_key_value$"):
+        index._compare_table(
+            right,
+            expected_namespace="left",
+            actual_namespace="right",
+            value_columns=("value",),
+        )
+    assert index.identity_payload_count(namespace="right") == 0
+    assert index.identity_payload_count(namespace="left") == 1

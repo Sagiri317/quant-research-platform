@@ -765,7 +765,9 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
                             liquidations.append(
                                 (
                                     observed_ns,
-                                    quantity if order["S"] == "BUY" else -quantity,
+                                    Fraction(
+                                        quantity if order["S"] == "BUY" else -quantity
+                                    ),
                                 )
                             )
                     event = next(events, None)
@@ -833,7 +835,7 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
                 for seconds, suffix in ((5, "5s"), (30, "30s")):
                     if "forceOrder" in fresh and count + 1 >= seconds * 10:
                         window = [
-                            Fraction(quantity)
+                            quantity
                             for observed, quantity in liquidations
                             if observed > decision_ns - seconds * 1_000_000_000
                         ]

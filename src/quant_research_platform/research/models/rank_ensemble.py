@@ -146,11 +146,12 @@ def _label_calibration(scores, labels, sample_weight) -> tuple[float, float]:
             Fraction(float(label)),
             Fraction(float(weight)),
         )
+        weighted_x = mass * x
         total += mass
-        sx += mass * x
+        sx += weighted_x
         sy += mass * y
-        xx += mass * x * x
-        xy += mass * x * y
+        xx += weighted_x * x
+        xy += weighted_x * y
     variance = total * xx - sx * sx
     slope = Fraction() if variance == 0 else (total * xy - sx * sy) / variance
     try:
@@ -233,25 +234,29 @@ def _training_rank_correlations(frame, columns, label_column, sample_weight):
         else None
     )
     groups = (
-        frame.groupby(timestamps, sort=True)
+        frame.groupby(timestamps, sort=True).indices
         if timestamps is not None
-        else ((None, frame),)
+        else {None: np.arange(len(frame))}
     )
     masses = (
         {
             timestamp: sum(
                 (Fraction(float(weights[index])) for index in indices), Fraction()
             )
-            for timestamp, indices in groups.indices.items()
+            for timestamp, indices in groups.items()
         }
         if timestamps is not None and sample_weight is not None
         else None
     )
     for column in columns:
         correlations, period_weights = [], []
-        for _, group in groups:
-            x = group[column].to_numpy(dtype="float64", copy=False)
-            y = group[label_column].to_numpy(dtype="float64", copy=False)
+        for timestamp, indices in groups.items():
+            x = frame[column].array.take(indices).to_numpy(dtype="float64", copy=False)
+            y = (
+                frame[label_column]
+                .array.take(indices)
+                .to_numpy(dtype="float64", copy=False)
+            )
             valid = np.isfinite(x) & np.isfinite(y)
             if int(valid.sum()) < 2:
                 continue
@@ -263,7 +268,7 @@ def _training_rank_correlations(frame, columns, label_column, sample_weight):
                 period_weights.append(
                     1.0
                     if sample_weight is None or masses is None
-                    else masses[pd.Timestamp(group["timestamp"].iloc[0])]
+                    else masses[pd.Timestamp(timestamp)]
                 )
         yield (
             column,

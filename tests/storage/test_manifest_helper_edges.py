@@ -123,3 +123,28 @@ def test_json_directory_limit_precedes_content_reads(tmp_path: Path, monkeypatch
     monkeypatch.setattr(manifests, "read_bounded_qrp_json", forbidden)
     with pytest.raises(ValueError, match="dataset_metadata_member_limit_exceeded"):
         manifests.read_bounded_qrp_json_directory(tmp_path, max_members=1)
+
+
+@pytest.mark.parametrize(
+    "writer_name", ("write_manifest", "write_internal_artifact_manifest")
+)
+def test_manifest_single_text_keeps_utf8_newline_and_error_order(
+    tmp_path, monkeypatch, writer_name
+):
+    from quant_research_platform.contracts.json_codec import render_qrp_json_object
+
+    writer = getattr(manifests, writer_name)
+    payload = {"schema_id": "qrp-test", "label": "分类😀"}
+    expected = (render_qrp_json_object(payload) + "\n").encode("utf-8")
+    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", len(expected))
+    path = tmp_path / "exact.json"
+    writer(path, payload)
+    assert path.read_bytes() == expected
+    assert manifests.read_manifest(path) == payload
+    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", len(expected) - 1)
+    with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
+        writer(tmp_path / "oversize.json", payload)
+    assert not (tmp_path / "oversize.json").exists()
+    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", 1)
+    with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
+        writer(tmp_path / "invalid-schema.json", {"schema_id": "invalid/schema"})

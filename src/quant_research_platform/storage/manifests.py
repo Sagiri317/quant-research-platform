@@ -9,9 +9,8 @@ from typing import Any
 
 from quant_research_platform.contracts.json_codec import (
     MAX_QRP_JSON_BYTES,
-    bounded_qrp_json_object_snapshot,
+    _bounded_qrp_json_snapshot_text,
     parse_qrp_json_object,
-    render_qrp_json_object,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
@@ -199,12 +198,11 @@ def read_dataset_manifest_evidence(
 
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
-    snapshot = bounded_qrp_json_object_snapshot(
+    snapshot, text = _bounded_qrp_json_snapshot_text(
         payload, max_bytes=MAX_QRP_JSON_BYTES - 1
     )
     _require_schema_id(snapshot)
-    text = render_qrp_json_object(snapshot) + "\n"
-    return atomic_write_text(path, text, encoding="utf-8")
+    return atomic_write_text(path, text + "\n", encoding="utf-8")
 
 
 def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Path:
@@ -214,13 +212,12 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     ``source_id`` must remain round-trippable. We still reject path, credential,
     and row-sample payloads that do not belong in schema metadata.
     """
-    snapshot = bounded_qrp_json_object_snapshot(
+    snapshot, text = _bounded_qrp_json_snapshot_text(
         payload, max_bytes=MAX_QRP_JSON_BYTES - 1
     )
     _require_schema_id(snapshot)
     assert_internal_artifact_metadata_safe(snapshot)
-    text = render_qrp_json_object(snapshot) + "\n"
-    return atomic_write_text(path, text, encoding="utf-8")
+    return atomic_write_text(path, text + "\n", encoding="utf-8")
 
 
 def _require_schema_id(payload: object) -> None:

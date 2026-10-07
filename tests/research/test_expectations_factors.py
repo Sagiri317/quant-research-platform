@@ -606,3 +606,65 @@ def test_expectation_preparation_keeps_full_source_error_order(failure):
             trading_sessions=pd.bdate_range("2025-01-02", periods=3),
             freshness_days=0 if failure == "parameter" else 90,
         )
+
+
+@pytest.mark.parametrize("freshness", (90, 180))
+def test_expectation_queries_keep_position_with_duplicate_index_and_nullable_close(
+    freshness,
+):
+    records = pd.DataFrame(
+        [
+            (
+                asset,
+                pd.Timestamp("2025-01-03"),
+                pd.Timestamp(year, 12, 31),
+                str(i),
+                multiple * (i + 1) * (year - 2024),
+            )
+            for asset, multiple in (("a", 2.0), ("b", 4.0))
+            for year in (2025, 2026)
+            for i in range(3)
+        ],
+        columns=(
+            "asset_id",
+            "declare_date",
+            "forecast_end_date",
+            "institution_id",
+            "forecast_eps",
+        ),
+    )
+    observations = pd.DataFrame(
+        {
+            "asset_id": ["b", "a", "a", "b", "a", "b"],
+            "timestamp": pd.to_datetime(
+                [
+                    "2025-01-07",
+                    "2025-01-06",
+                    "2025-01-07",
+                    "2025-01-06",
+                    "2025-01-08",
+                    "2025-01-08",
+                ]
+            ),
+            "close": pd.array([8, 4, pd.NA, 4, 0, 2], dtype="Float64"),
+        },
+        index=[8, 8, -1, 99, 3, 3],
+    )
+    observations["timestamp"] = observations.timestamp.dt.as_unit("ns")
+    actual = build_expectations_features(
+        records,
+        observations,
+        trading_sessions=pd.bdate_range("2025-01-03", "2025-01-08"),
+        freshness_days=freshness,
+    )
+    pd.testing.assert_frame_equal(
+        actual[["asset_id", "timestamp"]],
+        observations[["asset_id", "timestamp"]].reset_index(drop=True),
+        check_exact=True,
+    )
+    np.testing.assert_array_equal(
+        actual.forward_earnings_yield_fy1, [1, 1, np.nan, 2, np.nan, 4]
+    )
+    np.testing.assert_array_equal(
+        actual.forward_earnings_yield_fy2, [2, 2, np.nan, 4, np.nan, 8]
+    )
