@@ -309,6 +309,35 @@ def test_fee_reader_cleanup_preserves_primary(tmp_path, monkeypatch):
     assert handle.closed
 
 
+def test_fee_reader_rejects_early_eof_after_real_truncation(tmp_path, monkeypatch):
+    import io
+
+    from quant_research_platform.sources.reference import a_share_fees
+    from quant_research_platform.storage.identity import dataset_file_identity
+
+    root = _write_reference_root(tmp_path / "raw") / "reference"
+    path = next(filesystem_glob(root, "**/*.csv"))
+    expected = dataset_file_identity(path)
+    assert a_share_fees._read_rows(path, expected)[1] > 0
+
+    class Handle(io.FileIO):
+        reads = 0
+
+        def readline(self, *args):
+            raw = super().readline(*args)
+            self.reads += 1
+            if self.reads == 1:
+                with open(native_filesystem_path(path), "r+b") as writer:
+                    writer.truncate(0)
+            return raw
+
+    handle = Handle(native_filesystem_path(path), "rb")
+    monkeypatch.setattr(a_share_fees, "open_filesystem_file", lambda _: handle)
+    with pytest.raises(ValueError, match="a_share_fee_source_identity_changed"):
+        a_share_fees._read_rows(path, expected)
+    assert handle.closed and handle.reads == 2
+
+
 def _industry_observations():
     return (
         (
@@ -567,7 +596,7 @@ def test_invalid_fee_csv_header_preserves_previous_artifact(tmp_path):
     hostile = b"unexpected_column," + original
     csv_path.write_bytes(hostile)
     sidecar = source / A_SHARE_FEE_SIDECAR_NAME
-    metadata = json.loads(sidecar.read_text())
+    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
     metadata["file_sha256"] = hashlib.sha256(hostile).hexdigest()
     metadata["file_bytes"] = len(hostile)
     sidecar.write_text(json.dumps(metadata), encoding="utf-8")
@@ -588,7 +617,7 @@ def test_fee_csv_bounded_decoder_preserves_quoted_multiline_fields(tmp_path):
         writer.writeheader()
         writer.writerows(rows)
     sidecar = source / A_SHARE_FEE_SIDECAR_NAME
-    metadata = json.loads(sidecar.read_text())
+    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
     payload = path.read_bytes()
     metadata.update(
         file_bytes=len(payload), file_sha256=hashlib.sha256(payload).hexdigest()

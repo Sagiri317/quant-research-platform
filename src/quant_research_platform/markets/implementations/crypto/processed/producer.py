@@ -7,6 +7,7 @@ import json
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import ExitStack, contextmanager
 from dataclasses import asdict, replace
+from functools import partial
 from heapq import merge
 from itertools import chain, islice
 
@@ -34,7 +35,11 @@ from quant_research_platform.markets.implementations.crypto.ids import (
     canonical_crypto_asset_id,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.protocols.crypto_hft import HFT_FACTOR_COLUMNS
+from quant_research_platform.research.protocols.crypto_hft import (
+    HFT_FACTOR_COLUMNS,
+    factor_catalog,
+    label_catalog,
+)
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.sources.binance import ids as binance_ids
 from quant_research_platform.storage.datasets.reading import (
@@ -54,7 +59,20 @@ EXTERNAL_INSTRUMENTS = {
     "okx": {
         "exchange": "okex-swap",
         "symbols": {"btc_usdt": "BTC-USDT-SWAP", "eth_usdt": "ETH-USDT-SWAP"},
-        "base_units_per_amount": {"btc_usdt": 0.01, "eth_usdt": 0.1},
+        "base_units_per_amount": {
+            "btc_usdt": {
+                "before": 0.0001,
+                "after": 0.01,
+                "transition_start": "2020-03-20T08:00:00",
+                "transition_end": "2020-03-20T08:30:00",
+            },
+            "eth_usdt": {
+                "before": 0.001,
+                "after": 0.1,
+                "transition_start": "2020-03-19T08:00:00",
+                "transition_end": "2020-03-19T08:30:00",
+            },
+        },
     },
 }
 
@@ -177,41 +195,50 @@ def produce_hft_processed_data(
                     panel_spec.market_id, panel_spec.kind, panel_spec.data_id
                 ),
             )
-            session = open_dataset_session(root, columns=None, time_window=time_window)
-            metadata["input_dataset_identities"] = {
-                input_id: dataset_identity_payload(session.spec, session.manifest)
-            }
-            transform = (
-                (
-                    lambda frames: iter_factor_frames(
-                        frames,
-                        columns=tuple(
-                            (
-                                name
-                                for name in spec.required_columns
-                                if name in HFT_FACTOR_COLUMNS
-                            )
+            parameters = json.loads(spec.parameters_json)
+            if spec.data_id == HFT_LABEL_DATA_ID:
+                horizons = tuple(
+                    sorted({item["horizon"] for item in parameters["labels"]})
+                )
+                definitions = tuple(
+                    item for item in label_catalog().list() if item.horizon in horizons
+                )
+                transform = partial(iter_label_frames, horizons_ms=horizons)
+            else:
+                factor_columns = tuple(
+                    name for name in spec.required_columns if name in HFT_FACTOR_COLUMNS
+                )
+                definitions = tuple(
+                    factor_catalog().get(name) for name in factor_columns
+                )
+                transform = partial(iter_factor_frames, columns=factor_columns)
+            inputs = tuple(
+                dict.fromkeys(
+                    (
+                        "market_id",
+                        "asset_id",
+                        "timestamp",
+                        "segment_id",
+                        *(
+                            column
+                            for item in definitions
+                            for column in item.input_columns
+                            if column != "timestamp_ms"
                         ),
                     )
                 )
-                if spec.data_id != HFT_LABEL_DATA_ID
-                else lambda frames: iter_label_frames(
-                    frames,
-                    horizons_ms=tuple(
-                        sorted(
-                            {
-                                item["horizon"]
-                                for item in json.loads(spec.parameters_json)["labels"]
-                            }
-                        )
-                    ),
-                )
             )
+            session = open_dataset_session(
+                root, columns=inputs, time_window=time_window
+            )
+            metadata["input_dataset_identities"] = {
+                input_id: dataset_identity_payload(session.spec, session.manifest)
+            }
             data = _panel_frame_producer(
                 session,
                 transform=transform,
                 columns=spec.required_columns,
-                asset_ids=tuple(json.loads(spec.parameters_json)["asset_ids"]),
+                asset_ids=tuple(parameters["asset_ids"]),
             )
 
             def verify(_receipt):
@@ -287,13 +314,9 @@ def _common_symbol_panel_frames(
             if any(row[timestamp_position] != target for row in current):
                 continue
             if records and len(records) + len(current) > batch_rows:
-                _yield_value = (
-                    pd.DataFrame.from_records(records, columns=columns)
-                    .astype(dtypes)
-                    .sort_values(
-                        ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
-                    )
-                )
+                _yield_value = pd.DataFrame.from_records(
+                    records, columns=columns
+                ).astype(dtypes)
                 try:
                     yield _yield_value
                 except GeneratorExit:
@@ -320,13 +343,9 @@ def _common_symbol_panel_frames(
                 except StopIteration:
                     ended = True
             if len(records) >= batch_rows:
-                _yield_value = (
-                    pd.DataFrame.from_records(records, columns=columns)
-                    .astype(dtypes)
-                    .sort_values(
-                        ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
-                    )
-                )
+                _yield_value = pd.DataFrame.from_records(
+                    records, columns=columns
+                ).astype(dtypes)
                 try:
                     yield _yield_value
                 except GeneratorExit:
@@ -337,12 +356,8 @@ def _common_symbol_panel_frames(
                 for _row in stream:
                     pass
         if records:
-            _yield_value = (
-                pd.DataFrame.from_records(records, columns=columns)
-                .astype(dtypes)
-                .sort_values(
-                    ["timestamp", "asset_id"], kind="mergesort", ignore_index=True
-                )
+            _yield_value = pd.DataFrame.from_records(records, columns=columns).astype(
+                dtypes
             )
             try:
                 yield _yield_value

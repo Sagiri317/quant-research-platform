@@ -625,6 +625,7 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
             is_st=False,
             is_pt=False,
             listing_age_trading_days=400,
+            has_252_trading_sessions=True,
             close=10.0,
             adj_close=10.0,
             volume=10.0,
@@ -954,3 +955,248 @@ def test_trend_efficiency_extreme_normal_price_path_persists_finite_ratio(tmp_pa
     assert len(saved) == 60
     assert saved.trend_efficiency_60d.iloc[-1] == 1.0
     assert saved.trend_efficiency_60d.iloc[:-1].isna().all()
+
+
+@pytest.mark.parametrize(
+    "values",
+    (
+        [0.01] * 252 + [1e308] * 60,
+        [0.01, 1e308] + [0.01, 0.02] * 156,
+        [1e307, 5e307] * 157,
+    ),
+)
+def test_market_model_extreme_equal_assets_keep_unit_beta(values):
+    from quant_research_platform.compute.market_model import MarketModelRiskState
+
+    state = MarketModelRiskState()
+    for value in values:
+        result = state.observe(
+            pd.DataFrame(
+                {
+                    "asset_id": list("abcd"),
+                    "period_return": value,
+                    "float_market_cap": 1.0,
+                }
+            )
+        )
+    np.testing.assert_allclose(result.beta, 1.0, rtol=1e-14)
+    np.testing.assert_array_equal(result.residual_volatility, 0.0)
+
+
+@pytest.mark.parametrize("single_extreme", (False, True))
+def test_amplitude_extreme_representable_mean_persists(tmp_path, single_extreme):
+    from dataclasses import replace
+
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-02", periods=20).as_unit("ns"),
+            "high": 1e308,
+            "low": 0.5,
+            "close": 1.0,
+        }
+    )
+    from fractions import Fraction
+
+    if single_extreme:
+        frame[["high", "low", "close"]] = 0.1
+        frame.loc[0, ["high", "low"]] = [1e308, 0.01]
+    expected = float(
+        sum(
+            (Fraction(row.high) - Fraction(row.low)) / Fraction(row.close)
+            for row in frame.itertuples()
+        )
+        / len(frame)
+    )
+    output = calculate_price_volume_factors(frame, factor_columns=("amplitude_20d",))
+    output.insert(0, "market_id", "a_share")
+    base = research_profile().processed.get("price_volume_facts")
+    spec = replace(
+        base,
+        column_roles={
+            key: value
+            for key, value in base.column_roles.items()
+            if key in output.columns
+        },
+    )
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, output, spec=spec)
+    assert read_dataset(root).amplitude_20d.iloc[-1] == pytest.approx(
+        expected, rel=2e-16
+    )
+
+
+def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_path):
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.research.portfolios.risk import FactorRiskState
+    from quant_research_platform.research.protocols.a_share import factor_catalog
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    dates = pd.bdate_range("2020-01-02", periods=312).as_unit("ns")
+    prices = np.empty(312)
+    prices[0], prices[1] = 1e-307, 10.0
+    for i in range(2, len(prices)):
+        prices[i] = prices[i - 1] * (1.01 if i % 2 else 1.02)
+    returns = prices / np.r_[prices[0], prices[:-1]] - 1
+    assert np.isfinite(prices).all() and (prices > 0).all()
+    panel = pd.DataFrame(
+        [
+            dict(
+                market_id="a_share",
+                asset_id=asset,
+                timestamp=stamp,
+                period_return=returns[i],
+                float_market_cap=1000.0,
+                is_a_share_scope=True,
+                is_trading=True,
+                is_st=False,
+                is_pt=False,
+                listing_age_trading_days=400,
+                has_252_trading_sessions=True,
+                close=prices[i],
+                adj_close=prices[i],
+                volume=10.0,
+                amount=100.0,
+                turnover=0.1,
+            )
+            for i, stamp in enumerate(dates)
+            for asset in ("a", "b")
+        ]
+    )
+    definitions = tuple(
+        item for item in factor_catalog().list() if item.family == "market_model"
+    )
+    output = calculate_factors_for_panel(panel, definitions=definitions)
+    spec = research_profile().processed.get("market_model_factors")
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, output, spec=spec)
+    saved = read_dataset(root)
+    assert saved.loc[saved.timestamp.eq(dates[252]), "beta_252d"].eq(1.0).all()
+    current = saved.loc[saved.timestamp.eq(dates[-1])].assign(
+        industry_standard_id="CSRC2012",
+        industry_level1_code="A",
+        float_market_cap=1000.0,
+        eligible=True,
+    )
+    assert current.residual_volatility_60d.eq(0.0).all()
+    risk = FactorRiskState(style_columns=("beta_252d", "residual_volatility_60d"))
+    assert len(risk.prepare_exposures(current)) == 2
+
+
+def test_market_model_preserves_small_residual_beside_extreme_historical_mean():
+    from fractions import Fraction
+
+    from quant_research_platform.compute.market_model import MarketModelRiskState
+
+    state = MarketModelRiskState()
+    for index in range(253):
+        left, right = (
+            (0.0, 0.0)
+            if index == 0
+            else (1e308, 1e308)
+            if index == 1
+            else ((0.01, 0.02) if index % 2 else (0.02, 0.01))
+        )
+        state.observe(
+            pd.DataFrame(
+                {
+                    "asset_id": ("a", "b"),
+                    "period_return": (left, right),
+                    "float_market_cap": 1.0,
+                }
+            )
+        )
+    x = [Fraction(value) for value in state._market_returns["a"]]
+    y = [Fraction(value) for value in state._returns["a"]]
+    mx, my = sum(x) / len(x), sum(y) / len(y)
+    slope = sum((a - mx) * (b - my) for a, b in zip(x, y, strict=True)) / sum(
+        (a - mx) ** 2 for a in x
+    )
+    expected = float(y[-1] - my - slope * (x[-1] - mx))
+    assert expected != 0.0
+    assert state._residuals["a"][-1] == expected
+
+
+def test_all_a_convex_mean_keeps_subnormal_mass_with_extreme_caps():
+    from quant_research_platform.compute.market_model import MarketModelRiskState
+
+    small = np.nextafter(0.0, 1.0)
+    state = MarketModelRiskState(window=2)
+    panel = pd.DataFrame(
+        {
+            "asset_id": ("a", "b"),
+            "period_return": (0.0, 0.0),
+            "float_market_cap": (small, 1e308),
+        }
+    )
+    state.observe(panel)
+    state.observe(panel.assign(period_return=(1e308, 0.0)))
+    assert state._market_returns["a"][-1] == small
+    assert state._market_returns["b"][-1] == small
+
+
+@pytest.mark.parametrize(
+    "factor,values",
+    (
+        ("amount_cv_126d", [1e16, 1.0, -1e16] * 42),
+        ("amount_cv_126d", [float(2**53), float(2**53 + 2), float(2**53 + 4)] * 42),
+        (
+            "turnover_cv_126d",
+            [1.0, np.nextafter(1.0, 2.0), np.nextafter(np.nextafter(1.0, 2.0), 2.0)]
+            * 42,
+        ),
+    ),
+)
+def test_coefficient_of_variation_keeps_exact_center_and_ratio(
+    tmp_path, factor, values
+):
+    from dataclasses import replace
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+
+    fractions = [Fraction(value) for value in values]
+    center = sum(fractions) / len(fractions)
+    variance = sum((value - center) ** 2 for value in fractions) / (len(fractions) - 1)
+    with localcontext() as context:
+        context.prec = 200
+        deviation = (Decimal(variance.numerator) / Decimal(variance.denominator)).sqrt()
+        expected = float(
+            deviation / (Decimal(center.numerator) / Decimal(center.denominator))
+        )
+    frame = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-02", periods=126).as_unit("ns"),
+            factor.split("_")[0]: values,
+        }
+    )
+    result = calculate_price_volume_factors(frame, factor_columns=(factor,))
+    assert result[factor].iloc[-1] == expected
+    result.insert(0, "market_id", "a_share")
+    base = research_profile().processed.get("price_volume_facts")
+    spec = replace(
+        base,
+        column_roles={
+            name: role for name, role in base.column_roles.items() if name in result
+        },
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, result, spec=spec)
+    assert read_dataset(root)[factor].iloc[-1] == expected

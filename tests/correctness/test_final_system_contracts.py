@@ -7,7 +7,6 @@ from datetime import date
 from fractions import Fraction
 from math import comb
 from pathlib import Path
-from time import perf_counter
 
 import numpy as np
 import pandas as pd
@@ -570,22 +569,9 @@ def test_forward_labels_exact_on_sparse_sessions_and_extreme_prices():
     frame.loc[:3, "adj_open"] = [0.0, np.nan, 1e-300, 1e300]
     frame = frame.sample(frac=1, random_state=9)
     options = dict(horizons=(1, 5, 20), sessions=dates)
-    begin = perf_counter()
     expected = _reference_forward_labels(frame, **options)
-    baseline_seconds = perf_counter() - begin
-    begin = perf_counter()
     actual = add_forward_return_labels(frame, **options)
-    candidate_seconds = perf_counter() - begin
     pd.testing.assert_frame_equal(actual, expected, check_exact=True)
-    print(
-        json.dumps(
-            {
-                "kernel": "forward_labels",
-                "baseline_seconds": baseline_seconds,
-                "candidate_seconds": candidate_seconds,
-            }
-        )
-    )
 
 
 @pytest.mark.parametrize("with_size", [False, True])
@@ -594,23 +580,9 @@ def test_neutralization_is_bit_exact_for_dyadic_inputs(with_size):
     target = np.ldexp(rng.normal(size=700), rng.integers(-100, 100, size=700))
     industry = pd.Series(np.arange(700) % 7)
     sizes = rng.normal(size=700) if with_size else None
-    begin = perf_counter()
     expected = _reference_residuals(target, industry, sizes)
-    baseline_seconds = perf_counter() - begin
-    begin = perf_counter()
     actual = _industry_size_residuals(target, industry, sizes)
-    candidate_seconds = perf_counter() - begin
     np.testing.assert_array_equal(actual, expected)
-    print(
-        json.dumps(
-            {
-                "kernel": "exact_neutralization",
-                "with_size": with_size,
-                "baseline_seconds": baseline_seconds,
-                "candidate_seconds": candidate_seconds,
-            }
-        )
-    )
 
 
 def test_prepared_costs_are_bit_exact_for_201_random_cases():
@@ -643,7 +615,6 @@ def test_prepared_costs_are_bit_exact_for_201_random_cases():
         prepared = prepare_trade_cost(
             date(2026, 1, 1), "shanghai", side, schedule, assumptions
         )
-        begin = perf_counter()
         expected = [
             _reference_trade_cost(
                 date(2026, 1, 1),
@@ -656,10 +627,7 @@ def test_prepared_costs_are_bit_exact_for_201_random_cases():
             )
             for n, a in zip(notionals, adv, strict=True)
         ]
-        baseline_seconds = perf_counter() - begin
-        begin = perf_counter()
         totals = prepared.totals(notionals, adv)
-        candidate_seconds = perf_counter() - begin
         np.testing.assert_array_equal(totals, [item.total_cost for item in expected])
         for n, a, item in zip(notionals, adv, expected, strict=True):
             assert (
@@ -674,17 +642,6 @@ def test_prepared_costs_are_bit_exact_for_201_random_cases():
                 )
                 == item
             )
-        print(
-            json.dumps(
-                {
-                    "kernel": "prepared_cost",
-                    "side": side,
-                    "cases": len(notionals),
-                    "baseline_seconds": baseline_seconds,
-                    "candidate_seconds": candidate_seconds,
-                }
-            )
-        )
 
 
 @pytest.mark.parametrize("count", [32, 1080])

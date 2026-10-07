@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -139,21 +139,24 @@ def _label_calibration(scores, labels, sample_weight) -> tuple[float, float]:
 
     weights = _weights(sample_weight, len(scores))
     labels = np.asarray(labels, dtype="float64")
-    scale = float(np.max(np.abs(labels)))
-    if scale == 0.0:
-        return 0.0, 0.0
-    scaled = labels / scale
-    score_mean = float(np.average(scores, weights=weights))
-    label_mean = float(np.average(scaled, weights=weights))
-    centered = scores - score_mean
-    variance = float(np.average(centered * centered, weights=weights))
-    slope = (
-        0.0
-        if variance == 0.0
-        else float(np.average(centered * (scaled - label_mean), weights=weights))
-        / variance
-    )
-    result = ((label_mean - slope * score_mean) * scale, slope * scale)
+    total = sx = sy = xx = xy = Fraction()
+    for score, label, weight in zip(scores, labels, weights, strict=True):
+        x, y, mass = (
+            Fraction(float(score)),
+            Fraction(float(label)),
+            Fraction(float(weight)),
+        )
+        total += mass
+        sx += mass * x
+        sy += mass * y
+        xx += mass * x * x
+        xy += mass * x * y
+    variance = total * xx - sx * sx
+    slope = Fraction() if variance == 0 else (total * xy - sx * sy) / variance
+    try:
+        result = (float((sy - slope * sx) / total), float(slope))
+    except OverflowError:
+        raise ValueError("rank_label_calibration_nonfinite") from None
     if not all(np.isfinite(value) for value in result):
         raise ValueError("rank_label_calibration_nonfinite")
     return result
@@ -222,14 +225,31 @@ def _training_rank_correlations(frame, columns, label_column, sample_weight):
     from quant_research_platform.research.models.scaler import _weights
 
     weights = _weights(sample_weight, len(frame))
-    masses = (
-        pd.Series(weights).groupby(pd.to_datetime(frame["timestamp"]).to_numpy()).sum()
+    timestamps = (
+        strict_timestamp_series(
+            frame["timestamp"], error="invalid_rank_ensemble_timestamp"
+        )
         if "timestamp" in frame
+        else None
+    )
+    groups = (
+        frame.groupby(timestamps, sort=True)
+        if timestamps is not None
+        else ((None, frame),)
+    )
+    masses = (
+        {
+            timestamp: sum(
+                (Fraction(float(weights[index])) for index in indices), Fraction()
+            )
+            for timestamp, indices in groups.indices.items()
+        }
+        if timestamps is not None and sample_weight is not None
         else None
     )
     for column in columns:
         correlations, period_weights = [], []
-        for group in _cross_section_groups(frame):
+        for _, group in groups:
             x = group[column].to_numpy(dtype="float64", copy=False)
             y = group[label_column].to_numpy(dtype="float64", copy=False)
             valid = np.isfinite(x) & np.isfinite(y)
@@ -243,25 +263,24 @@ def _training_rank_correlations(frame, columns, label_column, sample_weight):
                 period_weights.append(
                     1.0
                     if sample_weight is None or masses is None
-                    else masses.loc[pd.Timestamp(group["timestamp"].iloc[0])]
+                    else masses[pd.Timestamp(group["timestamp"].iloc[0])]
                 )
         yield (
             column,
             (
-                float(np.average(correlations, weights=period_weights))
+                float(
+                    sum(
+                        (
+                            Fraction(float(value)) * Fraction(weight)
+                            for value, weight in zip(
+                                correlations, period_weights, strict=True
+                            )
+                        ),
+                        Fraction(),
+                    )
+                    / sum((Fraction(weight) for weight in period_weights), Fraction())
+                )
                 if correlations
                 else None
             ),
         )
-
-
-def _cross_section_groups(frame: pd.DataFrame) -> Iterator[pd.DataFrame]:
-    if "timestamp" not in frame:
-        yield frame
-        return
-    timestamps = strict_timestamp_series(
-        frame["timestamp"],
-        error="invalid_rank_ensemble_timestamp",
-    )
-    for _, group in frame.groupby(timestamps, sort=True):
-        yield group

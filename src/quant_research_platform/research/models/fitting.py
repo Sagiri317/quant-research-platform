@@ -6,6 +6,7 @@ import warnings
 from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -161,6 +162,7 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
     if isinstance(predictor, (LinearScaledPredictor, ScaledPredictor)):
         if (
             type(predictor.scaler) is not ModelMatrixScaler
+            or any(type(value) is not Fraction for value in predictor.scaler.offset_)
             or predictor.scaler.to_payload() != metadata["scaler"]
         ):
             raise ValueError("model_state_metadata_mismatch")
@@ -211,12 +213,15 @@ def _fit_linear_model_result_from_frames(
     transformed = scaler.transform(matrix).to_numpy(dtype="float64")
     design = np.column_stack((np.ones(len(transformed)), transformed))
     weighted = np.sqrt(weights)
+    target = training[spec.label_column].to_numpy(dtype="float64")
+    _, target_exponent = np.frexp(float(np.max(np.abs(target))))
     with threadpool_limits(limits=1, user_api="blas"):
         beta = np.linalg.lstsq(
             design * weighted[:, None],
-            training[spec.label_column].to_numpy(dtype="float64") * weighted,
+            np.ldexp(target, -target_exponent) * weighted,
             rcond=None,
         )[0]
+    beta = np.ldexp(beta, target_exponent)
     predictor = LinearScaledPredictor(
         coefficients=tuple(float(value) for value in beta), scaler=scaler
     )

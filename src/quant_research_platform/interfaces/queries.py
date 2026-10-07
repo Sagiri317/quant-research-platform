@@ -118,31 +118,33 @@ def portfolio_curve(
         else "continuous"
     )
     if mode == "independent_segments":
+        episodes = []
+
+        def consume_episode(index, _child, batches):
+            episodes.append(
+                {
+                    **{
+                        key: index[key]
+                        for key in (
+                            "episode_id",
+                            "start_ns",
+                            "stop_ns",
+                            "terminal_valuation_ns",
+                            "termination",
+                            "stop_reasons",
+                        )
+                    },
+                    "instance_identity": _child.identity,
+                    **_ledger_curve(batches, stride=stride),
+                }
+            )
+
         artifact = read_crypto_episode_artifact(
             root,
             expected_identity=result.instance_identity,
             expected_member_identities=identities,
+            consume_episode=consume_episode,
         )
-        episodes = []
-        with closing_iterator(artifact.iter_episodes()) as children:
-            for index, child in children:
-                episodes.append(
-                    {
-                        **{
-                            key: index[key]
-                            for key in (
-                                "episode_id",
-                                "start_ns",
-                                "stop_ns",
-                                "terminal_valuation_ns",
-                                "termination",
-                                "stop_reasons",
-                            )
-                        },
-                        "instance_identity": child.identity,
-                        **_ledger_curve(child, stride=stride),
-                    }
-                )
         curve = {
             "episodes": episodes,
             "episode_count": len(episodes),
@@ -153,14 +155,18 @@ def portfolio_curve(
             "stride": stride,
         }
     elif mode == "continuous":
+        curve = {}
         artifact = read_portfolio_ledger_artifact(
             root,
             expected_identity=result.instance_identity,
             expected_member_identities=identities,
+            consume_batches=lambda _artifact, batches: curve.update(
+                _ledger_curve(batches, stride=stride)
+            ),
         )
         curve = {
             "episode_id": "continuous",
-            **_ledger_curve(artifact, stride=stride),
+            **curve,
         }
     else:
         raise ValueError("portfolio_curve_execution_mode_invalid")
@@ -178,12 +184,12 @@ def portfolio_curve(
     }
 
 
-def _ledger_curve(artifact, *, stride):
+def _ledger_curve(batches, *, stride):
     points, boundaries = [], []
     total_points = 0
     last_points = []
     last_retained_sequence = -1
-    with closing_iterator(artifact.iter_chunks()) as batches:
+    with closing_iterator(iter(batches)) as batches:
         for batch in batches:
             last_points = [
                 {

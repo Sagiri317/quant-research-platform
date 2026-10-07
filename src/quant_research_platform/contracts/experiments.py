@@ -31,7 +31,6 @@ from quant_research_platform.policy.share_safety import (
 )
 
 SelectionDirection = Literal["maximize", "minimize"]
-ExperimentRole = Literal["train", "validation", "test"]
 
 
 def _model_inference_blocker(
@@ -343,13 +342,6 @@ class ExperimentPlan:
             payload[key] = tuple(payload[key])
         return cls(**payload)
 
-    def window(self, role: ExperimentRole) -> tuple[TimeWindow, ...]:
-        if role == "test":
-            raise PermissionError("test_locked")
-        if role not in {"train", "validation"}:
-            raise ValueError("experiment_role_invalid")
-        return tuple(getattr(fold, role) for fold in self.folds)
-
 
 def label_maturity_mask(
     frame: pd.DataFrame,
@@ -425,7 +417,7 @@ def legal_training_rows(
 
 def training_availability_columns(label_column: str) -> tuple[str, ...]:
     if label_column == "model_target":
-        return ("forward_return_20d_available_at",)
+        return ("model_target_available_at",)
     if label_column.startswith(
         (
             "forward_return_",

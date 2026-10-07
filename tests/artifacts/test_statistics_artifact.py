@@ -1371,10 +1371,23 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
     "corruption",
     ("none", "global_mean", "quarterly_mean", "mean_difference", "observation_count"),
 )
+@pytest.mark.parametrize("fdr_method", ("BY", "NOT_APPLICABLE"))
 def test_defined_group_comparison_requires_descriptive_facts(
-    tmp_path, tables, envelope, corruption
+    tmp_path, tables, envelope, corruption, fdr_method
 ):
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=envelope.logical_artifact_id,
+        schema_identity=envelope.schema_identity,
+        protocol_or_spec_identity=envelope.protocol_or_spec_identity,
+        research_window={**envelope.research_window, "access": "holdout"},
+        upstream_identities=envelope.upstream_identities,
+        software_identity=envelope.software_identity,
+        semantic_metadata=envelope.semantic_metadata,
+    )
     row = _defined_group_comparison_row()
+    row["fdr_method"] = fdr_method
+    if fdr_method == "NOT_APPLICABLE":
+        row["fdr_adjusted_p_value"] = float("nan")
     if corruption != "none":
         row[corruption] = 0 if corruption == "observation_count" else float("nan")
     tables["model_group_comparison"] = pd.DataFrame([row])
@@ -1396,6 +1409,10 @@ def test_defined_group_comparison_requires_descriptive_facts(
         with artifact.table("model_group_comparison.parquet") as frame:
             assert frame.global_mean.iloc[0] == 0.2
             assert frame.observation_count.iloc[0] == 64
+            assert frame.fdr_method.iloc[0] == fdr_method
+            assert frame.fdr_adjusted_p_value.isna().all() == (
+                fdr_method == "NOT_APPLICABLE"
+            )
 
 
 def _defined_group_comparison_row():

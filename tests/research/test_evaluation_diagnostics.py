@@ -795,7 +795,6 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
     config["evaluation"] = {
         "factors": factors,
         "labels": [label],
-        "primary_label": label,
     }
     profile = bind_research_configuration(
         research_profile(config["profile_id"]), config

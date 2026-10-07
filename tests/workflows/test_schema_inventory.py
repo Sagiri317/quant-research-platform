@@ -50,6 +50,114 @@ def _collect_inventory(
         return {"schema_id": "qrp-schema-inventory", "datasets": list(items)}
 
 
+@pytest.mark.parametrize("partitions", ((), ("year",)))
+@pytest.mark.parametrize("context", (False, True))
+def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
+    tmp_path, monkeypatch, partitions, context
+):
+    from dataclasses import replace
+
+    from tests.storage.low_level_fixtures import make_processed_dataset_spec
+
+    spec = make_processed_dataset_spec("statistics", partition_columns=partitions)
+    spec = replace(spec, column_roles={**spec.column_roles, "note": ColumnRole.CONTEXT})
+    root = StorageLayout(tmp_path).processed_data_root(
+        "a_share", "factor", "statistics"
+    )
+    frame = pd.DataFrame(
+        {
+            "market_id": ["a_share"] * 3,
+            "asset_id": ["a", "b", "c"],
+            "timestamp": pd.to_datetime(["2020-12-31", "2021-01-04", "2021-01-04"]),
+            "value": [1.0, float("nan"), float("nan")],
+            "note": pd.Series([None, "known", None], dtype="string"),
+        }
+    )
+    if not partitions:
+        spec = replace(
+            spec,
+            grain=DataGrain.ASSET_REFERENCE,
+            primary_key=("market_id", "asset_id"),
+            column_roles={
+                key: value
+                for key, value in spec.column_roles.items()
+                if key != "timestamp"
+            },
+        )
+        frame = frame.drop(columns="timestamp")
+    write_dataset(root, frame, spec=spec)
+    projections = []
+    original = schema_inventory.iter_dataset_chunks
+
+    def record(session, **kwargs):
+        projections.append(session.logical_columns)
+        yield from original(session, **kwargs)
+
+    monkeypatch.setattr(schema_inventory, "iter_dataset_chunks", record)
+    (item,) = _collect_inventory(
+        tmp_path,
+        important_null_count_columns=("asset_id", "value", "note")
+        if context
+        else ("asset_id", "value"),
+    )["datasets"]
+    assert item["row_count_by_year"] == ({"2020": 1, "2021": 2} if partitions else {})
+    assert item["null_key_counts"] == {key: 0 for key in spec.primary_key}
+    expected_nulls = {
+        "asset_id": 0,
+        "value": 2,
+    }
+    if context:
+        expected_nulls["note"] = 2
+    assert item["selected_important_column_null_counts"] == expected_nulls
+    expected_columns = (("timestamp",) if partitions else ()) + (
+        ("note",) if context else ()
+    )
+    assert projections == ([expected_columns] if expected_columns else [])
+
+
+@pytest.mark.parametrize("instances", (False, True))
+def test_inventory_ignores_only_unpublished_atomic_directory(tmp_path, instances):
+    from quant_research_platform.storage.identity import filesystem_exists
+    from tests.storage.low_level_fixtures import (
+        make_default_dataset_frame,
+        make_processed_dataset_spec,
+    )
+    from tests.storage.test_dataset_instances import _envelope
+
+    layout = StorageLayout(tmp_path)
+    ordinary_file = tmp_path / "data" / "processed" / ".a-0123456789ab"
+    filesystem_mkdir(ordinary_file.parent, parents=True)
+    filesystem_write_text(ordinary_file, "ordinary file", encoding="utf-8")
+    observed = []
+    for index, name in enumerate(("published", "new_build")):
+        spec = make_processed_dataset_spec(name)
+        root = layout.processed_data_root("a_share", "factor", name)
+        metadata = None
+        if instances:
+            envelope = _envelope(spec, seed=index)
+            root = layout.instance_root(root, envelope.instance_identity)
+            metadata = {"common_manifest": envelope}
+
+        def inspect_staged(receipt, root=root, index=index):
+            assert receipt.root.name.startswith(".a-")
+            assert not filesystem_exists(root)
+            items = _collect_inventory(tmp_path)["datasets"]
+            observed.append(items)
+            assert len(items) == index
+            assert all(".a-" not in item["logical_relative_root"] for item in items)
+
+        write_dataset(
+            root,
+            make_default_dataset_frame(),
+            spec=spec,
+            instance_metadata=metadata,
+            staged_validator=inspect_staged,
+        )
+    assert len(observed) == 2
+    assert len(_collect_inventory(tmp_path)["datasets"]) == 2
+    assert filesystem_read_text(ordinary_file, encoding="utf-8") == "ordinary file"
+
+
 @pytest.mark.parametrize(
     "names", [("foo", "foo-bar"), ("foo", "foo.bar"), ("foo", "foo_bar")]
 )
@@ -208,13 +316,16 @@ def test_schema_inventory_keeps_all_current_roots_and_instances(
     os.name != "nt" or not hasattr(Path, "is_junction"),
     reason="Windows junction capability required",
 )
-def test_schema_inventory_does_not_descend_nested_junction(tmp_path: Path) -> None:
+@pytest.mark.parametrize("name", ("nested", ".a-0123456789ab"))
+def test_schema_inventory_does_not_descend_nested_junction(
+    tmp_path: Path, name: str
+) -> None:
     layer_root = tmp_path / "data" / "processed"
     filesystem_mkdir(layer_root, parents=True)
     external = tmp_path / "external"
     filesystem_mkdir(external)
     filesystem_write_text(external / "spec.json", "{}", encoding="utf-8")
-    junction = layer_root / "nested"
+    junction = layer_root / name
     created = subprocess.run(
         ["cmd", "/c", "mklink", "/J", str(junction), str(external)],
         capture_output=True,

@@ -74,6 +74,11 @@ def build_a_share_statistics_tables(
         access_window=protocol_manifest["access_window"],
         selection_groups=(selection_group,),
     )
+    joint_blocker = (
+        "expectations_robustness_excluded"
+        if protocol_manifest.get("expectations", {}).get("role") == "robustness"
+        else None
+    )
     primary_label = protocol_manifest["research_configuration"]["evaluation"][
         "primary_label"
     ]
@@ -294,7 +299,7 @@ def build_a_share_statistics_tables(
         factors=factors,
         families=families,
         methods=fdr_methods
-        if protocol_manifest["access_window"] == "development"
+        if protocol_manifest["access_window"] == "development" and joint_blocker is None
         else (None,),
         max_lags=max_lags,
     )
@@ -343,6 +348,7 @@ def build_a_share_statistics_tables(
         benchmark_id=benchmark_id,
         access_window=protocol_manifest["access_window"],
         inference_blocker=inference_blocker,
+        joint_blocker=joint_blocker,
         max_lags=max_lags,
         block_size=block_size,
         repetitions=repetitions,
@@ -453,12 +459,17 @@ def _paired_group_rankic(
     inference_blocker = _model_inference_blocker(
         access_window=access, selection_groups=("global", "quarterly")
     )
+    fdr_method = (
+        None
+        if protocol_manifest.get("expectations", {}).get("role") == "robustness"
+        else declaration["fdr_method"]
+    )
     inference = (
         time_series_inference_summary(
             differences.reset_index(),
             identity_column="timestamp",
             max_lags=statistics["hac_lag"],
-            fdr_method=declaration["fdr_method"],
+            fdr_method=fdr_method,
             fdr_alpha=declaration["alpha"],
             fdr_family_size=len(family_ids),
         ).set_index("timestamp")
@@ -480,7 +491,7 @@ def _paired_group_rankic(
             status="UNDEFINED",
             reason=inference_blocker if len(values) else "no_common_observations",
             fdr_family_size=len(family_ids),
-            fdr_method=declaration["fdr_method"],
+            fdr_method=fdr_method or "NOT_APPLICABLE",
             fdr_alpha=declaration["alpha"],
             hac_lag=statistics["hac_lag"],
             bootstrap_block_size=statistics["bootstrap_block"],
@@ -604,8 +615,6 @@ def _factor_summary(
         part["defined_hypothesis_count"] = defined_count
         part["missing_hypothesis_count"] = len(diagnostics) - defined_count
         parts.append(part)
-    if not parts:
-        return _undefined_factor_table()
     return pd.concat(parts, ignore_index=True)
 
 
@@ -741,6 +750,7 @@ def _model_comparison(
     repetitions,
     root_seed,
     dataset_id,
+    joint_blocker=None,
 ):
     common = rank_by_date.loc[:, list(family_ids)].dropna()
     losses = -common
@@ -768,13 +778,14 @@ def _model_comparison(
         comparisons.append(summary)
     test_rows = []
     robustness_rows = []
+    joint_blocker = joint_blocker or inference_blocker
     for test_id in _MODEL_ROBUSTNESS_TESTS:
         seed = derive_seed(
             root_seed, "a_share_model_reality_check", dataset_id, access_window, test_id
         )
         result = None
         if (
-            inference_blocker is None
+            joint_blocker is None
             and access_window == "development"
             and challengers
             and (len(common) > block_size)
@@ -797,8 +808,8 @@ def _model_comparison(
         reason = (
             result.reason
             if result is not None
-            else inference_blocker
-            if inference_blocker is not None
+            else joint_blocker
+            if joint_blocker is not None
             else "holdout_excluded"
             if access_window != "development"
             else "no_comparison_models"
@@ -885,6 +896,15 @@ def _model_comparison(
     return (comparison_table, pd.DataFrame(test_rows), pd.DataFrame(robustness_rows))
 
 
+def _fama_macbeth_definitions(factors, core_factors):
+    definitions = tuple((f"single:{factor}", (factor,)) for factor in factors)
+    return (
+        definitions + (("core_multifactor", core_factors),)
+        if core_factors
+        else definitions
+    )
+
+
 def _fama_macbeth_period_records(
     frame: pd.DataFrame,
     *,
@@ -893,11 +913,10 @@ def _fama_macbeth_period_records(
     core_factors: tuple[str, ...],
 ) -> list[dict[str, object]]:
     timestamp = pd.Timestamp(frame["timestamp"].iloc[0])
-    definitions = tuple((f"single:{factor}", (factor,)) for factor in factors)
-    if core_factors:
-        definitions += (("core_multifactor", core_factors),)
     rows: list[dict[str, object]] = []
-    for regression_id, regression_factors in definitions:
+    for regression_id, regression_factors in _fama_macbeth_definitions(
+        factors, core_factors
+    ):
         coefficient_ids = ("intercept", *regression_factors)
         complete_count = len(
             frame.loc[:, [return_column, *regression_factors]].dropna()
@@ -953,19 +972,16 @@ def _fama_macbeth_summary(
 ) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     definitions = [
-        (f"single:{factor}", coefficient)
-        for factor in factors
-        for coefficient in ("intercept", factor)
+        (regression, coefficient)
+        for regression, columns in _fama_macbeth_definitions(factors, core_factors)
+        for coefficient in ("intercept", *columns)
     ]
-    definitions.extend(
-        ("core_multifactor", coefficient)
-        for coefficient in ("intercept", *core_factors)
+    groups = dict(
+        tuple(periods.groupby(["regression_id", "coefficient_id"], sort=False))
     )
+    empty = periods.iloc[:0]
     for regression_id, coefficient_id in definitions:
-        group = periods.loc[
-            periods["regression_id"].eq(regression_id)
-            & periods["coefficient_id"].eq(coefficient_id)
-        ]
+        group = groups.get((regression_id, coefficient_id), empty)
         defined = group.loc[group["status"].eq("DEFINED")]
         values = defined["value"].dropna()
         count = len(values)
@@ -1007,29 +1023,3 @@ def _fama_macbeth_summary(
             )
         rows.append(row)
     return pd.DataFrame(rows)
-
-
-def _undefined_factor_table() -> pd.DataFrame:
-    return pd.DataFrame(
-        [
-            {
-                "family_id": "none",
-                "factor_id": "none",
-                "observation_count": 0,
-                "status": "UNDEFINED",
-                "reason": "no_factor_columns",
-                "mean": np.nan,
-                "standard_error": np.nan,
-                "t_statistic": np.nan,
-                "p_value": np.nan,
-                "ci_lower": np.nan,
-                "ci_upper": np.nan,
-                "fdr_method": "NOT_APPLICABLE",
-                "fdr_alpha": np.nan,
-                "fdr_adjusted_p_value": np.nan,
-                "planned_hypothesis_count": 0,
-                "defined_hypothesis_count": 0,
-                "missing_hypothesis_count": 0,
-            }
-        ]
-    )

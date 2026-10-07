@@ -73,6 +73,52 @@ def _file_bytes(root: Path) -> dict[Path, bytes]:
     }
 
 
+@pytest.mark.parametrize("with_candidates", (False, True))
+def test_bound_missing_hyperparameters_reach_native_model_artifact(
+    tmp_path, with_candidates
+):
+    from quant_research_platform.profiles.research import bind_research_configuration
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration()
+    model = next(
+        item
+        for item in config["models"]
+        if item["model_algorithm"] == "linear_regression"
+    )
+    model.pop("hyperparameters")
+    model.pop("parameter_candidates", None)
+    model.update(
+        input_factor_columns=[config["evaluation"]["factors"][0]],
+        input_feature_columns=[],
+    )
+    if with_candidates:
+        model["parameter_candidates"] = [{}]
+    config.update(
+        models=[model],
+        portfolios=[],
+        primary_portfolio_id=None,
+        comparison_model_id=model["model_id"],
+    )
+    bound = bind_research_configuration(research_profile(config["profile_id"]), config)
+    normalized = bound.protocol(config["scenario_id"]).manifest()[
+        "research_configuration"
+    ]
+    assert normalized["models"][0]["hyperparameters"] == {}
+    specs = tuple(bound.models.list())
+    protocol = shared_model_protocol(specs, configurations=normalized["models"])
+    case = shared_model_case(tmp_path, specs=specs, protocol=protocol)
+    selection = case.artifact.selection("global", None, access_window="development")
+    assert selection["selected_family_id"] == model["model_id"]
+    predictor = read_quarterly_predictor(case.artifact, "global", model["model_id"])
+    metadata = next(
+        entry["model_metadata"]
+        for entry in case.artifact.final_models
+        if entry["selection_group"] == "global"
+    )
+    fitting.validate_model_state(predictor, metadata)
+
+
 def test_a_share_model_folds_require_formal_history_start_year() -> None:
     protocol = a_share.protocol(scenario_id="pv_all", access_window="development")
     manifest = protocol.manifest()

@@ -2726,7 +2726,6 @@ def _validate_semantic_target_root(
                 expected_run_id=f"run_{spec.target_id}",
                 expected_member_identities=output_identities(spec.target_id),
             )
-            validate_prediction_output_metadata_shape(manifest["metadata"])
             prediction_metadata = manifest["metadata"]
             lineage = prediction_metadata["model_metadata"]
             model_dependencies = tuple(
@@ -2892,8 +2891,10 @@ def _target_software_identity(binding, software):
         ),
         ProducerKind.PORTFOLIO: (
             portfolio_ledger.write_portfolio_ledger_artifact,
-            read_crypto_episode_artifact,
-            write_crypto_episode_artifact,
+            portfolio_ledger.read_portfolio_ledger_artifact,
+            outputs.read_prediction_output_bundle,
+            persisted.read_quarterly_model_artifact,
+            persisted.read_crypto_model_artifact,
         ),
         ProducerKind.REPORT: (
             research_artifacts.write_research_report_artifact,
@@ -2902,11 +2903,18 @@ def _target_software_identity(binding, software):
             persisted.read_crypto_model_artifact,
         ),
     }
+    owners = writers[binding.kind]
+    if (
+        binding.kind is ProducerKind.PORTFOLIO
+        and isinstance(binding.producer, partial)
+        and binding.producer.keywords.get("execution_mode") == "independent_segments"
+    ):
+        owners += (read_crypto_episode_artifact, write_crypto_episode_artifact)
     return _artifact_software_identity(
         software,
         binding.producer,
         binding.source_identity,
-        writers[binding.kind],
+        owners,
         composition_modules=(__name__, ResearchProfile.__module__),
     )
 
@@ -3169,6 +3177,13 @@ def _research_window(
         protocol_window = getattr(protocol, "time_window", None)
         if isinstance(protocol_window, TimeWindow):
             window = protocol_window
+        if start_date is not None or end_date is not None:
+            if window is None:
+                raise ValueError("research_window_default_missing")
+            window = TimeWindow(
+                window.start if start_date is None else start_date,
+                window.end if end_date is None else end_date,
+            )
     if window is None:
         return {
             "start": "1970-01-01",

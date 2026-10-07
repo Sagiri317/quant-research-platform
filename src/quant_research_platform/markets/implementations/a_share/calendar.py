@@ -61,129 +61,118 @@ def market_type_trading_sessions(
     return _sorted_unique_sessions(normalized.loc[mask, "calendar_date"])
 
 
-def compute_listing_age_trading_days(
+def compute_listing_session_facts(
     frame: pd.DataFrame,
     calendar: pd.DataFrame,
-    *,
-    observation_date_column: str,
-    listing_date_column: str,
-    market_type_column: str | None = None,
-    market_history: pd.DataFrame | None = None,
-) -> pd.Series:
-    """Count open trading sessions from listing date through observation date."""
-
-    for column in (observation_date_column, listing_date_column):
-        if column not in frame.columns:
-            raise ValueError(f"missing_listing_age_column: {column}")
+    market_history: pd.DataFrame,
+) -> pd.DataFrame:
+    """Derive exact age and proven eligibility from evidenced market membership."""
     normalized = _require_normalized_calendar(calendar)
-    if bool(
-        normalized.duplicated(["source_market_type", "calendar_date"], keep=False).any()
-    ):
+    if normalized.duplicated(["source_market_type", "calendar_date"]).any():
         raise ValueError("duplicate_trading_calendar_key")
-
-    observation_dates = strict_timestamp_series(
-        frame[observation_date_column],
-        error="invalid_listing_age_timestamp",
+    observations = strict_timestamp_series(
+        frame["timestamp"], error="invalid_listing_age_timestamp"
     ).dt.normalize()
-    listing_dates = strict_timestamp_series(
-        frame[listing_date_column],
-        error="invalid_listing_age_timestamp",
-        allow_null=True,
+    listings = strict_timestamp_series(
+        frame["listing_date"], error="invalid_listing_age_timestamp", allow_null=True
     ).dt.normalize()
-    valid = (
-        listing_dates.notna()
-        & observation_dates.notna()
-        & observation_dates.ge(listing_dates)
+    result = pd.DataFrame(
+        {
+            "listing_age_trading_days": pd.Series(
+                pd.NA, index=frame.index, dtype="Int64"
+            ),
+            "has_252_trading_sessions": pd.Series(
+                pd.NA, index=frame.index, dtype="boolean"
+            ),
+        }
     )
-    result = pd.Series(0, index=frame.index, dtype="Int64")
-    result.loc[listing_dates.isna()] = pd.NA
-    if not bool(valid.any()):
-        return result
-
-    assigned = pd.Series(False, index=frame.index, dtype=bool)
-    market_types = (
-        strict_integer_series(
-            frame[market_type_column],
-            error="invalid_source_market_type",
-        )
-        if market_type_column is not None and market_type_column in frame.columns
-        else pd.Series(pd.NA, index=frame.index, dtype="Float64")
-    )
-
+    before_listing = observations.lt(listings)
+    result.loc[before_listing, "listing_age_trading_days"] = 0
+    result.loc[before_listing, "has_252_trading_sessions"] = False
     trading = strict_bool_series(
-        normalized["is_trading_day"],
-        error="invalid_is_trading_day",
+        normalized["is_trading_day"], error="invalid_is_trading_day"
     )
-    source_market_types = strict_integer_series(
-        normalized["source_market_type"],
-        error="invalid_source_market_type",
+    market_types = strict_integer_series(
+        normalized["source_market_type"], error="invalid_source_market_type"
     )
-    available_market_types = source_market_types.loc[trading]
-    market_sessions = {
-        int(market_type): pd.DatetimeIndex(
+    sessions_by_market = {
+        market: pd.DatetimeIndex(
             sorted(
                 normalized.loc[
-                    trading & source_market_types.eq(market_type),
-                    "calendar_date",
+                    trading & market_types.eq(market), "calendar_date"
                 ].unique()
             )
         )
-        for market_type in source_market_types.unique()
+        for market in market_types.unique()
     }
-    if market_history is not None:
-        observation_groups = frame.groupby("asset_id", sort=False).groups
-        for asset_id, history in market_history.groupby("asset_id", sort=False):
-            indices = observation_groups.get(asset_id)
-            if indices is None:
-                continue
-            indices = frame.loc[indices].index[valid.loc[indices]]
-            if not len(indices):
-                continue
-            history = history.sort_values("timestamp", kind="mergesort")
-            records = tuple(history.itertuples(index=False))
-            result.loc[indices] = 0
-            for index, record in enumerate(records):
-                sessions = market_sessions[record.market_type]
-                left = sessions.searchsorted(
-                    listing_dates.loc[indices].to_numpy(dtype="datetime64[ns]"), "left"
-                )
-                if index:
-                    left = left.clip(
-                        min=sessions.searchsorted(record.timestamp, "left")
-                    )
-                right = sessions.searchsorted(
-                    observation_dates.loc[indices].to_numpy(dtype="datetime64[ns]"),
-                    "right",
-                )
-                if index + 1 < len(records):
-                    right = right.clip(
-                        max=sessions.searchsorted(records[index + 1].timestamp, "left")
-                    )
-                result.loc[indices] += (right - left).clip(min=0)
-            assigned.loc[indices] = True
-    for market_type in sorted(int(value) for value in available_market_types.unique()):
-        market_mask = valid & ~assigned & market_types.eq(market_type)
-        if not bool(market_mask.any()):
-            continue
-        sessions = market_sessions[market_type]
-        if sessions.empty:
-            continue
-        result.loc[market_mask] = _count_sessions_between(
-            sessions,
-            listing_dates.loc[market_mask],
-            observation_dates.loc[market_mask],
+    calendar_dates = pd.DatetimeIndex(sorted(normalized["calendar_date"].unique()))
+    dates_by_market = {
+        market: pd.DatetimeIndex(
+            sorted(normalized.loc[market_types.eq(market), "calendar_date"].unique())
         )
-        assigned.loc[market_mask] = True
-
-    fallback_mask = valid & ~assigned
-    if bool(fallback_mask.any()):
-        unified_sessions = unified_trading_sessions(normalized)
-        if not unified_sessions.empty:
-            result.loc[fallback_mask] = _count_sessions_between(
-                unified_sessions,
-                listing_dates.loc[fallback_mask],
-                observation_dates.loc[fallback_mask],
+        for market in market_types.unique()
+    }
+    history_groups = market_history.groupby("asset_id", sort=False).indices
+    for asset, indices in frame.groupby("asset_id", sort=False).groups.items():
+        history = market_history.iloc[history_groups.get(asset, [])].sort_values(
+            "timestamp", kind="mergesort"
+        )
+        if history.empty:
+            continue
+        records = tuple(history.itertuples(index=False))
+        counts = pd.Series(0, index=indices, dtype="Int64")
+        exact = (
+            listings.loc[indices].ge(records[0].timestamp)
+            & ~before_listing.loc[indices]
+        )
+        for position, record in enumerate(records):
+            active = observations.loc[indices].ge(record.timestamp)
+            if record.market_type not in dates_by_market:
+                exact &= ~active
+                continue
+            sessions = sessions_by_market[record.market_type]
+            starts = (
+                listings.loc[indices]
+                .fillna(record.timestamp)
+                .clip(lower=record.timestamp)
             )
+            left = sessions.searchsorted(
+                starts.to_numpy(dtype="datetime64[ns]"), side="left"
+            )
+            right = sessions.searchsorted(
+                observations.loc[indices].to_numpy(dtype="datetime64[ns]"), side="right"
+            )
+            if position + 1 < len(records):
+                right = right.clip(
+                    max=sessions.searchsorted(
+                        records[position + 1].timestamp, side="left"
+                    )
+                )
+            counts += (right - left).clip(min=0)
+            ends = observations.loc[indices]
+            if position + 1 < len(records):
+                ends = ends.clip(
+                    upper=records[position + 1].timestamp - pd.Timedelta(days=1)
+                )
+            known_dates = dates_by_market[record.market_type]
+            required_count = calendar_dates.searchsorted(
+                ends, side="right"
+            ) - calendar_dates.searchsorted(starts, side="left")
+            covered_count = known_dates.searchsorted(
+                ends, side="right"
+            ) - known_dates.searchsorted(starts, side="left")
+            covered = (
+                starts.ge(known_dates[0])
+                & ends.le(known_dates[-1])
+                & (required_count == covered_count)
+            )
+            exact &= ~active | covered
+        result.loc[indices[exact], "listing_age_trading_days"] = counts.loc[exact]
+        result.loc[indices[exact], "has_252_trading_sessions"] = counts.loc[exact].ge(
+            252
+        )
+        proven = counts.ge(252) & ~before_listing.loc[indices]
+        result.loc[indices[proven], "has_252_trading_sessions"] = True
     return result
 
 
@@ -206,17 +195,3 @@ def _sorted_unique_sessions(values: pd.Series) -> pd.DatetimeIndex:
         error="invalid_calendar_date",
     ).dt.normalize()
     return pd.DatetimeIndex(sorted(dates.dropna().unique()))
-
-
-def _count_sessions_between(
-    sessions: pd.DatetimeIndex,
-    listing_dates: pd.Series,
-    observation_dates: pd.Series,
-) -> pd.Series:
-    left = sessions.searchsorted(listing_dates.to_numpy(dtype="datetime64[ns]"), "left")
-    right = sessions.searchsorted(
-        observation_dates.to_numpy(dtype="datetime64[ns]"),
-        "right",
-    )
-    ages = (right - left).clip(min=0)
-    return pd.Series(ages, index=listing_dates.index, dtype="int64")

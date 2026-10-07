@@ -481,7 +481,8 @@ def iter_factor_frames(
     previous_mid: float | None = None
     return_tail: deque[float] = deque(maxlen=10)
     mid_tail: deque[float] = deque(maxlen=6)
-    flow_tail: deque[tuple[float, ...]] = deque(maxlen=50)
+    flow_tail: deque[tuple[Fraction, ...]] = deque(maxlen=50)
+    flow_totals = dict.fromkeys((count for count, _ in flow_windows), (0,) * 6)
     active_asset = None
     for source in frames:
         if source.empty:
@@ -598,7 +599,13 @@ def iter_factor_frames(
             if name in needed:
                 output[name] = values
         if "top10_depth_per_spread" in needed:
-            output["top10_depth_per_spread"] = (depth[10][0] + depth[10][1]) / spread
+            output["top10_depth_per_spread"] = [
+                float(
+                    (Fraction(float(bid)) + Fraction(float(ask)))
+                    / Fraction(float(width))
+                )
+                for bid, ask, width in zip(*depth[10], spread, strict=True)
+            ]
         expanded = {
             column: np.full(len(frame), np.nan)
             for column in needed
@@ -612,44 +619,63 @@ def iter_factor_frames(
         for index in range(len(frame)) if flow_columns else ():
             if boundaries[index]:
                 flow_tail.clear()
+                flow_totals = dict.fromkeys(flow_totals, (0,) * 6)
             bid, ask = depth[1][0][index], depth[1][1][index]
-            flow_tail.append(
-                (signed[index], buys[index], sells[index], ofi[index], bid + ask)
+            current = tuple(
+                Fraction(float(value))
+                for value in (
+                    signed[index],
+                    buys[index],
+                    sells[index],
+                    ofi[index],
+                    bid,
+                    ask,
+                )
             )
-            history = list(flow_tail)
+            for count, totals in flow_totals.items():
+                expired = flow_tail[-count] if len(flow_tail) >= count else (0,) * 6
+                flow_totals[count] = tuple(
+                    total + value - old
+                    for total, value, old in zip(totals, current, expired, strict=True)
+                )
+            flow_tail.append(current)
             for count, suffix in flow_windows:
                 if len(flow_tail) < count:
                     continue
-                window = history[-count:]
-                volume = math.fsum(row[1] + row[2] for row in window)
+                signed_total, buy_total, sell_total, total_ofi, bid_total, ask_total = (
+                    flow_totals[count]
+                )
+                volume = buy_total + sell_total
                 if volume > 0 and f"trade_flow_imbalance_{suffix}" in needed:
-                    expanded[f"trade_flow_imbalance_{suffix}"][index] = (
-                        math.fsum(row[0] for row in window) / volume
+                    expanded[f"trade_flow_imbalance_{suffix}"][index] = float(
+                        signed_total / volume
                     )
                 if count > 1:
-                    total_ofi = math.fsum(row[3] for row in window)
                     if f"ofi_{suffix}" in needed:
-                        expanded[f"ofi_{suffix}"][index] = total_ofi
-                    average_depth = math.fsum(row[4] / count for row in window)
-                    if average_depth > 0 and f"depth_normalized_ofi_{suffix}" in needed:
-                        expanded[f"depth_normalized_ofi_{suffix}"][index] = (
-                            total_ofi / average_depth
+                        expanded[f"ofi_{suffix}"][index] = float(total_ofi)
+                    total_depth = bid_total + ask_total
+                    if total_depth > 0 and f"depth_normalized_ofi_{suffix}" in needed:
+                        expanded[f"depth_normalized_ofi_{suffix}"][index] = float(
+                            total_ofi * count / total_depth
                         )
                 if count == 5:
                     if bid > 0 and "taker_sell_pressure_500ms" in needed:
-                        expanded["taker_sell_pressure_500ms"][index] = (
-                            math.fsum(row[2] for row in window) / bid
+                        expanded["taker_sell_pressure_500ms"][index] = float(
+                            sell_total / current[4]
                         )
                     if ask > 0 and "taker_buy_pressure_500ms" in needed:
-                        expanded["taker_buy_pressure_500ms"][index] = (
-                            math.fsum(row[1] for row in window) / ask
+                        expanded["taker_buy_pressure_500ms"][index] = float(
+                            buy_total / current[5]
                         )
         if "near_depth_share_1_10" in needed:
-            total10 = depth[10][0] + depth[10][1]
-            positive = total10 > 0
-            expanded["near_depth_share_1_10"][positive] = (
-                depth[1][0][positive] + depth[1][1][positive]
-            ) / total10[positive]
+            for index, (bid1, ask1, bid10, ask10) in enumerate(
+                zip(*depth[1], *depth[10], strict=True)
+            ):
+                total10 = Fraction(float(bid10)) + Fraction(float(ask10))
+                if total10 > 0:
+                    expanded["near_depth_share_1_10"][index] = float(
+                        (Fraction(float(bid1)) + Fraction(float(ask1))) / total10
+                    )
         for level in (1, 5):
             if f"imbalance_{level}_minus_10" in needed:
                 expanded[f"imbalance_{level}_minus_10"] = (
@@ -671,7 +697,6 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
     active_segment = previous_time = active_epoch = None
     states = {}
     liquidations = deque()
-    last_liquidation = None
     oi_values = [np.nan] * 3001
     invalid_prefix = [0] * 3001
     count = invalid = 0
@@ -717,16 +742,13 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
             for row, stamp in enumerate(timestamps):
                 decision_ns = int(stamp) * 1_000_000
                 if boundaries[row]:
-                    states.clear()
                     liquidations.clear()
-                    last_liquidation = None
                     count = invalid = 0
                 while event is not None and event[0] <= decision_ns:
                     observed_ns, channel, payload, epoch = event
                     if active_epoch is not None and epoch != active_epoch:
                         states.clear()
                         liquidations.clear()
-                        last_liquidation = None
                         count = invalid = 0
                     active_epoch = epoch
                     if channel is None:
@@ -737,14 +759,15 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
                         # z is observed cumulative filled base quantity, not order q.
                         order = payload["o"]
                         quantity = float(order["z"])
-                        if observed_ns > decision_ns - 30_000_000_000:
+                        if observed_ns > decision_ns - 30_000_000_000 and (
+                            count or observed_ns > decision_ns - 100_000_000
+                        ):
                             liquidations.append(
                                 (
                                     observed_ns,
                                     quantity if order["S"] == "BUY" else -quantity,
                                 )
                             )
-                        last_liquidation = observed_ns
                     event = next(events, None)
                 fresh = {}
                 for channel, (observed_ns, payload) in states.items():
@@ -810,18 +833,18 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
                 for seconds, suffix in ((5, "5s"), (30, "30s")):
                     if "forceOrder" in fresh and count + 1 >= seconds * 10:
                         window = [
-                            quantity
+                            Fraction(quantity)
                             for observed, quantity in liquidations
                             if observed > decision_ns - seconds * 1_000_000_000
                         ]
-                        total = math.fsum(abs(quantity) for quantity in window)
+                        total = sum(abs(quantity) for quantity in window)
                         if total > 0:
                             values["observed_force_order_imbalance_" + suffix][row] = (
-                                math.fsum(window) / total
+                                float(sum(window) / total)
                             )
-                if last_liquidation is not None and "forceOrder" in fresh:
+                if "forceOrder" in fresh:
                     values["time_since_observed_force_order"][row] = (
-                        decision_ns - last_liquidation
+                        decision_ns - states["forceOrder"][0]
                     ) / 1_000_000_000
                 for channel, name, field in ratio_fields:
                     if channel in fresh:
@@ -1079,7 +1102,17 @@ def iter_external_context_frames(
     bins = deque(maxlen=5)
     count = 0
     latest_quote = latest_trade = latest_ticker = None
-    multiplier = Fraction(str(base_units_per_amount))
+    if venue == "okx":
+        before = Fraction(str(base_units_per_amount["before"]))
+        after = Fraction(str(base_units_per_amount["after"]))
+        transition_start = (
+            pd.Timestamp(base_units_per_amount["transition_start"]).value // 1000
+        )
+        transition_end = (
+            pd.Timestamp(base_units_per_amount["transition_end"]).value // 1000
+        )
+    else:
+        multiplier = Fraction(str(base_units_per_amount))
     with (
         closing_iterator(iter(quotes)) as quote_rows,
         closing_iterator(iter(trades)) as trade_rows,
@@ -1114,6 +1147,15 @@ def iter_external_context_frames(
                 while trade is not None and trade["local_timestamp"] <= decision_us:
                     latest_trade = trade
                     if trade["local_timestamp"] > decision_us - 100_000:
+                        if venue == "okx":
+                            event_time = trade["timestamp"]
+                            if transition_start <= event_time < transition_end:
+                                raise ValueError(
+                                    "external_contract_face_value_transition_unproven"
+                                )
+                            multiplier = (
+                                before if event_time < transition_start else after
+                            )
                         quantity = Fraction(trade["amount"]) * multiplier
                         notional = quantity * Fraction(trade["price"])
                         if trade["side"] == "buy":

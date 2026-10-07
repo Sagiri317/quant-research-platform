@@ -6,7 +6,6 @@ import datetime as dt
 import pickle
 import sys
 from contextlib import ExitStack, contextmanager
-from copy import deepcopy
 from dataclasses import dataclass, field
 from fractions import Fraction
 from functools import partial
@@ -395,7 +394,7 @@ class TardisArchive:
                 > end_ns
             ):
                 return
-            yield deepcopy(record)
+            yield record
 
     def funding_root(self, symbol):
         return self.root / "funding" / symbol / "observations"

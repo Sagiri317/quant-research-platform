@@ -14,7 +14,6 @@ EXECUTION_MASK_ID = "execution_mask"
 PRICE_VOLUME_DATA_ID = "price_volume_facts"
 FUNDAMENTAL_PIT_ID = "fundamental_pit"
 FUNDAMENTAL_DATA_ID = "fundamental_factors"
-EXPECTATIONS_DATA_ID = "expectations_factors"
 FORWARD_RETURNS_DATA_ID = "forward_returns"
 
 FORMAL_BENCHMARKS = MappingProxyType(

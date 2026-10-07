@@ -685,17 +685,8 @@ class PortfolioCandidateSpec:
         if self.construction == "benchmark_enhanced":
             if self.top_quantile is not None or self.benchmark_id is None:
                 raise ValueError("portfolio_candidate_construction_invalid")
-            if (
-                type(self.risk_style_columns) is not tuple
-                or not self.risk_style_columns
-                or not all(
-                    type(column) is str and column for column in self.risk_style_columns
-                )
-                or len(set(self.risk_style_columns)) != len(self.risk_style_columns)
-            ):
+            if not self.risk_style_columns:
                 raise ValueError("portfolio_candidate_risk_styles_invalid")
-            if not self.risk_context_target_ids:
-                raise ValueError("portfolio_candidate_risk_context_invalid")
         else:
             if self.top_quantile is None or self.benchmark_id is not None:
                 raise ValueError("portfolio_candidate_construction_invalid")

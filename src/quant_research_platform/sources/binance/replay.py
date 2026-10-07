@@ -12,6 +12,8 @@ import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields
+from decimal import Decimal
+from fractions import Fraction
 from itertools import groupby
 from pathlib import Path
 from typing import Any
@@ -24,6 +26,7 @@ from quant_research_platform.contracts.order_book import (
     BookBoundary,
     BookState,
     TradeEvent,
+    _price_to_index,
     observation_order_key,
     price_to_index,
     validate_price_unit,
@@ -330,16 +333,17 @@ class ObservationCoverage:
         ):
             raise ValueError("binance_coverage_window_non_monotonic")
         self.last_bounds = (start_ns, end_ns)
-        while self.active and self.active[0][0] <= end_ns:
+        while self.active and self.active[0][0] <= start_ns:
             heapq.heappop(self.active)
-        while (
-            self.position < len(self.rows) and self.rows[self.position][0] <= start_ns
-        ):
-            _, closed_ns, observation_id = self.rows[self.position]
+        while self.position < len(self.rows) and self.rows[self.position][0] <= end_ns:
+            opened_ns, closed_ns, observation_id = self.rows[self.position]
             self.position += 1
-            if closed_ns > end_ns:
-                heapq.heappush(self.active, (closed_ns, observation_id))
-        return tuple(item[1] for item in self.active[:2])
+            if closed_ns > start_ns and opened_ns < closed_ns:
+                heapq.heappush(self.active, (closed_ns, observation_id, opened_ns))
+        if len(self.active) != 1:
+            return ()
+        closed_ns, observation_id, opened_ns = self.active[0]
+        return (observation_id,) if opened_ns <= start_ns and closed_ns > end_ns else ()
 
     def intervals(self):
         """Yield only unambiguous half-open coverage in chronological order."""
@@ -1208,7 +1212,7 @@ def _validate_raw_record(value: object, *, metadata: dict[str, Any]) -> None:
 def _levels(
     value: object,
     *,
-    price_unit: str,
+    price_unit: Fraction,
     error: str,
     allow_zero: bool,
 ) -> dict[int, float]:
@@ -1218,7 +1222,7 @@ def _levels(
     for level in value:
         if not isinstance(level, list) or len(level) != 2:
             raise ValueError(error)
-        price_index = price_to_index(level[0], price_unit, error=error)
+        price_index = _price_to_index(level[0], price_unit, error=error)
         quantity = strict_non_negative_float(level[1], error=error)
         if not allow_zero and quantity == 0:
             raise ValueError(error)
@@ -1263,6 +1267,7 @@ class DepthReconstructor:
             raise ValueError("binance_replay_connection_coverage_invalid")
         self.market_type = market_type
         self.price_unit = validate_price_unit(price_unit)
+        self._price_unit = Fraction(Decimal(self.price_unit))
         self.required_levels = required_levels
         self.output_levels = output_levels
         self.connection_close_ns = connection_close_ns
@@ -1272,7 +1277,7 @@ class DepthReconstructor:
         self._segment_id: str | None = None
         self._observation_id: str | None = None
         self._last_update_id: int | None = None
-        self._last_time: int | None = None
+        self._last_times: tuple[int, int | None, int] | None = None
         self._known_bid_floor_tick: int | None = None
         self._known_ask_ceiling_tick: int | None = None
         self._bootstrapped = False
@@ -1291,13 +1296,13 @@ class DepthReconstructor:
         segment_id, observation_id = _record_identity(record)
         bids = _levels(
             payload.get("bids"),
-            price_unit=self.price_unit,
+            price_unit=self._price_unit,
             error="binance_replay_snapshot_bids_invalid",
             allow_zero=False,
         )
         asks = _levels(
             payload.get("asks"),
-            price_unit=self.price_unit,
+            price_unit=self._price_unit,
             error="binance_replay_snapshot_asks_invalid",
             allow_zero=False,
         )
@@ -1314,7 +1319,7 @@ class DepthReconstructor:
             payload.get("lastUpdateId"),
             error="binance_replay_snapshot_id_invalid",
         )
-        self._last_time = None
+        self._last_times = None
         self._bootstrapped = False
         self._invalid = False
 
@@ -1367,13 +1372,13 @@ class DepthReconstructor:
             return self._invalidate(record, "sequence_gap")
         bid_updates = _levels(
             payload.get("b"),
-            price_unit=self.price_unit,
+            price_unit=self._price_unit,
             error="binance_replay_delta_bids_invalid",
             allow_zero=True,
         )
         ask_updates = _levels(
             payload.get("a"),
-            price_unit=self.price_unit,
+            price_unit=self._price_unit,
             error="binance_replay_delta_asks_invalid",
             allow_zero=True,
         )
@@ -1398,10 +1403,10 @@ class DepthReconstructor:
             record,
             market_type=self.market_type,
         )
-        if self._last_time is not None and observed_time < self._last_time:
+        if self._last_times is not None and observed_time < self._last_times[2]:
             self.stats.non_monotonic_timestamps += 1
             raise ValueError("binance_replay_observed_time_non_monotonic")
-        self._last_time = observed_time
+        self._last_times = (event_time, transaction_time, observed_time)
         self._last_update_id = last
         if not self._bootstrapped:
             self._bootstrapped = True
@@ -1420,10 +1425,9 @@ class DepthReconstructor:
             return
         if not result:
             return
-        event_time, transaction_time, observed_time = _record_times(
-            record, market_type=self.market_type
-        )
-        segment_id, observation_id = _record_identity(record)
+        assert self._last_times is not None
+        event_time, transaction_time, observed_time = self._last_times
+        segment_id, observation_id = self._segment_id, self._observation_id
         last = self._last_update_id
         assert last is not None
         state = BookState(

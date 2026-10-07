@@ -74,11 +74,12 @@ def compute_ic_and_grouped_label_values_from_validated_panel(
                     signal_valid,
                     label_valid,
                 )
+                signal_ranks = _average_ranks(signal_valid)
                 rankic, rankic_reason = _pearson_correlation_result(
-                    _average_ranks(signal_valid),
+                    signal_ranks,
                     _average_ranks(label_valid),
                 )
-                groups = _assign_groups_array(signal_valid, n_groups)
+                groups = _assign_groups_from_ranks(signal_ranks, n_groups)
                 for group in np.unique(groups):
                     group_mask = groups == group
                     grouped_records.append(
@@ -168,6 +169,19 @@ class _CorrelationMoments:
         self.left_square += x * x
         self.right_square += y * y
         self.product += x * y
+
+    def remove(self, left: float, right: float) -> None:
+        """Remove a previously observed pair from the retained rolling window."""
+        left_numerator, left_denominator = left.as_integer_ratio()
+        right_numerator, right_denominator = right.as_integer_ratio()
+        x = left_numerator << (self.exponent - left_denominator.bit_length() + 1)
+        y = right_numerator << (self.exponent - right_denominator.bit_length() + 1)
+        self.count -= 1
+        self.left_sum -= x
+        self.right_sum -= y
+        self.left_square -= x * x
+        self.right_square -= y * y
+        self.product -= x * y
 
     def averages(self) -> tuple[Fraction, Fraction, Fraction, Fraction, Fraction]:
         """Return exact first and second raw moments in observation units."""
@@ -273,10 +287,8 @@ def _stable_zscore(values: pd.Series) -> pd.Series:
     return pd.Series(output, index=values.index)
 
 
-def _assign_groups_array(values: np.ndarray, n_groups: int) -> np.ndarray:
-    lower_ranks, upper_ranks = _ordinal_rank_bounds(values)
-    ranks = (lower_ranks + upper_ranks) / 2.0
-    group_count = min(n_groups, len(values))
+def _assign_groups_from_ranks(ranks: np.ndarray, n_groups: int) -> np.ndarray:
+    group_count = min(n_groups, len(ranks))
     zero_based = np.floor((ranks - 1.0) * group_count / len(ranks))
     return np.clip(zero_based.astype("int64") + 1, 1, group_count)
 
@@ -299,17 +311,6 @@ def _average_ranks(values: np.ndarray) -> np.ndarray:
     return (lower_ranks + upper_ranks) / 2.0
 
 
-def _safe_ratio(numerator: float, denominator: float, *, valid_count: int) -> float:
-    if (
-        valid_count < 2
-        or not np.isfinite(numerator)
-        or not np.isfinite(denominator)
-        or denominator == 0
-    ):
-        return np.nan
-    return float(numerator / denominator)
-
-
 def _summarize_correlation_aggregates(
     *,
     count: int,
@@ -330,14 +331,19 @@ def _summarize_correlation_aggregates(
     variance = m2 / count
     with localcontext() as context:
         context.prec = 80
-        std = float(
-            (Decimal(variance.numerator) / Decimal(variance.denominator)).sqrt()
+        deviation = (Decimal(variance.numerator) / Decimal(variance.denominator)).sqrt()
+        std = float(deviation)
+        ratio = (
+            float(Decimal(mean.numerator) / Decimal(mean.denominator) / deviation)
+            if count >= 2 and deviation > 0
+            else np.nan
         )
     # A nonzero scale that rounds to zero is unrepresentable, not constant.
     if 0 < variance <= (Fraction(ulp(0.0)) / 2) ** 2:
         std = np.nan
     mean = float(mean)
-    ratio = _safe_ratio(mean, std, valid_count=count)
+    if not np.isfinite(std):
+        ratio = np.nan
     return {
         "mean": mean,
         "std": std,

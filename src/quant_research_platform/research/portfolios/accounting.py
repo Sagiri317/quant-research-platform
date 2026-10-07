@@ -1187,12 +1187,10 @@ def capacity_quantiles(
     ).dropna()
     if values.empty:
         raise ValueError("capacity_observations_empty")
-    annual = values.groupby(values.index.year).quantile(0.05).to_dict()
     return {
         "formal_p05": float(values.quantile(0.05)),
         "median": float(values.median()),
         "minimum": float(values.min()),
-        "annual_p05": {str(year): float(value) for year, value in annual.items()},
     }
 
 

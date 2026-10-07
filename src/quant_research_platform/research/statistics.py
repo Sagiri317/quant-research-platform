@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations
 from math import comb, e
+from statistics import mean as _mean
 from typing import Literal
 
 import numpy as np
@@ -234,7 +235,7 @@ def stationary_bootstrap_mean_ci(
         raise ValueError("confidence_invalid")
     bootstrap = StationaryBootstrap(block_size, data, seed=seed)
     interval = bootstrap.conf_int(
-        lambda sample: np.array([np.mean(sample)]),
+        lambda sample: np.array([float(_mean(sample))]),
         reps=repetitions,
         method="percentile",
         size=confidence,
@@ -242,7 +243,7 @@ def stationary_bootstrap_mean_ci(
     if not np.isfinite(interval).all() or interval[0, 0] > interval[1, 0]:
         raise ValueError("bootstrap_inference_undefined")
     return BootstrapInterval(
-        mean=float(np.mean(data)),
+        mean=float(_mean(data)),
         lower=float(interval[0, 0]),
         upper=float(interval[1, 0]),
         block_size=block_size,
@@ -618,23 +619,42 @@ def fama_macbeth_period(
     )
     if np.linalg.matrix_rank(x.to_numpy(dtype="float64")) != x.shape[1]:
         raise ValueError("fama_macbeth_period_insufficient")
+    _, target_exponent = np.frexp(float(np.max(np.abs(y))))
+    target_values = np.ldexp(y, -target_exponent)
+    target_differences = target_values - target_values.iloc[0]
+    target_offset = float(np.mean(target_differences))
+    target_centered = target_differences - target_offset
+    target_scale = float(np.max(np.abs(target_centered))) or 1.0
+    target = target_centered / target_scale
     if weight_column is None:
-        fit = sm.OLS(y, x).fit()
+        fit = sm.OLS(target, x).fit()
     else:
         weights = numeric[weight_column]
         if bool((weights <= 0.0).any()):
             raise ValueError("fama_macbeth_weights_invalid")
-        fit = sm.WLS(y, x, weights=weights).fit()
+        fit = sm.WLS(target, x, weights=weights).fit()
     residual_scale = float(np.max(np.abs(fit.resid)))
-    fit_scale = max(float(np.max(np.abs(y))), float(np.max(np.abs(fit.fittedvalues))))
+    fit_scale = max(
+        float(np.max(np.abs(target_values))),
+        float(
+            np.max(
+                np.abs(
+                    fit.fittedvalues * target_scale
+                    + target_offset
+                    + target_values.iloc[0]
+                )
+            )
+        ),
+    )
     white_p_value = None
-    if residual_scale > 32 * np.finfo("float64").eps * fit_scale:
+    if residual_scale * target_scale > 32 * np.finfo("float64").eps * fit_scale:
         try:
             # White LM needs the auxiliary R-squared, not its unused F statistic.
             left, right = np.triu_indices(x.shape[1])
             regressors = x.to_numpy(dtype="float64", copy=False)
             auxiliary = sm.OLS(
-                np.square(fit.resid), regressors[:, left] * regressors[:, right]
+                np.square(fit.resid / residual_scale),
+                regressors[:, left] * regressors[:, right],
             ).fit()
             white_p_value = float(
                 chi2.sf(len(numeric) * auxiliary.rsquared, auxiliary.df_model)
@@ -644,9 +664,55 @@ def fama_macbeth_period(
         except (AssertionError, ValueError):
             white_p_value = None
     coefficients = fit.params.copy()
-    scaled_slopes = fit.params.loc[list(factor_columns)].to_numpy() / scales
-    coefficients.loc[list(factor_columns)] = np.ldexp(scaled_slopes, -exponents)
-    coefficients.loc["const"] -= np.dot(scaled[0] + offsets, scaled_slopes)
+    unit = Fraction(2) ** int(target_exponent)
+    try:
+        if len(factor_columns) == 1:
+            total = sx = sy = xx = xy = Fraction()
+            weights = (
+                np.ones(len(numeric))
+                if weight_column is None
+                else numeric[weight_column].to_numpy(dtype="float64")
+            )
+            for left, right, weight in zip(values[:, 0], y, weights, strict=True):
+                left, right, weight = map(Fraction, map(float, (left, right, weight)))
+                total += weight
+                sx += weight * left
+                sy += weight * right
+                xx += weight * left * left
+                xy += weight * left * right
+            slope = (total * xy - sx * sy) / (total * xx - sx * sx)
+            coefficients.loc[factor_columns[0]] = float(slope)
+            coefficients.loc["const"] = float((sy - slope * sx) / total)
+        else:
+            slopes = [
+                Fraction(float(value)) * Fraction(target_scale) / Fraction(float(scale))
+                for value, scale in zip(
+                    fit.params.loc[list(factor_columns)], scales, strict=True
+                )
+            ]
+            coefficients.loc[list(factor_columns)] = [
+                float(slope * unit / (Fraction(2) ** int(exponent)))
+                for slope, exponent in zip(slopes, exponents, strict=True)
+            ]
+            coefficients.loc["const"] = float(
+                (
+                    Fraction(float(target_values.iloc[0]))
+                    + Fraction(target_offset)
+                    + Fraction(float(fit.params["const"])) * Fraction(target_scale)
+                    - sum(
+                        (
+                            (Fraction(float(origin)) + Fraction(float(offset))) * slope
+                            for origin, offset, slope in zip(
+                                scaled[0], offsets, slopes, strict=True
+                            )
+                        ),
+                        Fraction(),
+                    )
+                )
+                * unit
+            )
+    except OverflowError:
+        raise ValueError("fama_macbeth_coefficients_unrepresentable") from None
     return FamaMacBethPeriodResult(
         coefficients=coefficients,
         white_p_value=white_p_value,

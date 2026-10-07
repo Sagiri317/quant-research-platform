@@ -390,3 +390,158 @@ def test_extreme_finite_eps_medians_and_mad_persist_without_intermediate_overflo
     assert saved.forward_earnings_yield_fy1.iloc[-1] == (0.0 if symmetric else 1.0)
     assert saved.forward_earnings_yield_fy2.iloc[-1] == (0.0 if symmetric else 1.0)
     assert saved.forecast_dispersion_fy1.iloc[-1] == (scale if symmetric else 0.0)
+
+
+@pytest.mark.parametrize("same_institution", (False, True))
+@pytest.mark.parametrize("close", (0.5, np.nextafter(0.0, 1.0)))
+def test_half_subnormal_forecast_centers_survive_both_medians(
+    tmp_path, same_institution, close
+):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    small = np.nextafter(0.0, 1.0)
+    dates = pd.bdate_range("2020-01-02", periods=2).as_unit("ns")
+    records = pd.DataFrame(
+        [
+            {
+                "source_asset_id": "asset",
+                "declare_date": dates[0],
+                "forecast_end_date": pd.Timestamp(f"{year}-12-31"),
+                "institution_id": institution,
+                "forecast_eps": eps,
+            }
+            for year in (2020, 2021)
+            for institution, eps in (
+                [
+                    (institution, value)
+                    for institution in "abc"
+                    for value in (0.0, small)
+                ]
+                if same_institution
+                else list(zip("abcd", (0.0, 0.0, small, small), strict=True))
+            )
+        ]
+    )
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": "asset",
+            "timestamp": dates,
+            "close": close,
+        }
+    )
+    spec = research_profile().processed.get("expectations_factors")
+    output = producer._compute_processed_frame(
+        spec,
+        source={"analyst_forecast": records},
+        dependencies={"market_panel_1d": panel},
+        trading_sessions=dates,
+    )
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, output, spec=spec)
+    saved = read_dataset(root)
+    expected = small if close == 0.5 else 0.5
+    assert saved.forward_earnings_yield_fy1.iloc[-1] == expected
+    assert saved.forward_earnings_yield_fy2.iloc[-1] == expected
+
+
+@pytest.mark.parametrize("freshness", (90, 180))
+def test_bound_freshness_drives_native_source_window_and_processed_identity(
+    tmp_path, freshness
+):
+    import json
+
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.research_configuration import research_configuration
+    from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
+
+    config = research_configuration("a_share", "fusion_nf_expectations")
+    config["evaluation"]["forecast_freshness_days"] = freshness
+    profile = bind_research_configuration(research_profile(), config)
+    spec = profile.processed.get("expectations_factors")
+    assert json.loads(spec.parameters_json)["freshness_days"] == freshness
+    dates = pd.bdate_range("2020-06-02", periods=2).as_unit("ns")
+    window = TimeWindow(dates[0], dates[-1])
+    layout = StorageLayout(tmp_path)
+    source = _synthetic_interim_frames(dates)
+    panel_spec = profile.processed.get("market_panel_1d")
+    panel = producer._compute_processed_frame(
+        panel_spec,
+        source={
+            **producer._prepare_panel_source(source),
+            "market_bars_1d": source["market_bars_1d"],
+        },
+        dependencies={},
+        trading_sessions=dates,
+    )
+    write_dataset(
+        layout.processed_data_root(
+            panel_spec.market_id, panel_spec.kind, panel_spec.data_id
+        ),
+        panel,
+        spec=panel_spec,
+    )
+    records = pd.DataFrame(
+        [
+            dict(
+                source_asset_id="000001",
+                timestamp=dates[0] - pd.Timedelta(days=age),
+                report_id=str(i),
+                analyst_ids=str(i),
+                declare_date=dates[0] - pd.Timedelta(days=age),
+                forecast_end_date=pd.Timestamp("2020-12-31"),
+                institution_id=str(i),
+                forecast_eps=float(i + 1),
+                forecast_pe=10.0,
+            )
+            for i, age in enumerate((120, 120, 120, 1))
+        ]
+    )
+    source_spec = profile.interim.get("analyst_forecast")
+    write_dataset(
+        layout.interim_data_root(source_spec.source_id, source_spec.data_id),
+        records,
+        spec=source_spec,
+    )
+    planned = profile.protocol(config["scenario_id"]).target_window(
+        "data materialize", source_spec, window
+    )
+    assert planned.start == dates[0] - pd.Timedelta(days=freshness)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with producer.produce_a_share_processed_data(
+        spec,
+        layout=layout,
+        time_window=window,
+        processed_catalog=profile.processed,
+        source_catalog=profile.interim,
+    ) as (frames, metadata, verify):
+        write_dataset(
+            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
+        )
+    saved = read_dataset(root).query("asset_id == '000001'")
+    if freshness == 90:
+        assert saved.forward_earnings_yield_fy1.isna().all()
+    else:
+        expected_close = panel.query("asset_id == '000001'").close.to_numpy()
+        np.testing.assert_array_equal(
+            saved.forward_earnings_yield_fy1, 2.5 / expected_close
+        )
+    assert profile.protocol(config["scenario_id"]).manifest()["expectations"][
+        "role"
+    ] == ("primary" if freshness == 90 else "robustness")

@@ -366,6 +366,7 @@ _ARROW_SCHEMAS = {
     ),
     "holding_factor_returns.parquet": pa.schema(
         [
+            pa.field("attribution_group", pa.string(), nullable=False),
             pa.field("decision_at", pa.timestamp("ns")),
             pa.field("entry_at", pa.timestamp("ns")),
             pa.field("end_at", pa.timestamp("ns")),
@@ -958,13 +959,13 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
         )
         defined = result.status.eq("DEFINED")
         bootstrap_defined = result.bootstrap_status.eq("DEFINED")
+        fdr_defined = defined & result.fdr_method.eq("BY")
         measurements = (
             "standard_error",
             "t_statistic",
             "p_value",
             "ci_lower",
             "ci_upper",
-            "fdr_adjusted_p_value",
         )
         bootstrap = ("bootstrap_lower", "bootstrap_upper")
         if (
@@ -991,7 +992,9 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             .str.strip()
             .eq("")
             .any()
-            or (not result.fdr_method.eq("BY").all())
+            or (not result.fdr_method.isin(("BY", "NOT_APPLICABLE")).all())
+            or result.loc[fdr_defined, "fdr_adjusted_p_value"].isna().any()
+            or result.loc[~fdr_defined, "fdr_adjusted_p_value"].notna().any()
             or (not result.fdr_alpha.between(0, 1, inclusive="neither").all())
             or (not result.confidence.between(0, 1, inclusive="neither").all())
             or (not result.fdr_family_size.eq(len(result)).all())
@@ -1144,7 +1147,11 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             ),
             "portfolio_robustness.parquet": ("candidate_id", "test_id"),
             "portfolio_exposures.parquet": ("candidate_id", "entry_at", "factor_id"),
-            "holding_factor_returns.parquet": ("entry_at", "factor_id"),
+            "holding_factor_returns.parquet": (
+                "attribution_group",
+                "entry_at",
+                "factor_id",
+            ),
         }[member]
         if result.duplicated(list(keys)).any():
             raise ValueError("statistics_table_duplicate_keys")

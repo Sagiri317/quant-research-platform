@@ -69,6 +69,7 @@ PANEL_COLUMNS = (
     "listing_date",
     "delisting_date",
     "listing_age_trading_days",
+    "has_252_trading_sessions",
     "industry_standard_id",
     "industry_level1_code",
     "industry_level1_name",

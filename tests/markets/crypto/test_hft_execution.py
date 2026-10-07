@@ -81,6 +81,31 @@ def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
     )
     assert result["created_orders"] == 4
     assert [fill["timestamp_ms"] for fill in fills] == [650]
+    assert "inventory_target" not in result and "inventory_skew" not in result
+
+
+def test_fixed_maker_inventory_controls_change_real_fill_quantity():
+    quantities = []
+    for target, skew in ((0.0, 1.0), (-1.0, 1.0), (-1.0, 0.0)):
+        fills = []
+        result = simulate_maker(
+            [_state(0), _state(200)],
+            [_trade(50, price="99.5", quantity="4", maker_buyer=True)],
+            [_quote(0, book_segment_id="s1")],
+            config=replace(
+                _maker_config(), inventory_target=target, inventory_skew=skew
+            ),
+            observed_coverage={"s1": _coverage(0, 201)},
+            trade_coverage={"trade-connection-1": _coverage(0, 201)},
+            on_fill=fills.append,
+            capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            funding_events=(),
+        )
+        assert result["inventory_target"] == target
+        assert result["inventory_skew"] == skew
+        quantities.append(sum(fill["fill_qty"] for fill in fills))
+    assert quantities == [1.0, 0.5, 1.0]
 
 
 def _state(
@@ -900,3 +925,18 @@ def test_pending_markout_fifo_preserves_maturity_order_with_pending_suffix():
         assert completed == list(range(20))
         pending.expire_all()
         assert completed == list(range(30))
+
+
+def test_fee_stress_keeps_representable_extreme_change():
+    from fractions import Fraction
+
+    row = fixed_turnover_cost_sensitivity(
+        turnover=100.0,
+        net_pnl=0.0,
+        base_fee_bps=0.0,
+        fee_scenarios_bps=(1e308,),
+        additional_spread_scenarios_bps=(0.0,),
+    )[0]
+    expected = float(Fraction(100) * Fraction(1e308) / 10000)
+    assert row["cost_delta"] == expected
+    assert row["net_pnl"] == -expected

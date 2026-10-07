@@ -201,8 +201,13 @@ def require_fee_coverage(
         raise ValueError("a_share_fee_coverage_request_invalid")
     if len(set(markets)) != len(markets):
         raise ValueError("a_share_fee_coverage_request_invalid")
-    current = start_date
-    while current <= end_date:
+    boundaries = {start_date}
+    for rule in schedule.rules:
+        if start_date < rule.effective_date <= end_date:
+            boundaries.add(rule.effective_date)
+        if start_date <= rule.end_date < end_date:
+            boundaries.add(rule.end_date + timedelta(days=1))
+    for current in sorted(boundaries):
         for market in markets:
             for side, required in (
                 ("buy", {"BROKER_COMMISSION", "TRANSFER_FEE"}),
@@ -218,7 +223,6 @@ def require_fee_coverage(
                 }
                 if not required.issubset(available):
                     raise ValueError("a_share_fee_schedule_coverage_missing")
-        current += timedelta(days=1)
 
 
 @dataclass(frozen=True)

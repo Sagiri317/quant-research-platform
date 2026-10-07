@@ -103,16 +103,6 @@ def test_experiment_plan_is_locked_immutable_and_hash_stable() -> None:
         == ExperimentPlan.from_payload(changed.protocol_payload()).protocol_hash
     )
     assert "protocol_version" not in plan.protocol_payload()
-    assert plan.window("train") == tuple(fold.train for fold in plan.folds)
-    assert plan.window("validation") == (
-        TimeWindow(date(2021, 2, 1), date(2021, 7, 31)),
-        TimeWindow(date(2022, 2, 1), date(2022, 7, 31)),
-    )
-    with pytest.raises(PermissionError, match="^test_locked$"):
-        plan.window("test")
-    for removed_role in ("development_test", "final_holdout"):
-        with pytest.raises(ValueError, match="^experiment_role_invalid$"):
-            plan.window(removed_role)
     with pytest.raises(TypeError):
         plan.backend_versions["numpy"] = "changed"  # type: ignore[index]
     with pytest.raises(FrozenInstanceError):

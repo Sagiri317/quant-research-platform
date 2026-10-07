@@ -3068,3 +3068,107 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
     assert created == closed == [True]
     assert callbacks == consumed == []
     assert filesystem_read_bytes(marker) == b"unchanged"
+
+
+@pytest.mark.parametrize(
+    "start,end,expected_start,expected_end",
+    [
+        ("2020-01-01", None, "2020-01-01", "2023-12-31"),
+        (None, "2020-12-31", "2019-01-01", "2020-12-31"),
+        ("2020-01-01", "2020-12-31", "2020-01-01", "2020-12-31"),
+    ],
+)
+def test_materialize_single_endpoint_matches_public_plan_and_execute(
+    tmp_path, start, end, expected_start, expected_end
+):
+    from typer.testing import CliRunner
+
+    from quant_research_platform.interfaces.cli.commands import app
+    from quant_research_platform.profiles.research import bind_research_configuration
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from tests.sources.reference.test_interim import _write_reference_root
+
+    profile = bind_research_configuration(research_profile(), research_configuration())
+    target = "a_share_fee_schedule"
+    raw = _write_reference_root(tmp_path / "raw")
+    expected = {"start": expected_start, "end": expected_end, "access": "development"}
+    api_layout = StorageLayout(tmp_path / "api")
+    cli_layout = StorageLayout(tmp_path / "cli")
+    arguments = dict(
+        profile=profile,
+        layout=api_layout,
+        raw_root=raw,
+        start_date=start,
+        end_date=end,
+        data_ids=(target,),
+    )
+    native_frames = []
+    for plan in (True, False):
+        result = research.data_materialize(**arguments, plan=plan)
+        assert result["status"] == "COMPLETE"
+        if plan:
+            assert result["research_window"] == expected
+        else:
+            (built,) = result["target_results"]
+            assert built["status"] == "BUILT"
+            native = api_layout.instance_root(
+                api_layout.interim_data_root("reference", target),
+                built["instance_identity"],
+            )
+            window = read_dataset_manifest_evidence(native)["common_manifest"][
+                "research_window"
+            ]
+            assert window == {**expected, "access": "not_applicable"}
+            native_frames.append(read_dataset(native))
+        command = [
+            "data",
+            "materialize",
+            "--project-root",
+            str(cli_layout.project_root),
+            "--raw-root",
+            str(raw),
+            "--data-id",
+            target,
+        ]
+        for option, value in (("--start-date", start), ("--end-date", end)):
+            if value is not None:
+                command.extend((option, value))
+        if plan:
+            command.append("--plan")
+        response = CliRunner().invoke(app, command)
+        assert response.exit_code == 0, response.output
+        payload = json.loads(response.output)
+        assert payload["status"] == "COMPLETE"
+        if plan:
+            assert payload["research_window"] == expected
+        else:
+            (built,) = payload["target_results"]
+            assert built["status"] == "BUILT"
+            native = cli_layout.instance_root(
+                cli_layout.interim_data_root("reference", target),
+                built["instance_identity"],
+            )
+            window = read_dataset_manifest_evidence(native)["common_manifest"][
+                "research_window"
+            ]
+            assert window == {**expected, "access": "not_applicable"}
+            native_frames.append(read_dataset(native))
+    pd.testing.assert_frame_equal(*native_frames)
+
+
+@pytest.mark.parametrize("start,end", [("invalid", None), (None, "invalid")])
+def test_materialize_rejects_invalid_single_endpoint_before_sources(
+    tmp_path, start, end
+):
+    for plan in (True, False):
+        with pytest.raises(ValueError):
+            research.data_materialize(
+                profile=research_profile(),
+                layout=StorageLayout(tmp_path),
+                raw_root=tmp_path / "missing-raw",
+                start_date=start,
+                end_date=end,
+                data_ids=(research_profile().interim.list()[0].data_id,),
+                plan=plan,
+            )
+    assert not (tmp_path / "data").exists()

@@ -49,10 +49,6 @@ def write_a_share_raw_fixture(
     benchmark_total_return_indices: Mapping[str, str],
 ) -> None:
     """Keep real source, processed, dataset, model, and portfolio bindings intact."""
-    _write_raw(layout, benchmark_total_return_indices)
-
-
-def _write_raw(layout, benchmark_total_return_indices):
     raw_root = layout.raw_source_root("csmar").parent
     root = Path(raw_root) / "csmar"
     filesystem_mkdir(root, parents=True)

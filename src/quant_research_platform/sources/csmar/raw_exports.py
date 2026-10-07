@@ -249,6 +249,28 @@ def iter_index_info_rows(
             except StopIteration:
                 break
             row_number += 1
+            if header != [
+                "Indexcd",
+                "Idxinfo01",
+                "Idxinfo11",
+                "Idxinfo02",
+                "Idxinfo03",
+                "Idxinfo04",
+                "Idxinfo05",
+                "Idxinfo06",
+                "Idxinfo07",
+                "Idxinfo08",
+                "Idxinfo09",
+                "Idxinfo10",
+            ]:
+                if (
+                    len(record) != len(header)
+                    or "Indexcd" not in header
+                    or not INDEX_INFO_CODE_RE.fullmatch(record[header.index("Indexcd")])
+                ):
+                    raise ValueError(f"malformed_csmar_csv_row: {row_number}")
+                yield header, record, source_bytes
+                continue
             if pending_row is not None:
                 if _record_starts_index_info(record):
                     raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
@@ -301,7 +323,7 @@ def iter_index_info_rows(
             else:
                 row = record
             if len(row) < len(header):
-                if _looks_like_index_info_record_start(row):
+                if _record_starts_index_info(row):
                     if complete_row is not None:
                         if continuations:
                             complete_row[-1] = _join_continuations(
@@ -363,7 +385,7 @@ def iter_index_info_rows(
 def _normalize_index_info_row(
     row: list[str], column_count: int, row_number: int | None
 ) -> list[str]:
-    if len(row) != column_count or not _looks_like_index_info_record_start(row):
+    if len(row) != column_count or not _record_starts_index_info(row):
         raise ValueError(f"malformed_csmar_csv_row: {row_number}")
     return row
 
@@ -420,10 +442,6 @@ def _normalize_bounded_index_info_record(
     formula = _join_continuations("", continuation_spool)
     continuation_spool.clear()
     return [*fixed, sample, *codes, formula]
-
-
-def _looks_like_index_info_record_start(row: list[str]) -> bool:
-    return bool(row) and bool(INDEX_INFO_CODE_RE.fullmatch(row[0]))
 
 
 def _looks_like_source_category_code(

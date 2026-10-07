@@ -16,7 +16,10 @@ from quant_research_platform.contracts.json_codec import (
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
-from quant_research_platform.storage.atomic import atomic_write_chunks
+from quant_research_platform.storage.atomic import (
+    atomic_write_chunks,
+    is_atomic_directory_staging_name,
+)
 from quant_research_platform.storage.datasets.inspection import (
     inspect_dataset_session,
 )
@@ -324,6 +327,9 @@ def _iter_dataset_artifact_roots(project_root: Path) -> Iterable[Path]:
                     parent / name,
                     error="schema_inventory_dataset_invalid",
                 )
+            dirnames[:] = [
+                name for name in dirnames if not is_atomic_directory_staging_name(name)
+            ]
             for name in sorted(filenames):
                 if name != "spec.json":
                     continue
@@ -370,7 +376,6 @@ def _inventory_item_from_session(
     stats = _aggregate_dataset_stats(
         session,
         columns,
-        primary_key,
         important_null_count_columns=important_null_count_columns,
         exact_duplicate_count=int(inspection.manifest["duplicate_primary_key_count"]),
     )
@@ -409,7 +414,6 @@ def _inventory_item_from_session(
 def _aggregate_dataset_stats(
     session: DatasetSession,
     columns: tuple[str, ...],
-    primary_key: tuple[str, ...],
     *,
     important_null_count_columns: frozenset[str],
     exact_duplicate_count: int,
@@ -421,26 +425,41 @@ def _aggregate_dataset_stats(
         for descriptor in session.logical_dtypes["columns"]
     }
     row_count_by_year: dict[str, int] = {}
-    null_key_counts = {column: 0 for column in primary_key}
+    null_key_counts = dict(session.manifest["null_count_summary"])
     important_columns = tuple(
         column for column in columns if column in important_null_count_columns
     )
-    important_null_counts = {column: 0 for column in important_columns}
+    verified_null_counts = {
+        **null_key_counts,
+        **{
+            column: session.manifest[f"{role}_nan_profile"].get(column, 0)
+            for column, role in session.spec["column_roles"].items()
+            if role in {"factor", "label"}
+        },
+    }
+    important_null_counts = {
+        column: verified_null_counts.get(column, 0) for column in important_columns
+    }
+    scanned_important_columns = tuple(
+        column for column in important_columns if column not in verified_null_counts
+    )
     duplicate_primary_key_count = exact_duplicate_count
     statistic_columns = tuple(
         column
         for column in columns
-        if column == session.timestamp_column
-        or column in primary_key
-        or column in important_columns
+        if column == session.timestamp_column or column in scanned_important_columns
     )
-    chunks = iter_dataset_chunks(
-        replace(
-            session,
-            logical_columns=statistic_columns,
-            physical_columns=statistic_columns,
-        ),
-        batch_rows=DEFAULT_BATCH_ROWS,
+    chunks = (
+        iter_dataset_chunks(
+            replace(
+                session,
+                logical_columns=statistic_columns,
+                physical_columns=statistic_columns,
+            ),
+            batch_rows=DEFAULT_BATCH_ROWS,
+        )
+        if statistic_columns
+        else iter(())
     )
     with closing_iterator(chunks):
         for frame in chunks:
@@ -456,9 +475,7 @@ def _aggregate_dataset_stats(
                         row_count_by_year[year] = row_count_by_year.get(year, 0) + int(
                             count
                         )
-            for column in primary_key:
-                null_key_counts[column] += int(frame[column].isna().sum())
-            for column in important_columns:
+            for column in scanned_important_columns:
                 important_null_counts[column] += int(frame[column].isna().sum())
 
     return {

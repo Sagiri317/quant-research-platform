@@ -45,12 +45,13 @@ signal 是评估/组合使用的排序、权重或交易意图，evaluation 是�
 ## 研究配置
 
 可编辑 JSON 位于 `configs/research/a_share/` 与 `configs/research/crypto/`。
-因子库、评估选择和模型特征是三个不同集合；配置分别声明评估因子、标签与主统计标签、
+因子库、评估选择和模型特征是三个不同集合；配置分别声明评估因子、标签、A股主统计标签、
 每个模型的输入、算法和参数、使用的组合参数，以及 windows.development/windows.holdout。
 research run 只通过显式研究配置选择 profile、scenario 和研究窗口，不接受独立覆盖参数，避免双重选择来源。
 配置窗口必须位于协议访问边界内；选择窗口不会授予留出访问权。CORE6、PV25、Crypto baseline 是普通示例配置，
 运行入口不隐式选择它们，不动态展开“全部因子”。仅评估和完整研究复用同一 DAG。
 profiles 把确定的配置绑定到现有 catalog/protocol/producer，完整配置保存在 protocol 与 run 记录。
+Crypto 的所选标签并列评估，模型消费各自声明的标签；不接纳无科学消费者的 `evaluation.primary_label`。
 每个 target 仅绑定真正影响其计算的规范合同；workflow、业务 envelope、trial、writer 和 reader
 消费同一合同投影。只改变执行模式或未消费的费率，不改变模型、预测或校准的身份；
 真实输入、标签、成熟截止或参数变化仍使相关目标失效。不在各层复制字段排除名单。

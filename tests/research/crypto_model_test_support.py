@@ -899,7 +899,6 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
     configuration["evaluation"].update(
         factors=["imbalance_1"],
         labels=[model["label_column"]],
-        primary_label=model["label_column"],
     )
     profile = bind_research_configuration(
         research_profile(CRYPTO_PROFILE_ID), configuration

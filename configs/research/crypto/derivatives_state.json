@@ -61,8 +61,7 @@
       "future_mid_return_5000ms",
       "future_mid_direction_5000ms",
       "maker_bid_sell_pressure_proxy_500ms"
-    ],
-    "primary_label": "future_mid_return_100ms"
+    ]
   },
   "models": [
     {

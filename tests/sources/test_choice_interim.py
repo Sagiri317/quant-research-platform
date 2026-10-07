@@ -402,10 +402,30 @@ def test_same_day_branch_conflict_is_not_hidden_by_the_current_canonical_value(
     with choice_session(SDK(response())) as session:
         _disclosure(session, layout, events="2020-02-01")
         _snapshot(session, layout, "2020-01-30", [100.0] * 14)
-        for branch, old, new in (("1", 90.0, 100.0), ("3", 80.0, 110.0)):
+        _snapshot(session, layout, "2020-01-30", [100.0] * 14, branch="3")
+        for branch, old, new in (("1", 100.0, 90.0), ("3", 100.0, 110.0)):
             _snapshot(session, layout, "2020-01-31", [old] * 14, branch=branch)
             _snapshot(session, layout, "2020-02-01", [new] * 14, branch=branch)
     with pytest.raises(ValueError, match="choice_financial_version_values_conflict"):
+        interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
+    assert not filesystem_exists(
+        layout.interim_data_root("choice", "financial_balance")
+    )
+
+
+@pytest.mark.parametrize("after", (150.0, 200.0))
+def test_explicit_predecessor_must_match_known_branch_history(tmp_path, after):
+    layout = StorageLayout(tmp_path)
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout, events="2020-02-01")
+        for branch in ("1", "3"):
+            _snapshot(session, layout, "2020-01-30", [100.0] * 14, branch=branch)
+            _snapshot(session, layout, "2020-01-31", [150.0] * 14, branch=branch)
+            _snapshot(session, layout, "2020-02-01", [after] * 14, branch=branch)
+    with pytest.raises(
+        PortfolioTargetBlocked,
+        match="choice_revision_predecessor_conflicts_with_history",
+    ):
         interim.materialize_interim_data(layout=layout, data_ids=("financial_balance",))
     assert not filesystem_exists(
         layout.interim_data_root("choice", "financial_balance")

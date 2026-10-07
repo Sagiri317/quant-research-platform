@@ -1494,12 +1494,6 @@ def _transform_interim_chunk(
         source_row_counts["excluded_date_range_rows"] = source_row_counts[
             "retained_before_date_filter_rows"
         ] - len(filtered)
-    if filtered.empty:
-        return filtered, (
-            {"source_row_counts": source_row_counts}
-            if source_row_counts is not None
-            else {}
-        )
     pruned, report = _apply_output_column_rules_validated(
         filtered,
         data_id,
@@ -1684,14 +1678,7 @@ def _filter_normalized_frame(
     start_date: str | None,
     end_date: str | None,
 ) -> pd.DataFrame:
-    if data_id in TIME_RANGE_FILTER_DATA_IDS:
-        return filter_by_source_date_range(
-            frame,
-            data_id=data_id,
-            start_date=start_date,
-            end_date=end_date,
-        )
-    if data_id in START_END_FILTER_DATA_IDS:
+    if data_id in TIME_RANGE_FILTER_DATA_IDS | START_END_FILTER_DATA_IDS:
         return filter_by_source_date_range(
             frame,
             data_id=data_id,

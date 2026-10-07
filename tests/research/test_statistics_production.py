@@ -860,18 +860,80 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     )
 
 
-def test_empty_fama_macbeth_periods_do_not_invent_dates_or_coefficients() -> None:
+def test_robustness_joint_exclusion_preserves_individual_hac(monkeypatch):
+    rng = np.random.default_rng(74)
+    values = pd.DataFrame(
+        {
+            "baseline": rng.normal(0.01, 0.04, 64),
+            "challenger": rng.normal(0.02, 0.04, 64),
+        },
+        index=pd.date_range("2023-01-01", periods=64),
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("robustness runs must not enter the formal joint test domain")
+
+    for name in ("spa_reality_check", "stepm_superior_models", "model_confidence_set"):
+        monkeypatch.setattr(statistics_production, name, forbidden)
+    comparison, checks, robustness = statistics_production._model_comparison(
+        values,
+        family_ids=("baseline", "challenger"),
+        benchmark_id="baseline",
+        access_window="development",
+        inference_blocker=None,
+        joint_blocker="expectations_robustness_excluded",
+        max_lags=2,
+        block_size=4,
+        repetitions=32,
+        root_seed=17,
+        dataset_id="robustness",
+    )
+    assert comparison.status.eq("DEFINED").all()
+    assert checks.status.eq("UNDEFINED").all()
+    assert robustness.reason.eq("expectations_robustness_excluded").all()
+    assert checks.value.isna().all()
+    factors = statistics_production._factor_summary(
+        values.reset_index(names="timestamp"),
+        factors=("baseline", "challenger"),
+        families={"expectations": ("baseline", "challenger")},
+        methods=(None,),
+        max_lags=2,
+    )
+    assert factors.status.eq("DEFINED").all()
+    assert factors.fdr_method.eq("NOT_APPLICABLE").all()
+    assert factors.fdr_adjusted_p_value.isna().all()
+
+
+@pytest.mark.parametrize("core_factors", ((), ("factor",)))
+def test_empty_fama_macbeth_periods_do_not_invent_dates_or_coefficients(
+    core_factors,
+) -> None:
     periods = pd.DataFrame(columns=statistics_production._FAMA_MACBETH_PERIOD_COLUMNS)
     summary = statistics_production._fama_macbeth_summary(
-        periods, factors=("factor",), core_factors=("factor",), max_lags=19
+        periods, factors=("factor",), core_factors=core_factors, max_lags=19
     )
     assert periods.empty
-    assert set(summary["regression_id"]) == {"single:factor", "core_multifactor"}
+    assert list(summary["regression_id"]) == ["single:factor"] * 2 + (
+        ["core_multifactor"] * 2 if core_factors else []
+    )
     assert set(summary["coefficient_id"]) == {"intercept", "factor"}
     assert summary["period_count"].eq(0).all()
     assert summary["white_defined_period_count"].eq(0).all()
     assert summary["white_undefined_period_count"].eq(0).all()
     assert summary["status"].eq("UNDEFINED").all()
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-01"),
+            "asset_id": ["a", "b", "c", "d"],
+            "factor": [0.0, 1.0, 2.0, 3.0],
+            "label": [0.0, 2.0, 4.0, 6.0],
+        }
+    )
+    records = statistics_production._fama_macbeth_period_records(
+        frame, return_column="label", factors=("factor",), core_factors=core_factors
+    )
+    assert [row["regression_id"] for row in records] == summary.regression_id.tolist()
+    assert [row["coefficient_id"] for row in records] == summary.coefficient_id.tolist()
 
 
 def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(

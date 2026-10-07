@@ -695,41 +695,53 @@ def test_compare_maps_ancestor_alias_before_public_exists_probe(
 
 @pytest.mark.parametrize("alias_side", ("left", "right"))
 def test_compare_internal_recheck_blocks_new_ancestor_alias_before_exists(
-    monkeypatch: pytest.MonkeyPatch, alias_side: str
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, alias_side: str
 ) -> None:
-    left = Path("left-parent") / "left"
-    right = Path("right-parent") / "right"
+    from tests.storage.low_level_fixtures import (
+        make_dataset_artifact_root,
+        make_default_dataset_frame,
+        make_processed_dataset_spec,
+    )
+
+    left = make_dataset_artifact_root(tmp_path / "left-parent", "same")
+    right = make_dataset_artifact_root(tmp_path / "right-parent", "same")
+    for root in (left, right):
+        dataset_writing.write_dataset(
+            root, make_default_dataset_frame(), spec=make_processed_dataset_spec("same")
+        )
+    assert comparison.compare_datasets(left, right).status == "MATCH"
     target = left if alias_side == "left" else right
-    aliased_parent = Path.cwd() / target.parent
-    gate_count = 0
-    probe_count = {left: 0, right: 0}
-    original_require = comparison.require_artifact_root
-    original_exists = comparison.filesystem_exists
+    aliased_parent = target.parent
+    activated = False
+    alias_hits = 0
+    rejected = []
+    original_require = dataset_reading.require_artifact_root
+    original_alias = identity.path_is_filesystem_alias
 
     def require_root(path: Path) -> Path:
-        nonlocal gate_count
-        gate_count += 1
-        return original_require(path)
+        nonlocal activated
+        if path == target:
+            activated = True
+        try:
+            return original_require(path)
+        except ValueError as error:
+            rejected.append(str(error))
+            raise
 
     def is_alias(candidate: Path) -> bool:
-        internal_gate = gate_count >= (3 if alias_side == "left" else 4)
-        return internal_gate and candidate == aliased_parent
+        nonlocal alias_hits
+        if activated and candidate == aliased_parent:
+            alias_hits += 1
+            return True
+        return original_alias(candidate)
 
-    def exists(path: Path) -> bool:
-        candidate = Path(path)
-        if candidate not in probe_count:
-            return original_exists(path)
-        probe_count[candidate] += 1
-        if candidate == target:
-            assert probe_count[candidate] == 1
-        return True
-
-    monkeypatch.setattr(comparison, "require_artifact_root", require_root)
+    monkeypatch.setattr(dataset_reading, "require_artifact_root", require_root)
     monkeypatch.setattr(identity, "path_is_filesystem_alias", is_alias)
-    monkeypatch.setattr(comparison, "filesystem_exists", exists)
     result = comparison.compare_datasets(left, right)
     assert result.status == "INSPECTION_FAILED"
-    assert probe_count[target] == 1
+    assert activated
+    assert alias_hits == 1
+    assert rejected == ["invalid_dataset_part_files"]
 
 
 def test_shared_scratch_removes_only_exact_owned_paths(tmp_path: Path) -> None:

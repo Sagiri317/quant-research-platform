@@ -201,6 +201,8 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
                     if limit <= 0:
                         raise ValueError("a_share_fee_source_record_exceeds_capacity")
                     raw = binary.readline(limit + 1)
+                    if not raw:
+                        raise ValueError("a_share_fee_source_identity_changed")
                     if len(raw) > limit:
                         raise ValueError("a_share_fee_source_record_exceeds_capacity")
                     record_bytes += len(raw)

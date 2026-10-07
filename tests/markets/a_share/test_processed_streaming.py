@@ -928,3 +928,210 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
             pd.testing.assert_frame_equal(frame, frames[0], check_exact=True)
     assert all(panel_hashes)
     assert len(set(calendar_hashes)) == len(set(panel_hashes)) == 1
+
+
+@pytest.mark.parametrize("batch_rows", (6, 300))
+def test_asynchronous_own_market_label_endpoints_and_mask_batches(
+    tmp_path, monkeypatch, batch_rows
+):
+    dates = pd.bdate_range("2020-01-02", periods=9).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    bars = source["market_bars_1d"]
+    own = bars.source_asset_id.eq("000001")
+    bars.loc[own, "market_type"] = 4
+    bars.loc[own & bars.timestamp.eq(dates[2]), "filling_flag"] = 2
+    calendar = source["trading_calendar"]
+    second = calendar.assign(source_market_type=4)
+    second.loc[second.calendar_date.eq(dates[2]), "is_trading_day"] = False
+    source["trading_calendar"] = pd.concat((calendar, second), ignore_index=True)
+    profile = research_profile()
+    layout = StorageLayout(tmp_path)
+    panel_spec = profile.processed.get("market_panel_1d")
+    for data_id in panel_spec.source_input_data_ids:
+        spec = profile.interim.get(data_id)
+        write_dataset(
+            layout.interim_data_root(spec.source_id, data_id),
+            source[data_id],
+            spec=spec,
+        )
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    saved = {}
+    for data_id in ("market_panel_1d", "execution_mask", "forward_returns"):
+        spec = profile.processed.get(data_id)
+        root = layout.processed_data_root(spec.market_id, spec.kind, data_id)
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(dates[0], dates[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        saved[data_id] = read_dataset(root)
+    panel = (
+        saved["market_panel_1d"].query("asset_id == '000001'").set_index("timestamp")
+    )
+    assert dates[2] not in panel.index
+    mask = saved["execution_mask"].query("asset_id == '000001'").set_index("timestamp")
+    actual_mask = portfolio_production._mask_values(
+        mask.loc[[dates[1]]].reset_index(), pd.Index(["000001"])
+    )
+    assert actual_mask["can_enter"].all() and actual_mask["can_exit"].all()
+    label = (
+        saved["forward_returns"].query("asset_id == '000001'").set_index("timestamp")
+    )
+    for horizon in (1, 5):
+        column = f"forward_return_{horizon}d"
+        exit_date = panel.index[1 + horizon]
+        assert (
+            label.loc[dates[0], column]
+            == panel.loc[exit_date, "adj_open"] / panel.iloc[1].adj_open - 1.0
+        )
+        assert label.loc[dates[0], column + "_available_at"] == exit_date
+    assert mask.iloc[-1][["can_enter", "can_exit"]].isna().all()
+
+
+@pytest.mark.parametrize("missing_entry", (False, True))
+def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
+    tmp_path, missing_entry
+):
+    from quant_research_platform.markets.implementations.a_share.execution import (
+        derive_execution_mask,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=135).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    bars = source["market_bars_1d"]
+    own = bars.source_asset_id.eq("000001")
+    bars.loc[own & bars.timestamp.lt(dates[65]), "market_type"] = 4
+    bars.loc[own & bars.timestamp.eq(dates[2]), "filling_flag"] = 2
+    if missing_entry:
+        source["market_bars_1d"] = bars.loc[~(own & bars.timestamp.eq(dates[1]))].copy()
+    else:
+        bars.loc[own & bars.timestamp.eq(dates[3]), "filling_flag"] = 1
+    calendar = source["trading_calendar"]
+    second = calendar.assign(source_market_type=4)
+    second.loc[second.calendar_date.isin([dates[2], dates[70]]), "is_trading_day"] = (
+        False
+    )
+    source["trading_calendar"] = pd.concat((calendar, second), ignore_index=True)
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    panel = producer._compute_processed_frame(
+        spec,
+        source={
+            **producer._prepare_panel_source(source),
+            "market_bars_1d": source["market_bars_1d"],
+        },
+        dependencies={},
+        trading_sessions=tuple(dates),
+    )
+    mask = derive_execution_mask(panel)
+    axes = {
+        asset: tuple(group.timestamp.sort_values())
+        for asset, group in panel.groupby("asset_id")
+    }
+    assert dates[2] not in axes["000001"] and dates[70] in axes["000001"]
+    assert dates[1] in axes["000001"] and dates[3] in axes["000001"]
+    spec = profile.processed.get("forward_returns")
+    output = producer._compute_processed_frame(
+        spec,
+        source={},
+        dependencies={"market_panel_1d": panel, "execution_mask": mask},
+        trading_sessions=tuple(dates),
+        asset_sessions=axes,
+    )
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, output, spec=spec)
+    saved = read_dataset(root).query("asset_id == '000001'").set_index("timestamp")
+    own_panel = panel.query("asset_id == '000001'").set_index("timestamp")
+    for horizon in (1, 5, 10, 20, 60, 120):
+        column = f"forward_return_{horizon}d"
+        if missing_entry:
+            assert pd.isna(saved.loc[dates[0], column])
+        else:
+            exit_date = axes["000001"][horizon + 1]
+            assert (
+                saved.loc[dates[0], column]
+                == own_panel.loc[exit_date, "adj_open"]
+                / own_panel.loc[dates[1], "adj_open"]
+                - 1.0
+            )
+            assert saved.loc[dates[0], column + "_available_at"] == exit_date
+
+
+@pytest.mark.parametrize("gap", ("membership", "calendar"))
+@pytest.mark.parametrize("batch_rows", (6, 300))
+def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions(
+    tmp_path, monkeypatch, batch_rows, gap
+):
+    dates = pd.bdate_range("2019-01-02", periods=260).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    source["stock_master"]["listing_date"] = dates[0]
+    source["stock_master"]["timestamp"] = dates[0]
+    if gap == "membership":
+        source["market_bars_1d"] = (
+            source["market_bars_1d"]
+            .loc[source["market_bars_1d"].timestamp.ge(dates[4])]
+            .copy()
+        )
+    else:
+        source["trading_calendar"] = (
+            source["trading_calendar"]
+            .loc[source["trading_calendar"].calendar_date.ge(dates[4])]
+            .copy()
+        )
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    windows = (
+        ((0, dates[:6]), (1, dates[-6:])) if gap == "membership" else ((1, dates[-6:]),)
+    )
+    for index, requested in windows:
+        layout = StorageLayout(tmp_path / str(index))
+        for data_id in spec.source_input_data_ids:
+            source_spec = profile.interim.get(data_id)
+            write_dataset(
+                layout.interim_data_root(source_spec.source_id, data_id),
+                source[data_id],
+                spec=source_spec,
+            )
+        root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(requested[0], requested[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        actual = read_dataset(root)
+        assert actual.listing_age_trading_days.isna().all()
+        assert str(actual.listing_age_trading_days.dtype) == "Int64"
+        assert str(actual.has_252_trading_sessions.dtype) == "boolean"
+        if index == 0:
+            unknown = actual.timestamp.lt(dates[4])
+            assert actual.loc[unknown, "market_type"].isna().all()
+            assert actual.has_252_trading_sessions.isna().all()
+            assert not a_share_eligibility(actual, "pv_expanded").any()
+        else:
+            assert actual.has_252_trading_sessions.iloc[:3].isna().all()
+            assert actual.has_252_trading_sessions.iloc[3:].all()
+            assert (
+                a_share_eligibility(actual, "pv_expanded").tolist()
+                == [False] * 3 + [True] * 15
+            )

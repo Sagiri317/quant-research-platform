@@ -290,10 +290,10 @@ def test_frozen_archive_identity_and_persisted_maker_units(
         "buy",
         1.0,
         state,
-        _quote(0, book_segment_id="s1"),
+        _quote(200, book_segment_id="s1"),
         _maker_config().latency_ms,
     )
-    new.effective_at_ns = 100_000_000
+    new.effective_at_ns = 300_000_000
     old = replace(
         new,
         order_id=1,
@@ -303,15 +303,16 @@ def test_frozen_archive_identity_and_persisted_maker_units(
     )
     pending = (
         (
-            200_000_000,
+            250_000_000,
             "buy",
-            replace(new, order_id=3, effective_at_ns=200_000_000),
+            replace(new, order_id=3, effective_at_ns=250_000_000),
         ),
     )
+    responses = {}
     for commands in ((), pending):
         query = dict(
             state=state,
-            decision_ns=0,
+            decision_ns=200_000_000,
             new_order=new,
             active_order=old,
             commands=commands,
@@ -335,7 +336,7 @@ def test_frozen_archive_identity_and_persisted_maker_units(
                             model._response(
                                 sample,
                                 state=state,
-                                decision_ns=0,
+                                decision_ns=200_000_000,
                                 new_order=new,
                                 active_order=old,
                                 commands=commands,
@@ -352,6 +353,12 @@ def test_frozen_archive_identity_and_persisted_maker_units(
                     sample_stream.close()
             assert outputs[0] == outputs[1]
             assert outputs[0]
+            responses[bool(commands), replacement] = outputs[0]
+    for replacement in (None, 0.0, 1.0):
+        assert responses[False, replacement] != responses[True, replacement]
+        assert any(
+            50_000_000 < fill[0] < 100_000_000 for fill in responses[True, replacement]
+        )
     assert fingerprints() == before
 
 

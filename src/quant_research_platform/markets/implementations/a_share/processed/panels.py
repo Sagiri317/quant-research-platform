@@ -13,7 +13,7 @@ from quant_research_platform.contracts.validation import (
 )
 from quant_research_platform.markets.implementations.a_share.calendar import (
     CURRENT_MARKET_TYPES,
-    compute_listing_age_trading_days,
+    compute_listing_session_facts,
     market_type_trading_sessions,
     unified_trading_sessions,
 )
@@ -93,7 +93,7 @@ def compute_market_panel(
         asset_market_types=asset_market_types,
         market_history=market_history,
     )
-    open_session = pd.Series(False, index=dense.index)
+    open_session = dense["market_type"].isna()
     for market_type, group in dense.groupby("market_type", sort=False):
         open_session.loc[group.index] = group["timestamp"].isin(
             market_type_trading_sessions(trading_calendar, market_type)
@@ -120,14 +120,8 @@ def compute_market_panel(
     dense["delisting_date"] = dense["delisting_date"].where(
         dense["delisting_date"] != delisting_sentinel
     )
-    dense["listing_age_trading_days"] = compute_listing_age_trading_days(
-        dense,
-        trading_calendar,
-        observation_date_column="timestamp",
-        listing_date_column="listing_date",
-        market_type_column="market_type",
-        market_history=market_history,
-    )
+    facts = compute_listing_session_facts(dense, trading_calendar, market_history)
+    dense[facts.columns] = facts
     return dense.sort_values(
         ["timestamp", "market_id", "asset_id"], kind="mergesort"
     ).reset_index(drop=True)
@@ -341,11 +335,11 @@ def _dense_lifecycle_panel(
         )
         membership = market_history.iloc[market_groups.get(asset_id, [])]
         positions = membership.timestamp.searchsorted(dates, side="right") - 1
-        base["market_type"] = (
-            membership.market_type.iloc[positions.clip(min=0)].to_numpy()
-            if not membership.empty
-            else asset_market_types.loc[asset_id]
-        )
+        base["market_type"] = pd.Series(pd.NA, index=base.index, dtype="Int64")
+        known = positions >= 0
+        base.loc[known, "market_type"] = membership.market_type.iloc[
+            positions[known]
+        ].to_numpy()
         rows.append(base)
     if not rows:
         return bars.iloc[0:0].copy()

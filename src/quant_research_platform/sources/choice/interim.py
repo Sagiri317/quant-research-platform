@@ -471,6 +471,14 @@ def _report_versions(index, pair, first, end):
                 if after is None:
                     raise PortfolioTargetBlocked("choice_revision_snapshot_missing")
                 before = _snapshot(index, pair, event - timedelta(days=1), branch)
+                if (
+                    before is not None
+                    and branches[branch] is not None
+                    and before["values"] != branches[branch]["values"]
+                ):
+                    raise PortfolioTargetBlocked(
+                        "choice_revision_predecessor_conflicts_with_history"
+                    )
                 if before is None:
                     before = branches[branch]
                 if before is None:

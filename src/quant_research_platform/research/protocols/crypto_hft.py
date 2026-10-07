@@ -592,12 +592,17 @@ class CryptoProtocol:
         ):
             maker = self.research_plan.execution.maker
             for candidate in self.portfolio_candidates():
-                if isinstance(candidate, CryptoMakerCandidate) and abs(
-                    maker.inventory_target
-                ) > next(
-                    position
-                    for asset, _order, position in self.research_plan.exposure_limits
-                    if asset == candidate.asset_id
+                if (
+                    isinstance(candidate, CryptoMakerCandidate)
+                    and not candidate.calibrated
+                    and abs(maker.inventory_target)
+                    > next(
+                        position
+                        for asset, _order, position in (
+                            self.research_plan.exposure_limits
+                        )
+                        if asset == candidate.asset_id
+                    )
                 ):
                     raise ValueError("crypto_maker_inventory_target_invalid")
 
@@ -760,6 +765,12 @@ class CryptoProtocol:
                 if candidate.latency_ms is None
                 else candidate.latency_ms
             )
+        elif candidate.calibrated:
+            selected_plan["execution"]["maker"] = {
+                key: value
+                for key, value in execution["maker"].items()
+                if key not in {"inventory_target", "inventory_skew"}
+            }
         result["execution_mode"] = descriptor.execution_mode
         result["execution_target_id"] = descriptor.target_id
         selected_plan.update(

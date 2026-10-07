@@ -158,6 +158,7 @@ def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
                 "is_st": False,
                 "is_pt": False,
                 "listing_age_trading_days": 300,
+                "has_252_trading_sessions": True,
                 "close": 100.0,
                 "volume": 10.0,
                 "turnover": 0.01,
@@ -1879,6 +1880,7 @@ def test_risk_cross_uses_all_a_facts_and_persisted_styles():
             "is_st": False,
             "is_pt": False,
             "listing_age_trading_days": 300,
+            "has_252_trading_sessions": True,
             "close": 10.0,
             "adj_close": 10.0,
             "volume": 100.0,
@@ -2311,3 +2313,77 @@ def _assert_execution_endpoints_roundtrip(
         assert saved.trades[0].notional == expected_delta
     else:
         assert not saved.trades
+
+
+@pytest.mark.parametrize("extra_style", (-10000.0, 10000.0))
+def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
+    from quant_research_platform.research.portfolios.accounting import AlphaCalibration
+    from quant_research_platform.research.portfolios.production import (
+        _enhanced_decision,
+    )
+    from quant_research_platform.research.portfolios.risk import FactorRiskConfig
+
+    count = 120
+    x = np.arange(count, dtype=float)
+    cross = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-02"),
+            "asset_id": [f"a{i}" for i in range(count)],
+            "industry_standard_id": "CSRC2012",
+            "industry_level1_code": "A",
+            "float_market_cap": 100.0 + x,
+            "eligible": True,
+            "style": x,
+            "asset_return": np.sin(x) / 100,
+        }
+    )
+    state = FactorRiskState(
+        style_columns=("style",), config=FactorRiskConfig(minimum_cross_section=10)
+    )
+    calibration = AlphaCalibration(
+        0.0, 0.0, None, None, None, None, None, None, 1.0, 1, 1, None
+    )
+
+    def decision(frame):
+        return _enhanced_decision(
+            benchmark_weights=pd.Series(dtype=float),
+            alpha=pd.Series(0.0, index=frame.asset_id),
+            factor_risk=state,
+            current_cross=frame,
+            calibration_rows=[],
+            calibration_intervals=pd.DataFrame(),
+            as_of=pd.Timestamp("2020-01-03"),
+            risk_style_columns=("style",),
+            frozen_calibration=calibration,
+        ).exposures.set_index("asset_id")
+
+    expected = decision(cross)
+    changed = pd.concat(
+        (
+            cross,
+            cross.iloc[[0]].assign(
+                asset_id="unknown", industry_level1_code=pd.NA, style=extra_style
+            ),
+        ),
+        ignore_index=True,
+    )
+    changed = changed.astype({"industry_level1_code": cross.industry_level1_code.dtype})
+    pd.testing.assert_frame_equal(decision(changed), expected, check_exact=True)
+    pd.testing.assert_frame_equal(
+        state.fit_return_session(changed).exposures,
+        state.fit_return_session(cross).exposures,
+        check_exact=True,
+    )
+    projected = pd.concat(
+        (
+            cross,
+            cross.iloc[[0]].assign(
+                asset_id="benchmark_only", eligible=False, style=extra_style
+            ),
+        ),
+        ignore_index=True,
+    )
+    assert "benchmark_only" in decision(projected).index
+    pd.testing.assert_frame_equal(
+        decision(projected).loc[expected.index], expected, check_exact=True
+    )

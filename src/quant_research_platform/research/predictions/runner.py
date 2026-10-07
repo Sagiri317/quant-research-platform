@@ -243,6 +243,7 @@ def build_prediction_result_from_persisted_model(
                     q_input_columns,
                     prediction_model=predictor,
                     model_metadata=q_metadata,
+                    allow_empty=True,
                 )
                 with q_result:
                     for yielded_value in q_result.output_chunks:
@@ -279,7 +280,11 @@ class _PredictionMetadataState:
             raise ValueError("empty_prediction_window")
         first = self._metadata[0]
         effective_end = max(
-            (pd.Timestamp(item["effective_test_end"]) for item in self._metadata),
+            (
+                pd.Timestamp(item["effective_test_end"])
+                for item in self._metadata
+                if item["effective_test_end"] is not None
+            ),
             default=None,
         )
         if effective_end is None:

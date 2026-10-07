@@ -13,6 +13,7 @@ def bind_research_selection(profile, library, configuration):
     from quant_research_platform.contracts.json_codec import (
         bounded_qrp_json_object_snapshot,
     )
+    from quant_research_platform.contracts.models import _thaw_model_hyperparameters
     from quant_research_platform.research.features.transforms import (
         canonical_feature_input_factors,
         canonical_feature_transforms,
@@ -85,12 +86,21 @@ def bind_research_selection(profile, library, configuration):
     except KeyError:
         raise ValueError("research_configuration_scenario_invalid") from None
     evaluation = config["evaluation"]
-    if type(evaluation) is not dict or set(evaluation) != {
-        "factors",
-        "labels",
-        "primary_label",
-    }:
+    a_share_market = str(profile.market_id) == "a_share"
+    evaluation_fields = {"factors", "labels"}
+    if a_share_market:
+        evaluation_fields.add("primary_label")
+    if (
+        type(evaluation) is not dict
+        or set(evaluation) - ({"forecast_freshness_days"} if a_share_market else set())
+        != evaluation_fields
+    ):
         raise ValueError("research_evaluation_configuration_invalid")
+    if a_share_market:
+        freshness = evaluation.get("forecast_freshness_days", 90)
+        if type(freshness) is not int or freshness not in {90, 180}:
+            raise ValueError("research_forecast_freshness_invalid")
+        evaluation["forecast_freshness_days"] = freshness
     if any(
         type(evaluation[key]) is not list
         or not evaluation[key]
@@ -105,8 +115,13 @@ def bind_research_selection(profile, library, configuration):
             for label in evaluation["labels"]
         )
         or len(set(evaluation["labels"])) != len(evaluation["labels"])
-        or type(evaluation["primary_label"]) is not str
-        or evaluation["primary_label"] not in evaluation["labels"]
+        or (
+            a_share_market
+            and (
+                type(evaluation["primary_label"]) is not str
+                or evaluation["primary_label"] not in evaluation["labels"]
+            )
+        )
     ):
         raise ValueError("research_evaluation_label_invalid")
     if type(config["models"]) is not list or type(config["portfolios"]) is not list:
@@ -168,9 +183,9 @@ def bind_research_selection(profile, library, configuration):
     model_catalog = ModelCatalog.from_configuration(config["models"])
     models = model_catalog.list()
     for item in config["models"]:
-        item["training_weighting"] = model_catalog.get(
-            item["model_id"]
-        ).training_weighting.payload()
+        model = model_catalog.get(item["model_id"])
+        item["hyperparameters"] = _thaw_model_hyperparameters(model.hyperparameters)
+        item["training_weighting"] = model.training_weighting.payload()
     model_configurations = {item["model_id"]: item for item in config["models"]}
     canonical_factors = []
     for model in models:
@@ -211,6 +226,16 @@ def bind_research_selection(profile, library, configuration):
         type(column) is not str or column not in factors_by_column for column in columns
     ):
         raise ValueError("research_factor_not_available")
+    if a_share_market and set(columns).difference(base.factor_columns):
+        raise ValueError("research_factor_outside_scenario")
+    if (
+        a_share_market
+        and freshness == 180
+        and not any(
+            factors_by_column[column].family == "expectations" for column in columns
+        )
+    ):
+        raise ValueError("research_forecast_freshness_not_applicable")
     if len(set(evaluation["factors"])) != len(evaluation["factors"]):
         raise ValueError("research_evaluation_factor_duplicate")
     transforms = (
@@ -231,7 +256,7 @@ def bind_research_selection(profile, library, configuration):
         raise ValueError("research_label_not_available")
     availability = {
         label: (
-            a_share.forward_return_available_at_column(20)
+            "model_target_available_at"
             if label == "model_target"
             else label + "_available_at"
         )
@@ -246,10 +271,18 @@ def bind_research_selection(profile, library, configuration):
         )
     )
     if "model_target" in label_values:
-        labels = tuple(dict.fromkeys((*labels, "forward_return_20d")))
-    context_columns = list(base.context_columns)
+        labels = tuple(
+            dict.fromkeys(
+                (*labels, "forward_return_20d", "forward_return_20d_available_at")
+            )
+        )
+    context_columns = [
+        column
+        for column in base.context_columns
+        if column != "model_target_available_at" or "model_target" in label_values
+    ]
     dependencies = [base.base_input_data_id]
-    needed = {*columns, *labels, *base.context_columns}
+    needed = {*columns, *labels, *context_columns}
     covered = set(library.processed.get(base.base_input_data_id).required_columns)
     for column in columns:
         owners = [

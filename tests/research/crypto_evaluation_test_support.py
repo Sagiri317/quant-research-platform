@@ -26,7 +26,6 @@ def check_crypto_evaluation_readback(
     def read_parquet(path):
         return pd.read_parquet(native_filesystem_path(path))
 
-    oos = pd.Series(False, index=frame.index)
     cutoff = pd.Series(pd.NaT, index=frame.index, dtype="datetime64[ns]")
     window = plan["test"]
     oos = frame.timestamp.between(

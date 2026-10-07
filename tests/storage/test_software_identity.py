@@ -45,6 +45,60 @@ def test_package_identity_is_order_independent_and_ignores_bytecode(
     assert second.payload == first.payload
 
 
+@pytest.mark.parametrize("mutation", ("import", "source", "import_and_source", "aba"))
+def test_cold_native_import_only_explains_excluded_directory_changes(
+    tmp_path, monkeypatch, mutation
+):
+    import os
+    import subprocess
+    import sys
+
+    from quant_research_platform.storage import software_identity as owner
+
+    package = tmp_path / "package"
+    package.mkdir()
+    module = package / "module.py"
+    module.write_text("value = 1\n", encoding="utf-8")
+    if mutation == "aba":
+        initial = package.stat()
+        os.utime(package, ns=(initial.st_atime_ns, initial.st_mtime_ns - 1_000_000_000))
+    directory_before = package.stat()
+    expected = _identity(package)
+    native_open = owner.open_filesystem_file
+    triggered = False
+
+    def open_member(path):
+        nonlocal triggered
+        if Path(path) == module and not triggered:
+            triggered = True
+            if mutation in {"import", "import_and_source"}:
+                environment = os.environ.copy()
+                environment.pop("PYTHONDONTWRITEBYTECODE", None)
+                subprocess.run(
+                    [sys.executable, "-c", "import module"],
+                    cwd=package,
+                    env=environment,
+                    check=True,
+                )
+                assert (package / "__pycache__").is_dir()
+            if mutation != "import":
+                added = package / "new.py"
+                added.write_text("value = 2\n", encoding="utf-8")
+                if mutation == "aba":
+                    added.unlink()
+                    assert package.stat().st_mtime_ns != directory_before.st_mtime_ns
+                    assert tuple(package.iterdir()) == (module,)
+        return native_open(path)
+
+    monkeypatch.setattr(owner, "open_filesystem_file", open_member)
+    if mutation == "import":
+        assert _identity(package) == expected
+    else:
+        with pytest.raises(ValueError, match="production_package_identity_changed"):
+            _identity(package)
+    assert triggered
+
+
 def test_package_and_dependency_changes_invalidate_only_production_identity(
     tmp_path: Path,
 ) -> None:
@@ -499,3 +553,67 @@ def test_package_inventory_rejects_child_junction_on_windows(tmp_path):
     finally:
         junction.rmdir()
     assert (external / "module.py").read_bytes() == b"synthetic"
+
+
+def test_portfolio_identity_binds_only_consumed_episode_owner(tmp_path):
+    import copy
+    import shutil
+
+    from quant_research_platform.contracts.targets import ProducerKind
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.workflows import research
+    from tests.helpers.research_configuration import research_configuration
+
+    package = tmp_path / "package"
+    shutil.copytree(
+        Path(research.__file__).resolve().parents[1],
+        package,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    configurations = [research_configuration()]
+    for mode in ("continuous", "independent_segments"):
+        config = copy.deepcopy(research_configuration("crypto", "baseline"))
+        config["research_plan"]["execution"]["backtest_modes"] = [mode]
+        configurations.append(config)
+    bindings = []
+    for config in configurations:
+        profile = bind_research_configuration(
+            research_profile(config["profile_id"]),
+            config,
+            tardis_root=tmp_path / "tardis",
+        )
+        bindings.append(
+            next(
+                item
+                for item in profile.producer_bindings.values()
+                if item.kind is ProducerKind.PORTFOLIO
+            )
+        )
+    assert bindings[-1].producer.keywords["execution_mode"] == "independent_segments"
+
+    def identities():
+        software = _identity(package)
+        return tuple(
+            research._target_software_identity(binding, software)
+            for binding in bindings
+        )
+
+    original = identities()
+    report = package / "reports/crypto_hft.py"
+    report.write_bytes(report.read_bytes() + b"\n# Crypto episode report change.\n")
+    after_crypto = identities()
+    assert after_crypto[0] == original[0]
+    assert after_crypto[-1] != original[-1]
+    ledger = package / "artifacts/portfolio_ledger.py"
+    ledger.write_bytes(ledger.read_bytes() + b"\n# Consumed ledger owner change.\n")
+    after_ledger = identities()
+    assert all(
+        before != after
+        for before, after in zip(after_crypto, after_ledger, strict=True)
+    )
+    economic = package / "research/portfolios/production.py"
+    economic.write_bytes(economic.read_bytes() + b"\n# A-share economics change.\n")
+    assert identities()[0] != after_ledger[0]

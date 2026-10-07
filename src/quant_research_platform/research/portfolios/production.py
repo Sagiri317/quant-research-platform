@@ -950,6 +950,11 @@ def _enhanced_decision(
     complete = current_cross.loc[
         current_cross.loc[:, risk_style_columns].notna().all(axis=1)
     ]
+    complete = complete.assign(
+        eligible=complete.asset_id.isin(
+            factor_risk.prepare_exposures(current_cross).asset_id
+        )
+    )
     processed = (
         preprocess_risk_styles(complete, style_columns=risk_style_columns)
         if not complete.empty

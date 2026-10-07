@@ -13,12 +13,6 @@ from quant_research_platform.runtime.dataframes import (
 )
 
 
-def _single_time_frame() -> pd.DataFrame:
-    return pd.DataFrame(
-        {"timestamp": pd.to_datetime(["2024-01-01"], utc=True), "value": [1]}
-    )
-
-
 def test_complete_session_frames_merge_boundary_and_emit_one_session() -> None:
     frames = iter(
         (

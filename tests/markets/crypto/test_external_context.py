@@ -368,3 +368,108 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
         if p.is_file()
     } == good
     assert binding.source_identity(binding.raw_root, data_id) == expected_hash
+
+
+@pytest.mark.parametrize(
+    "asset,old,new,transition",
+    (
+        ("btc_usdt", 0.0001, 0.01, "2020-03-20T08:00:00"),
+        ("eth_usdt", 0.001, 0.1, "2020-03-19T08:00:00"),
+    ),
+)
+@pytest.mark.parametrize("regime", ("old", "new", "mixed", "uncertain"))
+def test_okx_dated_face_value_native_csv_to_persisted_flow(
+    tmp_path, asset, old, new, transition, regime
+):
+    import gzip
+    import hashlib
+
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer as crypto_producer,
+    )
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.sources.tardis.normalized import _rows
+    from quant_research_platform.storage.datasets import read_dataset, write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    definition = crypto_producer.EXTERNAL_INSTRUMENTS["okx"]
+    start = (
+        pd.Timestamp(transition)
+        + {
+            "old": -pd.Timedelta(days=1),
+            "new": pd.Timedelta(hours=1),
+            "mixed": pd.Timedelta(hours=1),
+            "uncertain": pd.Timedelta(minutes=1),
+        }[regime]
+    )
+    times = pd.date_range(start, periods=7, freq="100ms").as_unit("ns")
+    event = times[2].value // 1000
+    symbol = definition["symbols"][asset]
+    first_event = (
+        pd.Timestamp(transition).value // 1000 - 1 if regime == "mixed" else event
+    )
+    raw = (
+        "exchange,symbol,timestamp,local_timestamp,id,side,price,amount\n"
+        + f"okex-swap,{symbol},{first_event},{event},1,buy,10000,100\n"
+        + (
+            f"okex-swap,{symbol},{event + 100000},{event + 100000},2,buy,10000,100\n"
+            if regime == "mixed"
+            else ""
+        )
+    ).encode()
+    compressed = gzip.compress(raw, mtime=0)
+    path = tmp_path / "trades.csv.gz"
+    path.write_bytes(compressed)
+    trades = [
+        row
+        for _, row in _rows(
+            path,
+            exchange="okex-swap",
+            dataset_type="trades",
+            symbol=symbol,
+            date=str(start.date()),
+            sha256=hashlib.sha256(compressed).hexdigest(),
+        )
+    ]
+    frames = [
+        pd.DataFrame(
+            {
+                "market_id": "crypto",
+                "asset_id": asset,
+                "timestamp": times,
+                "segment_id": "s",
+                "mid": 10000.0,
+            }
+        )
+    ]
+    output = iter_external_context_frames(
+        frames,
+        quotes=[],
+        trades=trades,
+        tickers=[],
+        venue="okx",
+        base_units_per_amount=definition["base_units_per_amount"][asset],
+        max_age_ms=100,
+    )
+    if regime == "uncertain":
+        with pytest.raises(
+            ValueError, match="external_contract_face_value_transition_unproven"
+        ):
+            list(output)
+        return
+    spec = research_profile("crypto_binance_hft").processed.get(
+        "okx_perpetual_context_100ms"
+    )
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(
+        root, (frame.loc[:, list(spec.required_columns)] for frame in output), spec=spec
+    )
+    saved = read_dataset(root)
+    row = saved.iloc[5]
+    unit = old + new if regime == "mixed" else old if regime == "old" else new
+    assert row.okx_observed_signed_base_flow_500ms == pytest.approx(100 * unit)
+    assert row.okx_observed_signed_notional_flow_500ms == pytest.approx(
+        1_000_000 * unit
+    )

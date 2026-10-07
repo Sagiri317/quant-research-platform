@@ -145,10 +145,6 @@ def financial_events_from_interim(
         )
         if bool(frame["first_disclosure_date"].isna().any()):
             raise ValueError("financial_first_disclosure_missing")
-        if bool(
-            frame.loc[frame["is_corrected"], "correction_disclosure_date"].isna().any()
-        ):
-            raise ValueError("financial_correction_disclosure_missing")
         invalid_original_correction_date = frame.loc[
             ~frame["is_corrected"], "correction_disclosure_date"
         ].notna()

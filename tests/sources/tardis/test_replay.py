@@ -1264,6 +1264,7 @@ def test_archive_actual_spans_sort_equivalent_cross_midnight_slices(tmp_path):
         ("before", "2026-12-31", 1430, "before"),
         ("offset", "2026-12-31", 1440, "after"),
         ("next_day", "2027-01-01", 0, "after"),
+        ("older_anchor", "2026-12-30", 2880, "after"),
     ):
         manifests[name] = import_slices(
             tmp_path / name,
@@ -1283,7 +1284,12 @@ def test_archive_actual_spans_sort_equivalent_cross_midnight_slices(tmp_path):
         manifests["next_day"]
     )
     summaries = []
-    for paths in (("offset", "before"), ("next_day", "before"), ("before", "offset")):
+    for paths in (
+        ("next_day", "before"),
+        ("offset", "before"),
+        ("before", "offset"),
+        ("before", "older_anchor"),
+    ):
         with open_market_source(tmp_path, archive_paths=paths) as source:
             spans = tuple(
                 _archive_span(archive.manifest) for archive in source.archives
@@ -1333,7 +1339,40 @@ def test_archive_actual_spans_sort_equivalent_cross_midnight_slices(tmp_path):
             ]
             assert stats.gaps == 0
             summaries.append((books, coverage, boundaries))
-    assert summaries[0] == summaries[1] == summaries[2]
+
+            from quant_research_platform.storage.datasets import (
+                inspect_dataset,
+                read_dataset,
+                write_dataset,
+            )
+            from tests.storage.low_level_fixtures import make_processed_dataset_spec
+
+            spec = make_processed_dataset_spec(
+                f"span_identity_{len(summaries)}", market_id="crypto"
+            )
+            destination = (
+                tmp_path / "data" / "processed" / "crypto" / "factor" / spec.data_id
+            )
+            frame = pd.DataFrame(
+                {
+                    "market_id": ["crypto"] * len(books),
+                    "asset_id": ["btc_usdt"] * len(books),
+                    "timestamp": pd.to_datetime([row[0] for row in books], unit="ns"),
+                    "value": [float(row[2][0][0]) for row in books],
+                }
+            )
+            write_dataset(
+                destination,
+                frame,
+                spec=spec,
+                instance_metadata={"source_artifact_identity": source.source_identity},
+            )
+            pd.testing.assert_frame_equal(read_dataset(destination), frame)
+            assert (
+                inspect_dataset(destination).manifest["source_artifact_identity"]
+                == source.source_identity
+            )
+    assert all(summary == summaries[0] for summary in summaries)
     for paths, reason in (
         (("before", "before"), "tardis_archive_set_invalid"),
         (("offset", "next_day"), "tardis_archive_spans_overlap"),

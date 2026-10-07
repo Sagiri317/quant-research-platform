@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from array import array
 from dataclasses import dataclass
+from decimal import Decimal, localcontext
 
 import numpy as np
 import pandas as pd
@@ -425,7 +426,7 @@ class FactorRiskState:
             residuals,
             strict=True,
         ):
-            self._residuals.setdefault(asset, array("d")).append(float(residual**2))
+            self._residuals.setdefault(asset, array("d")).append(float(residual))
             self._residual_sessions.setdefault(asset, array("Q")).append(
                 self._session_count
             )
@@ -490,9 +491,27 @@ class FactorRiskState:
             if len(values) >= self.config.minimum_specific_dates:
                 ages = self._session_count - np.asarray(self._residual_sessions[asset])
                 weights = _ewma_weights(ages, self.config.specific_half_life)
-                specific[asset] = float(
-                    np.dot(weights, values) * self.config.annualization
-                )
+                if weights.dtype == object or any(
+                    abs(value) > np.sqrt(np.finfo(np.float64).max) for value in values
+                ):
+                    with localcontext() as context:
+                        context.prec = 80
+                        variance = sum(
+                            (
+                                weight
+                                if isinstance(weight, Decimal)
+                                else Decimal.from_float(float(weight))
+                            )
+                            * Decimal.from_float(value) ** 2
+                            for weight, value in zip(weights, values, strict=True)
+                        ) * Decimal.from_float(float(self.config.annualization))
+                else:
+                    variance = (
+                        np.dot(weights, np.square(values)) * self.config.annualization
+                    )
+                specific[asset] = float(variance)
+                if not np.isfinite(specific[asset]):
+                    raise ValueError("factor_risk_specific_variance_non_finite")
         return FactorRiskEstimate(
             factor_returns=factor_returns.reset_index(drop=True),
             factor_covariance=covariance,
@@ -518,18 +537,54 @@ def _ewma_covariance(
     columns: tuple[str, ...],
 ) -> pd.DataFrame:
     weights = _ewma_weights(ages, half_life)
-    centered = values - np.average(values, axis=0, weights=weights)
-    covariance = (centered * weights[:, None]).T @ centered
-    covariance = (1.0 - diagonal_shrinkage) * covariance + diagonal_shrinkage * np.diag(
-        np.diag(covariance)
-    )
-    covariance = (covariance + covariance.T) / 2.0 * annualization_factor
+    with localcontext() as context:
+        context.prec = 80
+        if weights.dtype == object or np.any(
+            np.abs(values) > np.sqrt(np.finfo(np.float64).max)
+        ):
+            weights = np.array(
+                [
+                    weight
+                    if isinstance(weight, Decimal)
+                    else Decimal.from_float(float(weight))
+                    for weight in weights
+                ],
+                dtype=object,
+            )
+            values = np.array(
+                [[Decimal.from_float(float(value)) for value in row] for row in values],
+                dtype=object,
+            )
+            diagonal_shrinkage = Decimal.from_float(float(diagonal_shrinkage))
+            annualization_factor = Decimal.from_float(float(annualization_factor))
+        centered = values - np.average(values, axis=0, weights=weights)
+        covariance = (centered * weights[:, None]).T @ centered
+        covariance = (
+            1 - diagonal_shrinkage
+        ) * covariance + diagonal_shrinkage * np.diag(np.diag(covariance))
+        covariance = np.asarray(
+            (covariance + covariance.T) / 2 * annualization_factor, dtype="float64"
+        )
+    if not np.isfinite(covariance).all():
+        raise ValueError("factor_risk_covariance_non_finite")
     if np.linalg.eigvalsh(covariance).min(initial=0.0) < -1e-12:
         raise ValueError("factor_risk_covariance_not_psd")
     return pd.DataFrame(covariance, index=columns, columns=columns)
 
 
 def _ewma_weights(ages: np.ndarray, half_life: float) -> np.ndarray:
-    decay = 0.5 ** (1.0 / half_life)
-    values = decay**ages
+    relative_ages = ages - ages.min()
+    with np.errstate(over="ignore"):
+        exponents = relative_ages / half_life
+    if np.any(exponents > -np.finfo(np.float64).minexp):
+        # Keep tail mass until it has multiplied the returns or residual squares.
+        with localcontext() as context:
+            context.prec = 80
+            half = Decimal.from_float(float(half_life))
+            values = np.array(
+                [Decimal(2) ** (-Decimal(int(age)) / half) for age in relative_ages],
+                dtype=object,
+            )
+            return values / sum(values)
+    values = np.exp2(-exponents)
     return values / values.sum()

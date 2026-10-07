@@ -83,6 +83,10 @@ def validate_price_unit(value: object) -> str:
 
 def price_to_index(value: object, price_unit: str, *, error: str) -> int:
     unit = _positive_decimal(price_unit, error="order_book_price_unit_invalid")
+    return _price_to_index(value, unit, error=error)
+
+
+def _price_to_index(value: object, unit: Decimal | Fraction, *, error: str) -> int:
     price = _positive_decimal(value, error=error)
     index = Fraction(price) / Fraction(unit)
     if index.denominator != 1:

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from bisect import bisect_left, bisect_right
 from contextlib import contextmanager
 from dataclasses import replace
@@ -53,6 +54,7 @@ from quant_research_platform.markets.implementations.a_share.processed.panels im
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.factors import engine as factor_engine
 from quant_research_platform.research.factors.expectations.calculations import (
+    FORECAST_FRESHNESS_DAYS,
     build_expectations_features,
 )
 from quant_research_platform.research.labels import engine as label_engine
@@ -114,7 +116,13 @@ def produce_a_share_processed_data(
             columns=None,
             time_window=None
             if data_id in _FULL_HISTORY_SOURCE_IDS
-            else a_share.source_history_window(source_spec, time_window),
+            else a_share.source_history_window(
+                source_spec,
+                time_window,
+                freshness_days=json.loads(spec.parameters_json).get(
+                    "freshness_days", FORECAST_FRESHNESS_DAYS
+                ),
+            ),
         )
     if spec.data_id == "market_panel_1d":
         missing = {
@@ -215,11 +223,13 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     calendar = (
         unified_trading_sessions(source["trading_calendar"]) if panel_source else None
     )
-    sessions, asset_types, market_history = _processed_axis(
+    sessions, asset_types, market_history, asset_sessions = _processed_axis(
         reference,
         panel_source=panel_source,
         calendar=source["trading_calendar"] if panel_source else None,
         validation_window=time_window if panel_source else None,
+        include_asset_sessions=spec.kind is ProcessedDataKind.LABEL
+        or spec.data_id == "execution_mask",
     )
     lower, upper, closed = time_window_timestamp_interval(time_window)
     if panel_source:
@@ -253,11 +263,13 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     asset_count = max(1, len(asset_types))
     block_sessions = max(1, DEFAULT_BATCH_ROWS // asset_count)
     if any(definition.family == "market_model" for definition in definitions):
-        _source_dates, _source_assets, market_history = _processed_axis(
-            source_sessions["market_bars_1d"],
-            panel_source=True,
-            calendar=source["trading_calendar"],
-            validation_window=time_window,
+        _source_dates, _source_assets, market_history, _asset_sessions = (
+            _processed_axis(
+                source_sessions["market_bars_1d"],
+                panel_source=True,
+                calendar=source["trading_calendar"],
+                validation_window=time_window,
+            )
         )
 
         def panels():
@@ -302,10 +314,21 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     for start in range(first, stop, block_sessions):
         end = min(stop, start + block_sessions)
         core = sessions[start:end]
-        read_window = TimeWindow(
-            sessions[max(0, start - lookback)],
-            sessions[min(len(sessions) - 1, end - 1 + lookahead)],
-        )
+        read_end = sessions[min(len(sessions) - 1, end - 1 + lookahead)]
+        if lookahead:
+            # PANEL keys contain every legal own-market session, including
+            # unknown quotes and suspensions; closed-market dates have no key.
+            read_end = max(
+                (
+                    axis[
+                        min(len(axis) - 1, bisect_right(axis, core[-1]) - 1 + lookahead)
+                    ]
+                    for axis in asset_sessions.values()
+                    if axis[0] <= core[-1] and axis[-1] >= core[0]
+                ),
+                default=read_end,
+            )
+        read_window = TimeWindow(sessions[max(0, start - lookback)], read_end)
         frames = {}
         for data_id, session in dependencies.items():
             view = session.filtered_view(read_window)
@@ -319,6 +342,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
             source=current_source,
             dependencies=frames,
             trading_sessions=sessions,
+            asset_sessions=asset_sessions,
             panel_sessions=pd.DatetimeIndex(core),
             asset_market_types=asset_types if panel_source else None,
             suspension_history=history,
@@ -370,7 +394,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
 
 
 def _benchmark_frames(source, session):
-    sessions, assets, _market_history = _processed_axis(
+    sessions, assets, _market_history, _asset_sessions = _processed_axis(
         session, panel_source=False, asset_column="constituent_asset_id"
     )
     block_size = max(1, DEFAULT_BATCH_ROWS // max(1, 2 * len(assets)))
@@ -397,7 +421,13 @@ def _benchmark_frames(source, session):
 
 
 def _processed_axis(
-    session, *, panel_source, asset_column=None, calendar=None, validation_window=None
+    session,
+    *,
+    panel_source,
+    asset_column=None,
+    calendar=None,
+    validation_window=None,
+    include_asset_sessions=False,
 ):
     if asset_column is None:
         asset_column = "source_asset_id" if panel_source else "asset_id"
@@ -410,6 +440,8 @@ def _processed_axis(
     dates = set()
     assets = {}
     first_market_events = {}
+    asset_session_masks = {}
+    session_positions = {}
     with closing_iterator(iter_dataset_chunks(view, batch_rows=65536)) as chunks:
         for frame in chunks:
             if panel_source:
@@ -448,6 +480,15 @@ def _processed_axis(
                         timestamp, first_market_events.get(key, timestamp)
                     )
                 frame = frame.loc[frame["filling_flag"].ne(2)]
+            if include_asset_sessions:
+                for asset, group in frame.groupby(asset_column, sort=False):
+                    mask = asset_session_masks.get(asset, 0)
+                    for timestamp in group.timestamp:
+                        position = session_positions.setdefault(
+                            timestamp, len(session_positions)
+                        )
+                        mask |= 1 << position
+                    asset_session_masks[asset] = mask
             new_dates = set(pd.to_datetime(frame["timestamp"]).unique()) - dates
             first = frame.drop_duplicates(asset_column)
             new_assets = first.loc[~first[asset_column].isin(assets)]
@@ -504,7 +545,20 @@ def _processed_axis(
                 (first.loc[~first.asset_id.isin(migrating)], history.loc[changed]),
                 ignore_index=True,
             )
-    return sessions, asset_types, market_history
+    axes = {
+        mask: tuple(
+            timestamp
+            for timestamp in sessions
+            if mask & (1 << session_positions[timestamp])
+        )
+        for mask in set(asset_session_masks.values())
+    }
+    return (
+        sessions,
+        asset_types,
+        market_history,
+        {asset: axes[mask] for asset, mask in asset_session_masks.items()},
+    )
 
 
 def _prepare_panel_source(source):
@@ -528,6 +582,7 @@ def _compute_processed_frame(
     source,
     dependencies,
     trading_sessions,
+    asset_sessions=None,
     panel_sessions=None,
     asset_market_types=None,
     suspension_history=None,
@@ -575,6 +630,9 @@ def _compute_processed_frame(
                 records,
                 panel.loc[:, ["asset_id", "timestamp", "close"]],
                 trading_sessions=trading_sessions,
+                freshness_days=json.loads(spec.parameters_json).get(
+                    "freshness_days", FORECAST_FRESHNESS_DAYS
+                ),
             )
             return (
                 panel.loc[:, ["market_id", "asset_id", "timestamp"]]
@@ -627,9 +685,17 @@ def _compute_processed_frame(
             validate="one_to_one",
         )
         definitions = a_share.label_catalog().list()
-        return label_engine.calculate_labels_for_panel(
-            panel, definitions=definitions, sessions=trading_sessions
-        ).loc[:, list(spec.required_columns)]
+        pieces = [
+            label_engine.calculate_labels_for_panel(
+                group,
+                definitions=definitions,
+                sessions=trading_sessions
+                if asset_sessions is None
+                else asset_sessions[asset],
+            )
+            for asset, group in panel.groupby("asset_id", sort=False)
+        ]
+        return pd.concat(pieces, ignore_index=True).loc[:, list(spec.required_columns)]
     raise ValueError(f"unsupported_a_share_processed_kind: {spec.kind}")
 
 

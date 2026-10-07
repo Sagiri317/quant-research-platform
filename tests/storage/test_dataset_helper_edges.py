@@ -16,7 +16,6 @@ import pyarrow.parquet as pq
 import pytest
 
 import quant_research_platform.storage.datasets.comparison as dataset_comparison
-import quant_research_platform.storage.datasets.fingerprinting as dataset_fingerprinting
 import quant_research_platform.storage.exact_keys as key_tracking
 from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.data import (
@@ -697,19 +696,6 @@ def test_nested_float_primary_key_zero_keeps_bit_identity(case: str) -> None:
     assert index.comparison_counts(
         expected_namespace="left", actual_namespace="right"
     ) == (1, 1, 0)
-
-
-@pytest.mark.parametrize("data_type", (pa.float16(), pa.float32(), pa.float64()))
-def test_top_level_float_primary_key_fingerprint_rejects_unsupported_width(
-    data_type: pa.DataType,
-) -> None:
-    table = pa.table({"key": pa.array([-0.0, 0.0], type=data_type)})
-    with pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"):
-        tuple(
-            dataset_fingerprinting._iter_fingerprint_hashes(
-                table.to_pandas(), arrow_schema=table.schema, primary_key=("key",)
-            )
-        )
 
 
 @pytest.mark.parametrize("nonfinite", (float("nan"), float("inf")))

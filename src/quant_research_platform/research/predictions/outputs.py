@@ -88,6 +88,7 @@ def build_prediction_result_from_frames(
     *,
     prediction_model: object,
     model_metadata: dict[str, object],
+    allow_empty: bool = False,
 ) -> PredictionResult:
     if type(model_metadata) is not dict:
         raise ValueError("invalid_model_metadata")
@@ -152,7 +153,7 @@ def build_prediction_result_from_frames(
             "oos_end": None,
         },
         prediction_metadata_factory=lambda: build_state.prediction_metadata(
-            spec=spec, input_columns=input_columns
+            spec=spec, input_columns=input_columns, allow_empty=allow_empty
         ),
         _close=output_frames.close,
     )
@@ -169,10 +170,8 @@ class _PredictionBuildState:
     effective_test_end: str | None = None
 
     def record_filter_metadata(self, metadata: dict[str, object]) -> None:
-        self.rows_input += _strict_non_negative_prediction_count(metadata["rows_input"])
-        self.rows_after_filter += _strict_non_negative_prediction_count(
-            metadata["rows_after_filter_mode"]
-        )
+        self.rows_input += metadata["rows_input"]
+        self.rows_after_filter += metadata["rows_after_filter_mode"]
         self.filter_columns_used = tuple(metadata["filter_columns_used"])
         self.filter_definition = str(metadata["filter_definition"])
 
@@ -198,9 +197,13 @@ class _PredictionBuildState:
         self.prediction_rows += int(len(output))
 
     def prediction_metadata(
-        self, *, spec: PredictionSpec, input_columns: tuple[str, ...]
+        self,
+        *,
+        spec: PredictionSpec,
+        input_columns: tuple[str, ...],
+        allow_empty: bool = False,
     ) -> dict[str, object]:
-        if self.prediction_rows == 0 or self.effective_test_end is None:
+        if not allow_empty and self.prediction_rows == 0:
             raise ValueError("empty_prediction_window")
         return {
             "prediction_mode": spec.prediction_mode,
@@ -311,9 +314,3 @@ def _iter_prediction_work_frames(
                 yield yielded_value
             except GeneratorExit:
                 return
-
-
-def _strict_non_negative_prediction_count(value: object) -> int:
-    if not isinstance(value, int) or isinstance(value, bool) or value < 0:
-        raise ValueError("invalid_prediction_metadata_count")
-    return value

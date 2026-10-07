@@ -18,7 +18,6 @@ from quant_research_platform.artifacts.outputs.manifest import (
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_crypto_prediction_frame,
     validate_family_prediction_frame,
-    validate_prediction_output_metadata_shape,
 )
 from quant_research_platform.contracts.predictions import (
     ALPHA_SCORE_COLUMN,
@@ -228,7 +227,6 @@ def read_prediction_output_bundle(
         metadata = manifest.get("metadata")
         if type(metadata) is not dict:
             raise ValueError("persisted_prediction_metadata_mismatch")
-        validate_prediction_output_metadata_shape(metadata)
         primary_key_value = metadata.get("primary_key")
         prediction_column = metadata.get("prediction_column")
         prediction_mode = metadata.get("prediction_mode")
@@ -260,7 +258,7 @@ def read_prediction_output_bundle(
         try:
             key_index = ExactPrimaryKeyIndex(primary_key=primary_key)
             lookup = _PredictionLookup(
-                index=key_index,
+                index=ExactPrimaryKeyIndex(primary_key=primary_key),
                 primary_key=primary_key,
                 prediction_column=lookup_column,
                 family_selection=family_selection,
@@ -282,6 +280,7 @@ def read_prediction_output_bundle(
                 test_start = metadata.get("test_start")
                 test_end = metadata.get("test_end")
                 effective_test_end = None
+                window_rows = 0
                 batches = iter(
                     parquet.iter_batches(batch_size=65536, use_threads=False)
                 )
@@ -339,6 +338,7 @@ def read_prediction_output_bundle(
                             if effective_test_end is None
                             else max(effective_test_end, batch_end)
                         )
+                    family_keep = None
                     if family_selection is not None:
                         selected_families = (
                             frame["quarter_id"].map(
@@ -347,11 +347,9 @@ def read_prediction_output_bundle(
                             if family_selection == "champion"
                             else family_selection
                         )
-                        keep = pa.array(
+                        family_keep = pa.array(
                             frame["family_id"].eq(selected_families).to_numpy()
                         )
-                        table = table.filter(keep)
-                        timestamps = table.column("timestamp")
 
                     if time_window is not None:
                         keep = pc.and_(
@@ -370,10 +368,17 @@ def read_prediction_output_bundle(
                                 ),
                             ),
                         )
+                        window_rows += int(pc.sum(keep).as_py() or 0)
+                        if family_keep is not None:
+                            keep = pc.and_(keep, family_keep)
                         table = table.filter(keep)
+                    else:
+                        window_rows += table.num_rows
+                        if family_keep is not None:
+                            table = table.filter(family_keep)
                     if table.num_rows:
                         lookup.add_table(table)
-                if lookup.row_count == 0:
+                if window_rows == 0:
                     raise ValueError("empty_prediction_window")
                 if (
                     time_value_isoformat(

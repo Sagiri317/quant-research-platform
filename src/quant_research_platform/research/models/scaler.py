@@ -3,9 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
+from scipy.linalg import norm
 
 from quant_research_platform.contracts.models import TrainingWeighting
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
@@ -17,13 +19,13 @@ class ModelMatrixScaler:
 
     columns: tuple[str, ...]
     origin_: tuple[float, ...]
-    offset_: tuple[float, ...]
+    offset_: tuple[Fraction, ...]
     scale_: tuple[float, ...]
 
     @property
     def mean_(self) -> tuple[float, ...]:
         return tuple(
-            origin + offset
+            float(Fraction(origin) + offset)
             for origin, offset in zip(self.origin_, self.offset_, strict=True)
         )
 
@@ -39,28 +41,67 @@ class ModelMatrixScaler:
             raise ValueError("model_scaler_columns_invalid")
         values = _finite_matrix(frame, columns)
         weights = _weights(sample_weight, len(values))
+        original_weights = weights
+        anchor = values[int(np.argmax(weights))]
+        root_weights = np.sqrt(weights)
+        root_weights /= root_weights.max()
         weights = weights / weights.max()
         total = float(weights.sum())
         with np.errstate(over="ignore"):
-            differences = values - values[0]
+            differences = values - anchor
         shifted = np.isfinite(differences).all(axis=0)
-        origin = np.where(shifted, values[0], 0.0)
+        origin = np.where(shifted, anchor, 0.0)
         differences[:, ~shifted] = values[:, ~shifted]
         magnitude = np.max(np.abs(differences), axis=0)
         constant = magnitude == 0.0
         magnitude[constant] = 1.0
         normalized = differences / magnitude
-        center = (weights[:, None] * normalized).sum(axis=0) / total
+        weighted = weights[:, None] * normalized
+        center = weighted.sum(axis=0) / total
         offset = center * magnitude
-        variance = (weights[:, None] * (normalized - center) ** 2).sum(axis=0) / total
-        scale = np.sqrt(variance) * magnitude
+        scale = (
+            np.array(
+                [
+                    norm(column, check_finite=False)
+                    for column in (root_weights[:, None] * (normalized - center)).T
+                ]
+            )
+            / np.sqrt(total)
+            * magnitude
+        )
+        # Preserve original-unit centers across underflow and anchor cancellation.
+        exact_columns = ~constant & (
+            ((normalized != 0) & (np.abs(weighted) < np.finfo(float).tiny)).any(axis=0)
+            | (np.abs(origin + offset) <= np.finfo(float).eps * np.abs(origin))
+        )
+        exact_offsets = [Fraction(float(value)) for value in offset]
+        if exact_columns.any():
+            exact_weights = tuple(
+                Fraction(float(weight)) for weight in original_weights
+            )
+            exact_total = sum(exact_weights)
+            for column in np.flatnonzero(exact_columns):
+                exact_mean = (
+                    sum(
+                        weight * Fraction(float(value))
+                        for weight, value in zip(
+                            exact_weights, values[:, column], strict=True
+                        )
+                    )
+                    / exact_total
+                )
+                exact_offset = exact_mean - Fraction(float(origin[column]))
+                if abs(exact_mean) < abs(exact_offset):
+                    origin[column] = 0.0
+                    exact_offset = exact_mean
+                exact_offsets[column] = exact_offset
         scale[constant] = 1.0
         if np.any(scale == 0.0):
             raise ValueError("model_scaler_scale_unrepresentable")
         return cls(
             columns=columns,
             origin_=tuple(float(value) for value in origin),
-            offset_=tuple(float(value) for value in offset),
+            offset_=tuple(exact_offsets),
             scale_=tuple(float(value) for value in scale),
         )
 
@@ -69,12 +110,12 @@ class ModelMatrixScaler:
             raise ValueError("model_scaler_columns_mismatch")
         values = _finite_matrix(frame, self.columns)
         origin = np.asarray(self.origin_)
-        offset = np.asarray(self.offset_)
+        offset = np.array([float(value) for value in self.offset_])
         scale = np.asarray(self.scale_)
         with np.errstate(over="ignore"):
             differences = (values - origin) - offset
-        overflow = ~np.isfinite(differences)
-        differences /= scale
+            overflow = ~np.isfinite(differences)
+            differences /= scale
         if overflow.any():
             rows, columns = np.nonzero(overflow)
             differences[rows, columns] = (
@@ -82,13 +123,29 @@ class ModelMatrixScaler:
                 - origin[columns] / scale[columns]
                 - offset[columns] / scale[columns]
             )
+        for column, exact_offset in enumerate(self.offset_):
+            if exact_offset != Fraction(float(offset[column])):
+                exact_origin = Fraction(self.origin_[column])
+                exact_scale = Fraction(self.scale_[column])
+                for row, value in enumerate(values[:, column]):
+                    standardized = (
+                        Fraction(float(value)) - exact_origin - exact_offset
+                    ) / exact_scale
+                    try:
+                        differences[row, column] = float(standardized)
+                    except OverflowError:
+                        differences[row, column] = (
+                            np.inf if standardized > 0 else -np.inf
+                        )
         return pd.DataFrame(differences, index=frame.index, columns=self.columns)
 
     def to_payload(self) -> dict[str, object]:
         return {
             "columns": list(self.columns),
             "weighted_mean_origin": list(self.origin_),
-            "weighted_mean_offset": list(self.offset_),
+            "weighted_mean_offset": [
+                [value.numerator, value.denominator] for value in self.offset_
+            ],
             "weighted_population_scale": list(self.scale_),
         }
 

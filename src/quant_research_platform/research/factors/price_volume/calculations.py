@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Iterable
+from decimal import Decimal, localcontext
+from fractions import Fraction
 from itertools import accumulate
 from math import hypot, sqrt
 from statistics import mean as arithmetic_mean
@@ -80,8 +82,9 @@ def calculate_price_volume_factors(
                     upper, side="right" if closed else "left"
                 )
             )
+        sums = {}
         for factor in requested:
-            output[factor].append(_calculate_values(values, factor, start, stop))
+            output[factor].append(_calculate_values(values, sums, factor, start, stop))
     ordered = ordered.loc[:, ("asset_id", "timestamp")]
     if bounds is not None:
         lower, upper, closed = bounds
@@ -101,15 +104,16 @@ def calculate_price_volume_factors(
 
 
 def _calculate_values(
-    values: dict[str, np.ndarray], factor: str, start: int, stop: int
+    values: dict[str, np.ndarray], sums: dict, factor: str, start: int, stop: int
 ) -> np.ndarray:
     names, windows = _PRICE_VOLUME_INPUT_WINDOWS[factor]
     size = windows[0] if windows else 0
-    source = values[
+    source_name = (
         "turnover"
         if "turnover" in factor and not factor.startswith("return_")
         else names[0]
-    ]
+    )
+    source = values[source_name]
     output = np.full(stop - start, np.nan)
     if factor.startswith(("reversal_", "momentum_")) or factor.endswith("_change_20d"):
         first = max(start, size)
@@ -176,9 +180,17 @@ def _calculate_values(
         "turnover_20d",
         "turnover_60d",
     }:
-        result = _rolling_mean(source[first - size + 1 - shift : stop - shift], size)[
-            valid
-        ]
+        if source_name not in sums:
+            sums[source_name] = _binary_prefix(source)
+        totals, unit = sums[source_name]
+        result = np.fromiter(
+            (
+                (totals[position + 1 - shift] - totals[position + 1 - shift - size])
+                / (size * unit)
+                for position in range(first, stop)
+            ),
+            dtype=float,
+        )[valid]
         if shift:
             result = (
                 np.divide(
@@ -222,17 +234,40 @@ def _calculate_values(
             (arithmetic_mean(row) for row in np.partition(current, -5, axis=1)[:, -5:]),
             dtype=float,
         )
-    elif factor in {"amount_cv_126d", "turnover_cv_126d", "abnormal_turnover_20_250"}:
+    elif factor in {"amount_cv_126d", "turnover_cv_126d"}:
+        if source_name not in sums:
+            sums[source_name] = _binary_prefix(source)
+        totals, _unit = sums[source_name]
+        square_totals = list(
+            accumulate(
+                (
+                    (right - left) ** 2
+                    for left, right in zip(totals[:-1], totals[1:], strict=True)
+                ),
+                initial=0,
+            )
+        )
+        result = np.full(len(current), np.nan)
+        for index, position in enumerate(np.flatnonzero(valid) + first + 1):
+            total = totals[position] - totals[position - size]
+            if total <= 0:
+                continue
+            squares = square_totals[position] - square_totals[position - size]
+            squared = Fraction(
+                size * (size * squares - total * total), (size - 1) * total * total
+            )
+            with localcontext() as context:
+                context.prec = 80
+                result[index] = float(
+                    (Decimal(squared.numerator) / Decimal(squared.denominator)).sqrt()
+                )
+    elif factor == "abnormal_turnover_20_250":
         scale = np.max(np.abs(current), axis=1, keepdims=True)
         normalized = np.divide(
             current, scale, out=np.zeros_like(current), where=scale > 0
         )
         denominator = np.mean(normalized, axis=1)
-        numerator = (
-            np.mean(normalized[:, -20:], axis=1)
-            if factor == "abnormal_turnover_20_250"
-            else _sample_standard_deviation(normalized)
-        )
+        numerator = np.mean(normalized[:, -20:], axis=1)
         result = np.divide(
             numerator,
             denominator,
@@ -266,11 +301,13 @@ def _calculate_values(
             )
     elif factor == "drawdown_60d":
         result = np.min(current / np.maximum.accumulate(current, axis=1) - 1.0, axis=1)
-    elif factor == "amplitude_20d":
-        result = np.mean((current - extra["low"]) / extra["close"], axis=1)
-    elif factor.startswith("amihud_"):
-        return_mantissa, return_exponent = np.frexp(np.abs(current))
-        amount_mantissa, amount_exponent = np.frexp(extra["amount"])
+    elif factor == "amplitude_20d" or factor.startswith("amihud_"):
+        numerator = (
+            current - extra["low"] if factor == "amplitude_20d" else np.abs(current)
+        )
+        denominator = extra["close"] if factor == "amplitude_20d" else extra["amount"]
+        return_mantissa, return_exponent = np.frexp(numerator)
+        amount_mantissa, amount_exponent = np.frexp(denominator)
         quotients = return_mantissa / amount_mantissa
         exponents = return_exponent - amount_exponent
         scale = np.max(
@@ -340,7 +377,7 @@ def _calculate_values(
     return output
 
 
-def _rolling_mean(values: np.ndarray, size: int) -> np.ndarray:
+def _binary_prefix(values: np.ndarray) -> tuple[list[int], int]:
     # Exact binary sums make subtraction safe across windows and chunk boundaries.
     # Missing values are zero only inside this accumulator; the caller's complete
     # window mask excludes every result containing them.
@@ -359,14 +396,7 @@ def _rolling_mean(values: np.ndarray, size: int) -> np.ndarray:
             initial=0,
         )
     )
-    denominator = size * unit
-    return np.fromiter(
-        (
-            (totals[start + size] - totals[start]) / denominator
-            for start in range(len(values) - size + 1)
-        ),
-        dtype=float,
-    )
+    return totals, unit
 
 
 def _sample_standard_deviation(windows: np.ndarray) -> np.ndarray:

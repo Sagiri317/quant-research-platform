@@ -240,6 +240,8 @@ basis 为无量纲比值减一。频道名 premiumIndex 不代表供应商存在
 forceOrder 仅代表供应商观测到的 proxy。每条发布快照以 z（累计已成交 base 数量）加权，
 BUY 为正、SELL 为负；不以订单数量 q 代替成交数量，不声称完整或去重后的全市场清算量。
 无观测或分母为零保持 NULL；断连 generation、grid gap 和 episode 边界重置窗口。
+执行 PANEL 的 segment/grid 边界只重置滚动窗口及预热；独立衍生品源的最新观测和观测时钟仍按自身 age 上限保留，只有该源 epoch 变化才失效。forceOrder elapsed 由同一最新观测时钟派生，窗口首个100ms只纳入该区间内的已观测成交。
+双边深度和滚动流量比值在最终除法后舍入；请求的绝对 OFI 若确实超出 float64 表示范围仍明确失败，不改成零或缺失值。
 缺 state 归档只阻塞依赖它的分支，微观结构因子不引入该依赖。
 
 ### 现货与永续上下文
@@ -280,8 +282,11 @@ SOL→BTC、BTC/ETH→SOL 的迁移选择。只有训练或评估需要 SOL 行�
 由 producer 按 `local_timestamp <= decision_time` 对齐到 Binance BTC/ETH 100ms 主键，
 随后使用现有 exact-key assembler。SOL 研究行对这些 BTC/ETH 专属信息保持 NULL。
 
-成交 amount 的原生单位不得混用。Bybit linear 为 base 数量；OKX BTC-USDT-SWAP
-每张为 0.01 BTC，ETH-USDT-SWAP 每张为 0.1 ETH。换算系数由市场 owner 定义，
+成交 amount 的原生单位不得混用。Bybit linear 为 base 数量。OKX BTC-USDT-SWAP
+旧期每张为 0.0001 BTC，ETH-USDT-SWAP 为 0.001 ETH；2020-03-20（BTC）与
+2020-03-19（ETH）香港时间 16:00–16:30 调整至 0.01 BTC 与 0.1 ETH。
+该半小时内的精确生效点未取得保证，相关成交明确阻塞；其他日期按成交事件时点选择已核面值。
+换算事实由市场 owner 定义，
 冻结进入 processed 参数身份。来源说明：
 [Tardis CSV 字段](https://docs.tardis.dev/downloadable-csv-files/data-types)、
 [OKX 合约面值公告](https://www.okx.com/zh-hans/help/adjustment-of-face-value-for-usdt-margined-perpetual-swap-futures-trading)。
@@ -312,7 +317,7 @@ baseline.json 保存九个模型选择作为可编辑示例；运行不强制保
 评估因子、各模型输入、训练和评估资产分别显式选择。multiscale.json 选择多尺度微观结构因子，
 derivatives_state.json 加入衍生品状态因子；不做块或参数的笛卡尔搜索。
 示例中的费用、延迟和资金为研究假设，不能当成已验证的历史账户费率。
-数值监督模型的 scaler 只在训练期拟合；配方变化登记新的模型/试验身份，既有失败结果不覆盖。
+数值监督模型的 scaler 只在训练期拟合；`weighted_mean_offset` 每列统一保存最简整数比 `[分子, 分母]`（正分母），极小中心偏移保留到最终标准化值舍入。旧浮点偏移 metadata 与旧 pickle 明确拒绝，受影响模型须重建；配方变化登记新的模型/试验身份，既有失败结果不覆盖。
 真实研究须有合格的事件来源与资金费归档；已完成的代码或合成验收不能替代真实覆盖。
 
 | 配置示例 | 选择的研究信息 | 附加来源条件 |
@@ -502,6 +507,8 @@ continuous 模式中，每个候选跨 OOS 窗口使用连续独立资金。窗�
 
 `execution.maker` 显式提供 `maker_fee_bps`、`latency_ms`、
 `min_calibration_samples`、`inventory_target` 和 `inventory_skew`。
+`inventory_target` 和 `inventory_skew` 仅用于 fixed maker；calibrated maker 按历史净收益选量，
+其计算身份和结果摘要不包含这两个未消费参数，完整配方 provenance 保留原声明。
 校准使用 TRAIN 拟合后产生、在 VALIDATION 截止前成熟的价格模型和 proxy 预测；
 按买卖方向保留每个样本的成交路径与价格预测残差，包括未成交样本。
 预期收益计算保留成交与残差的联合关系，不把均值相乘代替配对结果。

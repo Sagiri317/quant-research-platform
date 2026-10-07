@@ -218,8 +218,8 @@ def _maker_config(plan, asset_id):
         order_quantity=limits["max_order_quantity"],
         max_position=limits["max_position_quantity"],
         maker_fee_bps=maker["maker_fee_bps"],
-        inventory_target=maker["inventory_target"],
-        inventory_skew=maker["inventory_skew"],
+        inventory_target=maker.get("inventory_target"),
+        inventory_skew=maker.get("inventory_skew"),
         markout_horizon_ms=execution["markout_horizon_ms"],
         latency_ms=maker["latency_ms"],
     )

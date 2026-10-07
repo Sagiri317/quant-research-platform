@@ -262,7 +262,15 @@ def _package_content_hash(
             raise ValueError("production_package_identity_changed")
         if source is not None:
             sources[relative] = bytes(source)
-    if _package_inventory(root) != (files, directories):
+    final_files, final_directories = _package_inventory(root)
+    if (
+        final_files != files
+        or final_directories.keys() != directories.keys()
+        or any(
+            not _same_directory_identity(expected, final_directories[path])
+            for path, expected in directories.items()
+        )
+    ):
         raise ValueError("production_package_identity_changed")
     return digest.hexdigest()
 
@@ -270,7 +278,7 @@ def _package_content_hash(
 def _package_inventory(root: Path):
     root_before = _directory_identity(root)
     files: list[tuple[str, Path, tuple[int, int, int, int]]] = []
-    directories: dict[Path, tuple[int, int, int, int]] = {root: root_before}
+    directories = {root: root_before}
     pending = [(root, "")]
     while pending:
         directory, relative_parent = pending.pop()
@@ -305,10 +313,14 @@ def _package_inventory(root: Path):
                         )
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("production_package_enumeration_failed") from exc
-        if _directory_identity(directory) != directories[directory]:
+        if not _same_directory_identity(
+            _directory_identity(directory), directories[directory]
+        ):
             raise ValueError("production_package_identity_changed")
     for directory, expected_identity in directories.items():
-        if _directory_identity(directory) != expected_identity:
+        if not _same_directory_identity(
+            _directory_identity(directory), expected_identity
+        ):
             raise ValueError("production_package_identity_changed")
     return (tuple(sorted(files, key=lambda item: item[0])), directories)
 
@@ -323,14 +335,46 @@ def _file_identity(path: Path) -> tuple[int, int, int, int]:
     return (value.st_dev, value.st_ino, value.st_size, value.st_mtime_ns)
 
 
-def _directory_identity(path: Path) -> tuple[int, int, int, int]:
+def _same_directory_identity(left, right) -> bool:
+    # Retained members are checked separately; only excluded membership can
+    # explain changed directory timestamps without changing its inode.
+    return left[:2] == right[:2] and (left[2:4] == right[2:4] or left[4] != right[4])
+
+
+def _directory_identity(path: Path):
     try:
         value = filesystem_stat(path, follow_symlinks=False)
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("production_package_root_invalid") from exc
     if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
         raise ValueError("production_package_root_invalid")
-    return (value.st_dev, value.st_ino, value.st_mtime_ns, value.st_ctime_ns)
+    ignored = []
+    try:
+        with closing_iterator(filesystem_scandir(path)) as entries:
+            for entry in entries:
+                if entry.name == "__pycache__" or entry.name.casefold().endswith(
+                    ".pyc"
+                ):
+                    require_unaliased_path(
+                        path / entry.name, error="production_package_alias"
+                    )
+                    member = entry.stat(follow_symlinks=False)
+                    ignored.append((entry.name, member.st_dev, member.st_ino))
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise ValueError("production_package_enumeration_failed") from exc
+    try:
+        after = filesystem_stat(path, follow_symlinks=False)
+    except (FileNotFoundError, NotADirectoryError) as exc:
+        raise ValueError("production_package_root_invalid") from exc
+    if (after.st_dev, after.st_ino) != (value.st_dev, value.st_ino):
+        raise ValueError("production_package_identity_changed")
+    return (
+        after.st_dev,
+        after.st_ino,
+        after.st_mtime_ns,
+        after.st_ctime_ns,
+        tuple(sorted(ignored)),
+    )
 
 
 def _dependency_versions(supplied: Mapping[str, str] | None) -> dict[str, str]:

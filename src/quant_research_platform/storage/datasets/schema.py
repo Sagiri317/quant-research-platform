@@ -246,7 +246,6 @@ def _validate_source_artifact_identity(value: Any) -> dict[str, Any]:
         if type(members) is not list or not members:
             raise ValueError("invalid_source_artifact_identity")
         archives = []
-        previous_date = None
         identities = set()
         for member in members:
             if not isinstance(member, Mapping) or set(
@@ -260,7 +259,7 @@ def _validate_source_artifact_identity(value: Any) -> dict[str, Any]:
                 )
             except ValueError:
                 valid_date = False
-            if not valid_date or (previous_date is not None and day <= previous_date):
+            if not valid_date:
                 raise ValueError("invalid_source_artifact_identity")
             identity = _validate_source_artifact_identity(
                 {key: member[key] for key in _SOURCE_ARTIFACT_IDENTITY_KEYS}
@@ -270,7 +269,6 @@ def _validate_source_artifact_identity(value: Any) -> dict[str, Any]:
                 raise ValueError("invalid_source_artifact_identity")
             identities.add(key)
             archives.append({"date": day, **identity})
-            previous_date = day
         return {"schema_id": value["schema_id"], "archives": archives}
     if not isinstance(value, Mapping) or set(value) != _SOURCE_ARTIFACT_IDENTITY_KEYS:
         raise ValueError("invalid_source_artifact_identity")
@@ -654,9 +652,26 @@ def validate_persisted_logical_schema(
     for descriptor in logical_dtypes["columns"]:
         data_type = schema.field(descriptor["name"]).type
         if descriptor["kind"] == "categorical":
-            if not pa.types.is_dictionary(data_type) or bool(data_type.ordered) != bool(
-                descriptor["ordered"]
-            ):
+            if pa.types.is_dictionary(data_type):
+                if bool(data_type.ordered) != bool(descriptor["ordered"]):
+                    raise ValueError("dataset_categorical_domain_mismatch")
+                data_type = data_type.value_type
+            categories = pa.Array.from_pandas(
+                pd.Index(
+                    [_typed_category_value(item) for item in descriptor["categories"]]
+                )
+            )
+            try:
+                restored = categories.cast(data_type, safe=True).cast(
+                    categories.type, safe=True
+                )
+            except (
+                pa.ArrowInvalid,
+                pa.ArrowNotImplementedError,
+                pa.ArrowTypeError,
+            ) as error:
+                raise ValueError("dataset_categorical_domain_mismatch") from error
+            if not restored.equals(categories):
                 raise ValueError("dataset_categorical_domain_mismatch")
             continue
         if pa.types.is_dictionary(data_type):
@@ -886,7 +901,12 @@ def _typed_category_value_payload(value: object) -> dict[str, Any]:
         timestamp = pd.Timestamp(value)
         if pd.isna(timestamp):
             raise ValueError("dataset_categorical_value_invalid")
-        return {"type": "timestamp", "value": timestamp.isoformat()}
+        zone = getattr(timestamp.tz, "key", getattr(timestamp.tz, "zone", None))
+        return {
+            "type": "timestamp",
+            "value": f"{timestamp.isoformat()}@{timestamp.unit}"
+            + (f"[{zone}]" if zone is not None else ""),
+        }
     raise ValueError("dataset_categorical_value_invalid")
 
 
@@ -929,8 +949,14 @@ def _typed_category_value(value: Mapping[str, Any]) -> object:
             raise ValueError("dataset_logical_dtypes_invalid") from exc
     if kind == "timestamp" and type(payload) is str:
         try:
-            result = pd.Timestamp(payload)
-        except ValueError as exc:
+            zone = None
+            if payload.endswith("]"):
+                payload, _, zone = payload[:-1].rpartition("[")
+            instant, _, unit = payload.rpartition("@")
+            result = pd.Timestamp(instant).as_unit(unit)
+            if zone is not None:
+                result = result.tz_convert(zone)
+        except (ValueError, TypeError, KeyError) as exc:
             raise ValueError("dataset_logical_dtypes_invalid") from exc
         if not pd.isna(result):
             return result

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Iterator, Mapping
+from dataclasses import replace
 from pathlib import Path
 
 import numpy as np
@@ -140,7 +141,12 @@ def _iter_joined_processed_chunks(
 ) -> Iterator[pd.DataFrame]:
     base_data_id = _base_input_data_id(dataset_spec)
     chunk_windows = _iter_research_chunk_windows_from_base_input(
-        sessions[base_data_id], time_window=time_window
+        replace(
+            sessions[base_data_id],
+            logical_columns=("timestamp",),
+            physical_columns=("timestamp",),
+        ),
+        time_window=time_window,
     )
     physical_order = (
         "timestamp",
@@ -426,7 +432,11 @@ def _validate_research_input_specs(
         error_name="invalid_research_filter_columns",
     )
     _require_columns_from_roles_or_kinds(
-        dataset_spec.context_columns,
+        tuple(
+            column
+            for column in dataset_spec.context_columns
+            if column not in _generated_semantic_columns(dataset_spec)
+        ),
         role_by_column=role_by_column,
         kind_by_column=kind_by_column,
         allowed_roles={ColumnRole.CONTEXT},
@@ -523,7 +533,7 @@ def _generated_semantic_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str,
         return ()
     return tuple(
         column
-        for column in ("eligible", "model_target")
+        for column in ("eligible", "model_target", "model_target_available_at")
         if column in _ordered_output_columns(dataset_spec)
     )
 
@@ -542,6 +552,13 @@ def _add_a_share_semantic_columns(
         if "forward_return_20d" not in result.columns:
             raise ValueError("a_share_model_target_label_missing")
         result["model_target"] = _a_share_model_target(result)
+        result["model_target_available_at"] = (
+            result["forward_return_20d_available_at"]
+            .where(result.model_target.notna())
+            .groupby(result.timestamp, sort=False)
+            .transform("max")
+            .where(result.model_target.notna())
+        )
     return result
 
 

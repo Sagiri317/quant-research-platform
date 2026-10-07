@@ -185,6 +185,7 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
     tmp_path, missing_boundary, quantity_scale, monkeypatch
 ):
     plan = _statistics_plan(quantity_scale)
+    plan["execution"]["fee_scenarios_bps"].append(1e308)
     configuration = research_configuration(
         "crypto",
         "baseline",
@@ -373,6 +374,35 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
             tables=owned,
             table_group="crypto_portfolio",
         )
+        if (
+            quantity_scale == 1.0
+            and not missing_boundary
+            and descriptor == bound.execution_targets()[0]
+        ):
+            from quant_research_platform.research.portfolios.diagnostics import (
+                fixed_turnover_cost_sensitivity,
+            )
+
+            unrepresentable = fixed_turnover_cost_sensitivity(
+                turnover=1e308,
+                net_pnl=0.0,
+                base_fee_bps=0.0,
+                fee_scenarios_bps=(1e308,),
+                additional_spread_scenarios_bps=(0.0,),
+            )[0]
+            assert unrepresentable["cost_delta"] == np.inf
+            invalid = {name: frame.copy() for name, frame in owned.items()}
+            for column, value in unrepresentable.items():
+                invalid["crypto_cost_sensitivity"].loc[0, column] = value
+            with pytest.raises(ValueError, match="statistics_table_numeric_invalid"):
+                write_statistics_artifact(
+                    StorageLayout(tmp_path / "unrepresentable").semantic_artifact_root(
+                        "crypto", target
+                    ),
+                    envelope=envelope,
+                    tables=invalid,
+                    table_group="crypto_portfolio",
+                )
         artifact = read_statistics_artifact(
             root, expected_identity=envelope.instance_identity
         )
@@ -432,6 +462,21 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
                         assert observed.kind.tolist() == ["oos"]
                         assert observed.funding.iloc[0] == 100.0
                         assert observed.net_pnl.iloc[0] == 350.0
+                        from fractions import Fraction
+
+                        with artifact.table("crypto_cost_sensitivity.parquet") as costs:
+                            stressed = costs.loc[
+                                costs.fee_bps.eq(1e308)
+                                & costs.additional_spread_bps.eq(0.0)
+                            ]
+                            assert len(stressed) == 1
+                            expected_cost = float(
+                                Fraction(float(observed.turnover.iloc[0]))
+                                * Fraction(1e308)
+                                / 10000
+                            )
+                            assert stressed.cost_delta.iloc[0] == expected_cost
+                            assert stressed.net_pnl.iloc[0] == 350.0 - expected_cost
 
 
 @pytest.mark.parametrize("scale", (1.0, 2.0 ** (-50)))
@@ -748,6 +793,38 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
     assert curve["execution_mode"] == "independent_segments"
     assert "points" not in curve
     assert curve["episode_count"] == 2
+    for stride in (2, 100):
+        sampled = portfolio_curve(
+            profile=profile,
+            layout=layout,
+            run_id=run.run_id,
+            target_id=descriptor.target_id,
+            stride=stride,
+        )
+        assert sampled["source_point_count"] == curve["source_point_count"]
+        assert sampled["candidate_id"] == curve["candidate_id"]
+        assert sampled["initial_capital"] == curve["initial_capital"]
+        for actual, complete in zip(
+            sampled["episodes"], curve["episodes"], strict=True
+        ):
+            last = complete["points"][-1]["sequence"]
+            expected = [
+                point
+                for point in complete["points"]
+                if point["sequence"] % stride == 0 or point["sequence"] == last
+            ]
+            assert actual["points"] == expected
+            assert actual["boundaries"] == complete["boundaries"]
+            for key in (
+                "episode_id",
+                "start_ns",
+                "stop_ns",
+                "terminal_valuation_ns",
+                "termination",
+                "stop_reasons",
+                "instance_identity",
+            ):
+                assert actual[key] == complete[key]
     assert curve["source_point_count"] == curve["displayed_point_count"]
     assert [episode["points"][0]["nav"] for episode in curve["episodes"]] == [
         1000.0,

@@ -23,6 +23,7 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.factors import FactorDefinition, FactorSet
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.portfolios import (
     ExecutionAssumptions,
@@ -159,6 +160,17 @@ class AShareProtocol:
         )
 
     @property
+    def forecast_freshness_days(self):
+        configuration = self.configuration()
+        return (
+            FORECAST_FRESHNESS_DAYS
+            if configuration is None
+            else configuration["evaluation"].get(
+                "forecast_freshness_days", FORECAST_FRESHNESS_DAYS
+            )
+        )
+
+    @property
     def protocol_id(self) -> str:
         return PROTOCOL_ID
 
@@ -252,6 +264,12 @@ class AShareProtocol:
                 "adv_participation": EXECUTION_ASSUMPTIONS.adv_participation,
                 "adv_sensitivities": list(EXECUTION_ASSUMPTIONS.adv_sensitivities),
             },
+            "expectations": {
+                "freshness_days": self.forecast_freshness_days,
+                "role": "robustness"
+                if self.forecast_freshness_days == 180
+                else "primary",
+            },
             "risk": asdict(self.risk_config),
             "optimizer": asdict(self.optimizer_config),
             "statistics": {
@@ -287,6 +305,20 @@ class AShareProtocol:
                     if item.factor_set is FactorSet.CORE
                     and item.output_column in self.factor_columns
                 ],
+            },
+            "attribution_groups": {
+                canonical_json_hash(list(styles)): {
+                    "style_columns": list(styles),
+                    "candidate_ids": [
+                        candidate.candidate_id
+                        for candidate in self.portfolio_candidates()
+                        if candidate.risk_style_columns == styles
+                    ],
+                }
+                for styles in dict.fromkeys(
+                    candidate.risk_style_columns
+                    for candidate in self.portfolio_candidates()
+                )
             },
             "portfolio_candidates": [
                 candidate.candidate_id for candidate in self.portfolio_candidates()
@@ -367,15 +399,22 @@ class AShareProtocol:
                 and target_id == f"{self.scenario_id}_portfolio_statistics"
             ):
                 base["portfolio_candidates"] = full["portfolio_candidates"]
+                base["attribution_groups"] = full["attribution_groups"]
                 base["statistics"] = full["statistics"]
             if self.frozen_development is not None:
                 base["frozen_development"] = self.frozen_development
+        if producer_kind == "STATISTIC" and set(self.factor_columns).intersection(
+            EXPECTATIONS_FACTORS
+        ):
+            base["expectations"] = full["expectations"]
         return base
 
     def target_window(self, action, data_spec, window, target_id=None):
         if action != "research run":
             return (
-                source_history_window(data_spec, window)
+                source_history_window(
+                    data_spec, window, freshness_days=self.forecast_freshness_days
+                )
                 if isinstance(data_spec, InterimDataSpec)
                 else window
             )
@@ -772,14 +811,17 @@ def analysis_windows(
     return requested, requested
 
 
-def source_history_window(data_spec: InterimDataSpec, window: TimeWindow) -> TimeWindow:
+def source_history_window(
+    data_spec: InterimDataSpec,
+    window: TimeWindow,
+    *,
+    freshness_days: int = FORECAST_FRESHNESS_DAYS,
+) -> TimeWindow:
     """Bind actual preceding state without widening the knowledge cutoff."""
     if data_spec.source_id == "choice" or data_spec.data_id == "market_bars_1d":
         return data_history_window(window)
     if data_spec.data_id == "analyst_forecast":
-        return TimeWindow(
-            window.start - timedelta(days=FORECAST_FRESHNESS_DAYS), window.end
-        )
+        return TimeWindow(window.start - timedelta(days=freshness_days), window.end)
     return window
 
 
@@ -929,11 +971,13 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
             MODEL_TARGET_COLUMN,
         )
         context = (
+            "model_target_available_at",
             "is_a_share_scope",
             "is_trading",
             "is_st",
             "is_pt",
             "listing_age_trading_days",
+            "has_252_trading_sessions",
             "close",
             "adj_close",
             "volume",

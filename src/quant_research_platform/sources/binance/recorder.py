@@ -31,9 +31,6 @@ from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.order_book import BookBoundary
-from quant_research_platform.contracts.validation import (
-    strict_finite_float,
-)
 from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
 )
@@ -133,7 +130,7 @@ class RecorderConfig:
             raise ValueError("binance_recorder_scope_invalid")
         if self.symbols != RESEARCH_SYMBOLS:
             raise ValueError("binance_recorder_symbols_invalid")
-        _positive_number(
+        strict_positive_float(
             self.duration_seconds,
             error="binance_recorder_duration_invalid",
         )
@@ -142,18 +139,11 @@ class RecorderConfig:
             self.reconnect_max_seconds,
             self.connection_idle_timeout_seconds,
         ):
-            _positive_number(value, error="binance_recorder_timeout_invalid")
+            strict_positive_float(value, error="binance_recorder_timeout_invalid")
         root = Path(self.output_root)
         require_unaliased_path(root, error="invalid_storage_write_path")
         if filesystem_exists(root):
             raise FileExistsError("binance_recorder_output_exists")
-
-
-def _positive_number(value: object, *, error: str) -> float:
-    number = strict_finite_float(value, error=error)
-    if number <= 0:
-        raise ValueError(error)
-    return number
 
 
 def _utc_now() -> str:

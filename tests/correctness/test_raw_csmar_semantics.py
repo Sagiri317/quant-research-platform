@@ -1070,6 +1070,90 @@ def test_csmar_identity_rejects_requested_bad_schema(
         interim.source_content_identity(tmp_path, "trading_calendar")
 
 
+@pytest.mark.parametrize("order", ("first_empty", "last_empty", "all_empty"))
+@pytest.mark.parametrize("chunksize", (1, 2))
+def test_analyst_drop_projection_is_independent_of_empty_chunk_order(
+    tmp_path, order, chunksize
+):
+    import json
+
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw, parents=True)
+    valid = _analyst_rows()[0]
+    invalid = {**valid, "ReportID": "discarded", "InstitutionID": ""}
+    rows = (
+        [invalid, valid]
+        if order == "first_empty"
+        else [valid, invalid]
+        if order == "last_empty"
+        else [invalid]
+    )
+    _write_csmar(raw, "analyst_forecast", rows)
+    overrides = tmp_path / "drop.json"
+    filesystem_write_text(
+        overrides,
+        json.dumps({"analyst_forecast": {"keep": [], "drop": ["analyst_ids"]}}),
+        encoding="utf-8",
+    )
+    result = interim.materialize_interim_data(
+        layout=layout,
+        data_ids=("analyst_forecast",),
+        override_path=overrides,
+        chunksize=chunksize,
+    )
+    saved = read_dataset(result.artifact_roots["analyst_forecast"])
+    assert "analyst_ids" not in saved
+    assert len(saved) == (0 if order == "all_empty" else 1)
+
+
+def test_index_info_named_header_reordering_preserves_complete_row(tmp_path):
+    fields = [
+        "Indexcd",
+        "Idxinfo01",
+        "Idxinfo11",
+        "Idxinfo02",
+        "Idxinfo03",
+        "Idxinfo04",
+        "Idxinfo05",
+        "Idxinfo06",
+        "Idxinfo07",
+        "Idxinfo08",
+        "Idxinfo09",
+        "Idxinfo10",
+    ]
+    row = [
+        "000300",
+        "CSI 300",
+        "2014-01-02",
+        "2013-12-31",
+        "1000",
+        "scope",
+        "1",
+        "2",
+        "3",
+        "4",
+        "5",
+        "formula",
+    ]
+    frames = []
+    for name, positions in (
+        ("native", list(range(12))),
+        ("reordered", [1, 0, *range(2, 12)]),
+    ):
+        path = tmp_path / f"{name}.csv"
+        with open_filesystem_file(path, "w", encoding="utf-8", newline="") as stream:
+            writer = csv.writer(stream)
+            writer.writerow([fields[i] for i in positions])
+            writer.writerow([row[i] for i in positions])
+        frames.append(_collect_raw_export(path, "index_info").loc[:, fields])
+    pd.testing.assert_frame_equal(*frames)
+
+
 def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
     index_path = tmp_path / "index_info_dirty.csv"
     filesystem_write_text(

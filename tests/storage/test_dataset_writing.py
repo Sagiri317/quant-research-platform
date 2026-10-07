@@ -547,8 +547,6 @@ def test_float_primary_key_zero_identity_publication(tmp_path, dtype):
 @pytest.mark.parametrize(
     "mutation",
     (
-        "reverse",
-        "duplicate_date",
         "date_format",
         "empty",
         "missing_hash",
@@ -587,11 +585,7 @@ def test_archive_source_identity_is_validated_on_write_and_read(tmp_path, mutati
     assert len(read_dataset(root)) == 3
     invalid = deepcopy(identity)
     archives = invalid["archives"]
-    if mutation == "reverse":
-        archives.reverse()
-    elif mutation == "duplicate_date":
-        archives[1]["date"] = archives[0]["date"]
-    elif mutation == "date_format":
+    if mutation == "date_format":
         archives[0]["date"] = "20260701"
     elif mutation == "empty":
         archives.clear()

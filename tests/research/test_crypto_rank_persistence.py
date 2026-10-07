@@ -41,6 +41,7 @@ def crypto_rank_case(
     sample_filter_mode="eligible",
     ineligible_holdout=False,
     time_series_inputs=False,
+    omit_hyperparameters=False,
 ):
     plan = hft_research_plan()
     plan["folds"] = plan["folds"][:1]
@@ -66,6 +67,8 @@ def crypto_rank_case(
             sample_filter_mode=sample_filter_mode,
         )
         model.pop("parameter_candidates", None)
+        if omit_hyperparameters:
+            model.pop("hyperparameters")
         models.append(model)
     configuration.update(
         models=models, portfolios=[], comparison_model_id=models[0]["model_id"]
@@ -73,7 +76,6 @@ def crypto_rank_case(
     configuration["evaluation"].update(
         factors=["imbalance_1"],
         labels=[models[0]["label_column"]],
-        primary_label=models[0]["label_column"],
     )
     profile = bind_research_configuration(
         research_profile(CRYPTO_PROFILE_ID), configuration
@@ -303,6 +305,54 @@ def test_crypto_rank_roundtrip_and_frozen_holdout(
     assert observed == {entry["model_id"] for entry in case.saved.final_models}
     assert len(opened) == 1
     opened[0].verify()
+
+
+def test_missing_hyperparameters_bind_and_roundtrip_models(tmp_path):
+    case = crypto_rank_case(
+        tmp_path,
+        algorithms=("linear_regression",),
+        omit_hyperparameters=True,
+    )
+    assert case.manifest["research_configuration"]["models"][0]["hyperparameters"] == {}
+    for entry in case.saved.final_models:
+        predictor = persisted.read_crypto_model_member(case.saved, entry)
+        assert entry["model_metadata"]["hyperparameters"] == {}
+        fitting.validate_model_state(predictor, entry["model_metadata"])
+
+
+def test_crypto_rank_trial_mse_uses_frozen_training_label_calibration(tmp_path):
+    from quant_research_platform.storage.experiments import (
+        read_model_trial_ledger_reference,
+        research_run_trial_references,
+    )
+
+    case = crypto_rank_case(tmp_path)
+    references = {
+        item["semantic_identity"]: item
+        for item in research_run_trial_references(case.layout, "run_rank_roundtrip")
+    }
+    for entry in case.saved.models:
+        _plan, records = read_model_trial_ledger_reference(
+            case.layout, references[entry["trial_semantic_identity"]]
+        )
+        metrics = records[0].metrics
+        assert metrics["validation_mse"] == pytest.approx(0.0, abs=1e-28)
+        assert metrics["validation_ic"] == pytest.approx(1.0)
+        assert metrics["validation_rankic"] == pytest.approx(1.0)
+        with closing_iterator(
+            case.saved.validation_chunks(
+                fold_id=entry["fold_id"], model_id=entry["model_id"]
+            )
+        ) as chunks:
+            frame = pd.concat(list(chunks), ignore_index=True)
+        score = frame.prediction_score.to_numpy()
+        if entry["model_metadata"]["model_algorithm"] != "linear_regression":
+            assert set(score) == {-0.25, 0.25}
+            intercept, slope = entry["model_metadata"]["rank_parameters"][
+                "label_calibration"
+            ]
+            score = intercept + slope * score
+        np.testing.assert_allclose(score, frame["label"], rtol=0, atol=1e-15)
 
 
 def test_crypto_prediction_scope_rejects_native_source_change_between_models(tmp_path):

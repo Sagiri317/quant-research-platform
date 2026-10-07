@@ -51,6 +51,7 @@ def test_a_share_assembler_owns_eligibility_and_population_model_target(scale) -
             "is_st": [False, False, True],
             "is_pt": False,
             "listing_age_trading_days": 252,
+            "has_252_trading_sessions": True,
             "close": 10.0,
             "adj_close": 10.0,
             "volume": 100.0,
@@ -60,6 +61,7 @@ def test_a_share_assembler_owns_eligibility_and_population_model_target(scale) -
         }
     )
 
+    frame["forward_return_20d_available_at"] = frame["timestamp"] + pd.offsets.BDay(21)
     result = _add_a_share_semantic_columns(frame, spec)
 
     assert result["eligible"].tolist() == [True, True, False]
@@ -98,6 +100,7 @@ def test_a_share_model_target_zero_variance_does_not_invalidate_other_date() -> 
             "is_st": False,
             "is_pt": False,
             "listing_age_trading_days": 252,
+            "has_252_trading_sessions": True,
             "close": 10.0,
             "adj_close": 10.0,
             "volume": 100.0,
@@ -107,6 +110,7 @@ def test_a_share_model_target_zero_variance_does_not_invalidate_other_date() -> 
         }
     )
 
+    frame["forward_return_20d_available_at"] = frame["timestamp"] + pd.offsets.BDay(21)
     result = _add_a_share_semantic_columns(frame, spec)
 
     assert result.loc[result["timestamp"].eq("2024-01-02"), "model_target"].isna().all()
@@ -206,6 +210,7 @@ def test_a_share_assembler_persists_only_eligible_sample_truth(
         "listing_date": pd.Timestamp("2020-01-01"),
         "delisting_date": pd.NaT,
         "listing_age_trading_days": 252,
+        "has_252_trading_sessions": True,
         "industry_standard_id": "CSRC2012",
         "industry_level1_code": "A",
         "industry_level1_name": "industry",

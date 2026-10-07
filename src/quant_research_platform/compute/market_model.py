@@ -6,11 +6,11 @@ from array import array
 from collections.abc import Mapping
 from dataclasses import dataclass
 from fractions import Fraction
-from math import frexp, ldexp
 
 import numpy as np
 import pandas as pd
 
+from quant_research_platform.compute.dataframe.cross_section import _CorrelationMoments
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_integer_series,
@@ -30,6 +30,7 @@ class MarketModelRiskState:
         self.window = window
         self.residual_window = residual_window
         self._returns: dict[str, array] = {}
+        self._moments: dict[str, _CorrelationMoments] = {}
         self._market_returns: dict[str, array] = {}
         self._residuals: dict[str, array] = {}
         self._previous_weights: dict[str, float] = {}
@@ -100,6 +101,7 @@ class MarketModelRiskState:
         }
         for asset in absent - closed_assets:
             del self._returns[asset]
+            del self._moments[asset]
             del self._market_returns[asset]
             del self._residuals[asset]
             self._previous_weights.pop(asset, None)
@@ -116,30 +118,14 @@ class MarketModelRiskState:
             )
             for row in frame.itertuples(index=False)
         ]
-        market_scale = max(
-            (
-                weight
-                for _asset, _return, weight, _current, eligible in weighted
-                if eligible and weight is not None
-            ),
-            default=1.0,
-        )
-        market_exponent = frexp(market_scale)[1]
-        market_denominator = sum(
-            ldexp(weight, -market_exponent)
-            for _asset, _return_value, weight, _current_weight, eligible in weighted
-            if eligible and weight is not None
-        )
-        market_return = (
-            sum(
-                ldexp(weight, -market_exponent) * return_value
-                for _asset, return_value, weight, _current_weight, eligible in weighted
-                if eligible and weight is not None
-            )
-            / market_denominator
-            if market_denominator > 0.0
-            else np.nan
-        )
+        market_weight = Fraction()
+        market_total = Fraction()
+        for _, value, weight, _, eligible in weighted:
+            if eligible and weight is not None:
+                exact_weight = Fraction(weight)
+                market_weight += exact_weight
+                market_total += exact_weight * Fraction(value)
+        market_return = float(market_total / market_weight) if market_weight else np.nan
         for asset in closed_assets:
             gross = self._pending_market_gross.get(asset, Fraction(1))
             self._pending_market_gross[asset] = (
@@ -157,6 +143,9 @@ class MarketModelRiskState:
             _current_weight,
             _eligible,
         ) in weighted:
+            if asset not in self._moments:
+                self._moments[asset] = _CorrelationMoments()
+            moments = self._moments[asset]
             returns = self._returns.setdefault(asset, array("d"))
             markets = self._market_returns.setdefault(asset, array("d"))
             residuals = self._residuals.setdefault(asset, array("d"))
@@ -169,32 +158,29 @@ class MarketModelRiskState:
                     else np.nan
                 )
             if np.isfinite(interval_market_return) and np.isfinite(return_value):
+                moments.update(float(interval_market_return), return_value)
                 returns.append(return_value)
                 markets.append(interval_market_return)
                 if len(returns) > self.window:
-                    returns.pop(0)
-                    markets.pop(0)
+                    moments.remove(markets.pop(0), returns.pop(0))
             else:
                 del returns[:]
                 del markets[:]
+                self._moments[asset] = _CorrelationMoments()
             beta = np.nan
             residual = np.nan
             if len(returns) == self.window:
-                market_values = np.asarray(markets)
-                return_values = np.asarray(returns)
-                market_differences = market_values - market_values[0]
-                return_differences = return_values - return_values[0]
-                market_centered = market_differences - market_differences.mean()
-                return_centered = return_differences - return_differences.mean()
-                scale = float(np.max(np.abs(market_centered)))
-                if scale > 0.0:
-                    market_centered /= scale
-                    beta = float(
-                        np.dot(return_centered, market_centered)
-                        / np.dot(market_centered, market_centered)
-                        / scale
+                market_mean, return_mean, market_square, _, product = moments.averages()
+                variance = market_square - market_mean * market_mean
+                if variance > 0:
+                    slope = (product - market_mean * return_mean) / variance
+                    beta = float(slope)
+                    residual = float(
+                        Fraction(return_value)
+                        - return_mean
+                        - slope
+                        * (Fraction(float(interval_market_return)) - market_mean)
                     )
-                    residual = return_centered[-1] - beta * market_centered[-1] * scale
             residuals.append(residual)
             if len(residuals) > self.residual_window:
                 residuals.pop(0)

@@ -185,8 +185,6 @@ def _stage_family_predictions(frames, root, required, spec, metadata):
                 date_only=True,
             )
             paths.append((*coordinate, path))
-    if seen != expected.keys():
-        raise ValueError("prediction_family_stream_missing")
     return sorted(paths, key=lambda item: expected[item[:2]])
 
 

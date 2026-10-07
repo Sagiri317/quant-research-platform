@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 from contextlib import ExitStack
+from fractions import Fraction
 from math import comb
+from statistics import mean
 
 import numpy as np
 import pandas as pd
 
 from quant_research_platform.contracts.experiments import _model_inference_blocker
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
 from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.markets.implementations.a_share import ids as a_share_ids
@@ -82,7 +85,15 @@ def fixed_turnover_cost_sensitivity(
             spread = strict_finite_float(spread, error="hft_cost_sensitivity_invalid")
             if min(fee, spread) < 0:
                 raise ValueError("hft_cost_sensitivity_invalid")
-            change = turnover * (fee - base_fee_bps + spread) / 10000.0
+            exact_change = (
+                Fraction(turnover)
+                * (Fraction(fee) - Fraction(base_fee_bps) + Fraction(spread))
+                / 10000
+            )
+            try:
+                change = float(exact_change)
+            except OverflowError:
+                change = -np.inf if exact_change < 0 else np.inf
             result.append(
                 {
                     "fee_bps": fee,
@@ -856,9 +867,13 @@ def build_portfolio_statistics_tables(
             axis=None
         ):
             raise ValueError("benchmark_return_open_invalid")
-        benchmark.loc[missing, "open"] = (
-            required.open * required.total_close / required.close
-        ).to_numpy()
+        open_mantissa, open_exponent = np.frexp(required.open.to_numpy())
+        total_mantissa, total_exponent = np.frexp(required.total_close.to_numpy())
+        close_mantissa, close_exponent = np.frexp(required.close.to_numpy())
+        benchmark.loc[missing, "open"] = np.ldexp(
+            open_mantissa * total_mantissa / close_mantissa,
+            open_exponent + total_exponent - close_exponent,
+        )
     benchmark = benchmark.loc[
         benchmark.source_asset_id.isin(codes.values()),
         ["source_asset_id", "timestamp", "open"],
@@ -866,30 +881,34 @@ def build_portfolio_statistics_tables(
     benchmark["benchmark_id"] = benchmark.source_asset_id.map(
         {code: name for name, code in codes.items()}
     )
-    inputs = iter_holding_factor_inputs(
-        layout=layout,
-        calendar=calendar,
-        time_window=time_window,
-        unified_trading_sessions=unified_trading_sessions,
-        style_columns=tuple(
-            dict.fromkeys(
-                column
+    inputs = {
+        styles: iter_holding_factor_inputs(
+            layout=layout,
+            calendar=calendar,
+            time_window=time_window,
+            unified_trading_sessions=unified_trading_sessions,
+            style_columns=styles,
+            risk_config=FactorRiskConfig(**protocol_manifest["risk"]),
+            benchmark_required=any(
+                candidate.benchmark_id is not None
                 for candidate in candidates
-                for column in candidate.risk_style_columns
-            )
-        ),
-        risk_config=FactorRiskConfig(**protocol_manifest["risk"]),
-        benchmark_required=bool(codes),
-        risk_context_target_ids=("price_volume_facts",)
-        if not any(candidate.risk_context_target_ids for candidate in candidates)
-        else tuple(
-            dict.fromkeys(
-                target_id
-                for candidate in candidates
-                for target_id in candidate.risk_context_target_ids
-            )
-        ),
-    )
+                if candidate.risk_style_columns == styles
+            ),
+            risk_context_target_ids=tuple(
+                dict.fromkeys(
+                    target
+                    for candidate in candidates
+                    if candidate.risk_style_columns == styles
+                    for target in (
+                        candidate.risk_context_target_ids or ("price_volume_facts",)
+                    )
+                )
+            ),
+        )
+        for styles in dict.fromkeys(
+            candidate.risk_style_columns for candidate in candidates
+        )
+    }
     return _portfolio_statistics_tables(
         ledgers=ledgers,
         candidates=candidates,
@@ -955,29 +974,36 @@ def _portfolio_statistics_tables(
             )
             for candidate_id in ids
         ]
-        fit_stream = sources.enter_context(closing_iterator(iter(holding_inputs)))
+        fit_streams = {
+            styles: sources.enter_context(closing_iterator(iter(inputs)))
+            for styles, inputs in holding_inputs.items()
+        }
         sentinel = object()
 
         for interval_index in range(len(expected_intervals) + 1):
-            group = tuple(next(stream, sentinel) for stream in (*streams, fit_stream))
+            group = tuple(
+                next(stream, sentinel) for stream in (*streams, *fit_streams.values())
+            )
             if all(value is sentinel for value in group):
                 break
             if any(value is sentinel for value in group):
                 raise ValueError("portfolio_statistics_candidate_dates_misaligned")
             if interval_index >= len(expected_intervals):
                 raise ValueError("portfolio_statistics_window_incomplete")
-            batch_group, holding_input = (group[:-1], group[-1])
+            batch_group = group[: len(streams)]
+            interval_inputs = dict(zip(fit_streams, group[len(streams) :], strict=True))
             expected = expected_intervals.iloc[interval_index]
-            if (
-                holding_input.decision_at,
-                holding_input.entry_at,
-                holding_input.end_at,
-            ) != tuple(expected):
-                raise ValueError("holding_factor_interval_misaligned")
-            if holding_input.fitted is not None:
-                factor_rows.extend(
-                    (
+            for styles, holding_input in interval_inputs.items():
+                if (
+                    holding_input.decision_at,
+                    holding_input.entry_at,
+                    holding_input.end_at,
+                ) != tuple(expected):
+                    raise ValueError("holding_factor_interval_misaligned")
+                if holding_input.fitted is not None:
+                    factor_rows.extend(
                         dict(
+                            attribution_group=canonical_json_hash(list(styles)),
                             decision_at=holding_input.decision_at,
                             entry_at=holding_input.entry_at,
                             end_at=holding_input.end_at,
@@ -985,10 +1011,10 @@ def _portfolio_statistics_tables(
                             value=float(value),
                             observation_count=len(holding_input.fitted.asset_returns),
                         )
-                        for name, value in (holding_input.fitted.factor_returns.items())
+                        for name, value in holding_input.fitted.factor_returns.items()
                     )
-                )
             for candidate, batch in zip(candidates, batch_group, strict=True):
+                holding_input = interval_inputs[candidate.risk_style_columns]
                 candidate_id = candidate.candidate_id
                 previous_end, previous_nav = previous[candidate_id]
                 row = portfolio_interval_economics(batch)
@@ -1368,7 +1394,13 @@ def _portfolio_statistics_tables(
                     )
                 )
         blocks = protocol_manifest["statistics"]["cscv_blocks"]
-        if not inference_ids:
+        if protocol_manifest.get("expectations", {}).get("role") == "robustness":
+            value, status, reason = (
+                np.nan,
+                "UNDEFINED",
+                "expectations_robustness_excluded",
+            )
+        elif not inference_ids:
             value, status, reason = (
                 np.nan,
                 "UNDEFINED",
@@ -1502,6 +1534,7 @@ def _portfolio_statistics_tables(
         "holding_factor_returns": pd.DataFrame(
             factor_rows,
             columns=(
+                "attribution_group",
                 "decision_at",
                 "entry_at",
                 "end_at",
@@ -1545,6 +1578,8 @@ def _group_portfolio_comparison(matrix, protocol_manifest):
     inference_blocker = _model_inference_blocker(
         access_window=access, selection_groups=("global", "quarterly")
     )
+    if protocol_manifest.get("expectations", {}).get("role") == "robustness":
+        inference_blocker = "expectations_robustness_excluded"
     inference = (
         time_series_inference_summary(
             differences,
@@ -1567,9 +1602,9 @@ def _group_portfolio_comparison(matrix, protocol_manifest):
             else "secondary",
             "access_window": access,
             "observation_count": len(values),
-            "global_mean": float(matrix[f"global_{candidate}"].mean()),
-            "quarterly_mean": float(matrix[f"quarterly_{candidate}"].mean()),
-            "mean_difference": float(values.mean()),
+            "global_mean": float(mean(matrix[f"global_{candidate}"])),
+            "quarterly_mean": float(mean(matrix[f"quarterly_{candidate}"])),
+            "mean_difference": float(mean(values)),
             "global_terminal_wealth": float((1 + matrix[f"global_{candidate}"]).prod()),
             "quarterly_terminal_wealth": float(
                 (1 + matrix[f"quarterly_{candidate}"]).prod()

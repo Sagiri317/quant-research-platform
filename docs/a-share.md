@@ -547,6 +547,8 @@ listed >= 252 market sessions  # 上市交易日数量门槛
 仅使用信号收盘时已知信息
 ```
 
+上市会话事实由同一个市场日历 owner 生成。`listing_age_trading_days` 仅在从上市日开始的市场归属有证据时保存精确年龄；首次行情的市场不能反填到上市日，未知年龄保持 NULL。`has_252_trading_sessions` 是 nullable boolean 原始资格事实：完整历史时准确判断门槛；初始历史未知但已证实归属区间累计达到 252 个合法市场会话时为 True；尚不能证明时为 NULL。迁市场按各段真实市场日历计数，不把无报价的开市会话压缩掉。它与 ST、交易状态、价格和流动性事实共同派生唯一 `eligible`，不是另一份样本过滤结果；所有研究和组合资格消费者继续使用统一资格 owner。首次已知归属之前的 PANEL 行保持未知市场和未知价格，不从未来借市场、补价格或默认可交易。
+
 非金融融合场景还要求：
 
 ```text
@@ -852,6 +854,14 @@ FY2 = FY1 forecast_end_date + 1 calendar year  # 紧邻的下一财年，缺年�
 forward EP = median forecast EPS / unadjusted signal-day close  # 前瞻盈利收益率定义
 ```
 
+公开配置 `evaluation.forecast_freshness_days` 只接受 90 或 180，省略时为 90。
+该值经 `ProcessedDataSpec.parameters_json.freshness_days` 统一绑定来源回看、公式、DAG 与研究身份。
+180 日方案单独创建不可变研究实例，标为 `expectations.role=robustness`；保留其模型、预测与组合链，
+但不将其候选或结果混入 90 日正式选型及 FDR、SPA、StepM、PBO 推断域。
+180 日运行内部保留训练、验证和原排序作为稳健性诊断；基础描述、HAC、基准及归因仍按原定义计算。
+正式联合检验与 PBO 标注 `expectations_robustness_excluded`，不将全部稳健性结果改成未定义。
+机构日中位数与跨机构中位数的临时精确值保留到最终 EPS/close 比值，落盘仍为现有 Float64。
+
 预期修订、超预期、PEAD 和业绩预告属于扩展研究方向，不属于本协议的预期4模块。
 
 ### 5.10 特征范围与变换
@@ -1035,7 +1045,11 @@ signal time 为 t 收盘；entry/exit event time 分别为 t+1/t+1+h 开盘。
 
 零方差 / 有效样本不足 -> 该日期目标无效。
 
-只存在一份 `model_target` 真值。
+只存在一份 `model_target` 真值。其 `model_target_available_at` 是该截面真正参与规范化的
+合格非缺失标签成熟时点的最大值；没有有效目标的行保持 NaT。训练与验证消费该独立成熟列。
+逐资产原始 `forward_return_20d_available_at` 保持自身端点时间，不因其他市场较晚成熟而改写。
+标签端点及 execution mask 的分批 lookahead 共用正式 PANEL 的完整资产会话域：包含开市未知报价
+与停牌占位，排除已知闭市，遵守历史市场迁移，不按稀疏原始报价压缩期限。
 
 ### 5.12 研究数据集语义边界
 
@@ -1145,7 +1159,8 @@ refit 不伪造重叠 train/validation，也不建立假的第四角色。
 训练期零方差列的冻结 scale=1，训练样本变换为 0，不删除该列。
 OOS 始终使用训练期 mean/scale；新值按 (x-mean)/scale 变换，不能永久置零。
 fit、持久化、reload、transform 和 predict 共用 ModelMatrixScaler。
-加权中心以 `weighted_mean_origin + weighted_mean_offset` 保存，变换使用同一相对坐标
+加权中心以 `weighted_mean_origin + weighted_mean_offset` 保存；后者每列统一保存最简整数比 `[分子, 分母]`（正分母），模型状态使用相同精确比率。旧浮点偏移 metadata 与旧 pickle 明确拒绝，受影响模型须重建。精确偏移不能以 binary64 表示时，标准化保留精确比率直到最终输出舍入；普通列继续批量计算。
+加权中心的原单位语义不变，变换使用同一相对坐标
 `((x - origin) - offset) / scale`，避免相邻浮点值的均值舍入破坏零中心。
 模型 reader 校验完整拆分中心与总体尺度；旧单一中心 payload 不兼容，须由已验证上游重建。
 
@@ -1172,6 +1187,7 @@ ResearchDataset只有一个可执行feature-pipeline真值：持久化的 `a_sha
 它执行 `eligible → MAD winsor → industry+size neutralize → population zscore → missing/observed encoding`；
 assembler不根据scenario绕过此合同。Crypto不接入该横截面流程。
 
+EWMA先扣除当前有效观测的共同最小年龄再归一化；缺失最新session不抹掉有效历史。极小半衰期下，尾部质量保留到乘上收益或残差平方之后，只对最终风险值做float64舍入；真实不可表示风险明确失败。
 FactorRiskConfig唯一拥有风险窗口、半衰期、最小观测、diagonal shrinkage、annualization与weighting；
 OptimizerConfig唯一拥有active-name/TE/turnover/industry/style/SLSQP容差和迭代上限。
 protocol序列化同一配置，运行消费同一实例；ADV participation由ExecutionAssumptions唯一拥有。
@@ -1843,6 +1859,12 @@ rf=0 的 Sharpe
 ```
 
 归因在实际持有区间复用既有风险因子定义，并与经济账本勾稽。没有明确有效的时序转换，不得将收盘到收盘风险序列展示为开盘到开盘归因。未解释残差必须命名为残差/未解释项，不能自动称为选股 alpha；Brinson 归因不属于本协议。
+
+简单组合按已有五风格定义、增强组合按已有六风格定义分别拟合持有期归因；新增另一类候选
+不得改变原候选的拟合域。`attribution_groups` 在统计协议中绑定完整风格列表及候选成员，
+组身份为完整风格列表的规范 JSON 哈希。`holding_factor_returns.attribution_group` 与
+`entry_at`、`factor_id` 共同构成主键；已有候选暴露与归因行通过 candidate_id 对应所属组。
+各组独立保留缺失和不可识别状态，不用候选并集隐式要求额外风格。
 
 暴露 != 归因。
 

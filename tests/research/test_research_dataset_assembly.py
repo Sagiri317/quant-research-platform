@@ -1076,3 +1076,97 @@ def test_full_request_key_domain_is_independent_of_base_file_boundaries(
             for path, digest in before.items()
         )
     )
+
+
+def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock(
+    tmp_path,
+):
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.experiments import (
+        legal_training_rows,
+        resolve_training_availability_column,
+    )
+    from quant_research_platform.research.protocols import a_share
+    from quant_research_platform.storage.datasets import read_dataset
+
+    base = a_share.research_dataset_catalog().get("pv_all")
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": ["a", "b", "ineligible"],
+            "timestamp": pd.Timestamp("2020-01-02"),
+            "forward_return_20d": [0.1, 0.3, 0.5],
+            "forward_return_20d_available_at": pd.to_datetime(
+                ["2020-02-01", "2020-02-04", "2020-02-10"]
+            ),
+            "is_a_share_scope": True,
+            "is_trading": True,
+            "is_st": [False, False, True],
+            "is_pt": False,
+            "listing_age_trading_days": 400,
+            "has_252_trading_sessions": True,
+            "close": 10.0,
+            "adj_close": 10.0,
+            "volume": 10.0,
+            "amount": 100.0,
+            "turnover": 0.1,
+        }
+    )
+    output = assembler_module._add_a_share_semantic_columns(frame, base)
+    output["momentum_20d"] = [1.0, 2.0, 3.0]
+    pd.testing.assert_series_equal(
+        output.forward_return_20d_available_at, frame.forward_return_20d_available_at
+    )
+    assert (
+        output.model_target_available_at.iloc[:2].eq(pd.Timestamp("2020-02-04")).all()
+    )
+    assert pd.isna(output.model_target_available_at.iloc[2])
+    columns = (
+        "market_id",
+        "asset_id",
+        "timestamp",
+        "forward_return_20d",
+        "forward_return_20d_available_at",
+        "model_target",
+        "model_target_available_at",
+        "eligible",
+        "momentum_20d",
+    )
+    spec = replace(
+        base,
+        factor_columns=("momentum_20d",),
+        feature_columns=(),
+        feature_transforms=(),
+        context_columns=("model_target_available_at",),
+        label_columns=(
+            "forward_return_20d",
+            "forward_return_20d_available_at",
+            "model_target",
+        ),
+        column_roles={key: base.column_roles[key] for key in columns},
+    )
+    root = StorageLayout(tmp_path).research_dataset_root(spec.market_id, spec.data_id)
+    write_dataset(root, output.loc[:, columns], spec=spec)
+    saved = read_dataset(root)
+    maturity = resolve_training_availability_column(saved, label_column="model_target")
+    assert maturity == "model_target_available_at"
+    assert legal_training_rows(
+        saved,
+        fitting_cutoff=pd.Timestamp("2020-02-02"),
+        availability_column=maturity,
+        target_column="model_target",
+        feature_columns=(),
+    ).empty
+    assert (
+        len(
+            legal_training_rows(
+                saved,
+                fitting_cutoff=pd.Timestamp("2020-02-04"),
+                availability_column=maturity,
+                target_column="model_target",
+                feature_columns=(),
+            )
+        )
+        == 2
+    )

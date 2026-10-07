@@ -7,6 +7,7 @@ import json
 import os
 from datetime import UTC
 from decimal import Decimal, localcontext
+from fractions import Fraction
 from pathlib import Path
 
 import pandas as pd
@@ -681,13 +682,13 @@ def test_tick_conversion_is_exact_independently_of_decimal_context(
         with pytest.raises(ValueError, match="off_tick"):
             replay._levels(
                 [["100.00000000000000000000000000001", "1"]],
-                price_unit="0.1",
+                price_unit=Fraction("0.1"),
                 error="off_tick",
                 allow_zero=False,
             )
         assert replay._levels(
             [[price, "1"]],
-            price_unit="0.000000001",
+            price_unit=Fraction("0.000000001"),
             error="off_tick",
             allow_zero=False,
         ) == {ticks: 1.0}
@@ -1262,8 +1263,9 @@ def test_connection_queries_scan_each_interval_once(tmp_path):
         sweep.rows = rows
         for index in range(100):
             sweep.covering(first + index * 100000000, first + (index + 1) * 100000000)
-        assert sweep.position == 5
-        assert rows.reads <= 110
+        # The inclusive query endpoint must inspect the connection opening there.
+        assert sweep.position == 6
+        assert rows.reads <= 112
 
 
 def test_live_depth_advance_preserves_unknown_future_coverage_and_validity():
@@ -1687,6 +1689,7 @@ def _write_coverage_history(root, count, width):
         ([(0, 10), (10, 10), (10, 20)], [(0, 10), (10, 20)]),
         ([(0, 20), (10, 30)], [(0, 10), (20, 30)]),
         ([(0, 20), (10, 30), (15, 15)], [(0, 10), (20, 30)]),
+        ([(0, 30), (5, 15)], [(0, 5), (15, 30)]),
     ],
 )
 def test_coverage_empty_connections_keep_facts_without_sweep_contribution(
@@ -1736,7 +1739,150 @@ def test_coverage_empty_connections_keep_facts_without_sweep_contribution(
             start.value + opened * 10**9,
             start.value + closed * 10**9,
         )
+    for opened in range(31):
+        closed = opened + 10
+        intersections = [
+            position
+            for position, (left, right) in enumerate(bounds)
+            if left < right and left <= closed and right > opened
+        ]
+        expected_covering = ()
+        if len(intersections) == 1:
+            position = intersections[0]
+            left, right = bounds[position]
+            if left <= opened and right > closed:
+                expected_covering = (f"connection-{position}",)
+        assert (
+            reader.covering(start.value + opened * 10**9, start.value + closed * 10**9)
+            == expected_covering
+        )
     assert hashlib.sha256(filesystem_read_bytes(source)).hexdigest() == raw_hash
+
+
+@pytest.mark.parametrize("overlap", (False, True))
+def test_partial_connection_overlap_has_one_panel_and_execution_domain(
+    tmp_path, overlap
+):
+    from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+    from quant_research_platform.markets.implementations.crypto.hft import (
+        iter_panel_frames,
+    )
+    from quant_research_platform.markets.implementations.crypto.portfolio import (
+        _market_coverage_check,
+        _qualified_episodes,
+    )
+    from quant_research_platform.sources.binance.funding import FundingObservations
+
+    descriptor = _write_coverage_history(tmp_path, 1, 32)
+    source = tmp_path / descriptor["path"]
+    with gzip.open(native_filesystem_path(source), "rt", encoding="utf-8") as handle:
+        original = json.loads(next(handle))
+    start = pd.Timestamp("2020-01-01", tz="UTC")
+    intervals = [(0, 300), (50, 150)] if overlap else [(0, 300)]
+    with gzip.open(native_filesystem_path(source), "wt", encoding="utf-8") as handle:
+        for position, (opened, closed) in enumerate(intervals):
+            handle.write(
+                json.dumps(
+                    {
+                        **original,
+                        "connection_id": f"connection-{position}",
+                        "opened_at": (
+                            start + pd.Timedelta(milliseconds=opened)
+                        ).isoformat(),
+                        "closed_at": (
+                            start + pd.Timedelta(milliseconds=closed)
+                        ).isoformat(),
+                        "opened_monotonic_ns": opened * 10**6,
+                        "closed_monotonic_ns": closed * 10**6,
+                    }
+                )
+                + "\n"
+            )
+    descriptor.update(
+        record_count=len(intervals),
+        compressed_bytes=filesystem_stat(source).st_size,
+        sha256=hashlib.sha256(filesystem_read_bytes(source)).hexdigest(),
+    )
+    index = replay.ObservationCoverageIndex(
+        tmp_path,
+        descriptor,
+        markets={FUTURES_MARKET_TYPE},
+        decode_interval=replay._decode_recorder_interval,
+    )
+
+    def coverage():
+        return replay.ObservationCoverage(
+            index, FUTURES_MARKET_TYPE, "agg_trades", "BTCUSDT"
+        )
+
+    start_ms = start.value // 10**6
+    book = BookState(
+        source_sequence=1,
+        event_time_ms=start_ms,
+        transaction_time_ms=start_ms,
+        observed_time_ns=start.value,
+        receive_time=start.isoformat(),
+        receive_monotonic_ns=0,
+        update_id=1,
+        segment_id="book",
+        observation_id="book-connection",
+        market_type=FUTURES_MARKET_TYPE,
+        price_unit="0.1",
+        bids=((995, 2.0),),
+        asks=((1005, 1.0),),
+    )
+    trade = TradeEvent(
+        source_sequence=2,
+        event_time_ms=start_ms + 75,
+        transaction_time_ms=start_ms + 75,
+        observed_time_ns=start.value + 75 * 10**6,
+        receive_time=(start + pd.Timedelta(milliseconds=75)).isoformat(),
+        receive_monotonic_ns=75 * 10**6,
+        observation_id=f"connection-{int(overlap)}",
+        market_type=FUTURES_MARKET_TYPE,
+        price_unit="0.1",
+        price_index=1005,
+        quantity=2.0,
+        visible_quantity=2.0,
+        buyer_is_maker=False,
+    )
+    book_coverage = {"book": (start.value, start.value + 300 * 10**6)}
+    bounds = [(start.value, start.value + 100 * 10**6)]
+    frames = list(
+        iter_panel_frames(
+            [book],
+            [trade],
+            market_id="crypto",
+            asset_id="btc_usdt",
+            start_ms=start_ms + 100,
+            end_ms=start_ms + 100,
+            book_coverage=book_coverage,
+            trade_coverage=coverage().covering,
+            batch_rows=10,
+        )
+    )
+    if overlap:
+        assert frames == []
+        with pytest.raises(
+            PortfolioTargetBlocked, match="crypto_execution_trade_coverage_incomplete"
+        ):
+            _market_coverage_check(book_coverage, coverage(), bounds)
+    else:
+        assert len(frames) == 1
+        assert frames[0].trade_count_100ms.tolist() == [1]
+        assert frames[0].trade_volume_100ms.tolist() == [2.0]
+        _market_coverage_check(book_coverage, coverage(), bounds)
+    funding = FundingObservations(
+        "synthetic",
+        ((start.value, start.value + 300 * 10**6),),
+        (),
+        iter(()),
+    )
+    episodes = list(_qualified_episodes(book_coverage, coverage(), funding, bounds))
+    expected_end = start.value + (50 * 10**6 if overlap else 100 * 10**6 + 1)
+    assert [(left, right) for left, right, *_ in episodes] == [
+        (start.value, expected_end)
+    ]
 
 
 @pytest.mark.parametrize("change", ("grow", "truncate", "replace"))

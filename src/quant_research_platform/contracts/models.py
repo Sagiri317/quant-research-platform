@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from math import isfinite
+from fractions import Fraction
+from math import gcd, isfinite
 from types import MappingProxyType
 
 import numpy as np
@@ -466,7 +467,6 @@ def validate_model_metadata_core(
                 type(number) not in {int, float} or not np.isfinite(float(number))
                 for number in (
                     *scaler["weighted_mean_origin"],
-                    *scaler["weighted_mean_offset"],
                     *scaler["weighted_population_scale"],
                 )
             )
@@ -477,15 +477,26 @@ def validate_model_metadata_core(
                 for number in scaler["weighted_population_scale"]
             )
             or any(
-                not np.isfinite(float(origin) + float(offset))
-                for origin, offset in zip(
-                    scaler["weighted_mean_origin"],
-                    scaler["weighted_mean_offset"],
-                    strict=True,
-                )
+                type(ratio) is not list
+                or len(ratio) != 2
+                or any(type(value) is not int for value in ratio)
+                or ratio[1] <= 0
+                or gcd(*ratio) != 1
+                for ratio in scaler["weighted_mean_offset"]
             )
         ):
             raise ValueError("invalid_model_metadata")
+        try:
+            for origin, ratio in zip(
+                scaler["weighted_mean_origin"],
+                scaler["weighted_mean_offset"],
+                strict=True,
+            ):
+                offset = Fraction(*ratio)
+                float(offset)
+                float(Fraction(float(origin)) + offset)
+        except OverflowError:
+            raise ValueError("invalid_model_metadata") from None
     rank_algorithms = {
         "equal_weight_rank_ensemble",
         "ic_weighted_rank_ensemble",

@@ -416,7 +416,21 @@ def bind_research_configuration(
     processed = library.processed
     bindings = dict(profile.producer_bindings)
     if str(profile.market_id) == "a_share":
-        processed = profile.processed
+        processed = ProcessedDataCatalog(
+            replace(
+                spec,
+                parameters_json=json.dumps(
+                    {
+                        "freshness_days": evaluation.get(
+                            "forecast_freshness_days", a_share.FORECAST_FRESHNESS_DAYS
+                        )
+                    }
+                ),
+            )
+            if spec.data_id == "expectations_factors"
+            else spec
+            for spec in profile.processed.list()
+        )
         from quant_research_platform.markets.implementations.a_share.calendar import (
             unified_trading_sessions,
         )

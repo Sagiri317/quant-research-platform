@@ -65,8 +65,8 @@ class MakerConfig:
     order_quantity: float
     max_position: float
     maker_fee_bps: float
-    inventory_target: float
-    inventory_skew: float
+    inventory_target: float | None
+    inventory_skew: float | None
     markout_horizon_ms: int
     latency_ms: int
 
@@ -74,13 +74,15 @@ class MakerConfig:
         _positive(self.order_quantity, "hft_maker_order_quantity_invalid")
         _positive(self.max_position, "hft_maker_position_size_invalid")
         strict_finite_float(self.maker_fee_bps, error="hft_maker_fee_invalid")
-        target = strict_finite_float(
-            self.inventory_target,
-            error="hft_maker_inventory_target_invalid",
-        )
-        if abs(target) > self.max_position:
-            raise ValueError("hft_maker_inventory_target_invalid")
-        _nonnegative(self.inventory_skew, "hft_maker_inventory_skew_invalid")
+        if self.inventory_target is not None:
+            target = strict_finite_float(
+                self.inventory_target,
+                error="hft_maker_inventory_target_invalid",
+            )
+            if abs(target) > self.max_position:
+                raise ValueError("hft_maker_inventory_target_invalid")
+        if self.inventory_skew is not None:
+            _nonnegative(self.inventory_skew, "hft_maker_inventory_skew_invalid")
         _positive_integer(
             self.markout_horizon_ms,
             "hft_markout_horizon_invalid",
@@ -1515,12 +1517,12 @@ class MakerCalibration:
                 return count * edge + sign * mid * error if with_error else count
 
             total = 0.0 if with_error else 0
-            groups = curve(namespace)
+            groups = tuple(curve(namespace))
             for _quantity, count, error in groups:
                 total += weight(count, error)
             weighted = 0.0
             prefix = 0.0 if with_error else 0
-            groups = curve(namespace)
+            groups = iter(groups)
             current = next(groups, None)
             for choice in choices:
                 while current is not None and current[0] <= choice:
@@ -1856,6 +1858,10 @@ def simulate_maker(
     on_equity=None,
 ):
     """Freeze passive quotes at decisions; replay delayed replacements and expiry."""
+    if calibrations is None and (
+        config.inventory_target is None or config.inventory_skew is None
+    ):
+        raise ValueError("hft_maker_inventory_parameters_required")
     observation_start = (
         None if observation_window_ns is None else observation_window_ns[0]
     )
@@ -2560,8 +2566,14 @@ def simulate_maker(
         "maker_fee_bps": config.maker_fee_bps,
         "order_quantity": config.order_quantity,
         "max_position": config.max_position,
-        "inventory_target": config.inventory_target,
-        "inventory_skew": config.inventory_skew,
+        **(
+            {
+                "inventory_target": config.inventory_target,
+                "inventory_skew": config.inventory_skew,
+            }
+            if calibrations is None
+            else {}
+        ),
         "latency_ms": config.latency_ms,
         "quote_horizon_ms": CryptoMakerPlan.quote_horizon_ms,
         "markout_horizon_ms": config.markout_horizon_ms,

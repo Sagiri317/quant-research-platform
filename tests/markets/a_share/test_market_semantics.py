@@ -45,6 +45,7 @@ def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
             "is_st": False,
             "is_pt": False,
             "listing_age_trading_days": 300,
+            "has_252_trading_sessions": True,
         }
     )
     actual = _apply_suspension_semantics(frame)
@@ -1369,7 +1370,7 @@ def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
 
 def test_listing_age_keeps_unavailable_master_date_unknown():
     from quant_research_platform.markets.implementations.a_share.calendar import (
-        compute_listing_age_trading_days,
+        compute_listing_session_facts,
     )
 
     dates = pd.bdate_range("2020-01-02", periods=3)
@@ -1378,25 +1379,29 @@ def test_listing_age_keeps_unavailable_master_date_unknown():
     )
     observed = pd.DataFrame(
         {
+            "asset_id": ["unknown", "known", "future"],
             "timestamp": dates[1],
             "market_type": 1,
             "listing_date": [pd.NaT, dates[0], dates[2]],
         }
     )
-    ages = compute_listing_age_trading_days(
-        observed,
-        calendar,
-        observation_date_column="timestamp",
-        listing_date_column="listing_date",
-        market_type_column="market_type",
+    history = pd.DataFrame(
+        {
+            "asset_id": ["unknown", "known", "future"],
+            "timestamp": dates[0],
+            "market_type": 1,
+        }
     )
+    facts = compute_listing_session_facts(observed, calendar, history)
+    ages = facts["listing_age_trading_days"]
+    assert facts["has_252_trading_sessions"].iloc[1:].tolist() == [False, False]
     assert pd.isna(ages.iloc[0])
     assert ages.iloc[1:].tolist() == [2, 0]
 
 
 def test_listing_age_history_accepts_calendar_codes_and_absent_closed_assets():
     from quant_research_platform.markets.implementations.a_share.calendar import (
-        compute_listing_age_trading_days,
+        compute_listing_session_facts,
     )
 
     dates = pd.bdate_range("2020-01-02", periods=3).as_unit("ns")
@@ -1423,12 +1428,48 @@ def test_listing_age_history_accepts_calendar_codes_and_absent_closed_assets():
             "market_type": [1, 1, 4],
         }
     )
-    ages = compute_listing_age_trading_days(
+    ages = compute_listing_session_facts(
         observed,
         calendar,
-        observation_date_column="timestamp",
-        listing_date_column="listing_date",
-        market_type_column="market_type",
         market_history=history,
     )
-    pd.testing.assert_series_equal(ages, pd.Series([2], index=[7], dtype="Int64"))
+    pd.testing.assert_series_equal(
+        ages["listing_age_trading_days"],
+        pd.Series([2], index=[7], dtype="Int64", name="listing_age_trading_days"),
+    )
+    assert not ages["has_252_trading_sessions"].iloc[0]
+
+
+def test_listing_facts_do_not_call_partial_market_calendar_an_exact_age():
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        compute_listing_session_facts,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=260).as_unit("ns")
+    calendar = pd.DataFrame(
+        {
+            "calendar_date": dates.tolist() * 2,
+            "source_market_type": [1] * 260 + [4] * 260,
+            "is_trading_day": True,
+        }
+    )
+    calendar = calendar.loc[
+        ~(calendar.source_market_type.eq(1) & calendar.calendar_date.eq(dates[4]))
+    ]
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["partial", "unknown_ipo"],
+            "timestamp": dates[-1],
+            "listing_date": [dates[0], pd.NaT],
+        }
+    )
+    history = pd.DataFrame(
+        {
+            "asset_id": ["partial", "unknown_ipo"],
+            "timestamp": dates[0],
+            "market_type": [1, 4],
+        }
+    )
+    facts = compute_listing_session_facts(frame, calendar, history)
+    assert facts.listing_age_trading_days.isna().all()
+    assert facts.has_252_trading_sessions.tolist() == [True, True]

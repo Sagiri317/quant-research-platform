@@ -61,7 +61,7 @@ A_SHARE_ELIGIBILITY_FACTS = (
     "is_trading",
     "is_st",
     "is_pt",
-    "listing_age_trading_days",
+    "has_252_trading_sessions",
     "close",
     "adj_close",
     "volume",
@@ -81,7 +81,13 @@ def a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
             error=f"invalid_a_share_eligibility_fact: {column}",
             allow_null=True,
         )
-        for column in ("is_a_share_scope", "is_trading", "is_st", "is_pt")
+        for column in (
+            "is_a_share_scope",
+            "is_trading",
+            "is_st",
+            "is_pt",
+            "has_252_trading_sessions",
+        )
     }
     numeric_facts = {
         column: strict_finite_numeric_series(
@@ -90,7 +96,6 @@ def a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
             allow_null=True,
         )
         for column in (
-            "listing_age_trading_days",
             "close",
             "adj_close",
             "volume",
@@ -103,7 +108,7 @@ def a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
         & bool_facts["is_trading"]
         & ~bool_facts["is_st"]
         & ~bool_facts["is_pt"]
-        & numeric_facts["listing_age_trading_days"].ge(252)
+        & bool_facts["has_252_trading_sessions"]
         & numeric_facts["close"].gt(0.0)
         & numeric_facts["adj_close"].gt(0.0)
         & numeric_facts["volume"].gt(0.0)

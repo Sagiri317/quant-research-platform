@@ -104,7 +104,8 @@ def test_derivative_oracle_windows_age_chunks_and_causal_observations():
     gap = panel.iloc[:700].copy()
     gap.loc[200:, "segment_id"] = "after_gap"
     reset = compute([gap])
-    assert reset.open_interest_change_30s.iloc[200:600].isna().all()
+    assert reset.open_interest_change_30s.iloc[200:500].isna().all()
+    assert reset.open_interest_change_30s.iloc[500] == 1
 
 
 @pytest.mark.parametrize(

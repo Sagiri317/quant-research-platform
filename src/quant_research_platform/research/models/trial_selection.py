@@ -215,6 +215,7 @@ def evaluate_model_trial_metrics_from_chunks(
     prediction_column: str,
     expected_coverage: ModelSampleCoverage | None = None,
     validation_axis: EvaluationAxis = "cross_sectional",
+    label_calibration: tuple[float, float] | None = None,
 ) -> dict[str, object]:
     """Evaluate model-selection metrics from bounded prediction chunks."""
     if type(validation_axis) is not str or validation_axis not in EVALUATION_AXES:
@@ -264,7 +265,9 @@ def evaluate_model_trial_metrics_from_chunks(
         validation_rankic,
         validation_rankic_reason,
     ) = _cross_sectional_metric_summary(
-        values.itertuples(index=False, name=None), validation_axis=validation_axis
+        values.itertuples(index=False, name=None),
+        validation_axis=validation_axis,
+        label_calibration=label_calibration,
     )
     return {
         "model_id": model_id,
@@ -281,6 +284,7 @@ def _cross_sectional_metric_summary(
     rows,
     *,
     validation_axis: EvaluationAxis,
+    label_calibration: tuple[float, float] | None = None,
 ) -> tuple[int, float, float | None, str | None, float | None, str | None]:
     stats: dict[str, int | Fraction] = {
         "ic_count": 0,
@@ -300,10 +304,8 @@ def _cross_sectional_metric_summary(
         timestamp_ns = int(timestamp_ns) if validation_axis == "cross_sectional" else 0
         if current_timestamp != timestamp_ns:
             if timestamp_state is not None:
-                row_count += timestamp_state.count
-                _add_correlation_aggregate(
-                    stats, "ic", timestamp_state.correlation()[0]
-                )
+                row_count += timestamp_state.ic.count
+                _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
                 _add_correlation_aggregate(
                     stats, "rankic", timestamp_state.rank.result()[0]
                 )
@@ -312,20 +314,24 @@ def _cross_sectional_metric_summary(
         assert timestamp_state is not None
         label = float(label)
         prediction = float(prediction)
-        residual = prediction - label
+        label_prediction = (
+            prediction
+            if label_calibration is None
+            else label_calibration[0] + label_calibration[1] * prediction
+        )
+        residual = label_prediction - label
         if not np.isfinite(residual):
             raise ValueError("model_selection_mse_unrepresentable")
-        timestamp_state.update(
-            label, prediction, float(label_rank), float(prediction_rank)
-        )
+        timestamp_state.ic.update(label, prediction)
+        timestamp_state.rank.update(float(label_rank), float(prediction_rank))
         squared_errors.add(residual)
     if timestamp_state is not None:
-        row_count += timestamp_state.count
-        _add_correlation_aggregate(stats, "ic", timestamp_state.correlation()[0])
+        row_count += timestamp_state.ic.count
+        _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
         _add_correlation_aggregate(stats, "rankic", timestamp_state.rank.result()[0])
     if validation_axis == "single_asset_time_series":
         ic = (
-            timestamp_state.correlation()
+            timestamp_state.ic.result()
             if row_count >= 2
             else (None, "no_valid_observations")
         )
@@ -344,22 +350,11 @@ def _cross_sectional_metric_summary(
 
 
 class _TimestampMetricState:
-    __slots__ = ("count", "ic", "rank")
+    __slots__ = ("ic", "rank")
 
     def __init__(self) -> None:
-        self.count = 0
         self.ic = _CorrelationMoments()
         self.rank = _CorrelationMoments()
-
-    def update(
-        self, label: float, prediction: float, label_rank: float, prediction_rank: float
-    ) -> None:
-        self.ic.update(label, prediction)
-        self.rank.update(label_rank, prediction_rank)
-        self.count += 1
-
-    def correlation(self) -> tuple[float | None, str | None]:
-        return self.ic.result()
 
 
 class _ScaledSquareAccumulator:

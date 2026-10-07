@@ -36,9 +36,11 @@ def configuration(profile_id, scenario, model=None):
         "scenario_id": scenario,
         "stage": "evaluation" if model is None else "research",
         "evaluation": {
-            "primary_label": "forward_return_20d"
-            if profile_id == "a_share_csmar_choice"
-            else "future_mid_return_500ms",
+            **(
+                {"primary_label": "forward_return_20d"}
+                if profile_id == "a_share_csmar_choice"
+                else {}
+            ),
             "factors": ["share_price"]
             if profile_id == "a_share_csmar_choice"
             else ["ofi_500ms"],
@@ -549,9 +551,14 @@ def test_external_sources_have_independent_owners_units_and_sol_nulls(tmp_path):
         binding = selected.producer_bindings[data_id]
         assert binding.producer.func is crypto_producer.produce_normalized_context
         params = json.loads(selected.processed.get(data_id).parameters_json)
-        assert params["base_units_per_amount"]["btc_usdt"] == (
+        unit = params["base_units_per_amount"]["btc_usdt"]
+        assert (unit if venue == "bybit" else unit["after"]) == (
             1.0 if venue == "bybit" else 0.01
         )
+        if venue == "okx":
+            assert unit["before"] == 0.0001
+            assert unit["transition_start"] == "2020-03-20T08:00:00"
+            assert unit["transition_end"] == "2020-03-20T08:30:00"
     del config["auxiliary_sources"]["okx"]
     missing = bind_research_configuration(
         research_profile("crypto_binance_hft"),
@@ -1131,7 +1138,6 @@ def test_crypto_factor_and_label_subsets_keep_order_and_catalog_identity(
     config["evaluation"] = {
         "factors": factors,
         "labels": ["future_mid_return_500ms"],
-        "primary_label": "future_mid_return_500ms",
     }
     selected = bind_research_configuration(
         research_profile("crypto_binance_hft"), config, tardis_root=tmp_path
@@ -1361,9 +1367,14 @@ def test_maker_calibration_identity_tracks_reference_parameters(
         model_id, "MODEL"
     )
     execution_id = base.execution_targets()[0].target_id
-    assert base.target_manifest(execution_id, "PORTFOLIO") != altered.target_manifest(
-        execution_id, "PORTFOLIO"
+    affects_execution = not (
+        section == "maker" and field in {"inventory_target", "inventory_skew"}
     )
+    assert (
+        base.target_manifest(execution_id, "PORTFOLIO")
+        != altered.target_manifest(execution_id, "PORTFOLIO")
+    ) is affects_execution
+    assert base.configuration() != altered.configuration()
     reference = before["research_plan"]["execution"]["maker"]
     assert set(reference) == {"order_quantity", "latency_ms", "min_calibration_samples"}
     assert reference == {
@@ -1371,3 +1382,94 @@ def test_maker_calibration_identity_tracks_reference_parameters(
         "latency_ms": 100,
         "min_calibration_samples": 100,
     }
+
+
+def test_crypto_parallel_labels_have_no_unused_primary_label_configuration():
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "multiscale")
+    assert "primary_label" not in config["evaluation"]
+    profile = bind_research_configuration(
+        research_profile("crypto_binance_hft"), config
+    )
+    evaluation = profile.evaluations.get(config["scenario_id"] + "_evaluation")
+    assert evaluation.label_columns == tuple(config["evaluation"]["labels"])
+    assert {item.label_column for item in profile.models.list()} == {
+        item["label_column"] for item in config["models"]
+    }
+    config["evaluation"]["primary_label"] = config["evaluation"]["labels"][0]
+    with pytest.raises(ValueError, match="^research_evaluation_configuration_invalid$"):
+        bind_research_configuration(research_profile("crypto_binance_hft"), config)
+
+
+def test_a_share_still_requires_effective_primary_label():
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration()
+    del config["evaluation"]["primary_label"]
+    with pytest.raises(ValueError, match="^research_evaluation_configuration_invalid$"):
+        bind_research_configuration(research_profile(), config)
+
+
+def test_forecast_robustness_requires_a_real_expectations_consumer():
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration()
+    assert "earnings_yield" not in config["evaluation"]["factors"]
+    config["evaluation"]["forecast_freshness_days"] = 180
+    with pytest.raises(
+        ValueError, match="^research_forecast_freshness_not_applicable$"
+    ):
+        bind_research_configuration(research_profile(), config)
+
+
+@pytest.mark.parametrize("scenario", ("pv_all", "pv_expanded"))
+@pytest.mark.parametrize(
+    "entrypoint",
+    ("evaluation", "factor", "feature", "feature_missing", "feature_observed"),
+)
+def test_a_share_scenario_rejects_all_outside_factor_entrypoints(scenario, entrypoint):
+    from quant_research_platform.contracts.models import ModelSpec
+
+    column = "earnings_yield"
+    model = None
+    if entrypoint != "evaluation":
+        model = ModelSpec(
+            model_id="selected_ols",
+            model_algorithm="linear_regression",
+            input_factor_columns=(column,) if entrypoint == "factor" else (),
+            input_feature_columns=(entrypoint + "_" + column,)
+            if entrypoint != "factor"
+            else (),
+            label_column="model_target",
+        )
+    config = configuration("a_share_csmar_choice", scenario, model)
+    if entrypoint == "evaluation":
+        config["evaluation"]["factors"] = [column]
+    with pytest.raises(ValueError, match="^research_factor_outside_scenario$"):
+        bind_research_configuration(research_profile(), config)
+
+
+@pytest.mark.parametrize("scenario", ("fusion_nf_core", "fusion_nf_expectations"))
+def test_a_share_financial_scenarios_keep_allowed_model_feature_sources(scenario):
+    from quant_research_platform.contracts.models import ModelSpec
+
+    model = ModelSpec(
+        model_id="selected_ols",
+        model_algorithm="linear_regression",
+        input_feature_columns=("feature_earnings_yield",),
+        label_column="model_target",
+    )
+    config = configuration("a_share_csmar_choice", scenario, model)
+    selected = bind_research_configuration(research_profile(), config)
+    dataset = selected.research_datasets.get(scenario)
+    assert dataset.factor_columns == (
+        "share_price",
+        "earnings_yield",
+        "log_float_market_cap",
+    )
+    assert "fundamental_factors" in dataset.input_data_ids
+    assert {"is_nonfinancial_industry", "has_legal_fundamental_pit"} <= set(
+        dataset.context_columns
+    )
+    assert selected.models.get(model.model_id).input_columns == model.input_columns

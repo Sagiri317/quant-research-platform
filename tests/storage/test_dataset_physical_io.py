@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import errno
 import importlib
-import importlib.util
 import json
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -17,6 +16,7 @@ import quant_research_platform.storage.datasets.reading as dataset_reading
 import quant_research_platform.storage.datasets.schema as dataset_schema
 import quant_research_platform.storage.datasets.writing as dataset_writing
 import quant_research_platform.storage.parquet as dataset_physical
+from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.storage.datasets import (
     inspect_dataset,
@@ -46,6 +46,172 @@ def test_writer_rejects_mixed_incompatible_category_values(tmp_path: Path) -> No
     frame["asset_id"] = pd.Categorical([1, "1", 1], categories=[1, "1"])
     with pytest.raises(ValueError, match="unsupported_dataset_logical_dtype"):
         write_dataset(root, frame, spec=make_processed_dataset_spec("mixed_category"))
+
+
+@pytest.mark.parametrize("ordered", (False, True))
+@pytest.mark.parametrize(
+    "categories",
+    (
+        [1, 2, 3],
+        pd.date_range("2020-01-01", periods=3, tz="America/New_York"),
+        pd.date_range("2020-01-01", periods=3, tz="America/New_York").as_unit("ns"),
+    ),
+)
+def test_nonstring_categorical_native_roundtrip(
+    tmp_path, monkeypatch, categories, ordered
+):
+    frame = make_default_dataset_frame()
+    frame["timestamp"] = frame["timestamp"].astype("datetime64[ns]")
+    frame["asset_id"] = pd.Categorical(
+        [categories[0], categories[1], None], categories=categories, ordered=ordered
+    )
+    # Exercise a nullable context column without relaxing primary-key validity.
+    frame["value"], frame["asset_id"] = frame["asset_id"], pd.Series(["a", "b", "c"])
+    root = make_dataset_artifact_root(tmp_path, "typed_categories")
+    write_dataset(
+        root,
+        frame,
+        spec=make_processed_dataset_spec(
+            "typed_categories", value_role=ColumnRole.CONTEXT
+        ),
+    )
+    actual = read_dataset(root)
+    pd.testing.assert_frame_equal(
+        actual.sort_values("asset_id").reset_index(drop=True),
+        frame.sort_values("asset_id").reset_index(drop=True),
+    )
+    native_write = dataset_writing.write_parquet_file
+    invalid = (
+        99 if isinstance(categories, list) else categories[-1] + pd.Timedelta(days=1)
+    )
+
+    def corrupt_domain(table, path):
+        position = table.schema.get_field_index("value")
+        values = pa.array(
+            [invalid] * table.num_rows, type=table.schema.field("value").type
+        )
+        return native_write(table.set_column(position, "value", values), path)
+
+    monkeypatch.setattr(dataset_writing, "write_parquet_file", corrupt_domain)
+    invalid_root = make_dataset_artifact_root(tmp_path, "invalid_domain")
+    with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):
+        write_dataset(
+            invalid_root,
+            frame,
+            spec=make_processed_dataset_spec(
+                "invalid_domain", value_role=ColumnRole.CONTEXT
+            ),
+        )
+    assert not filesystem_exists(invalid_root)
+
+
+def test_object_null_prefix_has_chunk_independent_schema(tmp_path):
+    frame = make_default_dataset_frame()
+    frame["timestamp"] = frame["timestamp"].astype("datetime64[ns]")
+    frame = frame.sort_values(["timestamp", "asset_id"]).reset_index(drop=True)
+    frame["value"] = pd.Series([None, None, "known"], dtype=object)
+    expected = frame.copy()
+    expected["value"] = pd.Series([np.nan, np.nan, "known"], dtype=object)
+    for name, data in (
+        ("whole", frame),
+        ("chunked", (frame.iloc[i : i + 1] for i in range(3))),
+    ):
+        root = make_dataset_artifact_root(tmp_path, name)
+        write_dataset(
+            root,
+            data,
+            spec=make_processed_dataset_spec(name, value_role=ColumnRole.CONTEXT),
+        )
+        pd.testing.assert_frame_equal(read_dataset(root), expected)
+    root = make_dataset_artifact_root(tmp_path, "rewritten")
+    write_dataset(
+        root,
+        read_dataset(
+            make_dataset_artifact_root(tmp_path, "chunked"),
+            mode=dataset_reading.DatasetReadMode.CHUNKED,
+        ),
+        spec=make_processed_dataset_spec("rewritten", value_role=ColumnRole.CONTEXT),
+    )
+    pd.testing.assert_frame_equal(read_dataset(root), expected)
+
+
+@pytest.mark.parametrize("chunked", (False, True))
+def test_sparse_assembler_preserves_object_text_after_null_prefix(tmp_path, chunked):
+    from quant_research_platform.research.datasets.assembler import (
+        assemble_research_dataset,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.research_processed_inputs import make_dummy_processed_catalog
+    from tests.helpers.research_specs import (
+        make_dummy_research_dataset_spec,
+        make_research_dataset_catalog,
+    )
+
+    layout = StorageLayout(tmp_path)
+    catalog = make_dummy_processed_catalog()
+    base = pd.DataFrame(
+        {
+            "market_id": ["dummy_market"] * 2,
+            "asset_id": ["a"] * 2,
+            "timestamp": pd.to_datetime(["2020-12-31", "2021-01-04"]).as_unit("ns"),
+        }
+    )
+    context = base.iloc[1:].copy()
+    context["context_1"] = pd.Series(["known"], index=context.index, dtype=object)
+    frames = {
+        "base": base,
+        "factors": base.assign(factor_1=1.0),
+        "labels": base.assign(label_1=0.1),
+        "filters": base.assign(eligible=True),
+        "context": context,
+    }
+    for name, frame in frames.items():
+        spec = catalog.get(name)
+        data = (
+            (frame.iloc[i : i + 1] for i in range(len(frame)))
+            if chunked and name == "base"
+            else frame
+        )
+        write_dataset(
+            layout.processed_data_root(spec.market_id, spec.kind, spec.data_id),
+            data,
+            spec=spec,
+        )
+    output = assemble_research_dataset(
+        layout=layout,
+        processed_catalog=catalog,
+        dataset_catalog=make_research_dataset_catalog(
+            make_dummy_research_dataset_spec(key_coverage={"context": "sparse"})
+        ),
+        dataset_id="dummy_dataset",
+        time_window=TimeWindow("2020-12-31", "2021-01-04"),
+    )
+    actual = read_dataset(output)
+    assert actual.context_1.dtype == object
+    assert pd.isna(actual.context_1.iloc[0])
+    assert actual.context_1.iloc[1] == "known"
+
+
+@pytest.mark.parametrize(
+    "values,error",
+    (
+        ([None, None, None], "unsupported_dataset_arrow_type"),
+        ([None, "known", 1], "dataset_schema_mismatch"),
+    ),
+)
+def test_unresolved_or_drifting_object_schema_never_publishes(tmp_path, values, error):
+    frame = make_default_dataset_frame()
+    frame["value"] = pd.Series(values, dtype=object)
+    root = make_dataset_artifact_root(tmp_path, "unresolved")
+    with pytest.raises(ValueError, match=error):
+        write_dataset(
+            root,
+            (frame.iloc[i : i + 1] for i in range(3)),
+            spec=make_processed_dataset_spec(
+                "unresolved", value_role=ColumnRole.CONTEXT
+            ),
+        )
+    assert not filesystem_exists(root)
 
 
 def test_session_detects_part_manifest_and_same_size_identity_changes(

@@ -15,18 +15,16 @@ PRICE_VOLUME_SIGNAL_COLUMN = "momentum_20d"
 FORWARD_RETURN_LABEL_COLUMN = forward_return_label_column(20)
 
 
-def make_price_volume_prediction_output_frame(
-    *,
-    with_metadata: bool = True,
-    row_count: int = 1,
-) -> pd.DataFrame:
-    frame = _price_volume_prediction_frame(row_count=row_count)
-    if with_metadata:
-        frame.attrs["model_metadata"] = _price_volume_model_metadata()
-        frame.attrs["prediction_metadata"] = {
-            **_price_volume_prediction_metadata(),
-            "prediction_rows": row_count,
+def make_price_volume_prediction_output_frame() -> pd.DataFrame:
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2014-01-03"]),
+            "asset_id": ["asset-a"],
+            "prediction_score": [0.25],
         }
+    )
+    frame.attrs["model_metadata"] = _price_volume_model_metadata()
+    frame.attrs["prediction_metadata"] = _price_volume_prediction_metadata()
     return frame
 
 
@@ -57,18 +55,6 @@ def make_artifact_signal_spec() -> SignalSpec:
         signal_id="signal",
         source_column="feature",
         source_kind="feature",
-    )
-
-
-def _price_volume_prediction_frame(*, row_count: int) -> pd.DataFrame:
-    assets = ["asset-a", "asset-b"][:row_count]
-    scores = [0.25, 0.35][:row_count]
-    return pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2014-01-03"] * row_count),
-            "asset_id": assets,
-            "prediction_score": scores,
-        }
     )
 
 

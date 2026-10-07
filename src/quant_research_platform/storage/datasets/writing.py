@@ -152,6 +152,18 @@ class _WriteStats:
             table = pa.Table.from_pandas(frame, schema=schema, preserve_index=False)
         except (pa.ArrowInvalid, pa.ArrowNotImplementedError, pa.ArrowTypeError) as exc:
             raise ValueError("unsupported_dataset_logical_dtype") from exc
+        for name in frame:
+            dtype = frame[name].dtype
+            if isinstance(dtype, pd.CategoricalDtype):
+                values_type = pa.Array.from_pandas(dtype.categories).type
+                if not (
+                    pa.types.is_string(values_type)
+                    or pa.types.is_large_string(values_type)
+                ):
+                    position = table.schema.get_field_index(name)
+                    table = table.set_column(
+                        position, name, table.column(position).cast(values_type)
+                    )
         physical_schema = _canonical_storage_schema(table.schema.remove_metadata())
         if self._arrow_schema is None:
             for name in object_string_columns:
@@ -169,8 +181,12 @@ class _WriteStats:
                 )
             except (pa.ArrowInvalid, pa.ArrowTypeError) as error:
                 raise ValueError("dataset_schema_mismatch") from error
-            if unified != self._arrow_schema:
+            if any(
+                old.type != new.type and not pa.types.is_null(old.type)
+                for old, new in zip(self._arrow_schema, unified, strict=True)
+            ):
                 raise ValueError("dataset_schema_mismatch")
+            self._arrow_schema = unified
             physical_schema = self._arrow_schema
         return table.cast(physical_schema, safe=True)
 
@@ -381,6 +397,23 @@ def _write_contents(
         spec=spec, data_root=root, key_tracker=key_tracker, inventory=inventory
     )
     part_indices: dict[str, int] = {}
+    pending_parts: list[Path] = []
+
+    def observe_pending() -> None:
+        schema = accumulator._arrow_schema
+        assert schema is not None
+        if any(pa.types.is_null(field.type) for field in schema):
+            return
+        for pending in pending_parts:
+            with pq.ParquetFile(native_filesystem_path(pending)) as parquet:
+                table = parquet.read()
+            resolved = table.cast(
+                schema.with_metadata(table.schema.metadata), safe=True
+            )
+            write_parquet_file(resolved, pending)
+            accumulator.observe_file(pending, batch_rows=batch_rows)
+        pending_parts.clear()
+
     saw_empty_schema = False
     for chunk in chunks:
         declared = pd.DataFrame(accumulator.declared_frame(chunk), copy=False)
@@ -419,8 +452,19 @@ def _write_contents(
                 part_indices[partition] = part_index + 1
                 path = partition_part_path(root, partition, part_index)
                 write_parquet_file(persisted, path)
-                accumulator.observe_file(path, batch_rows=batch_rows)
+                assert accumulator._arrow_schema is not None
+                if any(
+                    pa.types.is_null(field.type) for field in accumulator._arrow_schema
+                ):
+                    pending_parts.append(path)
+                else:
+                    observe_pending()
+                    accumulator.observe_file(path, batch_rows=batch_rows)
                 _raise_accumulated_failures(accumulator)
+    if pending_parts:
+        observe_pending()
+    if pending_parts:
+        raise ValueError("unsupported_dataset_arrow_type")
     if accumulator.row_count == 0 and (not saw_empty_schema):
         raise ValueError("empty_dataset_schema_missing")
     if saw_empty_schema:
@@ -477,6 +521,10 @@ def _validate_persisted_categorical_values(
         if expected["kind"] != "categorical":
             continue
         observed = actual_by_name.get(expected["name"])
+        if observed is not None and observed["kind"] != "categorical":
+            # Parquet decodes non-string dictionary values as their primitive type.
+            # The shared batch converter checks their domain before casting.
+            continue
         if (
             observed is None
             or observed["kind"] != "categorical"
