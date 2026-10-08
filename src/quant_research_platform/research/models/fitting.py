@@ -176,37 +176,34 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
         raise ValueError("model_state_metadata_mismatch")
 
 
-def _fit_model_result_from_frames(
-    frames: Iterable[pd.DataFrame],
+def _fit_model_result(
+    prepared_training,
     spec: ModelSpec,
     *,
     estimator: object,
-    fitting_cutoff: object,
     on_fit_start=None,
 ) -> ModelFitResult:
+    training, row_counts, filter_metadata = prepared_training
+    prepared_training = (training.copy(deep=True), row_counts, filter_metadata)
     if spec.model_algorithm == "linear_regression":
-        return _fit_linear_model_result_from_frames(
-            frames, spec, fitting_cutoff=fitting_cutoff, on_fit_start=on_fit_start
+        return _fit_linear_model_result(
+            prepared_training, spec, on_fit_start=on_fit_start
         )
-    return _fit_estimator_model_result_from_frames(
-        frames,
+    return _fit_estimator_model_result(
+        prepared_training,
         spec,
         estimator=estimator,
-        fitting_cutoff=fitting_cutoff,
         on_fit_start=on_fit_start,
     )
 
 
-def _fit_linear_model_result_from_frames(
-    frames: Iterable[pd.DataFrame],
+def _fit_linear_model_result(
+    prepared_training,
     spec: ModelSpec,
     *,
-    fitting_cutoff: object,
     on_fit_start=None,
 ) -> ModelFitResult:
-    training, row_counts, filter_metadata = _collect_training_frame(
-        frames, spec, fitting_cutoff=fitting_cutoff
-    )
+    training, row_counts, filter_metadata = prepared_training
     if training.empty:
         raise ValueError("model_training_sample_empty")
     if on_fit_start is not None:
@@ -292,17 +289,14 @@ def model_metadata(
     return metadata
 
 
-def _fit_estimator_model_result_from_frames(
-    frames: Iterable[pd.DataFrame],
+def _fit_estimator_model_result(
+    prepared_training,
     spec: ModelSpec,
     *,
     estimator: object,
-    fitting_cutoff: object,
     on_fit_start=None,
 ) -> ModelFitResult:
-    training, row_counts, filter_metadata = _collect_training_frame(
-        frames, spec, fitting_cutoff=fitting_cutoff
-    )
+    training, row_counts, filter_metadata = prepared_training
     if training.empty:
         raise ValueError("model_training_sample_empty")
     threads = supervised.model_thread_count(spec)
@@ -529,34 +523,6 @@ def model_training_read_columns(
             )
         )
     )
-
-
-def iter_legal_training_chunks(
-    chunks: Iterable[pd.DataFrame],
-    *,
-    train_end: pd.Timestamp,
-    label_column: str,
-    input_columns: tuple[str, ...],
-    model_algorithm: str,
-) -> Iterable[pd.DataFrame]:
-    with closing_iterator(iter(chunks)) as active_chunks:
-        for chunk in active_chunks:
-            train = legal_training_rows(
-                chunk,
-                fitting_cutoff=train_end,
-                availability_column=resolve_training_availability_column(
-                    chunk, label_column=label_column
-                ),
-                feature_columns=model_input_validity_columns(
-                    input_columns, model_algorithm
-                ),
-                target_column=label_column,
-            )
-            if not train.empty:
-                try:
-                    yield train
-                except GeneratorExit:
-                    return
 
 
 def training_scope_chunks(

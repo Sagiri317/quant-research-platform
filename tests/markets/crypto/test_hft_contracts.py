@@ -37,6 +37,7 @@ from tests.helpers.binance_hft import (
     _quote,
     _row_timestamp_ms,
 )
+from tests.helpers.portfolio_ledger import capture_fill_rows
 from tests.helpers.research_configuration import research_configuration
 
 simulate_taker = _simulate_taker
@@ -201,7 +202,7 @@ def test_unobserved_state_is_hidden_from_panel_and_taker() -> None:
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"book-1": _coverage(0, 200)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -235,7 +236,7 @@ def test_exact_ns_observation_boundary_is_hidden_from_panel_and_taker() -> None:
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage=coverage,
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -360,7 +361,7 @@ def test_maker_uses_local_observation_order_for_same_time_events() -> None:
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
-        on_fill=book_first_fills.append,
+        on_ledger=capture_fill_rows(book_first_fills.append),
     )
     trade_first_result = simulate_maker(
         [initial, trade_first_book],
@@ -372,7 +373,7 @@ def test_maker_uses_local_observation_order_for_same_time_events() -> None:
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
-        on_fill=trade_first_fills.append,
+        on_ledger=capture_fill_rows(trade_first_fills.append),
     )
     assert book_first["filled_orders"] == 1
     assert trade_first_result["filled_orders"] == 1
@@ -453,7 +454,7 @@ def test_trade_through_consumes_full_remaining_order_not_visible_quantity() -> N
         config=_maker_config(),
         observed_coverage={"book-1": (0, 200000000)},
         trade_coverage={"trade-connection-1": (0, 200000000)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -489,7 +490,7 @@ def test_maker_order_expires_at_first_missing_trade_coverage_boundary() -> None:
         config=_maker_config(),
         observed_coverage={"book-1": (0, 200000000)},
         trade_coverage={"trade-connection-1": (0, 75000000)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -549,8 +550,7 @@ def test_book_state_taker_timing_and_terminal_mark() -> None:
         prediction_column="prediction",
         config=_taker_config(latency_ms=10),
         observed_coverage={"book-1": _coverage(0, 20)},
-        on_fill=fills.append,
-        on_equity=equities.append,
+        on_ledger=capture_fill_rows(fills.append, equities.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -559,7 +559,7 @@ def test_book_state_taker_timing_and_terminal_mark() -> None:
     assert fills[0]["effective_time_ms"] == 10
     assert fills[0]["state_observed_time_ms"] == 5
     assert fills[0]["timestamp_ms"] == 10
-    assert equities[0]["timestamp_ms"] == 0
+    assert equities[0].valuations[0].timestamp_ns == 0
     terminal = simulate_taker(
         [_state(0), _state(100, bid_index=1005, ask_index=1015)],
         [{"timestamp_ms": 0, "prediction": 0.1}],
@@ -735,8 +735,9 @@ def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
                 funding_forecasts=KNOWN_NO_FUNDING,
                 decision_windows_ns=((0, 180000000),),
                 observation_window_ns=(0, stop_ms * 1000000),
-                on_fill=lambda fill: fills.append(dict(fill)),
-                on_ledger=emit,
+                on_ledger=capture_fill_rows(
+                    lambda fill: fills.append(dict(fill)), emit
+                ),
             )
             if kind == "taker":
                 result = _simulate_taker(

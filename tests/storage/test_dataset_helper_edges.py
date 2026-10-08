@@ -38,7 +38,6 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.datasets.schema import (
     data_spec_payload,
-    logical_dtype_payload_from_frame,
     physical_schema_from_schema,
     validate_dataset_manifest_payload,
     validate_dataset_spec,
@@ -262,111 +261,6 @@ def test_validate_dataset_spec_rejects_forged_mutable_research_semantic_mapping(
         validate_dataset_spec(research)
 
 
-@pytest.mark.parametrize(
-    "replacement", ([0.0, 1.0], [False, True]), ids=("int-float", "int-bool")
-)
-def test_manifest_spec_binding_is_typed_exact_recursively(
-    replacement: list[object],
-) -> None:
-    base = make_demo_research_dataset_spec()
-    factor_column = base.factor_columns[0]
-    feature_column = f"{factor_column}_winsorized"
-    spec = data_spec_payload(
-        make_demo_research_dataset_spec(
-            feature_columns=(feature_column,),
-            feature_transforms=(
-                FeatureTransformSpec(
-                    transform_id=feature_column,
-                    source_columns=(factor_column,),
-                    transform="winsorize",
-                    output_columns=(feature_column,),
-                    winsorize_quantiles=(0, 1),
-                ),
-            ),
-        )
-    )
-    physical_schema = physical_schema_from_schema(
-        pa.schema(
-            [
-                pa.field(column, pa.string(), nullable=True)
-                for column in spec["required_columns"]
-            ]
-        )
-    )
-    manifest = {
-        **{key: deepcopy(value) for key, value in spec.items() if key != "schema_id"},
-        "schema_id": "qrp-dataset-manifest",
-        "row_count": 0,
-        "file_count": 1,
-        "file_size_bytes": 0,
-        "content_hash": "0" * 64,
-        "columns": list(spec["required_columns"]),
-        "physical_schema": physical_schema,
-        "schema_hash": canonical_json_hash(physical_schema),
-        "logical_dtypes": logical_dtype_payload_from_frame(
-            pd.DataFrame(
-                {
-                    column: pd.Series(dtype="object")
-                    for column in spec["required_columns"]
-                }
-            )
-        ),
-        "partition_row_counts": {"year=2024": 0},
-        "partition_count": 1,
-        "partitions": ["year=2024"],
-        "date_min": None,
-        "date_max": None,
-        "null_count_summary": {},
-        "non_finite_count_summary": {},
-        "duplicate_primary_key_count": 0,
-        "factor_nan_profile": {},
-        "label_nan_profile": {},
-        "validation_status": "PASS",
-    }
-    manifest["logical_dtype_hash"] = canonical_json_hash(manifest["logical_dtypes"])
-    manifest["feature_transforms"][0]["winsorize_quantiles"] = replacement
-    if all(type(item) is bool for item in replacement):
-        with pytest.raises(ValueError, match="dataset_manifest_spec_mismatch"):
-            validate_dataset_manifest_payload(manifest, spec=spec)
-    else:
-        validate_dataset_manifest_payload(manifest, spec=spec)
-
-
-def test_storage_maps_huge_winsorize_quantiles_to_stable_owner_error() -> None:
-    factor_column = make_demo_research_dataset_spec().factor_columns[0]
-    feature_column = f"{factor_column}_winsorized"
-    transform = FeatureTransformSpec(
-        transform_id=feature_column,
-        source_columns=(factor_column,),
-        transform="winsorize",
-        output_columns=(feature_column,),
-        winsorize_quantiles=(0, 1),
-    )
-    runtime_spec = make_demo_research_dataset_spec(
-        feature_columns=(feature_column,), feature_transforms=(transform,)
-    )
-    object.__setattr__(transform, "winsorize_quantiles", (0, 10**400))
-    with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
-        validate_dataset_spec(runtime_spec)
-    persisted_spec = data_spec_payload(
-        make_demo_research_dataset_spec(
-            feature_columns=(feature_column,),
-            feature_transforms=(
-                FeatureTransformSpec(
-                    transform_id=feature_column,
-                    source_columns=(factor_column,),
-                    transform="winsorize",
-                    output_columns=(feature_column,),
-                    winsorize_quantiles=(0, 1),
-                ),
-            ),
-        )
-    )
-    persisted_spec["feature_transforms"][0]["winsorize_quantiles"] = [0, 10**400]
-    with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
-        validate_dataset_spec_payload(persisted_spec)
-
-
 @pytest.mark.parametrize("wrong_kind", ([], {}), ids=("list", "dict"))
 def test_persisted_research_key_coverage_rejects_unhashable_policy_with_owner_error(
     wrong_kind: object,
@@ -375,39 +269,6 @@ def test_persisted_research_key_coverage_rejects_unhashable_policy_with_owner_er
     data_id = payload["input_data_ids"][0]
     payload["key_coverage"][data_id] = wrong_kind
     with pytest.raises(ValueError, match="dataset_key_coverage_invalid"):
-        validate_dataset_spec_payload(payload)
-
-
-@pytest.mark.parametrize(
-    ("field", "wrong_kind"),
-    (
-        ("transform", []),
-        ("transform", {}),
-        ("fillna_policy", []),
-        ("fillna_policy", {}),
-    ),
-    ids=("transform-list", "transform-dict", "fillna-list", "fillna-dict"),
-)
-def test_persisted_feature_transform_rejects_unhashable_enum_with_owner_error(
-    field: str, wrong_kind: object
-) -> None:
-    factor_column = make_demo_research_dataset_spec().factor_columns[0]
-    feature_column = f"{factor_column}_rank"
-    payload = data_spec_payload(
-        make_demo_research_dataset_spec(
-            feature_columns=(feature_column,),
-            feature_transforms=(
-                FeatureTransformSpec(
-                    transform_id=feature_column,
-                    source_columns=(factor_column,),
-                    transform="cross_sectional_rank",
-                    output_columns=(feature_column,),
-                ),
-            ),
-        )
-    )
-    payload["feature_transforms"][0][field] = wrong_kind
-    with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
         validate_dataset_spec_payload(payload)
 
 
@@ -1362,3 +1223,42 @@ def test_exact_comparison_bad_late_key_keeps_right_batch_atomic():
         )
     assert index.identity_payload_count(namespace="right") == 0
     assert index.identity_payload_count(namespace="left") == 1
+
+
+@pytest.mark.parametrize("invalid", ([], {}, True, 10**400, "winsorize"))
+def test_feature_recipe_rejects_invalid_runtime_and_persisted_recipe(invalid):
+    factor = make_demo_research_dataset_spec().factor_columns[0]
+    transform = FeatureTransformSpec("a_share_canonical", (factor,))
+    spec = make_demo_research_dataset_spec(
+        feature_columns=transform.output_columns,
+        feature_transforms=(transform,),
+    )
+    payload = data_spec_payload(spec)
+    payload["feature_transforms"][0]["recipe_id"] = invalid
+    with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
+        validate_dataset_spec_payload(payload)
+    object.__setattr__(transform, "recipe_id", invalid)
+    with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
+        validate_dataset_spec(spec)
+
+
+def test_feature_recipe_is_the_only_persisted_transform_configuration():
+    factor = make_demo_research_dataset_spec().factor_columns[0]
+    identities = []
+    for recipe in ("a_share_canonical", "a_share_quantile_1_99"):
+        transform = FeatureTransformSpec(recipe, (factor,))
+        payload = data_spec_payload(
+            make_demo_research_dataset_spec(
+                feature_columns=transform.output_columns,
+                feature_transforms=(transform,),
+            )
+        )
+        validate_dataset_spec_payload(payload)
+        assert payload["feature_transforms"] == [
+            {"recipe_id": recipe, "source_columns": [factor]}
+        ]
+        identities.append(canonical_json_hash(payload))
+        payload["feature_transforms"][0]["fillna_policy"] = "zero"
+        with pytest.raises(ValueError, match="dataset_feature_transforms_invalid"):
+            validate_dataset_spec_payload(payload)
+    assert identities[0] != identities[1]

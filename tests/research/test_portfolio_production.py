@@ -17,7 +17,6 @@ from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
 from quant_research_platform.contracts.portfolios import (
-    CONTINUOUS_EXECUTION_COLUMNS,
     PORTFOLIO_DECISION_REASON_ENHANCED,
     PORTFOLIO_DECISION_REASON_MAINTENANCE,
     PORTFOLIO_DECISION_REASON_SIMPLE,
@@ -35,7 +34,10 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     prepare_trade_cost,
     require_fee_coverage,
 )
-from quant_research_platform.research.portfolios import production
+from quant_research_platform.markets.implementations.a_share.processed import (
+    producer as market_sessions,
+)
+from quant_research_platform.research.portfolios import accounting, production
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskConfig,
     FactorRiskEstimate,
@@ -43,10 +45,13 @@ from quant_research_platform.research.portfolios.risk import (
 )
 from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
 from quant_research_platform.storage.datasets import DatasetReadMode
+from quant_research_platform.storage.datasets import reading as dataset_reading
 from quant_research_platform.storage.identity import filesystem_mkdir
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.portfolio_ledger import (
+    CONTINUOUS_EXECUTION_COLUMNS,
     execute_continuous_target,
+    ledger_frame,
     session_frame,
     write_test_sessions,
 )
@@ -362,57 +367,7 @@ def _build_producer(
             assert columns == ("calendar_date", "source_market_type", "is_trading_day")
             assert time_window is None
             return frames["calendar"].copy()
-        if target_id == "benchmark":
-            assert columns == ("benchmark_id", "asset_id", "timestamp", "weight")
-            assert isinstance(time_window, TimeWindow)
-            selected = frames[target_id].loc[
-                pd.to_datetime(frames[target_id]["timestamp"]).dt.normalize()
-                == pd.Timestamp(time_window.start).normalize()
-            ]
-            return selected.loc[:, list(columns)].copy()
-        if target_id == "risk_context":
-            selected = frames[target_id].loc[
-                frames[target_id].timestamp.eq(pd.Timestamp(time_window.start))
-            ]
-            return (
-                selected.copy()
-                if columns is None
-                else selected.loc[:, list(columns)].copy()
-            )
-        expected = {
-            "dataset": tuple(
-                dict.fromkeys(
-                    (
-                        "asset_id",
-                        "timestamp",
-                        "eligible",
-                        "float_market_cap",
-                        *production.model_input_validity_columns(
-                            model_inputs, model_algorithm
-                        ),
-                    )
-                )
-            ),
-            "panel": production._ENHANCED_PANEL_COLUMNS
-            if enhanced
-            else (
-                "asset_id",
-                "timestamp",
-                "adj_open",
-                "adj_close",
-                "amount",
-                "market_type",
-            ),
-            "execution": ("asset_id", "timestamp", "can_enter", "can_exit"),
-        }[target_id]
-        assert columns == expected
-        assert isinstance(time_window, TimeWindow)
-        assert time_window.start == time_window.end
-        selected = frames[target_id].loc[
-            pd.to_datetime(frames[target_id]["timestamp"]).dt.normalize()
-            == pd.Timestamp(time_window.start).normalize()
-        ]
-        return selected.loc[:, list(columns)].copy()
+        raise AssertionError(f"Unexpected materialized target: {target_id}")
 
     def input_session(root, *, columns=None, time_window=None):
         target = next((key for key, value in roots.items() if value == root))
@@ -435,7 +390,7 @@ def _build_producer(
         ):
             yield (session.root / "synthetic.parquet", frame)
 
-    def source_evidence(layout, panel_root, calendar):
+    def source_evidence(layout, panel_root, calendar, *, include_asset_sessions):
         from quant_research_platform.markets.implementations.a_share.processed import (
             panels,
         )
@@ -461,9 +416,10 @@ def _build_producer(
             panels._canonical_stock_master(stocks),
         )
 
-    monkeypatch.setattr(production, "_portfolio_session_evidence", source_evidence)
+    monkeypatch.setattr(market_sessions, "_portfolio_session_evidence", source_evidence)
+    monkeypatch.setattr(market_sessions, "open_dataset_session", input_session)
     monkeypatch.setattr(production, "open_dataset_session", input_session)
-    monkeypatch.setattr(production, "iter_dataset_file_batches", file_batches)
+    monkeypatch.setattr(dataset_reading, "iter_dataset_file_batches", file_batches)
     monkeypatch.setattr(production, "read_dataset", fake_read_dataset)
     assumptions = ExecutionAssumptions(
         initial_nav=100.0,
@@ -475,6 +431,7 @@ def _build_producer(
 
     def output():
         chunks = production.build_portfolio_ledger(
+            iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
             candidate=candidate,
             layout=layout,
             upstream_identities={**identities, "prediction": "b" * 64},
@@ -681,7 +638,7 @@ def test_float_cap_roundoff_keeps_nonnegative_persisted_cash_target(tmp_path):
         assumptions=assumptions,
         cost_source_identity="f" * 64,
     )
-    frame = production._ledger_frame(
+    frame = ledger_frame(
         account=account,
         decision_timestamp=pd.Timestamp("2023-01-03"),
         returns=zero,
@@ -1167,7 +1124,9 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
     actual_build = production._build_session
 
     def observe_decision(**kwargs):
-        account, returns, adv, optimization, decision_delta = actual_build(**kwargs)
+        account, returns, adv, optimization, decision_delta, snapshot = actual_build(
+            **kwargs
+        )
         if kwargs["decision_timestamp"] == pd.Timestamp("2023-01-06"):
             assert optimization is not None
             observed.append(
@@ -1179,7 +1138,7 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
                     decision_delta.copy(),
                 )
             )
-        return (account, returns, adv, optimization, decision_delta)
+        return (account, returns, adv, optimization, decision_delta, snapshot)
 
     monkeypatch.setattr(production, "_build_session", observe_decision)
     chunks, _calls = _build_producer(
@@ -1472,21 +1431,22 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         risk_context_target_ids=("risk",),
     )
     assumptions = ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,))
-    account, returns, adv, optimized, delta = production._build_session(
+    account, returns, adv, optimized, delta, _snapshot = production._build_session(
         candidate=candidate,
         decision_timestamp=pd.Timestamp("2023-01-06"),
         next_timestamp=pd.Timestamp("2023-01-09"),
-        panel=production._session_frame(
+        panel=production._portfolio_session_frame(
             at_date(panel, "2023-01-06"), production._ENHANCED_PANEL_COLUMNS
         ),
         next_panel=at_date(panel, "2023-01-09"),
         endpoint_panel=at_date(panel, "2023-01-10"),
         closed_assets=frozenset(),
-        dataset=production._session_frame(
+        dataset=production._portfolio_session_frame(
             at_date(frames["dataset"], "2023-01-06"), production._DATASET_COLUMNS
         ),
-        execution=production._session_frame(
-            at_date(frames["execution"], "2023-01-06"), production._EXECUTION_COLUMNS
+        execution=production._portfolio_session_frame(
+            at_date(frames["execution"], "2023-01-06"),
+            market_sessions._EXECUTION_COLUMNS,
         ).assign(execution_at=pd.Timestamp("2023-01-09")),
         holdings=pd.Series({"a": 45.0, "b": 45.0}),
         cash=10.0,
@@ -1507,7 +1467,7 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
     assert "__cash__" not in set(account.asset_ledger.asset_id)
     if retain_cash:
         assert optimized.weights.loc["__cash__"] > 0.0
-    ledger = production._ledger_frame(
+    ledger = ledger_frame(
         account=account,
         decision_timestamp=pd.Timestamp("2023-01-06"),
         returns=returns,
@@ -2221,7 +2181,7 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
         final_calibration=lambda: final[0],
     )
     artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    restored, cutoff = production.frozen_alpha_calibration(
+    restored, cutoff = accounting.frozen_alpha_calibration(
         artifact.final_alpha_calibration,
         cutoff=window.end,
         selection_group=candidate.selection_group,
@@ -2229,7 +2189,7 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
     assert restored == final_state
     assert cutoff == pd.Timestamp(window.end).date().isoformat()
     with pytest.raises(ValueError, match="holdout_alpha_calibration_binding_invalid"):
-        production.frozen_alpha_calibration(
+        accounting.frozen_alpha_calibration(
             artifact.final_alpha_calibration,
             cutoff="2023-01-09",
             selection_group=candidate.selection_group,
@@ -2290,9 +2250,7 @@ def _assert_execution_endpoints_roundtrip(
     tmp_path, *, nav, current, target, can_enter, adv, expected_delta, expected_reason
 ):
     from quant_research_platform.contracts.portfolios import TradeCostComponents
-    from quant_research_platform.research.portfolios.accounting import (
-        continuous_ledger_batch,
-    )
+    from tests.helpers.portfolio_ledger import continuous_ledger_batch
 
     current_weights = pd.Series({"a": current})
     target_weights = pd.Series({"a": target})
@@ -2312,7 +2270,7 @@ def _assert_execution_endpoints_roundtrip(
         assumptions=assumptions,
         cost_source_identity="f" * 64,
     )
-    frame = production._ledger_frame(
+    frame = ledger_frame(
         account=account,
         decision_timestamp=pd.Timestamp("2023-01-03"),
         returns=zero,

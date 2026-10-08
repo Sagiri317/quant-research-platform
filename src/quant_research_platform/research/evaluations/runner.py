@@ -185,9 +185,6 @@ def build_crypto_evaluation_result(
         result = build_evaluation_result_from_frames(
             mature_chunks(),
             spec=spec,
-            signal_columns=tuple(signal.signal_id for signal in spec.signals),
-            label_columns=spec.label_columns,
-            n_groups=spec.n_groups,
             asset_column="asset_id",
             source_columns_by_kind={
                 "factor": tuple(dataset.factor_columns),
@@ -217,7 +214,6 @@ def build_evaluation_result_from_research_dataset(
     evaluation_catalog: EvaluationCatalog,
     evaluation_id: str,
     time_window: TimeWindow | None = None,
-    n_groups: int | None = None,
     access_window: str = "development",
 ) -> EvaluationResult:
     spec = evaluation_catalog.get(evaluation_id)
@@ -230,7 +226,6 @@ def build_evaluation_result_from_research_dataset(
         *spec.label_availability_columns.values(),
         *required_filter_columns(spec.filter_mode),
     )
-    effective_groups = spec.n_groups if n_groups is None else n_groups
     operation = ExitStack()
     try:
         chunks = operation.enter_context(
@@ -273,9 +268,6 @@ def build_evaluation_result_from_research_dataset(
         result = build_evaluation_result_from_frames(
             validated_chunks(),
             spec=spec,
-            signal_columns=tuple(signal.signal_id for signal in spec.signals),
-            label_columns=spec.label_columns,
-            n_groups=effective_groups,
             asset_column="asset_id",
             source_columns_by_kind={
                 "factor": tuple(dataset_spec.factor_columns),

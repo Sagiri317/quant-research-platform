@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable
 from fractions import Fraction
 from functools import partial
 from statistics import median
@@ -19,27 +18,6 @@ from quant_research_platform.contracts.validation import (
 from .definitions import EXPECTATIONS_FACTORS
 
 FORECAST_FRESHNESS_DAYS = 90
-
-
-def build_expectations_features(
-    records: pd.DataFrame,
-    observations: pd.DataFrame,
-    *,
-    trading_sessions: Iterable[object],
-    freshness_days: int = FORECAST_FRESHNESS_DAYS,
-    minimum_institutions: int = 3,
-) -> pd.DataFrame:
-    """Aggregate the latest PIT annual forecasts for each asset/session."""
-
-    if not {"asset_id", "timestamp", "close"}.issubset(observations.columns):
-        raise ValueError("expectations_input_columns_invalid")
-    calculate = _prepare_expectations(
-        records,
-        trading_sessions=trading_sessions,
-        freshness_days=freshness_days,
-        minimum_institutions=minimum_institutions,
-    )
-    return calculate(observations)
 
 
 def _prepare_expectations(
@@ -125,6 +103,8 @@ def _expectations_for_observations(
     freshness_days,
     minimum_institutions,
 ):
+    if not {"asset_id", "timestamp", "close"}.issubset(observations.columns):
+        raise ValueError("expectations_input_columns_invalid")
     output = observations.loc[:, ["asset_id", "timestamp", "close"]].copy()
     output["asset_id"] = strict_string_series(
         output["asset_id"], error="expectations_asset_id_invalid"

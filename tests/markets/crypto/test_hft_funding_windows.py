@@ -12,6 +12,7 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.markets.implementations.crypto.execution import (
     simulate_taker,
 )
+from tests.helpers.portfolio_ledger import capture_fill_rows
 from tests.markets.crypto.test_hft_execution import _state, _taker_config
 
 
@@ -58,8 +59,9 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
             funding_events=events,
             funding_forecasts=known,
             decision_windows_ns=((0, 20000000), (60000000, 100000000)),
-            on_ledger=batches.append,
-            on_fill=lambda row: fills.append(dict(row)),
+            on_ledger=capture_fill_rows(
+                lambda row: fills.append(dict(row)), batches.append
+            ),
         )
         selected = []
         boundaries = []

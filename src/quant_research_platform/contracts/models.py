@@ -590,6 +590,16 @@ _MODEL_SELECTION_TRIAL_METRIC_KEYS = frozenset(
         "validation_rankic_reason",
         "validation_mse",
     }
+) | frozenset(
+    f"validation_{suffix}"
+    for prefix in ("ic", "rankic")
+    for suffix in (
+        f"std_{prefix}",
+        f"{prefix}ir",
+        f"positive_{prefix}_rate",
+        f"valid_{prefix}_count",
+        f"{prefix}ir_reason",
+    )
 )
 
 
@@ -777,6 +787,35 @@ def _validate_model_selection_trial_record(trial: object) -> None:
             if reason is None:
                 raise ValueError("invalid_model_metadata")
         elif reason is not None:
+            raise ValueError("invalid_model_metadata")
+    for prefix in ("ic", "rankic"):
+        count = trial[f"validation_valid_{prefix}_count"]
+        std = trial[f"validation_std_{prefix}"]
+        ratio = trial[f"validation_{prefix}ir"]
+        positive = trial[f"validation_positive_{prefix}_rate"]
+        reason = trial[f"validation_{prefix}ir_reason"]
+        if type(count) is not int or not 0 <= count <= rows:
+            raise ValueError("invalid_model_metadata")
+        for value in (std, ratio, positive):
+            if value is not None and (
+                type(value) not in {int, float} or not np.isfinite(value)
+            ):
+                raise ValueError("invalid_model_metadata")
+        if (
+            (std is not None and std < 0)
+            or (positive is not None and not 0 <= positive <= 1)
+            or (count == 0 and any(v is not None for v in (std, ratio, positive)))
+            or (count > 0 and positive is None)
+            or ((ratio is None) != (reason is not None))
+            or (ratio is not None and (count < 2 or std is None or std == 0))
+            or (
+                reason is not None
+                and (
+                    type(reason) is not str
+                    or reason not in CORRELATION_SUMMARY_REASON_CODES
+                )
+            )
+        ):
             raise ValueError("invalid_model_metadata")
     if (
         type(trial["validation_mse"]) not in {int, float}

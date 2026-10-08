@@ -32,11 +32,11 @@ from quant_research_platform.contracts.data import (
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.models import ModelSpec
-from quant_research_platform.contracts.portfolios import CONTINUOUS_EXECUTION_COLUMNS
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import (
     ProducerBinding,
     ProducerKind,
+    TargetPlan,
     research_run_record_from_payload,
 )
 from quant_research_platform.contracts.time import TimeWindow
@@ -46,6 +46,7 @@ from quant_research_platform.profiles.research import (
     research_profile,
 )
 from quant_research_platform.reports.a_share import REQUIRED_REPORT_SECTIONS
+from quant_research_platform.research.portfolios import accounting
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.sources.csmar.interim import InterimImportResult
 from quant_research_platform.storage.datasets.writing import write_dataset
@@ -64,7 +65,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
-from tests.helpers.portfolio_ledger import session_frame
+from tests.helpers.portfolio_ledger import CONTINUOUS_EXECUTION_COLUMNS, session_frame
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     PV25_FACTORS,
@@ -237,6 +238,7 @@ def _dataset_spec() -> ResearchDatasetSpec:
             "forward_return_20d_available_at": ColumnRole.LABEL,
             "eligible": ColumnRole.MASK,
             "float_market_cap": ColumnRole.CONTEXT,
+            "total_market_cap": ColumnRole.CONTEXT,
         },
         primary_key=("market_id", "asset_id", "timestamp"),
         partition_columns=("year",),
@@ -250,7 +252,7 @@ def _dataset_spec() -> ResearchDatasetSpec:
             "forward_return_20d_available_at",
         ),
         filter_columns=("eligible",),
-        context_columns=("float_market_cap", "label_available_at"),
+        context_columns=("float_market_cap", "total_market_cap", "label_available_at"),
     )
 
 
@@ -307,6 +309,7 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
                 "forward_return_20d_available_at": calendar_dates[date_index + 21],
                 "eligible": True,
                 "float_market_cap": 1_000.0 if asset == "a" else 2_000.0,
+                "total_market_cap": 2_000.0 if asset == "a" else 5_000.0,
             }
             for asset in assets
             for date_index, timestamp in enumerate(dates)
@@ -329,16 +332,12 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
         turnover=0.01,
     )
     from quant_research_platform.research.factors.engine import (
-        calculate_factors_for_panel,
+        _market_model_frames,
     )
 
-    market_factors = calculate_factors_for_panel(
-        panel,
-        definitions=tuple(
-            definition
-            for definition in a_share.factor_catalog().list()
-            if definition.family == "market_model"
-        ),
+    market_factors = pd.concat(
+        _market_model_frames((panel,), trading_calendar=None, market_history=None),
+        ignore_index=True,
     )
     calendar = pd.DataFrame(
         {
@@ -500,7 +499,6 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
         return InterimImportResult(
             artifact_roots={data_id: root},
             skipped=(),
-            pruning_report_text="synthetic persisted source",
         )
 
     @contextmanager
@@ -582,10 +580,10 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
             "pv_all_evaluation": base.producer_bindings["pv_all_evaluation"],
             "pv_all_report_artifact": base.producer_bindings["pv_all_report_artifact"],
             **{
-                target.producer_id: base.producer_bindings[target.producer_id]
+                target.target_id: base.producer_bindings[target.target_id]
                 for target in protocol.target_specs("research run")
-                if target.producer_id in base.producer_bindings
-                and base.producer_bindings[target.producer_id].kind
+                if target.target_id in base.producer_bindings
+                and base.producer_bindings[target.target_id].kind
                 is not ProducerKind.EVALUATION
             },
         }
@@ -960,10 +958,10 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     frames["pv_all"]["forward_return_1d"] = frames["pv_all"]["label"]
     frames["pv_all"]["forward_return_1d_available_at"] = sessions.take(positions + 2)
     from quant_research_platform.research.features.transforms import (
-        canonical_feature_pipeline,
+        a_share_feature_pipeline,
     )
 
-    frames["pv_all"] = canonical_feature_pipeline(
+    frames["pv_all"] = a_share_feature_pipeline(
         frames["pv_all"], factor_columns=PV25_FACTORS
     )
     key_roles = {
@@ -1108,7 +1106,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     def forbidden(*args, **kwargs):
         raise AssertionError("holdout attempted supervised learning")
 
-    monkeypatch.setattr(fitting, "_fit_model_result_from_frames", forbidden)
+    monkeypatch.setattr(fitting, "_fit_model_result", forbidden)
     monkeypatch.setattr(production, "_build_a_share_models", forbidden)
     monkeypatch.setattr(portfolios, "calibrate_expected_alpha", forbidden)
     from quant_research_platform.research.predictions import runner as predictions
@@ -1196,7 +1194,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     with monkeypatch.context() as preflight:
         from quant_research_platform.research.portfolios import production
 
-        preflight.setattr(production, "frozen_alpha_calibration", unavailable_alpha)
+        preflight.setattr(accounting, "frozen_alpha_calibration", unavailable_alpha)
         preflight.setattr(research, "_execute_action", forbidden)
         planned_block = research.research_run(**request, plan=True)
         assert planned_block["status"] == "BLOCKED" and "run_id" not in planned_block
@@ -1317,7 +1315,12 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
             protocol=frozen,
             layout=rebuild_layout,
             spec=spec,
-            planned=target_plan,
+            planned=TargetPlan(
+                **{
+                    **target_plan,
+                    "upstream_target_ids": tuple(target_plan["upstream_target_ids"]),
+                }
+            ),
             time_window=research._semantic_target_time_window(
                 "research run", frozen, spec, None, record.research_window
             ),
@@ -1372,7 +1375,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 ),
                 expected_identity=source.instance_identity,
             )
-            calibration, _ = portfolios.frozen_alpha_calibration(
+            calibration, _ = accounting.frozen_alpha_calibration(
                 original.final_alpha_calibration,
                 cutoff=pd.Timestamp("2019-08-30"),
                 selection_group=candidate.selection_group,
@@ -2149,7 +2152,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         if manifest["column_roles"][column] == "factor"
     }
     assert coverage["pit"]["raw_completeness"] == "UNDEFINED"
-    assert report["sections"]["factor diagnostics"]["global"]["results"]
+    assert report["sections"]["factor diagnostics"]["inference"]["factor_diagnostics"]
     assert report["sections"]["model selection"]["selections"]
     assert report["sections"]["model selection"]["configurations"]
     blocked_ids = {
@@ -2254,10 +2257,12 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         filesystem_rename(saved_statistics_manifest, statistics_manifest)
     assert damaged_report["source_run_status"] == "COMPLETE"
     assert damaged_report["status"] == "FAILED"
-    assert damaged_report["report"]["sections"]["factor diagnostics"]["global"] == {
-        "status": "FAILED",
-        "reason": "target_reference_invalid",
-    }
+    assert (
+        damaged_report["report"]["sections"]["factor diagnostics"]["inference"][
+            "status"
+        ]
+        == "DEFINED"
+    )
 
     changed = research.plan_targets(
         profile=profile,

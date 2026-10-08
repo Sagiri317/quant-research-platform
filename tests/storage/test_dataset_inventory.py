@@ -224,6 +224,6 @@ def test_bounded_metadata_reader_accepts_single_external_hardlink(
         os.link(native_filesystem_path(external), native_filesystem_path(candidate))
     except OSError:
         pytest.skip("hardlink_not_available")
-    assert storage_manifests.read_bounded_qrp_json(candidate)[1] == {
+    assert storage_manifests.read_qrp_json_file(candidate)[1] == {
         "schema_id": "outside"
     }

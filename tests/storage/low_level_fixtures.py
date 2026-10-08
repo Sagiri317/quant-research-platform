@@ -266,7 +266,7 @@ def _write_runtime_manifest(
         frame.loc[:, list(spec["required_columns"])]
     )
     manifest = {
-        **{key: value for key, value in spec.items() if key != "schema_id"},
+        "spec_identity": canonical_json_hash(spec),
         "schema_id": "qrp-dataset-manifest",
         "columns": list(physical_schema_columns(first_schema)),
         "physical_schema": first_schema,

@@ -161,6 +161,7 @@ def build_prediction_result_from_frames(
 
 @dataclass
 class _PredictionBuildState:
+    segments: int = 0
     rows_input: int = 0
     rows_after_filter: int = 0
     rows_after_dropna: int = 0
@@ -168,6 +169,18 @@ class _PredictionBuildState:
     filter_columns_used: tuple[str, ...] = ()
     filter_definition: str = ""
     effective_test_end: str | None = None
+
+    def add(self, metadata: dict[str, object]) -> None:
+        self.record_filter_metadata(metadata)
+        self.rows_after_dropna += int(metadata["rows_after_input_dropna"])
+        self.prediction_rows += int(metadata["prediction_rows"])
+        end = metadata["effective_test_end"]
+        if end is not None and (
+            self.effective_test_end is None
+            or pd.Timestamp(end) > pd.Timestamp(self.effective_test_end)
+        ):
+            self.effective_test_end = end
+        self.segments += 1
 
     def record_filter_metadata(self, metadata: dict[str, object]) -> None:
         self.rows_input += metadata["rows_input"]
@@ -217,7 +230,12 @@ class _PredictionBuildState:
             "train_end": spec.train_end,
             "test_start": spec.test_start,
             "requested_test_end": spec.test_end,
-            "effective_test_end": self.effective_test_end,
+            "effective_test_end": time_value_isoformat(
+                pd.Timestamp(self.effective_test_end),
+                date_only=not is_datetime_value(spec.test_start),
+            )
+            if self.effective_test_end is not None
+            else None,
             "is_oos": spec.is_oos,
             "is_final_oos_window": spec.is_final_oos_window,
             "input_columns": list(input_columns),

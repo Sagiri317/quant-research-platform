@@ -194,7 +194,7 @@ def test_open_dataset_session_preserves_missing_manifest_preflight(
         metadata_reads += 1
         raise AssertionError("metadata read ran for missing manifest")
 
-    monkeypatch.setattr(dataset_reading, "read_bounded_qrp_json", reject_metadata_read)
+    monkeypatch.setattr(dataset_reading, "read_qrp_json_file", reject_metadata_read)
     with pytest.raises(ValueError, match="dataset_manifest_missing"):
         dataset_reading.open_dataset_session(root, columns=None, time_window=None)
         pass
@@ -234,7 +234,7 @@ def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
             dataset_reading, "dataset_file_identity", fail_owner_preflight_identity
         )
         identity_patch.setattr(
-            dataset_reading, "read_bounded_qrp_json", reject_metadata_read
+            dataset_reading, "read_qrp_json_file", reject_metadata_read
         )
         fatal = failure in {"io", "permission"}
         with pytest.raises(

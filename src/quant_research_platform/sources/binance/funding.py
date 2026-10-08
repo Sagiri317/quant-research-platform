@@ -30,6 +30,7 @@ from quant_research_platform.storage.identity import (
     _hash_file_content,
     dataset_file_identity,
     filesystem_is_file,
+    filesystem_iterdir,
     open_filesystem_file,
     require_unaliased_path,
     verified_file_handle,
@@ -288,9 +289,7 @@ def _manifest(root, symbol):
 def _records(root, manifest, *, settlements):
     previous = {"settlement": -1, "forecast": -1}
     settlement_count = 0
-    rows = iter_csv_snapshot(
-        root, expected_manifest=manifest, max_bytes=manifest["byte_count"]
-    )
+    rows = iter_csv_snapshot(root, expected_manifest=manifest)
     with closing_iterator(rows):
         for kind, timestamp, known_until, rate, mark, cashflows in rows:
             if (
@@ -353,6 +352,24 @@ def read_funding_observations(funding_roots, *, symbol):
     for value in funding_roots:
         root = Path(value)
         manifest, settlements, original_identity = _manifest(root, symbol)
+        sidecar = root / "response.metadata.json"
+        sidecar_identity = dataset_file_identity(sidecar)
+        files = (
+            (
+                root / "response.csv",
+                dataset_file_identity(root / "response.csv"),
+                manifest["sha256"],
+                "raw_csv_content_invalid",
+            ),
+            (
+                sidecar,
+                sidecar_identity,
+                _hash_file_content(
+                    sidecar, sidecar_identity, "binance_funding_identity_changed"
+                ),
+                "binance_funding_identity_changed",
+            ),
+        )
         interval = manifest["metadata"]["coverage"]
         start, end = interval["start_ns"], interval["end_ns"]
         if coverage and start <= coverage[-1][1]:
@@ -365,6 +382,7 @@ def read_funding_observations(funding_roots, *, symbol):
                 manifest,
                 settlements,
                 original_identity,
+                files,
             )
         )
         del manifest, interval
@@ -389,7 +407,7 @@ def read_funding_observations(funding_roots, *, symbol):
 
     def records():
         previous = {FundingEvent: -1, FundingForecast: -1}
-        for root, expected, manifest, settlements, original_identity in sources:
+        for root, expected, manifest, settlements, original_identity, _files in sources:
             verify(root, expected, manifest, original_identity)
             rows = _records(root, manifest, settlements=settlements)
             with closing_iterator(rows):
@@ -433,12 +451,25 @@ def read_funding_observations(funding_roots, *, symbol):
         raise
     finally:
         try:
-            # Revalidate each source even if forecasts were only partly consumed.
-            with closing_iterator(records()) as rows:
-                for _item in rows:
-                    pass
-            for root, expected, manifest, _settlements, original_identity in sources:
+            # Bind every source to its fully decoded bytes, including unread forecasts.
+            for (
+                root,
+                expected,
+                manifest,
+                _settlements,
+                original_identity,
+                files,
+            ) in sources:
                 verify(root, expected, manifest, original_identity, content=True)
+                require_unaliased_path(root, error="raw_csv_path_invalid")
+                if {path.name for path in filesystem_iterdir(root)} != {
+                    "response.csv",
+                    "response.metadata.json",
+                }:
+                    raise ValueError("raw_csv_members_invalid")
+                for path, captured, digest, error in files:
+                    if _hash_file_content(path, captured, error) != digest:
+                        raise ValueError(error)
         except BaseException as error:
             if primary is None:
                 raise

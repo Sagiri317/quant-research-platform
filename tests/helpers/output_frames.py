@@ -4,7 +4,7 @@ from __future__ import annotations
 import pandas as pd
 
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.research.labels.forward_returns import (
@@ -45,8 +45,6 @@ def make_prediction_report_spec() -> OutputSpec:
         output_definition_id="prediction_outputs",
         run_id="test_run",
         market_id=MarketId("a_share"),
-        run_type="prediction",
-        scope=OutputScope.LOCAL_ONLY,
     )
 
 

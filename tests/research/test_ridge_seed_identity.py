@@ -139,11 +139,12 @@ def test_ridge_resolved_and_native_state_parameters_keep_typed_identity(
         random_seed=731,
         hyperparameters={"solver": solver, "alpha": 1, "max_iter": 10000, "tol": 1e-8},
     )
-    fitted = fitting._fit_model_result_from_frames(
-        (frame,),
+    fitted = fitting._fit_model_result(
+        fitting._collect_training_frame(
+            (frame,), spec, fitting_cutoff=frame.timestamp.max() + pd.Timedelta(days=2)
+        ),
         spec,
         estimator=build_estimator_from_model_spec(spec),
-        fitting_cutoff=frame.timestamp.max() + pd.Timedelta(days=2),
     )
     metadata = validate_model_metadata_core(fitted.metadata)
     predictor = pickle.loads(pickle.dumps(fitted.prediction_model))
@@ -188,11 +189,12 @@ def test_ridge_native_seed_type_aliases_are_rejected(seed, alias):
         label_column="label",
         random_seed=seed,
     )
-    fitted = fitting._fit_model_result_from_frames(
-        (frame,),
+    fitted = fitting._fit_model_result(
+        fitting._collect_training_frame(
+            (frame,), spec, fitting_cutoff=frame.timestamp.max() + pd.Timedelta(days=2)
+        ),
         spec,
         estimator=build_estimator_from_model_spec(spec),
-        fitting_cutoff=frame.timestamp.max() + pd.Timedelta(days=2),
     )
     fitted.prediction_model.estimator.random_state = alias
     with pytest.raises(ValueError, match="^model_state_metadata_mismatch$"):
@@ -288,11 +290,12 @@ def test_native_estimator_defaults_and_nan_pass_typed_state_checks(algorithm):
         random_seed=731,
         hyperparameters=params,
     )
-    fitted = fitting._fit_model_result_from_frames(
-        (frame,),
+    fitted = fitting._fit_model_result(
+        fitting._collect_training_frame(
+            (frame,), spec, fitting_cutoff=frame.timestamp.max() + pd.Timedelta(days=2)
+        ),
         spec,
         estimator=build_estimator_from_model_spec(spec),
-        fitting_cutoff=frame.timestamp.max() + pd.Timedelta(days=2),
     )
     metadata = validate_model_metadata_core(fitted.metadata)
     predictor = pickle.loads(pickle.dumps(fitted.prediction_model))

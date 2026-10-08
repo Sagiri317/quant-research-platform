@@ -8,25 +8,12 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
-from quant_research_platform.artifacts.outputs import validate_output_bundle
 from quant_research_platform.artifacts.portfolio_ledger import (
     PORTFOLIO_LEDGER_TABLE_COLUMNS,
     _capital,
     read_portfolio_ledger_artifact,
     summarize_portfolio_ledger,
     write_portfolio_ledger_artifact,
-)
-from quant_research_platform.artifacts.research import (
-    _instance_root,
-    _issue,
-    _report_rows,
-    _unavailable,
-    read_evaluation_report_evidence,
-    read_validated_reference,
-)
-from quant_research_platform.artifacts.statistics import (
-    STATISTICS_TABLE_GROUPS,
-    read_statistics_artifact,
 )
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
@@ -40,10 +27,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioTargetBlocked,
 )
-from quant_research_platform.contracts.targets import ProducerKind, TargetStatus
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.reports import diagnostic_status
-from quant_research_platform.reports.crypto_hft import build_crypto_research_report
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
 )
@@ -51,9 +35,7 @@ from quant_research_platform.storage.identity import (
     dataset_file_identity,
     native_filesystem_path,
 )
-from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from quant_research_platform.storage.parquet import (
-    _opened_parquet,
     parquet_table_writer,
 )
 from quant_research_platform.storage.semantic_artifacts import (
@@ -135,15 +117,15 @@ def _episode_rows(
     )
     primary = None
     try:
-        with _opened_parquet(
-            root / "episodes.parquet", expected_identity=identities["episodes.parquet"]
-        ) as (parquet, _identity, _handle):
-            if not parquet.schema_arrow.equals(
-                CRYPTO_EPISODE_SCHEMA, check_metadata=False
-            ):
+
+        def validate_schema(metadata):
+            if not metadata.schema.equals(CRYPTO_EPISODE_SCHEMA, check_metadata=False):
                 raise ValueError("crypto_episode_schema_invalid")
+
         chunks = iter_declared_parquet_member_batches(
-            root / "episodes.parquet", expected_identity=identities["episodes.parquet"]
+            root / "episodes.parquet",
+            expected_identity=identities["episodes.parquet"],
+            metadata_observer=validate_schema,
         )
         count = 0
         with closing_iterator(chunks):
@@ -404,411 +386,6 @@ def write_crypto_episode_artifact(logical_root, *, envelope, produce):
     )
 
 
-def produce_crypto_report(
-    *,
-    layout,
-    record,
-    panel_id,
-    read_model_artifact,
-    expected_symbols,
-    read_reconstruction,
-    validate_maker_calibration,
-    calibration_candidates,
-    comparison_ids,
-    execution_targets,
-):
-    protocol = record.payload()["protocol"]
-    final_test = record.research_window["access"] == "holdout"
-    issues, references, captured = ([], {}, {})
-    for result in record.target_results:
-        if result.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}:
-            issues.append(_issue(result.target_id, result.status.value, result.reason))
-            continue
-        try:
-            identities = {}
-            read_validated_reference(layout, result, member_identities=identities)
-            captured[result.target_id] = identities
-        except (OSError, ValueError):
-            issues.append(
-                _issue(result.target_id, "FAILED", "target_reference_invalid")
-            )
-        else:
-            references[result.target_id] = result
-    data_rows, quality = ([], {})
-    recording_counts = {}
-    reconstruction_defined = False
-    data_targets = {panel_id, record.scenario_id} | {
-        result.target_id
-        for result in record.target_results
-        if result.producer_kind in {ProducerKind.PROCESSED, ProducerKind.DATASET}
-    }
-    for target in (panel_id, record.scenario_id):
-        if target not in references and (
-            not any(issue["target_id"] == target for issue in issues)
-        ):
-            issues.append(_issue(target, "BLOCKED", "run_target_result_missing"))
-    for target, result in references.items():
-        if result.producer_kind in {ProducerKind.PROCESSED, ProducerKind.DATASET}:
-            try:
-                manifest = read_dataset_manifest_evidence(
-                    _instance_root(layout, result),
-                    expected_member_identities=captured[result.target_id],
-                )
-                if target == panel_id:
-                    recording_counts = {
-                        key: manifest["producer_diagnostics"][key]
-                        for key in ("raw_record_count", "source_file_count")
-                    }
-                    reconstruction = manifest["producer_diagnostics"]["reconstruction"]
-                    if type(reconstruction) is not dict or any(
-                        type(stats) is not dict for stats in reconstruction.values()
-                    ):
-                        raise ValueError("crypto_panel_diagnostics_invalid")
-                    if set(reconstruction) != set(expected_symbols):
-                        raise ValueError("crypto_panel_diagnostics_symbols_invalid")
-                    states = [
-                        read_reconstruction(stats) for stats in reconstruction.values()
-                    ]
-                    reconstruction_defined = all(
-                        state.invalid_segments == 0
-                        and state.valid_segments > 0
-                        and bool(state.coverage_segments)
-                        for state in states
-                    )
-                    quality = {
-                        symbol: {
-                            key: value
-                            for key, value in stats.items()
-                            if key != "coverage_segments"
-                        }
-                        for symbol, stats in reconstruction.items()
-                    }
-            except (OSError, KeyError, TypeError, ValueError):
-                issues.append(
-                    _issue(target, "FAILED", "crypto_dataset_evidence_invalid")
-                )
-                continue
-            data_rows.append(
-                {
-                    "target_id": target,
-                    "identity": result.instance_identity,
-                    "row_count": manifest["row_count"],
-                    "file_count": manifest["file_count"],
-                }
-            )
-    data_issues = [issue for issue in issues if issue["target_id"] in data_targets]
-    data = {
-        "status": diagnostic_status(data_issues)
-        if data_issues
-        else "DEFINED"
-        if reconstruction_defined
-        else "UNDEFINED",
-        "datasets": data_rows,
-        "reconstruction": quality,
-        "recording_counts": recording_counts,
-        "issues": data_issues,
-        "reconstruction_status": "DEFINED" if reconstruction_defined else "UNDEFINED",
-    }
-    model_target = f"{record.scenario_id}_models"
-    models = _unavailable(issues, model_target)
-    if model_target in references:
-        reference = references[model_target]
-        try:
-            artifact = read_model_artifact(
-                _instance_root(layout, reference),
-                expected_identity=reference.instance_identity,
-                expected_member_identities=captured[reference.target_id],
-                trial_layout=layout,
-            )
-            models = {
-                "status": "DEFINED",
-                "identity": reference.instance_identity,
-                "fold_models": list(artifact.models),
-                "final_models": list(artifact.final_models),
-                "validation_prediction_role": (
-                    "train_model_predictions_of_mature_validation_rows"
-                ),
-            }
-        except (OSError, KeyError, TypeError, ValueError):
-            issues.append(_issue(model_target, "FAILED", "model_artifact_invalid"))
-            models = _unavailable(issues, model_target)
-    prediction_target = f"{record.scenario_id}_predictions"
-    predictions = (
-        _unavailable(issues, prediction_target)
-        if final_test
-        else {"status": "UNDEFINED", "reason": "not_requested"}
-    )
-    if prediction_target in references:
-        reference = references[prediction_target]
-        try:
-            rows = []
-            for model_id in protocol["model_scopes"]:
-                output_id = f"{model_id}_prediction"
-                manifest, _members = validate_output_bundle(
-                    _instance_root(layout, reference) / "outputs" / output_id,
-                    expected_output_id=output_id,
-                    expected_run_id=f"run_{output_id}",
-                    expected_member_identities={
-                        key.removeprefix(f"outputs/{output_id}/"): value
-                        for key, value in captured[reference.target_id].items()
-                        if key.startswith(f"outputs/{output_id}/")
-                    },
-                )
-                metadata = manifest["metadata"]
-                if (
-                    metadata["model_metadata"]["model_artifact_identity"]
-                    != references[model_target].instance_identity
-                ):
-                    raise ValueError("prediction_model_identity_mismatch")
-                rows.append(
-                    {
-                        "model_id": model_id,
-                        "prediction_id": output_id,
-                        "primary_key": metadata["primary_key"],
-                        "training_asset_ids": metadata["training_asset_ids"],
-                        "evaluation_asset_ids": metadata["evaluation_asset_ids"],
-                        "prediction_metadata": metadata["prediction_metadata"],
-                    }
-                )
-            predictions = {
-                "status": "DEFINED",
-                "identity": reference.instance_identity,
-                "outputs": rows,
-            }
-        except (OSError, KeyError, TypeError, ValueError):
-            issues.append(
-                _issue(prediction_target, "FAILED", "prediction_artifact_invalid")
-            )
-            predictions = _unavailable(issues, prediction_target)
-    evaluations = []
-    for result in record.target_results:
-        if result.producer_kind is not ProducerKind.EVALUATION:
-            continue
-        if result.target_id not in references:
-            evaluations.append(
-                {
-                    "evaluation_id": result.target_id,
-                    **_unavailable(issues, result.target_id),
-                }
-            )
-            continue
-        try:
-            evaluations.append(
-                read_evaluation_report_evidence(
-                    _instance_root(layout, result),
-                    evaluation_id=result.target_id,
-                    instance_identity=result.instance_identity,
-                    expected_member_identities=captured[result.target_id],
-                )
-            )
-        except (OSError, KeyError, TypeError, ValueError):
-            issues.append(
-                _issue(result.target_id, "FAILED", "evaluation_artifact_invalid")
-            )
-            evaluations.append(
-                {
-                    "evaluation_id": result.target_id,
-                    **_unavailable(issues, result.target_id),
-                }
-            )
-    calibrations = []
-    for item in calibration_candidates:
-        calibration_target = item.calibration_target_id
-        calibration = _unavailable(issues, calibration_target)
-        if calibration_target in references:
-            reference = references[calibration_target]
-            try:
-                artifact = read_statistics_artifact(
-                    _instance_root(layout, reference),
-                    expected_identity=reference.instance_identity,
-                    expected_member_identities=captured[reference.target_id],
-                    validate_tables=validate_maker_calibration,
-                )
-                with artifact.table("crypto_maker_calibration.parquet") as frame:
-                    calibration = {
-                        "status": "DEFINED"
-                        if frame.status.eq("DEFINED").all()
-                        else "UNDEFINED",
-                        "identity": reference.instance_identity,
-                        "summary": _report_rows(frame),
-                        "method": (
-                            "paired_validation_event_paths_and_forecast_error_by_side"
-                        ),
-                        "quote_order_type": "post_only_limit",
-                        "outcome_clock": "original_decision_plus_500ms",
-                        "sample_tables": [
-                            "crypto_maker_samples.parquet",
-                            "crypto_maker_events.parquet",
-                        ],
-                    }
-            except (OSError, KeyError, TypeError, ValueError):
-                issues.append(
-                    _issue(
-                        calibration_target,
-                        "FAILED",
-                        "maker_calibration_artifact_invalid",
-                    )
-                )
-                calibration = _unavailable(issues, calibration_target)
-        calibrations.append(
-            {
-                "candidate_id": item.candidate_id,
-                "asset_id": item.asset_id,
-                **calibration,
-            }
-        )
-    portfolios = []
-    statistics = []
-    for execution_target in execution_targets if final_test else ():
-        candidate = execution_target.candidate
-        target = execution_target.target_id
-        key = {
-            "candidate_id": candidate.candidate_id,
-            "asset_id": candidate.asset_id,
-            "execution_mode": execution_target.execution_mode,
-            "target_id": target,
-        }
-        if target not in references:
-            portfolios.append({**key, **_unavailable(issues, target)})
-        else:
-            reference = references[target]
-            try:
-                root = _instance_root(layout, reference)
-                if execution_target.execution_mode == "continuous":
-                    economics = {}
-                    read_portfolio_ledger_artifact(
-                        root,
-                        expected_identity=reference.instance_identity,
-                        expected_member_identities=captured[reference.target_id],
-                        consume_batches=lambda ledger, batches, result=economics: (
-                            result.update(
-                                summarize_portfolio_ledger(ledger.capital, batches)
-                            )
-                        ),
-                    )
-                    result = {
-                        "episode_id": "continuous",
-                        "economics": economics,
-                        "execution_curve": {
-                            "artifact_root": reference.artifact_root,
-                            "identity": reference.instance_identity,
-                            "member": "valuations.parquet",
-                            "aggregation": "sum_end_values_by_sequence",
-                            "clock": "persisted_event_time",
-                            "use": "execution_only_not_annualized",
-                        },
-                    }
-                else:
-                    episode_rows = []
-
-                    def consume_episode(
-                        index,
-                        ledger,
-                        batches,
-                        reference=reference,
-                        episode_rows=episode_rows,
-                    ):
-                        row = {
-                            "episode_id": index["episode_id"],
-                            "start_at": pd.Timestamp(index["start_ns"]).isoformat(),
-                            "stop_at": pd.Timestamp(index["stop_ns"]).isoformat(),
-                            "terminal_valuation_at": pd.Timestamp(
-                                index["terminal_valuation_ns"]
-                            ).isoformat(),
-                            "termination": index["termination"],
-                            "stop_reasons": index["stop_reasons"],
-                            "economics": summarize_portfolio_ledger(
-                                ledger.capital, batches
-                            ),
-                            "execution_curve": {
-                                "artifact_root": reference.artifact_root,
-                                "identity": index["ledger_identity"],
-                                "member": index["ledger_root"] + "/valuations.parquet",
-                                "aggregation": "sum_end_values_by_sequence",
-                                "clock": "persisted_event_time",
-                                "use": "independent_episode_only",
-                            },
-                        }
-                        episode_rows.append(row)
-
-                    read_crypto_episode_artifact(
-                        root,
-                        expected_identity=reference.instance_identity,
-                        expected_member_identities=captured[reference.target_id],
-                        consume_episode=consume_episode,
-                    )
-                    result = {
-                        "episodes": episode_rows,
-                        "return_policy": "per_episode_only",
-                    }
-                portfolios.append(
-                    {
-                        **key,
-                        "status": "DEFINED",
-                        "identity": reference.instance_identity,
-                        **result,
-                    }
-                )
-            except (OSError, KeyError, TypeError, ValueError):
-                issues.append(
-                    _issue(target, "FAILED", "portfolio_execution_artifact_invalid")
-                )
-                portfolios.append({**key, **_unavailable(issues, target)})
-        statistics_target = execution_target.statistics_target_id
-        key = {
-            "candidate_id": candidate.candidate_id,
-            "execution_mode": execution_target.execution_mode,
-            "target_id": statistics_target,
-        }
-        if statistics_target not in references:
-            statistics.append({**key, **_unavailable(issues, statistics_target)})
-            continue
-        reference = references[statistics_target]
-        try:
-            artifact = read_statistics_artifact(
-                _instance_root(layout, reference),
-                expected_identity=reference.instance_identity,
-                expected_member_identities=captured[reference.target_id],
-            )
-            tables = {}
-            for member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]:
-                with artifact.table(member) as frame:
-                    tables[member.removesuffix(".parquet")] = _report_rows(frame)
-            statistics.append(
-                {
-                    **key,
-                    "status": "DEFINED",
-                    "identity": reference.instance_identity,
-                    "tables": tables,
-                }
-            )
-        except (OSError, KeyError, TypeError, ValueError):
-            issues.append(
-                _issue(statistics_target, "FAILED", "portfolio_statistics_invalid")
-            )
-            statistics.append({**key, **_unavailable(issues, statistics_target)})
-    return build_crypto_research_report(
-        record=record,
-        evidence={
-            "data": data,
-            "models": models,
-            "predictions": predictions,
-            "evaluations": [
-                item
-                for item in evaluations
-                if item["evaluation_id"] not in comparison_ids
-            ],
-            "model_comparisons": [
-                item for item in evaluations if item["evaluation_id"] in comparison_ids
-            ],
-            "calibrations": calibrations,
-            "portfolios": portfolios,
-            "statistics": statistics,
-            "issues": issues,
-        },
-    )
-
-
 def summarize_crypto_ledger(artifact, batches, *, windows_ns=None, consume_batch=None):
     """Project execution and interval diagnostics during the economic summary pass."""
     expected = (
@@ -833,11 +410,7 @@ def summarize_crypto_ledger(artifact, batches, *, windows_ns=None, consume_batch
         nonlocal execution, marker_index, previous
         for diagnostic in batch.diagnostics:
             if diagnostic.name == "execution_summary":
-                if (
-                    execution is not None
-                    or type(diagnostic.text) is not str
-                    or len(diagnostic.text) > 65536
-                ):
+                if execution is not None or type(diagnostic.text) is not str:
                     raise ValueError("crypto_execution_summary_invalid")
                 execution = parse_qrp_json_object(diagnostic.text.encode("utf-8"))
                 if PORTFOLIO_ECONOMIC_SUMMARY_FIELDS.intersection(execution) or any(

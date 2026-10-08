@@ -9,12 +9,15 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.contracts.portfolios import (
-    CONTINUOUS_EXECUTION_COLUMNS,
+    PORTFOLIO_CASH_ASSET_ID,
     PORTFOLIO_LEDGER_COST_COLUMNS,
+    ExecutedTrade,
+    PortfolioCashFlow,
+    PortfolioDiagnostic,
+    PortfolioLedgerBatch,
+    PortfolioValuation,
 )
-from quant_research_platform.research.portfolios.accounting import (
-    continuous_ledger_batch,
-)
+from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.research.portfolios.accounting import (
     execute_continuous_target as _execute_continuous_target,
 )
@@ -58,6 +61,10 @@ def session_frame(batch):
     for asset, row in rows.items():
         row["executed_delta_notional"] = (
             row["post_trade_notional"] - row["pre_trade_notional"]
+            if asset == PORTFOLIO_CASH_ASSET_ID
+            else sum(
+                trade.notional for trade in batch.trades if trade.asset_id == asset
+            )
         )
         for cost in PORTFOLIO_LEDGER_COST_COLUMNS:
             row[cost] = -sum(
@@ -130,3 +137,218 @@ def write_market_evidence(layout, panel, *, bars=None, stocks=None):
         write_dataset(root, frame.reindex(columns=spec.required_columns), spec=spec)
         roots[target] = root
     return roots
+
+
+CONTINUOUS_EXECUTION_COLUMNS = (
+    "decision_timestamp",
+    "execution_date",
+    "asset_id",
+    "pre_trade_notional",
+    "target_notional",
+    "executed_delta_notional",
+    "post_trade_notional",
+    "holding_return",
+    "end_notional",
+    *PORTFOLIO_LEDGER_COST_COLUMNS,
+    "block_reason",
+    "adv20",
+    "alpha_score",
+    "decision_delta_weight",
+    "expected_alpha",
+    "benchmark_weight",
+    "asset_specific_variance",
+    "decision_reason",
+    "alpha_status",
+    "alpha_undefined_reason",
+    "alpha_slope",
+    "alpha_intercept",
+    "alpha_slope_se",
+    "alpha_slope_t",
+    "alpha_slope_pvalue",
+    "alpha_slope_ci_low",
+    "alpha_slope_ci_high",
+    "alpha_weighted_r2",
+    "alpha_inference_status",
+    "alpha_inference_reason",
+    "alpha_r2_status",
+    "alpha_r2_reason",
+    "alpha_coverage",
+    "alpha_valid_dates",
+    "alpha_scheduled_dates",
+    "predicted_tracking_error",
+    "portfolio_factor_variance",
+    "portfolio_specific_variance",
+    "expected_transaction_cost",
+)
+
+
+def continuous_ledger_batch(
+    frame: pd.DataFrame, sequence: int, *, end_timestamp: pd.Timestamp
+) -> PortfolioLedgerBatch:
+    """Project the continuous execution transition into canonical economic facts."""
+    if tuple(frame.columns) != CONTINUOUS_EXECUTION_COLUMNS:
+        raise ValueError("portfolio_ledger_schema_invalid")
+    if frame.map(lambda value: isinstance(value, (bool, np.bool_))).any().any():
+        raise ValueError("portfolio_ledger_numeric_invalid")
+    trades: list[ExecutedTrade] = []
+    cashflows: list[PortfolioCashFlow] = []
+    valuations: list[PortfolioValuation] = []
+    diagnostics: list[PortfolioDiagnostic] = []
+    economic_columns = {
+        "decision_timestamp",
+        "execution_date",
+        "asset_id",
+        "pre_trade_notional",
+        "executed_delta_notional",
+        "post_trade_notional",
+        "end_notional",
+        "holding_return",
+        *PORTFOLIO_LEDGER_COST_COLUMNS,
+    }
+    for row in frame.to_dict("records"):
+        asset = str(row["asset_id"])
+        timestamp = int(pd.Timestamp(row["execution_date"]).value)
+        fill_id = None
+        delta = strict_finite_float(
+            row["executed_delta_notional"], error="portfolio_ledger_numeric_invalid"
+        )
+        if asset != PORTFOLIO_CASH_ASSET_ID and delta:
+            fill_id = f"{sequence}:{asset}"
+            trades.append(
+                ExecutedTrade(fill_id, fill_id, timestamp, asset, delta, delta)
+            )
+            cashflows.append(
+                PortfolioCashFlow(
+                    f"{fill_id}:principal",
+                    timestamp,
+                    asset,
+                    fill_id,
+                    "principal",
+                    -delta,
+                )
+            )
+        for cost in PORTFOLIO_LEDGER_COST_COLUMNS:
+            amount = strict_finite_float(
+                row[cost], error="portfolio_ledger_numeric_invalid"
+            )
+            if amount:
+                if fill_id is None:
+                    raise ValueError("portfolio_ledger_phantom_cost_invalid")
+                cashflows.append(
+                    PortfolioCashFlow(
+                        f"{fill_id}:{cost}",
+                        timestamp,
+                        asset,
+                        fill_id,
+                        cost,
+                        -amount,
+                    )
+                )
+        for phase, column in (
+            ("before", "pre_trade_notional"),
+            ("after", "post_trade_notional"),
+            ("end", "end_notional"),
+        ):
+            value = strict_finite_float(
+                row[column], error="portfolio_ledger_numeric_invalid"
+            )
+            quantity = (
+                strict_finite_float(
+                    row["post_trade_notional"], error="portfolio_ledger_numeric_invalid"
+                )
+                if phase == "end"
+                else value
+            )
+            mark = (
+                1.0
+                + strict_finite_float(
+                    row["holding_return"], error="portfolio_ledger_numeric_invalid"
+                )
+                if phase == "end"
+                else 1.0
+            )
+            valuations.append(
+                PortfolioValuation(
+                    int(end_timestamp.value) if phase == "end" else timestamp,
+                    asset,
+                    phase,
+                    quantity,
+                    value,
+                    mark,
+                )
+            )
+        diagnostics.append(
+            PortfolioDiagnostic(
+                asset,
+                fill_id,
+                "decision_timestamp",
+                text=pd.Timestamp(row["decision_timestamp"]).isoformat(),
+            )
+        )
+        for name, value in row.items():
+            if name in economic_columns or pd.isna(value):
+                continue
+            diagnostics.append(
+                PortfolioDiagnostic(
+                    asset,
+                    fill_id,
+                    name,
+                    number=strict_finite_float(
+                        value, error="portfolio_ledger_numeric_invalid"
+                    )
+                    if not isinstance(value, str)
+                    else None,
+                    text=value if isinstance(value, str) else None,
+                )
+            )
+    return PortfolioLedgerBatch(
+        sequence, tuple(trades), tuple(cashflows), tuple(valuations), tuple(diagnostics)
+    )
+
+
+def ledger_frame(*, account, **kwargs):
+    from quant_research_platform.research.portfolios.production import _ledger_batch
+
+    return session_frame(
+        _ledger_batch(
+            account=account,
+            asset_ledger=account.asset_ledger,
+            sequence=0,
+            end_timestamp=pd.Timestamp(account.execution_date),
+            **kwargs,
+        )
+    )
+
+
+def capture_fill_rows(emit, on_batch=None):
+    """Join canonical trades, cashflows and delayed diagnostics for assertions."""
+    pending = {}
+
+    def capture(batch):
+        if on_batch is not None:
+            on_batch(batch)
+        for trade in batch.trades:
+            pending[trade.fill_id] = {
+                "fill_id": trade.fill_id,
+                "fill_qty": abs(trade.quantity),
+                "fill_price": abs(trade.notional / trade.quantity),
+                "notional": abs(trade.notional),
+                "fee": -sum(
+                    flow.amount
+                    for flow in batch.cashflows
+                    if flow.fill_id == trade.fill_id
+                ),
+            }
+        resolved = set()
+        for diagnostic in batch.diagnostics:
+            if diagnostic.fill_id is not None:
+                pending[diagnostic.fill_id][diagnostic.name] = (
+                    diagnostic.text
+                    if diagnostic.text is not None
+                    else diagnostic.number
+                )
+                resolved.add(diagnostic.fill_id)
+        for identity in resolved:
+            emit(pending.pop(identity))
+
+    return capture

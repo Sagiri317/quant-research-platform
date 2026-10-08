@@ -169,8 +169,11 @@ def test_processed_benchmark_target_streams_exact_dates_and_requires_global_cove
         )
     )
     pd.testing.assert_frame_equal(pd.concat(streamed, ignore_index=True), expected)
-    with pytest.raises(ValueError, match="coverage_incomplete"):
-        tuple(iter_benchmark_weight_snapshots(index_info, (weights.iloc[:128],)))
+    single = pd.concat(
+        iter_benchmark_weight_snapshots(index_info, (weights.iloc[:128],)),
+        ignore_index=True,
+    )
+    assert set(single.benchmark_id) == {"csi500"}
 
 
 @pytest.mark.parametrize(
@@ -406,3 +409,36 @@ def test_complete_500_and_1000_source_rounding_preserves_relative_weights(direct
             np.array([group["weight"].sum()]), np.array([1.0]), maxulp=2
         )
     pd.testing.assert_frame_equal(raw, original, check_exact=True)
+
+
+@pytest.mark.parametrize("benchmark_id", ["csi500", "csi1000"])
+def test_single_benchmark_requires_its_own_identity(benchmark_id):
+    from quant_research_platform.markets.implementations.a_share.ids import (
+        FORMAL_BENCHMARKS,
+    )
+
+    # The production mapping owns vendor identifiers and names.
+    source_id = next(
+        key for key, value in FORMAL_BENCHMARKS.items() if value[0] == benchmark_id
+    )
+    info = pd.DataFrame(
+        {
+            "source_asset_id": [source_id],
+            "index_name": [FORMAL_BENCHMARKS[source_id][1]],
+        }
+    )
+    weights = pd.DataFrame(
+        {
+            "source_asset_id": [source_id, source_id],
+            "constituent_asset_id": ["000001", "000002"],
+            "effective_date": pd.Timestamp("2024-01-02"),
+            "weight": [0.4, 0.6],
+        }
+    )
+    result = pd.concat(iter_benchmark_weight_snapshots(info, [weights]))
+    assert set(result.benchmark_id) == {benchmark_id}
+    assert result.weight.sum() == 1.0
+    with pytest.raises(ValueError, match="index_identity_invalid"):
+        list(iter_benchmark_weight_snapshots(info.iloc[:0], [weights]))
+    with pytest.raises(ValueError, match="coverage_incomplete"):
+        list(iter_benchmark_weight_snapshots(info, [weights.iloc[:0]]))

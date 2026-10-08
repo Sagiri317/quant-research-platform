@@ -142,7 +142,7 @@ def check_published_evidence_views(
     with monkeypatch.context() as patch:
         for name in _FORBIDDEN_ACTIONS:
             patch.setattr(research, name, _forbidden)
-        patch.setattr(report_artifact, "_markdown", _forbidden)
+        patch.setattr(report_artifact, "render_research_report", _forbidden)
         patch.setattr(
             api_module,
             "research_profile",
@@ -378,7 +378,8 @@ def _execute_notebook(
         "assert Path(sys.prefix).name == 'quantlab313'\n"
         "guards = [patch.object(guarded_workflow, name, forbidden) "
         f"for name in {_FORBIDDEN_ACTIONS!r}]\n"
-        "guards.append(patch.object(guarded_report, '_markdown', forbidden))\n"
+        "guards.append(patch.object(guarded_report, "
+        "'render_research_report', forbidden))\n"
         "for guard in guards:\n    guard.start()\n"
         "actual_profile = guarded_profiles.research_profile\n"
         "def read_only_profile(profile_id):\n"

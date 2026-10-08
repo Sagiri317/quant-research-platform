@@ -65,6 +65,12 @@ def test_model_selection_metrics_are_cross_sectional_and_chunk_parity_stable() -
     )
     assert partitioned == whole
     assert whole["validation_rows"] == 6
+    for prefix in ("ic", "rankic"):
+        assert whole[f"validation_std_{prefix}"] == 1.0
+        assert whole[f"validation_{prefix}ir"] == 0.0
+        assert whole[f"validation_valid_{prefix}_count"] == 2
+        assert whole[f"validation_positive_{prefix}_rate"] == 0.5
+        assert whole[f"validation_{prefix}ir_reason"] is None
     assert whole["validation_ic"] == pytest.approx(0.0)
     assert whole["validation_rankic"] == pytest.approx(0.0)
 
@@ -109,6 +115,10 @@ def test_time_series_trial_metrics_keep_axis_across_chunks_and_degeneracy():
     )
     assert split == whole
     assert whole["validation_ic"] == 1.0
+    assert whole["validation_icir"] is None
+    assert whole["validation_icir_reason"] == "insufficient_observations"
+    assert whole["validation_valid_ic_count"] == 1
+    assert whole["validation_rankicir_reason"] == "not_applicable"
     assert whole["validation_rankic"] is None
     assert whole["validation_rankic_reason"] == "not_applicable"
     cross_sectional = evaluate_model_trial_metrics_from_chunks((frame,), **arguments)
@@ -184,6 +194,16 @@ def test_persisted_trial_correlations_obey_exact_bounds(field, sign):
     metrics = {
         "validation_rows": 2,
         "validation_ic": 1.0,
+        "validation_std_ic": 0.0,
+        "validation_icir": None,
+        "validation_positive_ic_rate": 1.0,
+        "validation_valid_ic_count": 1,
+        "validation_icir_reason": "insufficient_observations",
+        "validation_std_rankic": 0.0,
+        "validation_rankicir": None,
+        "validation_positive_rankic_rate": 1.0,
+        "validation_valid_rankic_count": 1,
+        "validation_rankicir_reason": "insufficient_observations",
         "validation_ic_reason": None,
         "validation_rankic": 1.0,
         "validation_rankic_reason": None,

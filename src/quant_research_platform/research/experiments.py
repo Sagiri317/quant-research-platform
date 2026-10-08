@@ -72,7 +72,7 @@ class TrialRecorder:
         fit_windows,
         fit_cutoff,
         selection_ledger_semantic_identities: tuple[str, ...],
-        selection_group: str | None,
+        selection_groups: tuple[str, ...],
     ):
         """Bind a real prepared fit domain to its completed selection ledger."""
         plan = replace(
@@ -90,7 +90,7 @@ class TrialRecorder:
             fit_windows=fit_windows,
             fit_cutoff=fit_cutoff,
             selection_ledger_semantic_identities=selection_ledger_semantic_identities,
-            selection_group=selection_group,
+            selection_groups=selection_groups,
         )
         recorder = TrialRecorder(self.layout, self.run_id, plan)
         return (recorder, recorder.begin(spec, common_coverage_id=common_coverage_id))
@@ -105,15 +105,9 @@ class TrialRecorder:
     ) -> None:
         values = {}
         if metrics is not None:
-            for key in (
-                "validation_ic",
-                "validation_rankic",
-                "validation_mse",
-                "validation_ic_reason",
-                "validation_rankic_reason",
-                "validation_rows",
-            ):
-                value = metrics[key]
+            for key, value in metrics.items():
+                if key == "model_id":
+                    continue
                 if hasattr(value, "item"):
                     value = value.item()
                 if type(value) is float and (not isfinite(value)):

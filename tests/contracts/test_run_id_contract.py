@@ -4,7 +4,7 @@ import pytest
 
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.ids import MarketId
-from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.signals import SignalSpec
 
@@ -15,8 +15,6 @@ def test_run_id_accepts_share_safe_lowercase_identifiers() -> None:
         output_definition_id="prediction_outputs",
         run_id="run-01.alpha_beta",
         market_id=MarketId("a_share"),
-        run_type="prediction",
-        scope=OutputScope.LOCAL_ONLY,
     )
 
     assert report.run_id == "run-01.alpha_beta"
@@ -26,8 +24,6 @@ def test_run_id_accepts_share_safe_lowercase_identifiers() -> None:
             output_definition_id="prediction_outputs",
             run_id="run_202606",
             market_id=MarketId("a_share"),
-            run_type="prediction",
-            scope=OutputScope.LOCAL_ONLY,
         ).run_id
         == "run_202606"
     )
@@ -37,8 +33,6 @@ def test_run_id_accepts_share_safe_lowercase_identifiers() -> None:
             output_definition_id="prediction_outputs",
             run_id="run_2026_06",
             market_id=MarketId("a_share"),
-            run_type="prediction",
-            scope=OutputScope.LOCAL_ONLY,
         ).run_id
         == "run_2026_06"
     )
@@ -68,8 +62,6 @@ def test_output_spec_rejects_invalid_run_ids(run_id: str) -> None:
             output_definition_id="prediction_outputs",
             run_id=run_id,
             market_id=MarketId("a_share"),
-            run_type="prediction",
-            scope=OutputScope.LOCAL_ONLY,
         )
 
 
@@ -96,8 +88,6 @@ def test_output_spec_preserves_typed_content_identifiers(run_id: str) -> None:
         output_definition_id="prediction_outputs",
         run_id=run_id,
         market_id=MarketId("a_share"),
-        run_type="prediction",
-        scope=OutputScope.LOCAL_ONLY,
     )
 
     assert report.run_id == run_id

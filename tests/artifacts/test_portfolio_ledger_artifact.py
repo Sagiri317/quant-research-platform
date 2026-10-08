@@ -16,7 +16,6 @@ from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
 from quant_research_platform.contracts.portfolios import (
-    CONTINUOUS_EXECUTION_COLUMNS,
     ExecutedTrade,
     FundingEvent,
     FundingForecast,
@@ -40,7 +39,11 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
 )
 from tests.helpers.binance_hft import KNOWN_NO_FUNDING
-from tests.helpers.portfolio_ledger import session_frame, write_test_sessions
+from tests.helpers.portfolio_ledger import (
+    CONTINUOUS_EXECUTION_COLUMNS,
+    session_frame,
+    write_test_sessions,
+)
 
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
@@ -385,9 +388,7 @@ def test_orphan_fill_and_unknown_delayed_fill_fail_closed(tmp_path):
         write_portfolio_ledger_artifact,
     )
     from quant_research_platform.contracts.portfolios import PortfolioDiagnostic
-    from quant_research_platform.research.portfolios.accounting import (
-        continuous_ledger_batch,
-    )
+    from tests.helpers.portfolio_ledger import continuous_ledger_batch
 
     frame = _session(
         "2019-01-01",
@@ -1125,8 +1126,6 @@ def test_unidentified_alpha_survives_publication_and_blocks_freezing(
     from quant_research_platform.research.portfolios.accounting import (
         alpha_calibration_intervals,
         calibrate_expected_alpha,
-    )
-    from quant_research_platform.research.portfolios.production import (
         frozen_alpha_calibration,
     )
 
@@ -1195,10 +1194,10 @@ def test_degenerate_alpha_diagnostics_survive_ledger_and_freeze(
 ):
     from quant_research_platform.research.portfolios.accounting import (
         calibrate_expected_alpha,
+        frozen_alpha_calibration,
     )
     from quant_research_platform.research.portfolios.production import (
         _ALPHA_DIAGNOSTICS,
-        frozen_alpha_calibration,
     )
 
     dates = pd.date_range("2019-01-01", periods=6, freq="MS")

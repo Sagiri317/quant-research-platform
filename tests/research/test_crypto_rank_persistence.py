@@ -606,7 +606,7 @@ def test_crypto_new_reader_preserves_immutable_and_lazy_acceptance_contract(
         native_filesystem_path,
         open_filesystem_file,
     )
-    from quant_research_platform.storage.manifests import read_bounded_qrp_json
+    from quant_research_platform.storage.manifests import read_qrp_json_file
     from quant_research_platform.storage.parquet import parquet_table_writer
 
     case = crypto_rank_case(
@@ -625,7 +625,7 @@ def test_crypto_new_reader_preserves_immutable_and_lazy_acceptance_contract(
     assert records[0].metrics["validation_ic"] == pytest.approx(1.0)
     persisted.read_crypto_model_member(case.saved, case.saved.final_models[0])
     manifest_path = case.root / "manifest.json"
-    _raw, manifest = read_bounded_qrp_json(manifest_path)
+    _raw, manifest = read_qrp_json_file(manifest_path)
     original_manifest = deepcopy(manifest)
     if member_kind == "validation":
         from quant_research_platform.markets.implementations.crypto.portfolio import (

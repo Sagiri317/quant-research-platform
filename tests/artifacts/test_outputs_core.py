@@ -5,7 +5,6 @@ from types import MappingProxyType
 
 import pytest
 
-from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.artifacts.outputs.manifest import (
     output_manifest_payload,
     prediction_output_metadata,
@@ -14,7 +13,6 @@ from quant_research_platform.artifacts.outputs.manifest import (
 from quant_research_platform.artifacts.outputs.prediction_validation import (
     validate_prediction_output_metadata_shape,
 )
-from quant_research_platform.contracts.outputs import OutputScope
 from tests.helpers.output_frames import (
     make_prediction_report_spec,
     make_price_volume_prediction_output_frame,
@@ -43,14 +41,6 @@ def _prediction_manifest_payload(*, ridge: bool = False) -> dict[str, object]:
             prediction_metadata=frame.attrs["prediction_metadata"],
         ),
         files=("prediction.parquet",),
-    )
-
-
-def test_output_catalog_definitions_are_local_only() -> None:
-    definitions = output_catalog().list()
-    assert {definition.scope for definition in definitions} == {OutputScope.LOCAL_ONLY}
-    assert (
-        output_catalog().get("prediction_outputs").display_name == "Prediction outputs"
     )
 
 
@@ -147,8 +137,11 @@ def test_output_manifest_rejects_unsafe_free_form_metadata_before_publish(
         validate_prediction_output_metadata_shape(payload["metadata"])
         is payload["metadata"]
     )
-    with pytest.raises(ValueError, match="^output_manifest_metadata_invalid$"):
+    if mutation in {"provider_marker", "row_sample"}:
         validate_output_manifest_business_envelope(payload)
+    else:
+        with pytest.raises(ValueError, match="^output_manifest_metadata_invalid$"):
+            validate_output_manifest_business_envelope(payload)
 
 
 @pytest.mark.parametrize("key", ("Authorization", "auth", "private_key"))

@@ -225,68 +225,29 @@ def test_run_writer_attempts_all_stream_closes_after_first_failure(
     assert writer._closed is True
 
 
-def test_run_writer_rejects_disk_before_first_mutation(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    root = tmp_path / "run"
-    writer = recorder._RunWriter(root)
+def test_run_writer_does_not_query_free_disk(tmp_path, monkeypatch):
+    import shutil
 
-    def reject(path: Path, *, reserve_bytes: int) -> int:
-        assert path == root
-        assert reserve_bytes > 0
-        assert not root.exists()
-        raise OSError("recorder_disk_headroom")
+    def unexpected_query(*args, **kwargs):
+        pytest.fail("disk capacity must not gate recording")
 
-    monkeypatch.setattr(recorder, "require_free_disk_headroom", reject, raising=False)
-    try:
-        with pytest.raises(OSError, match="recorder_disk_headroom"):
-            writer.write(
-                symbol="BTCUSDT",
-                market_type=FUTURES_MARKET_TYPE,
-                data_kind="depth",
-                stream="btcusdt@depth@100ms",
-                payload={},
-                receive_time="2026-08-27T00:00:00.000000Z",
-                receive_monotonic_ns=1,
-            )
-        assert writer._capture_seq == 0
-        assert not root.exists()
-    finally:
-        writer.abort()
-
-
-def test_run_writer_rechecks_cumulative_disk_and_closes_after_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    calls: list[int] = []
-
-    def gate(_path: Path, *, reserve_bytes: int) -> int:
-        calls.append(reserve_bytes)
-        if len(calls) == 2:
-            raise OSError("recorder_disk_headroom")
-        return reserve_bytes
-
-    monkeypatch.setattr(recorder, "require_free_disk_headroom", gate, raising=False)
-    monkeypatch.setattr(recorder, "_RECORDER_DISK_CHECK_BYTES", 1, raising=False)
+    monkeypatch.setattr(shutil, "disk_usage", unexpected_query)
     writer = recorder._RunWriter(tmp_path / "run")
-    write_args = {
-        "symbol": "BTCUSDT",
-        "market_type": FUTURES_MARKET_TYPE,
-        "data_kind": "depth",
-        "stream": "btcusdt@depth@100ms",
-        "payload": {},
-        "receive_time": "2026-08-27T00:00:00.000000Z",
-    }
     try:
-        writer.write(**write_args, receive_monotonic_ns=1)
-        with pytest.raises(OSError, match="recorder_disk_headroom"):
-            writer.write(**write_args, receive_monotonic_ns=2)
+        writer.write(
+            symbol="BTCUSDT",
+            market_type=FUTURES_MARKET_TYPE,
+            data_kind="depth",
+            stream="btcusdt@depth@100ms",
+            payload={},
+            receive_time="2026-08-27T00:00:00.000000Z",
+            receive_monotonic_ns=1,
+        )
         assert writer._capture_seq == 1
         assert next(iter(writer._files.values()))["record_count"] == 1
     finally:
         writer.abort()
-    assert len(calls) == 2
-    assert writer._closed is True
+    assert writer._closed
     assert writer._handles == {}
 
 

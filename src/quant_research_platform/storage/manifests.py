@@ -8,8 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from quant_research_platform.contracts.json_codec import (
-    MAX_QRP_JSON_BYTES,
-    _bounded_qrp_json_snapshot_text,
+    _qrp_json_snapshot_text,
     parse_qrp_json_object,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -38,20 +37,15 @@ def _qrp_json_file_identity(path: Path) -> DatasetFileIdentity:
         raise ValueError("dataset_metadata_file_invalid") from exc
 
 
-def read_bounded_qrp_json(
+def read_qrp_json_file(
     path: Path,
     *,
     expected_identity: DatasetFileIdentity | None = None,
-    max_bytes: int = MAX_QRP_JSON_BYTES,
 ) -> tuple[bytes, dict[str, Any]]:
-    if type(max_bytes) is not int or max_bytes < 0:
-        raise ValueError("dataset_metadata_size_limit_invalid")
     candidate = Path(path)
     identity = _qrp_json_file_identity(candidate)
     if expected_identity is not None and identity != expected_identity:
         raise ValueError("dataset_metadata_file_identity_changed")
-    if identity.size > max_bytes:
-        raise ValueError("dataset_metadata_file_too_large")
     try:
         handle = open_filesystem_file(candidate)
         with closing_iterator(handle):
@@ -66,8 +60,8 @@ def read_bounded_qrp_json(
         raise ValueError("dataset_metadata_file_invalid") from exc
     except ValueError as exc:
         raise ValueError("dataset_metadata_file_identity_changed") from exc
-    if len(raw) > max_bytes:
-        raise ValueError("dataset_metadata_file_too_large")
+    if len(raw) != identity.size:
+        raise ValueError("dataset_metadata_file_identity_changed")
     return (raw, parse_qrp_json_object(raw))
 
 
@@ -115,7 +109,7 @@ def read_bounded_qrp_json_directory(
         result.append(
             (
                 name,
-                read_bounded_qrp_json(candidate / name, expected_identity=identity)[1],
+                read_qrp_json_file(candidate / name, expected_identity=identity)[1],
             )
         )
     if member_names() != names:
@@ -128,7 +122,7 @@ def _directory_identity(value: os.stat_result) -> tuple[int, int, int, int]:
 
 
 def read_manifest(path: Path) -> dict[str, Any]:
-    return read_bounded_qrp_json(path)[1]
+    return read_qrp_json_file(path)[1]
 
 
 def read_qrp_json(
@@ -138,7 +132,7 @@ def read_qrp_json(
     error: str,
     expected_identity: DatasetFileIdentity | None = None,
 ) -> dict[str, Any]:
-    payload = read_bounded_qrp_json(path, expected_identity=expected_identity)[1]
+    payload = read_qrp_json_file(path, expected_identity=expected_identity)[1]
     if payload.get("schema_id") != expected_schema_id:
         raise ValueError(error)
     return payload
@@ -194,13 +188,11 @@ def read_dataset_manifest_evidence(
         raise ValueError("dataset_metadata_file_identity_changed")
     if member_identities is not None:
         member_identities.update(identities)
-    return payload
+    return {**spec, **payload}
 
 
 def write_manifest(path: Path, payload: dict[str, Any]) -> Path:
-    snapshot, text = _bounded_qrp_json_snapshot_text(
-        payload, max_bytes=MAX_QRP_JSON_BYTES - 1
-    )
+    snapshot, text = _qrp_json_snapshot_text(payload)
     _require_schema_id(snapshot)
     return atomic_write_text(path, text + "\n", encoding="utf-8")
 
@@ -212,9 +204,7 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     ``source_id`` must remain round-trippable. We still reject path, credential,
     and row-sample payloads that do not belong in schema metadata.
     """
-    snapshot, text = _bounded_qrp_json_snapshot_text(
-        payload, max_bytes=MAX_QRP_JSON_BYTES - 1
-    )
+    snapshot, text = _qrp_json_snapshot_text(payload)
     _require_schema_id(snapshot)
     assert_internal_artifact_metadata_safe(snapshot)
     return atomic_write_text(path, text + "\n", encoding="utf-8")

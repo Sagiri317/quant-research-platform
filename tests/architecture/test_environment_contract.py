@@ -28,15 +28,15 @@ RUNTIME_DEPENDENCIES = {
     "websockets",
 }
 DEV_DEPENDENCIES = {
-    "build",
     "matplotlib",
-    "nbconvert",
+    "nbformat",
+    "nbclient",
+    "jupyter-client",
     "ipykernel",
     "pytest",
     "ruff",
 }
 BUILD_SYSTEM_TO_CONDA_PACKAGES = {
-    "build": "python-build",
     "setuptools": "setuptools",
     "wheel": "wheel",
 }
@@ -79,13 +79,14 @@ def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> 
     build_system_requires = _dependency_specs(pyproject["build-system"]["requires"])
     conda_specs = _environment_dependency_specs(environment)
     expected = {
-        "build": ("python-build", dev["build"]),
         "setuptools": ("setuptools", build_system_requires["setuptools"]),
         "wheel": ("wheel", build_system_requires["wheel"]),
         "pyarrow": ("pyarrow", runtime["pyarrow"]),
         "arch": ("arch-py", runtime["arch"]),
         "matplotlib": ("matplotlib-base", dev["matplotlib"]),
-        "nbconvert": ("nbconvert", dev["nbconvert"]),
+        "nbformat": ("nbformat", dev["nbformat"]),
+        "nbclient": ("nbclient", dev["nbclient"]),
+        "jupyter-client": ("jupyter_client", dev["jupyter-client"]),
         "ipykernel": ("ipykernel", dev["ipykernel"]),
         "scipy": ("scipy", runtime["scipy"]),
         "statsmodels": ("statsmodels", runtime["statsmodels"]),
@@ -113,40 +114,17 @@ def test_environment_python_pin_matches_requires_python_lower_bound() -> None:
     assert _environment_python_pin(environment) == expected_minor
 
 
-def test_build_system_requires_conda_managed_frontend_and_backend() -> None:
+def test_local_install_backend_is_declared_in_conda() -> None:
     pyproject = _load_pyproject()
-    environment = ENVIRONMENT_YML.read_text(encoding="utf-8")
-    conda_specs = _environment_dependency_specs(environment)
-    build_system_requires = _dependency_specs(pyproject["build-system"]["requires"])
-    dev = _dependency_specs(pyproject["project"]["optional-dependencies"]["dev"])
-
-    missing = {}
-    if "build" not in dev or "python-build" not in conda_specs:
-        missing["build"] = "python-build"
-    missing.update(
-        {
-            pyproject_name: conda_name
-            for pyproject_name, conda_name in BUILD_SYSTEM_TO_CONDA_PACKAGES.items()
-            if pyproject_name != "build"
-            and (
-                pyproject_name not in build_system_requires
-                or conda_name not in conda_specs
-            )
-        }
+    conda_specs = _environment_dependency_specs(
+        ENVIRONMENT_YML.read_text(encoding="utf-8")
     )
-    loose_bounds = {
-        pyproject_name: conda_name
-        for pyproject_name, conda_name in BUILD_SYSTEM_TO_CONDA_PACKAGES.items()
-        if pyproject_name in build_system_requires
-        and conda_name in conda_specs
-        and not _conda_spec_is_same_or_stricter(
-            conda_specs[conda_name], build_system_requires[pyproject_name]
+    requirements = _dependency_specs(pyproject["build-system"]["requires"])
+    for name, conda_name in BUILD_SYSTEM_TO_CONDA_PACKAGES.items():
+        assert name in requirements and conda_name in conda_specs
+        assert _conda_spec_is_same_or_stricter(
+            conda_specs[conda_name], requirements[name]
         )
-    }
-
-    assert "build" in dev
-    assert missing == {}
-    assert loose_bounds == {}
 
 
 def _python_minor_from_requires(spec: str) -> str:

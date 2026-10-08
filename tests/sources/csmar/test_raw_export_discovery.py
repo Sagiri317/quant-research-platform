@@ -54,7 +54,7 @@ def test_csv_constructor_preserves_primary_when_close_fails(
         raw_schemas, "open_filesystem_file", lambda *_a: FailingHandle()
     )
     with pytest.raises(error_type) as raised:
-        raw_schemas._BoundedCsvRecords(path, limit_bytes=1024)
+        raw_schemas._CsvRecords(path)
     assert raised.value is primary
     assert handle.closed
     assert primary.__notes__ == ["CSMAR source close also failed: OSError"]

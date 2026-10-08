@@ -118,7 +118,7 @@ def test_expanded_pv_uses_existing_owners_and_keeps_formal_selections():
     )
     for target in expanded.target_specs("research run"):
         assert "fundamental_factors" not in target.dependencies
-        assert target.producer_id in expanded_profile.producer_bindings
+        assert target.target_id in expanded_profile.producer_bindings
 
 
 def test_holdout_freezes_alpha_for_each_prediction_source():

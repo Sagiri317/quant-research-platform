@@ -117,7 +117,7 @@ def test_writer_rejects_missing_persisted_logical_dtype_metadata(
         return path
 
     monkeypatch.setattr(dataset_writing, "write_parquet_file", write_without_metadata)
-    with pytest.raises(ValueError, match="dataset_logical_dtypes_missing"):
+    with pytest.raises(ValueError, match="dataset_logical_dtypes_invalid"):
         write_dataset(
             root,
             make_default_dataset_frame(),
@@ -363,7 +363,9 @@ def test_dataset_schema_validators_reject_mutated_runtime_contracts() -> None:
         {"primary_key": ["asset_id"], "null_count_summary": {"asset_id": True}},
     ):
         with pytest.raises(ValueError, match="dataset_manifest_not_consumable"):
-            dataset_schema.validate_dataset_primary_key_null_summary(manifest)
+            dataset_schema.validate_dataset_primary_key_null_summary(
+                manifest, primary_key=manifest.get("primary_key")
+            )
 
 
 @pytest.mark.parametrize(

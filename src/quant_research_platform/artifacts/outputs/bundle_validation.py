@@ -36,7 +36,7 @@ from quant_research_platform.storage.identity import (
     filesystem_stat,
     require_unaliased_path,
 )
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
+from quant_research_platform.storage.manifests import read_qrp_json_file
 from quant_research_platform.storage.parquet import (
     DatasetFileIdentity,
     _opened_parquet,
@@ -74,7 +74,7 @@ def validate_output_bundle(
         else expected_member_identities["manifest.json"],
     )
     try:
-        _manifest_bytes, manifest = read_bounded_qrp_json(
+        _manifest_bytes, manifest = read_qrp_json_file(
             manifest_path, expected_identity=manifest_identity
         )
     except ValueError as exc:

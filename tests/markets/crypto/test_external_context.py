@@ -51,7 +51,6 @@ def test_external_units_clocks_windows_and_chunk_invariance():
                 frames,
                 quotes=quote_rows,
                 trades=trade_rows,
-                tickers=[],
                 venue="bybit",
                 base_units_per_amount=multiplier,
                 max_age_ms=100,
@@ -149,10 +148,6 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
     headers_and_values = {
         "quotes": ("ask_amount,ask_price,bid_price,bid_amount", "1,101,99,1"),
         "trades": ("id,side,price,amount", "1,buy,100,1"),
-        "derivative_ticker": (
-            "funding_timestamp,funding_rate,predicted_funding_rate,open_interest,last_price,index_price,mark_price",
-            ",0,0,1,100,100,100",
-        ),
     }
     manifests = {}
     for symbol, kinds in config["auxiliary_sources"][venue]["archives"].items():
@@ -195,7 +190,6 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
                         dataset_type=kind,
                         symbol=symbol,
                         date=date,
-                        byte_budget=1024**2,
                     )
                 )
     source_start = min(
@@ -313,7 +307,6 @@ def test_external_archive_collection_identity_persists_and_guards_publication(
             for kind, observed_ms, event_ms, age_ms in (
                 ("quote", -5, -6, 605),
                 ("trade", 400, 399, 200),
-                ("ticker", -5, -6, 605),
             ):
                 assert row[venue + "_" + kind + "_age_ms"] == age_ms
                 assert row[venue + "_" + kind + "_observed_at"] == start + pd.Timedelta(
@@ -446,7 +439,6 @@ def test_okx_dated_face_value_native_csv_to_persisted_flow(
         frames,
         quotes=[],
         trades=trades,
-        tickers=[],
         venue="okx",
         base_units_per_amount=definition["base_units_per_amount"][asset],
         max_age_ms=100,

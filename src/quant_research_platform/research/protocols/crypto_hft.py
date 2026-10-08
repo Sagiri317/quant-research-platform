@@ -19,7 +19,7 @@ from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.evaluations import EvaluationSpec
 from quant_research_platform.contracts.experiments import ExperimentFold
 from quant_research_platform.contracts.json_codec import (
-    bounded_qrp_json_object_snapshot,
+    qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.labels import LabelDefinition
 from quant_research_platform.contracts.portfolios import (
@@ -159,7 +159,7 @@ HFT_EXTERNAL_FIELDS = (
 )
 HFT_EXTERNAL_CLOCK_FIELDS = tuple(
     f"{source}_{field}"
-    for source in ("quote", "trade", "ticker")
+    for source in ("quote", "trade")
     for field in ("age_ms", "observed_at", "event_at")
 )
 
@@ -431,7 +431,7 @@ class _CryptoResearchPlan:
 
 def research_chronology(value):
     """Decode the chronology shared by model artifacts and execution plans."""
-    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=1024 * 1024)
+    snapshot = qrp_json_object_snapshot(value)
     if set(snapshot) != {"folds", "test"}:
         raise ValueError("crypto_research_chronology_fields_invalid")
 
@@ -471,7 +471,7 @@ def research_chronology(value):
 
 
 def _research_plan(value: Mapping[str, object]) -> _CryptoResearchPlan:
-    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=1024 * 1024)
+    snapshot = qrp_json_object_snapshot(value)
     if set(snapshot) - {"execution"} != {
         "folds",
         "test",
@@ -972,21 +972,23 @@ class CryptoProtocol:
                     )
                     if evaluation.signals[0].source_kind == "prediction"
                     else (dataset,),
-                    producer_id=evaluation.evaluation_id,
                 )
                 for evaluation in build_crypto_evaluation_catalog(
                     configuration=self.configuration()
                 ).list()
             ),
-            TargetSpec(models, dependencies=(dataset,), producer_id=models),
             TargetSpec(
-                predictions, dependencies=(models, dataset), producer_id=predictions
+                models,
+                dependencies=(dataset,),
+            ),
+            TargetSpec(
+                predictions,
+                dependencies=(models, dataset),
             ),
             *(
                 TargetSpec(
                     candidate.calibration_target_id,
                     dependencies=(models, dataset, panel),
-                    producer_id=candidate.calibration_target_id,
                 )
                 for candidate in self.portfolio_candidates()
                 if isinstance(candidate, CryptoMakerCandidate) and candidate.calibrated
@@ -1011,7 +1013,6 @@ class CryptoProtocol:
                         if isinstance(target.candidate, CryptoMakerCandidate)
                         else (predictions, dataset, panel)
                     ),
-                    producer_id=target.target_id,
                 )
                 for target in execution_targets
             ),
@@ -1019,7 +1020,6 @@ class CryptoProtocol:
                 TargetSpec(
                     target.statistics_target_id,
                     dependencies=(target.target_id,),
-                    producer_id=target.statistics_target_id,
                 )
                 for target in execution_targets
             ),
@@ -1029,11 +1029,17 @@ class CryptoProtocol:
         if action == "dataset build":
             return (self.scenario_id,)
         if action == "research run":
-            if (
-                self.configuration_json is not None
-                and self.configuration()["stage"] == "evaluation"
-            ):
-                return (f"{self.scenario_id}_evaluation",)
+            if self.configuration_json is not None:
+                stage = self.configuration()["stage"]
+                if stage == "dataset":
+                    return (self.scenario_id,)
+                if stage == "evaluation":
+                    return (f"{self.scenario_id}_evaluation",)
+                if stage == "models":
+                    return (
+                        f"{self.scenario_id}_models",
+                        f"{self.scenario_id}_evaluation",
+                    )
             if self.access_window == "development":
                 return (
                     f"{self.scenario_id}_models",

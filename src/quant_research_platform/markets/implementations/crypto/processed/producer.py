@@ -790,11 +790,6 @@ def produce_normalized_context(
             trades=read_records(
                 raw_root, archive_paths=paths["trades"], time_window=time_window
             ),
-            tickers=read_records(
-                raw_root,
-                archive_paths=paths["derivative_ticker"],
-                time_window=time_window,
-            ),
             venue=parameters["venue"],
             base_units_per_amount=parameters["base_units_per_amount"][asset],
             max_age_ms=parameters["max_age_ms"],

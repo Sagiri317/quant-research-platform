@@ -8,20 +8,22 @@ import numpy as np
 import pandas as pd
 
 from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
-from quant_research_platform.contracts.features import FeatureTransformSpec
+from quant_research_platform.contracts.features import (
+    FEATURE_PREFIXES,
+    FEATURE_RECIPES,
+    FeatureTransformSpec,
+)
 from quant_research_platform.contracts.models import _model_algorithm_facts
 from quant_research_platform.contracts.validation import strict_finite_numeric_series
-
-_CANONICAL_FEATURE_PREFIXES = ("feature_", "feature_missing_", "feature_observed_")
 
 
 def canonical_feature_validity_columns(input_columns):
     """Project consumed encodings to their canonical structural-validity values."""
     values = []
     for column in input_columns:
-        for prefix in reversed(_CANONICAL_FEATURE_PREFIXES):
+        for prefix in reversed(FEATURE_PREFIXES):
             if column.startswith(prefix):
-                values.append(_CANONICAL_FEATURE_PREFIXES[0] + column[len(prefix) :])
+                values.append(FEATURE_PREFIXES[0] + column[len(prefix) :])
                 break
     return tuple(dict.fromkeys(values))
 
@@ -42,96 +44,28 @@ def apply_feature_transforms(
     frame: pd.DataFrame,
     transforms: tuple[FeatureTransformSpec, ...],
     *,
-    timestamp_column: str = "timestamp",
     diagnostics: dict | None = None,
 ) -> pd.DataFrame:
-    canonical = tuple(t for t in transforms if t.transform == "a_share_canonical")
-    if canonical:
-        if len(transforms) != 1:
-            raise ValueError("canonical_feature_pipeline_must_be_exclusive")
-    if canonical:
-        return canonical_feature_pipeline(
-            frame, factor_columns=canonical[0].source_columns, diagnostics=diagnostics
-        )
-    result = frame.copy()
-    for transform in transforms:
-        _apply_feature_transform(result, transform, timestamp_column=timestamp_column)
-    return result
-
-
-def _apply_feature_transform(
-    result: pd.DataFrame, transform: FeatureTransformSpec, *, timestamp_column: str
-) -> None:
-    for source_column, output_column in zip(
-        transform.source_columns, transform.output_columns, strict=True
-    ):
-        if source_column not in result:
-            raise ValueError(f"missing_feature_transform_source: {source_column}")
-        values = strict_finite_numeric_series(
-            result[source_column],
-            error=f"invalid_feature_transform_source: {source_column}",
-            allow_null=True,
-        ).astype("float64")
-        transformed = _transform_values(
-            values, timestamps=result[timestamp_column], transform=transform
-        )
-        result[output_column] = _apply_fillna(
-            transformed,
-            timestamps=result[timestamp_column],
-            fillna_policy=transform.fillna_policy,
-        )
-
-
-def _transform_values(
-    values: pd.Series, *, timestamps: pd.Series, transform: FeatureTransformSpec
-) -> pd.Series:
-    grouped = values.groupby(timestamps, sort=False)
-    if transform.transform == "cross_sectional_zscore":
-        return grouped.transform(_stable_zscore)
-    if transform.transform == "cross_sectional_rank":
-        return grouped.rank(method="average", pct=True)
-    if transform.transform == "winsorize":
-        return _winsorize(values, grouped, transform.winsorize_quantiles)
-    if transform.transform == "winsorized_zscore":
-        winsorized = _winsorize(values, grouped, transform.winsorize_quantiles)
-        return winsorized.groupby(timestamps, sort=False).transform(_stable_zscore)
-    if transform.transform == "winsorized_rank":
-        winsorized = _winsorize(values, grouped, transform.winsorize_quantiles)
-        return winsorized.groupby(timestamps, sort=False).rank(
-            method="average", pct=True
-        )
-    if transform.transform == "mad_winsorize":
-        return _mad_winsorize(values, grouped)
-    if transform.transform == "mad_winsorized_zscore":
-        clipped = _mad_winsorize(values, grouped)
-        return clipped.groupby(timestamps, sort=False).transform(_stable_zscore)
-    if transform.transform == "mad_winsorized_rank":
-        clipped = _mad_winsorize(values, grouped)
-        return clipped.groupby(timestamps, sort=False).rank(method="average", pct=True)
-    if transform.transform == "missing_indicator":
-        return values.isna().astype("float64")
-    if transform.transform == "observed_indicator":
-        return values.notna().astype("float64")
-    if transform.transform == "fillna_zero":
-        return values.fillna(0.0)
-    if transform.transform == "fillna_median":
-        medians = values.groupby(timestamps, sort=False).transform(
-            lambda item: _quantile(item, 0.5)[0]
-        )
-        return values.fillna(medians)
-    raise ValueError(f"unsupported_feature_transform: {transform.transform}")
+    if len(transforms) != 1:
+        raise ValueError("feature_recipe_must_be_exclusive")
+    recipe = transforms[0]
+    return a_share_feature_pipeline(
+        frame,
+        factor_columns=recipe.source_columns,
+        recipe_id=recipe.recipe_id,
+        diagnostics=diagnostics,
+    )
 
 
 def _winsorize(
     values: pd.Series,
     grouped: pd.core.groupby.SeriesGroupBy,
-    quantiles: tuple[float, float] | None,
 ) -> pd.Series:
     lower = np.full(len(values), np.nan)
     upper = np.full(len(values), np.nan)
     for positions in grouped.indices.values():
         lower[positions], upper[positions] = _quantile(
-            grouped.obj.iloc[positions], *(quantiles or (0.01, 0.99))
+            grouped.obj.iloc[positions], 0.01, 0.99
         )
     return values.clip(
         lower=pd.Series(lower, index=values.index),
@@ -317,15 +251,18 @@ def _industry_group_codes(
     )
 
 
-def canonical_feature_pipeline(
+def a_share_feature_pipeline(
     frame: pd.DataFrame,
     *,
     factor_columns: tuple[str, ...],
+    recipe_id: str = "a_share_canonical",
     size_column: str = "log_float_market_cap",
     industry_column: str = "industry_level1_code",
     diagnostics: dict | None = None,
 ) -> pd.DataFrame:
-    """Apply eligible -> MAD winsor -> neutralize -> population zscore."""
+    """Apply the named clipping recipe, neutralization and population zscore."""
+    if type(recipe_id) is not str or recipe_id not in FEATURE_RECIPES:
+        raise ValueError("unsupported_feature_recipe")
     if "eligible" not in frame:
         raise ValueError("feature_eligibility_required")
     universe = frame["eligible"]
@@ -351,11 +288,11 @@ def canonical_feature_pipeline(
             error=f"invalid_feature_factor: {factor}",
             allow_null=True,
         )
-        winsorized[factor] = _mad_winsorize(
-            values,
-            values.groupby(winsorized["timestamp"], sort=False),
-            zero_counts=mad_counts,
-            column=factor,
+        grouped = values.groupby(winsorized["timestamp"], sort=False)
+        winsorized[factor] = (
+            _mad_winsorize(values, grouped, zero_counts=mad_counts, column=factor)
+            if recipe_id == "a_share_canonical"
+            else _winsorize(values, grouped)
         )
     winsorized[industry_column] = _industry_group_codes(winsorized, industry_column)
     residualized = neutralize_cross_section(
@@ -404,38 +341,12 @@ def canonical_feature_pipeline(
         missing.loc[scoped.index] = final_missing.astype("int8")
         observed.loc[scoped.index] = final_missing.eq(False).astype("int8")
         for prefix, values in zip(
-            _CANONICAL_FEATURE_PREFIXES, (feature, missing, observed), strict=True
+            FEATURE_PREFIXES, (feature, missing, observed), strict=True
         ):
             feature_values[prefix + factor] = values
     return pd.concat((result, pd.DataFrame(feature_values, index=result.index)), axis=1)
 
 
-def _apply_fillna(
-    values: pd.Series, *, timestamps: pd.Series, fillna_policy: str
-) -> pd.Series:
-    if fillna_policy == "none":
-        return values
-    if fillna_policy == "zero":
-        return values.fillna(0.0)
-    if fillna_policy == "median":
-        medians = values.groupby(timestamps, sort=False).transform(
-            lambda item: _quantile(item, 0.5)[0]
-        )
-        return values.fillna(medians)
-    raise ValueError("unsupported_feature_transform_fillna_policy")
-
-
-def canonical_feature_transforms(factor_columns):
-    """Persist the executable eligible/MAD/neutralize/zscore/encoding pipeline."""
-    return (
-        FeatureTransformSpec(
-            transform_id="a_share_canonical",
-            source_columns=tuple(factor_columns),
-            output_columns=tuple(
-                prefix + column
-                for column in factor_columns
-                for prefix in _CANONICAL_FEATURE_PREFIXES
-            ),
-            transform="a_share_canonical",
-        ),
-    )
+def feature_transforms(factor_columns, *, recipe_id="a_share_canonical"):
+    """Declare one executable recipe with derived output columns."""
+    return (FeatureTransformSpec(recipe_id, tuple(factor_columns)),)

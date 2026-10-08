@@ -475,27 +475,25 @@ def test_inventory_rejects_child_alias_before_scanning_external_content(
     assert filesystem_read_bytes(payload) == b"external synthetic content"
 
 
-def test_inventory_limit_failure_preserves_published_artifact_and_parent(
-    tmp_path, monkeypatch
-):
-    import quant_research_platform.storage.semantic_artifacts as storage
-
+def test_member_inventory_has_no_total_byte_quota(tmp_path):
     root = _write_artifact(tmp_path)
     old_good = _immediate_file_bytes(root)
-    before = set(filesystem_iterdir(root.parent))
     candidate_fields = _envelope().payload()
     del candidate_fields["instance_identity"], candidate_fields["status"]
     candidate_fields["semantic_metadata"] = {"candidate": True}
     candidate = build_business_manifest_envelope(**candidate_fields)
-    monkeypatch.setattr(storage, "MAX_QRP_JSON_BYTES", 2048)
 
     def writer(staging):
         for index in range(257):
             filesystem_write_bytes(staging / f"member-{index}.bin", b"small")
 
-    with pytest.raises(ValueError, match="semantic_artifact_member_limit_exceeded"):
-        write_semantic_artifact(tmp_path / "model", candidate, writer)
-    assert set(filesystem_iterdir(root.parent)) == before
+    published = write_semantic_artifact(tmp_path / "model", candidate, writer)
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact_record,
+    )
+
+    _envelope_payload, members = read_semantic_artifact_record(published)
+    assert len(members) == 257
     assert _immediate_file_bytes(root) == old_good
 
 
@@ -795,7 +793,7 @@ def test_operational_metadata_schema_rejects_absolute_keys_before_write_and_read
             "semantic_artifact_operational_metadata_invalid",
         ),
         (
-            ("model_phase_observations", "phases", 0, "selection_group"),
+            ("model_phase_observations", "phases", 0, "selection_groups"),
             "semantic_artifact_operational_metadata_invalid",
         ),
         (
@@ -851,7 +849,7 @@ def test_operational_metadata_rejects_wrong_enum_types_without_mutating_good(
             "phases": [
                 {
                     "phase": "shared_candidate_fit",
-                    "selection_group": None,
+                    "selection_groups": [],
                     "family_id": "ridge",
                     "quarter_id": None,
                     "fit_count": 1,
@@ -874,7 +872,7 @@ def test_operational_metadata_rejects_wrong_enum_types_without_mutating_good(
     parent = invalid
     for key in path[:-1]:
         parent = parent[key]
-    parent[path[-1]] = bad
+    parent[path[-1]] = [bad] if path[-1] == "selection_groups" else bad
     with pytest.raises(ValueError, match=f"^{error}$"):
         write_semantic_artifact(
             tmp_path / "good",
@@ -931,7 +929,7 @@ def test_known_parquet_schema_publishes_typed_empty_file_without_explicit_rows(
         ("status", "trial_status_invalid"),
         ("selection_direction", "experiment_selection_direction_invalid"),
         ("stage", "experiment_stage_invalid"),
-        ("selection_group", "experiment_selection_group_invalid"),
+        ("selection_groups", "experiment_selection_group_invalid"),
     ),
 )
 def test_trial_enum_types_reject_in_native_ledger_and_compare_without_mutating_good(
@@ -968,7 +966,7 @@ def test_trial_enum_types_reject_in_native_ledger_and_compare_without_mutating_g
         TrialRecord.from_payload if field == "status" else ExperimentPlan.from_payload
     )
     payload = mother.payload() if field == "status" else plan.protocol_payload()
-    payload[field] = bad
+    payload[field] = [bad] if field == "selection_groups" else bad
     with pytest.raises(ValueError, match=f"^{error}$"):
         decoder(payload)
 
@@ -1011,7 +1009,7 @@ def test_trial_enum_types_reject_in_native_ledger_and_compare_without_mutating_g
         else candidate_ledger / "plan.json"
     )
     forged = read_manifest(changed)
-    forged[field] = bad
+    forged[field] = [bad] if field == "selection_groups" else bad
     forged_bytes = (render_qrp_json_object(forged) + "\n").encode("utf-8")
     filesystem_write_bytes(changed, forged_bytes)
     with pytest.raises(ValueError, match=f"^{error}$"):
@@ -1054,7 +1052,7 @@ def _metric_operational_metadata(value):
             "phases": [
                 {
                     "phase": "shared_candidate_fit",
-                    "selection_group": None,
+                    "selection_groups": [],
                     "family_id": "ridge",
                     "quarter_id": None,
                     "fit_count": 1,
@@ -1075,7 +1073,7 @@ def _metric_operational_metadata(value):
         1.25,
         2**53 + 1,
         10**400 + 1,
-        10**4095,
+        10**4096,
         float.fromhex("0x1.fffffffffffffp+1023"),
     ],
     ids=[
@@ -1085,7 +1083,7 @@ def _metric_operational_metadata(value):
         "finite_float",
         "exact_integer",
         "large_integer",
-        "json_integer_limit",
+        "above_former_integer_limit",
         "maximum_float",
     ],
 )
@@ -1139,7 +1137,6 @@ def test_operational_metrics_preserve_numeric_type_and_precision_in_native_artif
         (float("nan"), "qrp_json_nonfinite_number"),
         (float("inf"), "qrp_json_nonfinite_number"),
         (-float("inf"), "qrp_json_nonfinite_number"),
-        (10**4096, "qrp_json_integer_too_large"),
     ],
     ids=[
         "true",
@@ -1151,7 +1148,6 @@ def test_operational_metrics_preserve_numeric_type_and_precision_in_native_artif
         "nan",
         "positive_infinity",
         "negative_infinity",
-        "over_integer_limit",
     ],
 )
 def test_invalid_operational_metrics_reject_before_publication_and_native_compare(
@@ -1206,10 +1202,7 @@ def test_invalid_operational_metrics_reject_before_publication_and_native_compar
     assert _immediate_file_bytes(good) == before
 
 
-def test_operational_observations_keep_the_existing_json_byte_limit(tmp_path):
-    from quant_research_platform.contracts.json_codec import (
-        bounded_rendered_qrp_json_object_size,
-    )
+def test_operational_observations_roundtrip_above_former_byte_quota(tmp_path):
     from quant_research_platform.storage.semantic_artifacts import (
         read_semantic_artifact_operational_metadata,
     )
@@ -1219,10 +1212,7 @@ def test_operational_observations_keep_the_existing_json_byte_limit(tmp_path):
             "final_alpha_observations"
         ]
     }
-    observations = metadata["final_alpha_observations"]
-    size = bounded_rendered_qrp_json_object_size(observations, max_bytes=65536)
-    observations["environment"]["platform"] += "x" * (65536 - size)
-    assert bounded_rendered_qrp_json_object_size(observations, max_bytes=65536) == 65536
+    metadata["final_alpha_observations"]["environment"]["platform"] += "x" * 65537
     good = write_semantic_artifact(
         tmp_path / "good",
         _envelope(),
@@ -1231,13 +1221,4 @@ def test_operational_observations_keep_the_existing_json_byte_limit(tmp_path):
     )
     before = _immediate_file_bytes(good)
     assert read_semantic_artifact_operational_metadata(good) == metadata
-    observations["environment"]["platform"] += "x"
-    with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
-        write_semantic_artifact(
-            tmp_path / "good",
-            _envelope(seed=1),
-            lambda staging: filesystem_write_bytes(staging / "model.bin", b"model"),
-            operational_metadata=metadata,
-        )
-    assert tuple(filesystem_iterdir(good.parent)) == (good,)
     assert _immediate_file_bytes(good) == before

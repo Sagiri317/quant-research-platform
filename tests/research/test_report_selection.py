@@ -1,7 +1,9 @@
 """Reports distinguish unrequested stages from missing requested artifacts."""
 
+from contextlib import nullcontext
 from types import SimpleNamespace
 
+import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.targets import (
@@ -51,10 +53,12 @@ def test_a_share_factor_only_report_uses_evaluation_without_model_blockers():
             "issues": [],
             "selections": {},
             "factor_evaluation": evaluation,
+            "factor_statistics": {"status": "DEFINED", "identity": "f" * 64},
         },
     )
     assert result["report_status"] == "COMPLETE"
-    assert result["sections"]["factor diagnostics"] == evaluation
+    assert result["sections"]["factor diagnostics"]["evaluation"] == evaluation
+    assert result["sections"]["factor diagnostics"]["inference"]["identity"] == "f" * 64
     for key in ("model selection", "OOS prediction", "portfolio", "risk", "robustness"):
         assert result["sections"][key] == unavailable
     _check_notebook_unrequested_diagnostics(
@@ -130,11 +134,13 @@ def _check_notebook_unrequested_diagnostics(result, *, is_crypto, sections):
     ]
 
 
-def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
+@pytest.mark.parametrize("stage", ["dataset", "evaluation"])
+def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path, stage):
     from quant_research_platform.artifacts import research
     from quant_research_platform.storage.layout import StorageLayout
 
     run = record()
+    run.protocol["research_configuration"]["stage"] = stage
     run.target_results = tuple(
         (
             SimpleNamespace(
@@ -147,9 +153,12 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
             for key, kind in (
                 ("factors_only", ProducerKind.DATASET),
                 ("factors_only_evaluation", ProducerKind.EVALUATION),
+                ("factors_only_factor_statistics", ProducerKind.STATISTIC),
             )
         )
     )
+    if stage == "dataset":
+        run.target_results = run.target_results[:1]
     checked = []
     monkeypatch.setattr(
         research,
@@ -180,12 +189,33 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path):
             "metadata": {"evaluation_diagnostics": {"rows": 12}},
         },
     )
+    monkeypatch.setattr(
+        research,
+        "read_statistics_artifact",
+        lambda *args, **kwargs: SimpleNamespace(
+            table=lambda member: nullcontext(pd.DataFrame())
+        ),
+    )
     evidence = research.load_a_share_run_evidence(
         layout=StorageLayout(tmp_path), record=run, selections={}
     )
-    assert checked == ["factors_only", "factors_only_evaluation"]
+    assert checked == (
+        ["factors_only"]
+        if stage == "dataset"
+        else [
+            "factors_only",
+            "factors_only_evaluation",
+            "factors_only_factor_statistics",
+        ]
+    )
     assert evidence["issues"] == []
-    assert evidence["factor_evaluation"]["status"] == "DEFINED"
+    if stage == "evaluation":
+        assert evidence["factor_evaluation"]["status"] == "DEFINED"
+    else:
+        assert evidence["factor_evaluation"]["reason"] == "not_requested"
+        assert evidence["factor_statistics"]["reason"] == "not_requested"
+        report = build_a_share_report(record=run, evidence=evidence)
+        assert report["report_status"] == "COMPLETE"
     assert all(
         value["reason"] == "not_requested" for value in evidence["statistics"].values()
     )
@@ -326,7 +356,7 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked(candidat
     assert report["report_status"] == "BLOCKED"
     portfolio = report["sections"]["portfolio"]
     assert portfolio["intervals"]["results"] == tables["crypto_portfolio_intervals"]
-    assert portfolio["intervals"]["statistics_artifacts"][0] == blocked
+    assert report["sections"]["Data/Coverage"]["statistics_artifacts"][0] == blocked
     assert (
         report["sections"]["Data/Coverage"]["execution_coverage"]["results"]
         == tables["crypto_portfolio_coverage"]

@@ -38,10 +38,6 @@ from quant_research_platform.research.models.supervised import (
 )
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 
-VALIDATION_METRIC_COLUMNS = ("validation_ic", "validation_rankic", "validation_mse")
-VALIDATION_METRIC_REASON_COLUMNS = ("validation_ic_reason", "validation_rankic_reason")
-TEST_METRIC_COLUMNS = ("test_ic", "test_rankic", "test_mse")
-
 
 def validate_trial_metric_columns(
     *,
@@ -257,26 +253,13 @@ def evaluate_model_trial_metrics_from_chunks(
         values["prediction_rank"] = ranks["prediction"]
     else:
         values["label_rank"] = values["prediction_rank"] = 0.0
-    (
-        validation_rows,
-        validation_mse,
-        validation_ic,
-        validation_ic_reason,
-        validation_rankic,
-        validation_rankic_reason,
-    ) = _cross_sectional_metric_summary(
-        values.itertuples(index=False, name=None),
-        validation_axis=validation_axis,
-        label_calibration=label_calibration,
-    )
     return {
         "model_id": model_id,
-        "validation_rows": validation_rows,
-        "validation_ic": validation_ic,
-        "validation_ic_reason": validation_ic_reason,
-        "validation_rankic": validation_rankic,
-        "validation_rankic_reason": validation_rankic_reason,
-        "validation_mse": validation_mse,
+        **_cross_sectional_metric_summary(
+            values.itertuples(index=False, name=None),
+            validation_axis=validation_axis,
+            label_calibration=label_calibration,
+        ),
     }
 
 
@@ -285,7 +268,7 @@ def _cross_sectional_metric_summary(
     *,
     validation_axis: EvaluationAxis,
     label_calibration: tuple[float, float] | None = None,
-) -> tuple[int, float, float | None, str | None, float | None, str | None]:
+) -> dict[str, object]:
     stats: dict[str, int | Fraction] = {
         "ic_count": 0,
         "ic_mean": Fraction(),
@@ -329,24 +312,41 @@ def _cross_sectional_metric_summary(
         row_count += timestamp_state.ic.count
         _add_correlation_aggregate(stats, "ic", timestamp_state.ic.result()[0])
         _add_correlation_aggregate(stats, "rankic", timestamp_state.rank.result()[0])
-    if validation_axis == "single_asset_time_series":
-        ic = (
-            timestamp_state.ic.result()
-            if row_count >= 2
-            else (None, "no_valid_observations")
+    result = {
+        "validation_rows": row_count,
+        "validation_mse": squared_errors.result(row_count),
+    }
+    for prefix in ("ic", "rankic"):
+        summary = _summarize_correlation_aggregates(
+            count=int(stats[f"{prefix}_count"]),
+            mean=stats[f"{prefix}_mean"],
+            m2=stats[f"{prefix}_m2"],
+            positive_count=int(stats[f"{prefix}_positive"]),
         )
-        rankic = (None, "not_applicable")
-    else:
-        ic = _trial_correlation_summary(stats, "ic")
-        rankic = _trial_correlation_summary(stats, "rankic")
-    return (
-        row_count,
-        squared_errors.result(row_count),
-        ic[0],
-        ic[1],
-        rankic[0],
-        rankic[1],
-    )
+        if validation_axis == "single_asset_time_series":
+            if prefix == "ic":
+                summary["mean"], summary["reason"] = (
+                    timestamp_state.ic.result()
+                    if row_count >= 2
+                    else (None, "no_valid_observations")
+                )
+            else:
+                summary["mean"], summary["reason"] = None, "not_applicable"
+                summary["ratio_reason"] = "not_applicable"
+        for suffix, key in (
+            (prefix, "mean"),
+            (f"{prefix}_reason", "reason"),
+            (f"std_{prefix}", "std"),
+            (f"{prefix}ir", "ratio"),
+            (f"positive_{prefix}_rate", "positive_rate"),
+            (f"valid_{prefix}_count", "valid_count"),
+            (f"{prefix}ir_reason", "ratio_reason"),
+        ):
+            value = summary[key]
+            result[f"validation_{suffix}"] = (
+                None if isinstance(value, float) and not np.isfinite(value) else value
+            )
+    return result
 
 
 class _TimestampMetricState:
@@ -387,20 +387,6 @@ class _ScaledSquareAccumulator:
         if result == 0.0 or not np.isfinite(result):
             raise ValueError("model_selection_mse_unrepresentable")
         return float(result)
-
-
-def _trial_correlation_summary(
-    stats: dict[str, int | Fraction], prefix: str
-) -> tuple[float | None, str | None]:
-    result = _summarize_correlation_aggregates(
-        count=int(stats[f"{prefix}_count"]),
-        mean=stats[f"{prefix}_mean"],
-        m2=stats[f"{prefix}_m2"],
-        positive_count=int(stats[f"{prefix}_positive"]),
-    )
-    if int(result["valid_count"]) == 0:
-        return (None, str(result["reason"]))
-    return (float(result["mean"]), None)
 
 
 def _metric_chunk(
@@ -448,6 +434,7 @@ def fit_validation_candidates(
     *,
     fold,
     candidate_specs,
+    training_by_candidate,
     dataset_spec,
     chunks,
     validation_input_columns: tuple[str, ...] | None = None,
@@ -495,19 +482,10 @@ def fit_validation_candidates(
             else None
         )
         try:
-            model_result = fitting._fit_model_result_from_frames(
-                fitting.training_scope_chunks(
-                    chunks(
-                        train_read_columns,
-                        input_columns=candidate_spec.input_columns,
-                        start=None,
-                        end=fold.train.end,
-                    ),
-                    asset_ids=(),
-                ),
+            model_result = fitting._fit_model_result(
+                training_by_candidate[candidate_spec.model_id],
                 candidate_spec,
                 estimator=build_estimator_from_model_spec(candidate_spec),
-                fitting_cutoff=pd.Timestamp(fold.train.end),
             )
 
             def validation_source(
@@ -559,18 +537,6 @@ def fit_validation_candidates(
                 label_column=label_column,
                 prediction_column="prediction_score",
                 expected_coverage=validation_coverage,
-            )
-            trial_metrics.update(
-                {
-                    "resolved_hyperparameters": dict(
-                        model_result.metadata["resolved_hyperparameters"]
-                    ),
-                    "random_seed": model_result.metadata["random_seed"],
-                    "n_train": model_result.metadata["rows_after_input_label_dropna"],
-                    "dependency_status": dict(
-                        model_result.metadata["dependency_status"]
-                    ),
-                }
             )
             if trial_recorder is not None:
                 trial_recorder.finish(

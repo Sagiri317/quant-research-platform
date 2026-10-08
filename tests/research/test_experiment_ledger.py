@@ -13,6 +13,7 @@ from quant_research_platform.contracts.experiments import (
 )
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.research.models.production import _prepare_training
 from quant_research_platform.storage.experiments import (
     append_trial_record,
     read_trial_ledger,
@@ -258,6 +259,12 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
         trial_selection.fit_validation_candidates(
             fold=plan.folds[0],
             candidate_specs=specs,
+            training_by_candidate={
+                spec.model_id: _prepare_training(
+                    dataset, spec, chunks=chunks, train_end=plan.folds[0].train.end
+                )
+                for spec in specs
+            },
             dataset_spec=dataset,
             chunks=chunks,
             trial_recorder=recorder,
@@ -305,7 +312,7 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
 
         target = trial_selection.fitting if phase == "fit" else trial_selection
         name = (
-            "_fit_model_result_from_frames"
+            "_fit_model_result"
             if phase == "fit"
             else "evaluate_model_trial_metrics_from_chunks"
         )
@@ -334,9 +341,7 @@ def test_real_selection_records_terminal_attempts_retry_and_primary_failures(
         raise OSError("trial record persistence failed")
 
     with monkeypatch.context() as patch:
-        patch.setattr(
-            trial_selection.fitting, "_fit_model_result_from_frames", fail_fit
-        )
+        patch.setattr(trial_selection.fitting, "_fit_model_result", fail_fit)
         patch.setattr(experiments, "append_trial_record", fail_record)
         with pytest.raises(ValueError) as caught:
             select("run_record_failure")
@@ -360,6 +365,16 @@ def test_model_trial_read_validates_metrics_without_restricting_generic_experime
         "validation_rows": 3,
         "n_train": 4,
         "validation_ic": 0.2,
+        "validation_std_ic": 0.0,
+        "validation_icir": None,
+        "validation_positive_ic_rate": 1.0,
+        "validation_valid_ic_count": 1,
+        "validation_icir_reason": "insufficient_observations",
+        "validation_std_rankic": 0.0,
+        "validation_rankicir": None,
+        "validation_positive_rankic_rate": 1.0,
+        "validation_valid_rankic_count": 1,
+        "validation_rankicir_reason": "insufficient_observations",
         "validation_rankic": 0.3,
         "validation_ic_reason": None,
         "validation_rankic_reason": None,
@@ -450,7 +465,7 @@ def test_production_begin_survives_hard_exit(tmp_path, stage):
             folds=(),
             fit_windows=(TimeWindow(date(2020, 1, 1), date(2020, 1, 2)),),
             fit_cutoff=date(2020, 1, 2),
-            selection_group="global",
+            selection_groups=("global",),
             candidate_ids=("ridge",),
             selection_ledger_semantic_identities=("b" * 64,),
         )
@@ -568,20 +583,17 @@ def test_first_plan_readback_precedes_first_trial_publication(tmp_path, monkeypa
 @pytest.mark.parametrize("member", ("plan", "record"))
 @pytest.mark.parametrize("extra_byte", (0, 1))
 @pytest.mark.parametrize("existing", (False, True))
-def test_trial_json_disk_limit_is_checked_before_publication(
+def test_trial_json_roundtrips_above_former_capacity(
     tmp_path, member, extra_byte, existing
 ):
-    from hashlib import sha256
-
     from quant_research_platform.contracts.json_codec import (
-        MAX_QRP_JSON_BYTES,
         render_qrp_json_object,
     )
 
     root = tmp_path / "ledger"
     plan = _plan()
     padding = "研究" + chr(10) + '"'
-    disk_size = MAX_QRP_JSON_BYTES + extra_byte
+    disk_size = 1024 * 1024 + extra_byte
     if member == "plan":
         plan = replace(plan, input_lineage=(padding,))
         remaining = disk_size - len(
@@ -600,35 +612,21 @@ def test_trial_json_disk_limit_is_checked_before_publication(
     payload = plan.protocol_payload() if member == "plan" else record.payload()
     assert len((render_qrp_json_object(payload) + "\n").encode("utf-8")) == disk_size
 
-    def identities():
-        return {
-            path.relative_to(root): sha256(path.read_bytes()).hexdigest()
-            for path in root.rglob("*")
-            if path.is_file()
-        }
-
     if existing:
-        saved_plan = _plan() if member == "plan" and extra_byte else plan
+        saved_plan = plan
         append_trial_record(
             root,
             saved_plan,
             _record(saved_plan, event_id="first", attempt_index=1, status="failed"),
         )
-    original = identities()
-    if extra_byte:
-        with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
-            append_trial_record(root, plan, record)
-        assert root.exists() is existing
-        assert identities() == original
-    else:
-        path = append_trial_record(root, plan, record)
-        checked = root / "plan.json" if member == "plan" else path
-        assert checked.stat().st_size == MAX_QRP_JSON_BYTES
-        assert checked.read_bytes().endswith(b"\n")
-        saved, records = read_trial_ledger(root, plan)
-        assert saved == plan
-        assert records[-1] == record
-        assert len(records) == (2 if existing else 1)
+    path = append_trial_record(root, plan, record)
+    checked = root / "plan.json" if member == "plan" else path
+    assert checked.stat().st_size == disk_size
+    assert checked.read_bytes().endswith(b"\n")
+    saved, records = read_trial_ledger(root, plan)
+    assert saved == plan
+    assert records[-1] == record
+    assert len(records) == (2 if existing else 1)
 
 
 def test_trial_ledger_root_stops_real_directory_scan_at_third_member(
@@ -700,6 +698,16 @@ def test_begin_refit_persists_fit_domain_and_all_real_parent_ledgers(tmp_path, g
             attempted,
             metrics={
                 "validation_ic": 0.5,
+                "validation_std_ic": 0.0,
+                "validation_icir": None,
+                "validation_positive_ic_rate": 1.0,
+                "validation_valid_ic_count": 1,
+                "validation_icir_reason": "insufficient_observations",
+                "validation_std_rankic": 0.0,
+                "validation_rankicir": None,
+                "validation_positive_rankic_rate": 1.0,
+                "validation_valid_rankic_count": 1,
+                "validation_rankicir_reason": "insufficient_observations",
                 "validation_rankic": 0.5,
                 "validation_mse": 1.0,
                 "validation_ic_reason": None,
@@ -729,7 +737,7 @@ def test_begin_refit_persists_fit_domain_and_all_real_parent_ledgers(tmp_path, g
         fit_windows=fit_windows,
         fit_cutoff=date(2020, 1, 2),
         selection_ledger_semantic_identities=parents,
-        selection_group=group,
+        selection_groups=(() if group is None else (group,)),
     )
     plan, records = read_trial_ledger(refit.root)
     assert plan.stage == "refit" and plan.folds == ()
@@ -738,7 +746,7 @@ def test_begin_refit_persists_fit_domain_and_all_real_parent_ledgers(tmp_path, g
     assert plan.fit_cutoff == date(2020, 1, 2)
     assert plan.test == TimeWindow(date(2020, 1, 3), date(2020, 1, 4))
     assert plan.selection_ledger_semantic_identities == parents
-    assert plan.selection_group == group
+    assert plan.selection_groups == (() if group is None else (group,))
     assert plan.selection_metric is None and plan.selection_direction is None
     assert plan.candidate_ids == ("ridge",) and plan.trial_budget == 1
     assert records == (started,) and started.fold_id == "refit"
@@ -767,7 +775,7 @@ def test_begin_refit_persists_fit_domain_and_all_real_parent_ledgers(tmp_path, g
             fit_windows=fit_windows,
             fit_cutoff=date(2020, 1, 3),
             selection_ledger_semantic_identities=parents,
-            selection_group=group,
+            selection_groups=(() if group is None else (group,)),
         )
     assert set(layout.trial_ledger_root("run_refit").iterdir()) == roots_before
 
@@ -844,3 +852,23 @@ def test_trial_ledger_canonical_float_zero_and_frozen_json_containers(tmp_path):
     saved, records = read_trial_ledger(root, plan)
     assert saved.protocol_hash == plan.protocol_hash and len(records) == 1
     assert records[0].status == "completed"
+
+
+def test_trial_storage_rejects_credentials_before_write_and_on_read(tmp_path):
+    from quant_research_platform.contracts.json_codec import render_qrp_json_object
+    from quant_research_platform.storage.identity import filesystem_write_bytes
+
+    plan = _plan()
+    record = _record(plan, event_id="event", attempt_index=1, status="attempted")
+    unsafe = replace(record, normalized_parameters={"api_key": "synthetic-credential"})
+    root = tmp_path / "ledger"
+    with pytest.raises(ValueError, match="trial_evidence_unsafe"):
+        append_trial_record(root, plan, unsafe)
+    assert not root.exists()
+    append_trial_record(root, plan, record)
+    filesystem_write_bytes(
+        root / "records" / "00000001.json",
+        render_qrp_json_object(unsafe.payload()).encode(),
+    )
+    with pytest.raises(ValueError, match="trial_evidence_unsafe"):
+        read_trial_ledger(root)

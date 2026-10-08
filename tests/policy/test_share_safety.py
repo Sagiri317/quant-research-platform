@@ -1,86 +1,38 @@
-from __future__ import annotations
+import json
 
-from quant_research_platform.policy.share_safety import (
-    sanitize_shared_text,
-    unsafe_for_share_reason,
+import pytest
+
+from quant_research_platform.artifacts.evidence import (
+    write_json_evidence,
+    write_markdown_evidence,
 )
 
 
-def test_share_safety_rejects_local_path_and_sanitizes_it() -> None:
-    text = "created at C:/Users/example/project/data/raw/source/file.csv"
-
-    assert unsafe_for_share_reason(text) in {"local_path", "local_only_path"}
-    assert "C:/Users" not in sanitize_shared_text(text)
-
-
-def test_evidence_writers_reject_unordered_and_structured_row_facts(tmp_path):
-    import pytest
-
-    from quant_research_platform.artifacts.evidence import (
-        write_json_evidence,
-        write_markdown_evidence,
-    )
-
-    for text in (
-        "market_id=synthetic asset_id=synthetic",
-        "asset_id=synthetic market_id=synthetic",
-        "asset_id=synthetic timestamp=synthetic",
-        "timestamp=synthetic asset_id=synthetic",
-    ):
-        with pytest.raises(ValueError, match="unsafe_evidence: row_sample"):
-            write_markdown_evidence(tmp_path / "row.md", text)
-    for fields in (
-        {"asset_id": "synthetic", "timestamp": "synthetic"},
-        {"timestamp": "synthetic", "asset_id": "synthetic"},
-        {"asset_id": "synthetic", "market_id": "synthetic"},
-    ):
-        with pytest.raises(ValueError, match="unsafe_evidence: row_sample"):
-            write_json_evidence(
-                tmp_path / "row.json", {"schema_id": "synthetic-check", "facts": fields}
-            )
-    write_json_evidence(
-        tmp_path / "schema.json",
-        {
-            "schema_id": "synthetic-check",
-            "columns": ["asset_id", "timestamp"],
-            "row_count": 2,
-        },
-    )
-
-
-def test_evidence_count_summary_keeps_row_and_credential_checks(tmp_path):
-    import json
-
-    import pytest
-
-    from quant_research_platform.artifacts.evidence import write_json_evidence
-
-    counts = {"market_id": 0, "asset_id": 0, "timestamp": 0, "value": 2}
-    payload = {"schema_id": "synthetic-report", "null_count_summary": counts}
-    path = tmp_path / "summary.json"
-    write_json_evidence(path, payload)
+def test_evidence_preserves_research_rows_counts_sources_and_relative_paths(tmp_path):
+    payload = {
+        "schema_id": "synthetic-report",
+        "source_id": "csmar",
+        "rows": [{"asset_id": "600000.SH", "timestamp": "2026-01-01", "value": 1.2}],
+        "path": "data/raw/csmar/export.csv",
+        "row_count": 600000,
+    }
+    path = write_json_evidence(tmp_path / "report.json", payload)
     assert json.loads(path.read_text()) == payload
+    text = "600000.SH source_id=csmar " + "x" * 100_000
+    path = write_markdown_evidence(tmp_path / "report.md", text)
+    assert path.read_text() == text
 
-    for disguised in (
-        {"market_id": "synthetic", "asset_id": "synthetic", "timestamp": "synthetic"},
-        {**counts, "asset_id": True},
-        {**counts, "asset_id": 1.0},
-        {**counts, "asset_id": -1},
-    ):
-        with pytest.raises(ValueError, match="unsafe_evidence: row_sample"):
-            write_json_evidence(
-                tmp_path / "disguised.json",
-                {"schema_id": "synthetic-report", "null_count_summary": disguised},
-            )
-    with pytest.raises(ValueError, match="unsafe_evidence: row_sample"):
+
+@pytest.mark.parametrize(
+    "payload,reason",
+    (
+        ({"api_key": "SYNTHETIC_SECRET"}, "credential"),
+        ({"path": "/workspace/private/file.csv"}, "absolute_path"),
+    ),
+)
+def test_evidence_still_rejects_credentials_and_local_paths(tmp_path, payload, reason):
+    with pytest.raises(ValueError, match="unsafe_evidence: " + reason):
         write_json_evidence(
-            tmp_path / "row.json", {"schema_id": "synthetic-report", "facts": counts}
+            tmp_path / "report.json", {"schema_id": "synthetic-report", **payload}
         )
-    with pytest.raises(ValueError, match="unsafe_evidence: credential"):
-        write_json_evidence(
-            tmp_path / "credential.json",
-            {
-                "schema_id": "synthetic-report",
-                "null_count_summary": {**counts, "api_key": 0},
-            },
-        )
+    assert not (tmp_path / "report.json").exists()

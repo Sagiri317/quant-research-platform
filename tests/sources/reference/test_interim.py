@@ -191,7 +191,7 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
     )
 
 
-@pytest.mark.parametrize("mutation", ("planned", "loaded", "staged"))
+@pytest.mark.parametrize("mutation", ("planned", "staged"))
 @pytest.mark.parametrize("existing_target", (False, True))
 def test_fee_source_identity_race_preserves_old_good(
     tmp_path, monkeypatch, mutation, existing_target
@@ -228,18 +228,6 @@ def test_fee_source_identity_race_preserves_old_good(
     previous_members = set(filesystem_iterdir(target.parent))
     if mutation == "planned":
         _write_reference_root(raw_root, commission=0.0004)
-    elif mutation == "loaded":
-        original = interim.load_a_share_fee_source
-        calls = 0
-
-        def load(**kwargs):
-            nonlocal calls
-            calls += 1
-            if calls == 2:
-                _write_reference_root(raw_root, commission=0.0004)
-            return original(**kwargs)
-
-        monkeypatch.setattr(interim, "load_a_share_fee_source", load)
     else:
         original_frame = interim._frame_from_rows
 
@@ -726,3 +714,23 @@ def test_industry_future_bad_row_precedes_date_projection(tmp_path, publication)
             data_ids=(interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID,),
             end_date="2020-12-31",
         )
+
+
+def test_fee_materialization_parses_once_then_rechecks_at_publication(
+    tmp_path, monkeypatch
+):
+    raw_root = _write_reference_root(tmp_path / "raw")
+    original = interim.load_a_share_fee_source
+    calls = []
+
+    def load(**kwargs):
+        calls.append(1)
+        return original(**kwargs)
+
+    monkeypatch.setattr(interim, "load_a_share_fee_source", load)
+    interim.materialize_interim_data(
+        layout=StorageLayout(tmp_path),
+        raw_root=raw_root / "reference",
+        data_ids=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
+    )
+    assert len(calls) == 2

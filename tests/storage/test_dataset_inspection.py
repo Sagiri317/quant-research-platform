@@ -152,7 +152,7 @@ def test_inspection_closes_native_iterator_and_preserves_consumer_failure(
         assert created[0].gi_frame is None
         notes = getattr(primary, "__notes__", [])
         if identity_changed:
-            assert "dataset verification also failed: ValueError" in notes
+            assert notes == ["iterator close also failed: ValueError"]
         else:
             assert not notes
         assert not unraisable

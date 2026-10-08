@@ -36,7 +36,6 @@ from quant_research_platform.research.features.transforms import (
 )
 from quant_research_platform.research.models import fitting
 from quant_research_platform.research.models.fitting import (
-    iter_legal_training_chunks,
     model_training_read_columns,
     training_scope_chunks,
 )
@@ -52,6 +51,7 @@ from quant_research_platform.research.models.trial_selection import (
 )
 from quant_research_platform.research.protocols.a_share import (
     model_folds,
+    model_selection_windows,
     quarter_id_for_fold,
 )
 from quant_research_platform.research.randomness import ROOT_SEED, derive_seed
@@ -66,7 +66,7 @@ from quant_research_platform.storage.layout import StorageLayout
 
 @dataclass(frozen=True)
 class FinalModelResult:
-    selection_group: str
+    selection_groups: tuple[str, ...]
     family_id: str
     spec: object
     model_result: fitting.ModelFitResult
@@ -256,23 +256,26 @@ def _build_a_share_models(
     configurations = {
         item["model_id"]: item for item in research_configuration["models"]
     }
-    training_counts = {}
+    selection_windows = {
+        (group, key): (cutoff, window)
+        for group, key, cutoff, window in model_selection_windows(
+            (
+                (quarter_id_for_fold(fold), fold.train.end, fold.validation.start)
+                for fold in folds
+            ),
+            chronology=chronology,
+            development_window=development_window,
+            complete=pd.Timestamp(time_window.end)
+            >= pd.Timestamp(development_window["end"]),
+        )
+    }
     last_recorders = {}
     last_specs = {}
     for fold in folds:
         quarter_id = quarter_id_for_fold(fold)
-        if pd.Timestamp(fold.validation.start) >= pd.Timestamp(
-            development_window["start"]
-        ):
+        if ("quarterly", quarter_id) in selection_windows:
             select_models(
-                "quarterly",
-                quarter_id,
-                pd.Timestamp(fold.train.end),
-                TimeWindow(
-                    pd.Timestamp(fold.validation.start).to_period("Q").start_time
-                    - pd.DateOffset(months=chronology["scoring_lookback_months"]),
-                    fold.train.end,
-                ),
+                "quarterly", quarter_id, *selection_windows[("quarterly", quarter_id)]
             )
         coverage = ModelSampleCoverage(
             model_validation_coverage_scope(dataset_identity, fold, family_specs)
@@ -314,13 +317,13 @@ def _build_a_share_models(
             parameters = configuration.get(
                 "parameter_candidates", [configuration["hyperparameters"]]
             )
-            n_train = _count_training_rows(
+            prepared_training = _prepare_training(
                 dataset_spec,
                 base,
                 chunks=chunks,
                 train_end=fold.train.end,
-                cache=training_counts,
             )
+            n_train = len(prepared_training[0])
             candidates = _selection_model_specs(
                 base,
                 parameters,
@@ -360,6 +363,10 @@ def _build_a_share_models(
                 fit_validation_candidates(
                     fold=fold,
                     candidate_specs=candidates,
+                    training_by_candidate={
+                        candidate.model_id: prepared_training
+                        for candidate in candidates
+                    },
                     dataset_spec=dataset_spec,
                     chunks=chunks,
                     validation_input_columns=common_inputs,
@@ -375,7 +382,7 @@ def _build_a_share_models(
             on_observation(
                 {
                     "phase": "shared_candidate_fit",
-                    "selection_group": None,
+                    "selection_groups": [],
                     "family_id": family_id,
                     "quarter_id": quarter_id,
                     "fit_count": len(candidates),
@@ -390,112 +397,107 @@ def _build_a_share_models(
         return
     fit_windows = (TimeWindow(pd.Timestamp(formal_dataset_window["start"]), cutoff),)
     final_decisions = {
-        "global": select_models(
-            "global",
-            "final",
-            cutoff,
-            TimeWindow(pd.Timestamp(development_window["start"]), cutoff),
-        ),
-        "quarterly": select_models(
-            "quarterly",
-            "final",
-            cutoff,
-            TimeWindow(
-                cutoff
-                + pd.Timedelta(days=1)
-                - pd.DateOffset(months=chronology["scoring_lookback_months"]),
-                cutoff,
-            ),
-        ),
+        group: select_models(group, "final", *selection_windows[(group, "final")])
+        for group in ("global", "quarterly")
     }
+    final_choices = {}
     for group, decision in final_decisions.items():
         for family in decision["families"]:
-            family_id = family["family_id"]
-            selected_id = family["selected_config_id"]
-            candidates = last_specs[family_id]
-            selected = next(spec for spec in candidates if spec.model_id == selected_id)
-            configuration = configurations[family_id]
-            parameters = configuration.get(
-                "parameter_candidates", [configuration["hyperparameters"]]
+            key = (family["family_id"], family["selected_config_id"])
+            final_choices.setdefault(key, []).append(group)
+    for (family_id, selected_id), selected_groups in final_choices.items():
+        groups = tuple(selected_groups)
+        parents = tuple(
+            sorted(
+                {
+                    identity
+                    for group in groups
+                    for identity in final_decisions[group][
+                        "selection_ledger_semantic_identities"
+                    ]
+                }
             )
-            selected_parameters = parameters[
-                tuple(spec.model_id for spec in candidates).index(selected_id)
-            ]
-            recorder = last_recorders[family_id]
-            refit_recorder = attempt = fit_coverage = actual_spec = None
+        )
+        candidates = last_specs[family_id]
+        selected = next(spec for spec in candidates if spec.model_id == selected_id)
+        configuration = configurations[family_id]
+        parameters = configuration.get(
+            "parameter_candidates", [configuration["hyperparameters"]]
+        )
+        selected_parameters = parameters[
+            tuple(spec.model_id for spec in candidates).index(selected_id)
+        ]
+        recorder = last_recorders[family_id]
+        refit_recorder = attempt = fit_coverage = actual_spec = None
 
-            finished = False
+        finished = False
 
-            def begin_refit(
-                spec, training, *, recorder=recorder, decision=decision, group=group
-            ):
-                nonlocal refit_recorder, attempt, fit_coverage, actual_spec
-                actual_spec = spec
-                fit_coverage = _refit_sample_coverage(
-                    recorder.plan,
-                    spec,
-                    training,
-                    fitting_cutoff=cutoff,
-                    fit_windows=fit_windows,
+        def begin_refit(
+            spec, training, *, recorder=recorder, groups=groups, parents=parents
+        ):
+            nonlocal refit_recorder, attempt, fit_coverage, actual_spec
+            actual_spec = spec
+            fit_coverage = _refit_sample_coverage(
+                recorder.plan,
+                spec,
+                training,
+                fitting_cutoff=cutoff,
+                fit_windows=fit_windows,
+            )
+            refit_recorder, attempt = recorder.begin_refit(
+                spec,
+                common_coverage_id=fit_coverage.semantic_identity,
+                fit_windows=fit_windows,
+                fit_cutoff=cutoff.to_pydatetime(),
+                selection_groups=groups,
+                selection_ledger_semantic_identities=parents,
+            )
+
+        try:
+            observation = {}
+            with record_run_observations(observation):
+                model_result = _fit_selected_model_result(
+                    dataset_spec=dataset_spec,
+                    selected_spec=selected,
+                    chunks=chunks,
+                    fitting_cutoff=cutoff.isoformat(),
+                    quarter_id="final",
+                    root_seed=root_seed,
+                    candidate_parameters=selected_parameters,
+                    on_fit_start=begin_refit,
                 )
-                refit_recorder, attempt = recorder.begin_refit(
-                    spec,
-                    common_coverage_id=fit_coverage.semantic_identity,
-                    fit_windows=fit_windows,
-                    fit_cutoff=cutoff.to_pydatetime(),
-                    selection_group=group,
-                    selection_ledger_semantic_identities=tuple(
-                        decision["selection_ledger_semantic_identities"]
-                    ),
-                )
-
-            try:
-                observation = {}
-                with record_run_observations(observation):
-                    model_result = _fit_selected_model_result(
-                        dataset_spec=dataset_spec,
-                        selected_spec=selected,
-                        chunks=chunks,
-                        training_counts=training_counts,
-                        fitting_cutoff=cutoff.isoformat(),
-                        quarter_id="final",
-                        root_seed=root_seed,
-                        candidate_parameters=selected_parameters,
-                        on_fit_start=begin_refit,
+            on_observation(
+                {
+                    "phase": "final_refit",
+                    "selection_groups": list(groups),
+                    "family_id": family_id,
+                    "quarter_id": None,
+                    "fit_count": 1,
+                    "observations": observation,
+                }
+            )
+            refit_recorder.finish(attempt, model_metadata=model_result.metadata)
+            finished = True
+            member = FinalModelResult(
+                groups,
+                family_id,
+                actual_spec,
+                model_result,
+                fit_windows,
+                cutoff.to_pydatetime(),
+                fit_coverage.semantic_identity,
+                refit_recorder.reference(),
+            )
+            yield member
+        except BaseException as error:
+            if attempt is not None and (not finished):
+                try:
+                    refit_recorder.finish(attempt, error=error)
+                except BaseException as secondary:
+                    error.add_note(
+                        "refit failure record also failed: " + type(secondary).__name__
                     )
-                on_observation(
-                    {
-                        "phase": "final_refit",
-                        "selection_group": group,
-                        "family_id": family_id,
-                        "quarter_id": None,
-                        "fit_count": 1,
-                        "observations": observation,
-                    }
-                )
-                refit_recorder.finish(attempt, model_metadata=model_result.metadata)
-                finished = True
-                member = FinalModelResult(
-                    group,
-                    family_id,
-                    actual_spec,
-                    model_result,
-                    fit_windows,
-                    cutoff.to_pydatetime(),
-                    fit_coverage.semantic_identity,
-                    refit_recorder.reference(),
-                )
-                yield member
-            except BaseException as error:
-                if attempt is not None and (not finished):
-                    try:
-                        refit_recorder.finish(attempt, error=error)
-                    except BaseException as secondary:
-                        error.add_note(
-                            "refit failure record also failed: "
-                            + type(secondary).__name__
-                        )
-                raise
+            raise
 
 
 def _dataset_sessions(chunks: Iterable[pd.DataFrame]) -> pd.DatetimeIndex:
@@ -539,20 +541,19 @@ def _fit_selected_model_result(
     dataset_spec,
     selected_spec,
     chunks,
-    training_counts,
     fitting_cutoff: str,
     quarter_id: str,
     root_seed: int,
     candidate_parameters,
     on_fit_start=None,
 ) -> fitting.ModelFitResult:
-    n_refit = _count_training_rows(
+    prepared_training = _prepare_training(
         dataset_spec,
         selected_spec,
         chunks=chunks,
         train_end=fitting_cutoff,
-        cache=training_counts,
     )
+    n_refit = len(prepared_training[0])
     refit_spec = _refit_model_spec(
         selected_spec,
         n_train=n_refit,
@@ -560,27 +561,13 @@ def _fit_selected_model_result(
         root_seed=root_seed,
         candidate_parameters=candidate_parameters,
     )
-    refit_read_columns = model_training_read_columns(
-        dataset_spec.primary_key,
-        refit_spec.input_columns,
-        label_column=refit_spec.label_column,
-        sample_filter_mode=refit_spec.sample_filter_mode,
-    )
-    model_result = fitting._fit_model_result_from_frames(
-        training_scope_chunks(
-            chunks(
-                refit_read_columns,
-                input_columns=refit_spec.input_columns,
-                start=None,
-                end=fitting_cutoff,
-            )
-        ),
+    if on_fit_start is not None:
+        on_fit_start(refit_spec, prepared_training[0])
+    return fitting._fit_model_result(
+        prepared_training,
         refit_spec,
         estimator=build_estimator_from_model_spec(refit_spec),
-        fitting_cutoff=fitting_cutoff,
-        on_fit_start=on_fit_start,
     )
-    return model_result
 
 
 def _resolve_candidate_parameters(algorithm, parameters, n_train):
@@ -644,50 +631,48 @@ def _selection_model_specs(base_spec, parameters, *, n_train, root_seed, quarter
     )
 
 
-def _count_training_rows(
-    dataset_spec, model_spec, *, chunks, train_end: str, cache
-) -> int:
-    scope = (
-        frozenset(model_spec.input_columns),
-        model_spec.label_column,
-        model_spec.sample_filter_mode,
-        model_spec.max_train_rows,
-        train_end,
-        _model_algorithm_facts(model_spec.model_algorithm).input_kind,
-    )
-    if scope in cache:
-        return cache[scope]
+def _prepare_training(dataset_spec, model_spec, *, chunks, train_end):
+    """Prepare one selection domain, preserving validation of excluded raw rows."""
     read_columns = model_training_read_columns(
         dataset_spec.primary_key,
         model_spec.input_columns,
         label_column=model_spec.label_column,
         sample_filter_mode=model_spec.sample_filter_mode,
     )
-    count = 0
-    with closing_iterator(
-        iter_legal_training_chunks(
+
+    def checked_frames():
+        with closing_iterator(
             chunks(
                 read_columns,
                 input_columns=model_spec.input_columns,
                 start=None,
                 end=train_end,
-            ),
-            train_end=pd.Timestamp(train_end),
-            label_column=model_spec.label_column,
-            input_columns=model_spec.input_columns,
-            model_algorithm=model_spec.model_algorithm,
-        )
-    ) as training_chunks:
-        for frame in training_chunks:
-            count += len(frame)
-    if count <= 0:
-        raise ValueError("model_training_sample_empty")
-    cache[scope] = (
-        min(count, model_spec.max_train_rows)
-        if model_spec.max_train_rows is not None
-        else count
+            )
+        ) as source:
+            for chunk in source:
+                # Selection previously validated these rows in its counting pass.
+                legal_training_rows(
+                    chunk,
+                    fitting_cutoff=train_end,
+                    availability_column=training_availability_columns(
+                        model_spec.label_column
+                    )[0],
+                    feature_columns=model_input_validity_columns(
+                        model_spec.input_columns, model_spec.model_algorithm
+                    ),
+                    target_column=model_spec.label_column,
+                )
+                try:
+                    yield chunk
+                except GeneratorExit:
+                    return
+
+    prepared = fitting._collect_training_frame(
+        checked_frames(), model_spec, fitting_cutoff=train_end
     )
-    return cache[scope]
+    if prepared[0].empty:
+        raise ValueError("model_training_sample_empty")
+    return prepared
 
 
 @dataclass(frozen=True)
@@ -876,18 +861,19 @@ def build_crypto_fold_models(
                     common_coverage_id=fit_coverage.semantic_identity,
                     fit_windows=(fold.train, fold.validation),
                     fit_cutoff=fold.validation.end,
-                    selection_group=None,
+                    selection_groups=(),
                     selection_ledger_semantic_identities=(
                         recorder.reference()["semantic_identity"],
                     ),
                 )
 
             try:
-                trained = fitting._fit_model_result_from_frames(
-                    chunks(fold.train),
+                trained = fitting._fit_model_result(
+                    fitting._collect_training_frame(
+                        chunks(fold.train), spec, fitting_cutoff=fold.train.end
+                    ),
                     spec,
                     estimator=build_estimator_from_model_spec(spec),
-                    fitting_cutoff=fold.train.end,
                 )
                 training_metadata = dict(trained.metadata)
                 validation = iter_validation_prediction_chunks(
@@ -968,11 +954,12 @@ def build_crypto_fold_models(
                             except GeneratorExit:
                                 return
 
-                result = fitting._fit_model_result_from_frames(
-                    refit_chunks(),
+                result = fitting._fit_model_result(
+                    fitting._collect_training_frame(
+                        refit_chunks(), spec, fitting_cutoff=fold.validation.end
+                    ),
                     spec,
                     estimator=build_estimator_from_model_spec(spec),
-                    fitting_cutoff=fold.validation.end,
                     on_fit_start=begin_crypto_refit,
                 )
                 refit_recorder.finish(refit_attempt, model_metadata=result.metadata)

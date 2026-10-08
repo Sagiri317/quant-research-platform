@@ -290,7 +290,7 @@ def test_write_dataset_activates_and_closes_caller_iterator(
             return InputIterator()
 
     monkeypatch.setattr(
-        dataset_writing, "validate_dataset_spec", lambda _spec, **_kwargs: None
+        dataset_writing, "data_spec_payload", lambda _spec, **_kwargs: {}
     )
     monkeypatch.setattr(
         dataset_writing, "validate_dataset_artifact_root", lambda *_args: None
@@ -453,7 +453,7 @@ def test_bounded_manifest_read_preserves_body_primary_over_handle_close(
     )
     monkeypatch.setattr(manifests.os, "fstat", lambda _fd: metadata)
     with pytest.raises(primary_type, match="body_primary"):
-        manifests.read_bounded_qrp_json(path)
+        manifests.read_qrp_json_file(path)
 
 
 def test_compare_expected_storage_validation_still_maps(
@@ -574,14 +574,14 @@ def test_bounded_metadata_reader_rejects_ancestor_alias(tmp_path: Path) -> None:
     except OSError as exc:
         pytest.skip(f"directory_symlink_not_available: {exc}")
     with pytest.raises(ValueError, match="^dataset_metadata_file_invalid$"):
-        manifests.read_bounded_qrp_json(alias / "manifest.json")
+        manifests.read_qrp_json_file(alias / "manifest.json")
 
 
 def test_write_dataset_requires_artifact_root_before_writer_or_data_pull(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(
-        dataset_writing, "validate_dataset_spec", lambda _spec, **_kwargs: None
+        dataset_writing, "data_spec_payload", lambda _spec, **_kwargs: {}
     )
     monkeypatch.setattr(
         dataset_writing, "validate_dataset_artifact_root", lambda *_args: None

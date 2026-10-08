@@ -29,11 +29,8 @@ def build_crypto_research_report(*, record, evidence):
     statistics = evidence["statistics"]
 
     def statistical_rows(table, predicate=None):
-        selected, states, artifacts = [], [], []
+        selected, states = [], []
         for item in statistics:
-            artifacts.append(
-                {key: value for key, value in item.items() if key != "tables"}
-            )
             states.append({"status": item["status"]})
             if item["status"] in {"BLOCKED", "FAILED"}:
                 continue
@@ -42,7 +39,6 @@ def build_crypto_research_report(*, record, evidence):
         states.extend({"status": row["status"]} for row in selected if "status" in row)
         return {
             "status": diagnostic_status(states),
-            "statistics_artifacts": artifacts,
             "results": selected,
         }
 
@@ -86,6 +82,10 @@ def build_crypto_research_report(*, record, evidence):
     sections = {
         "Data/Coverage": {
             **evidence["data"],
+            "statistics_artifacts": [
+                {key: value for key, value in item.items() if key != "tables"}
+                for item in statistics
+            ],
             "execution_coverage": statistical_rows("crypto_portfolio_coverage"),
         },
         "factor diagnostics": {
@@ -165,7 +165,7 @@ def build_crypto_research_report(*, record, evidence):
             "issues": evidence["issues"],
         },
     }
-    if configuration["stage"] == "evaluation":
+    if configuration["stage"] in {"dataset", "evaluation"}:
         for name in ("models and validation", "OOS prediction", "model comparison"):
             sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
     if not evidence["calibrations"]:
@@ -192,6 +192,9 @@ def build_crypto_research_report(*, record, evidence):
             "daily statistics",
         ):
             sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
+    sections["development vs holdout"]["stage_selection"] = configuration.get(
+        "stage_selection"
+    )
     return {
         "schema_id": REPORT_SCHEMA_ID,
         "run_id": record.run_id,

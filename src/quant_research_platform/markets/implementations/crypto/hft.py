@@ -1096,14 +1096,14 @@ def iter_cross_asset_factor_frames(
 
 
 def iter_external_context_frames(
-    frames, *, quotes, trades, tickers, venue, base_units_per_amount, max_age_ms
+    frames, *, quotes, trades, venue, base_units_per_amount, max_age_ms
 ):
     """Align observed external quotes and base/notional trade flow to Binance time."""
     active_segment = previous_time = None
     mids = deque(maxlen=6)
     bins = deque(maxlen=5)
     count = 0
-    latest_quote = latest_trade = latest_ticker = None
+    latest_quote = latest_trade = None
     if venue == "okx":
         before = Fraction(str(base_units_per_amount["before"]))
         after = Fraction(str(base_units_per_amount["after"]))
@@ -1118,11 +1118,9 @@ def iter_external_context_frames(
     with (
         closing_iterator(iter(quotes)) as quote_rows,
         closing_iterator(iter(trades)) as trade_rows,
-        closing_iterator(iter(tickers)) as ticker_rows,
     ):
         quote = next(quote_rows, None)
         trade = next(trade_rows, None)
-        ticker = next(ticker_rows, None)
         for source in frames:
             if source.empty:
                 continue
@@ -1142,9 +1140,6 @@ def iter_external_context_frames(
                 while quote is not None and quote["local_timestamp"] <= decision_us:
                     latest_quote = quote
                     quote = next(quote_rows, None)
-                while ticker is not None and ticker["local_timestamp"] <= decision_us:
-                    latest_ticker = ticker
-                    ticker = next(ticker_rows, None)
                 buy = sell = buy_notional = sell_notional = Fraction()
                 while trade is not None and trade["local_timestamp"] <= decision_us:
                     latest_trade = trade
@@ -1179,7 +1174,6 @@ def iter_external_context_frames(
                 for name, observation in (
                     ("quote", latest_quote),
                     ("trade", latest_trade),
-                    ("ticker", latest_ticker),
                 ):
                     if observation is not None:
                         row[name + "_age_ms"] = (

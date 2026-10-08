@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from copy import deepcopy
 from pathlib import Path
 
 import pandas as pd
@@ -298,12 +297,6 @@ def test_schema_inventory_keeps_all_current_roots_and_instances(
         ) == (common["data_id"], layer, kind, rows)
         assert item["duplicate_primary_key_count"] == 0
         assert item["selected_important_column_null_counts"] == {"value": rows - 1}
-        invalid = deepcopy(item)
-        invalid["logical_relative_root"] = (
-            str(item["logical_relative_root"]) + "/instances/not-an-identity"
-        )
-        with pytest.raises(ValueError, match="schema_inventory_dataset_invalid"):
-            schema_inventory._validate_schema_inventory_item(invalid)
     cli_output = tmp_path / "cli-inventory.json"
     result = CliRunner().invoke(
         private_cli.app, ["--project-root", str(tmp_path), "--output", str(cli_output)]
@@ -650,7 +643,6 @@ def test_inventory_uses_declared_time_and_closes_early_context(
             with schema_inventory.iter_schema_inventory_items(tmp_path) as items:
                 item = next(items)
                 assert item["row_count_by_year"] == {"2022": 1, "2023": 2}
-                assert schema_inventory._validate_schema_inventory_item(item) is item
                 if cancel:
                     raise primary
         except KeyboardInterrupt as error:

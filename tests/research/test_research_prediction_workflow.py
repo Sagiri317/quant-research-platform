@@ -44,11 +44,14 @@ def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
         test_end="2014-01-03",
     )
     estimator = build_estimator_from_model_spec(model_spec)
-    model_result = model_fitting._fit_model_result_from_frames(
-        (frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],),
+    model_result = model_fitting._fit_model_result(
+        model_fitting._collect_training_frame(
+            (frame.loc[frame["timestamp"] <= pd.Timestamp(prediction_spec.train_end)],),
+            model_spec,
+            fitting_cutoff=prediction_spec.train_end,
+        ),
         model_spec,
         estimator=estimator,
-        fitting_cutoff=prediction_spec.train_end,
     )
     prediction, output_bundle, _ = write_prediction_output_and_read(
         tmp_path,
@@ -156,11 +159,12 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
             ]
     preflight_model_specs(specs)
     for spec in specs:
-        result = model_fitting._fit_model_result_from_frames(
-            (frame,),
+        result = model_fitting._fit_model_result(
+            model_fitting._collect_training_frame(
+                (frame,), spec, fitting_cutoff="2020-02-12"
+            ),
             spec,
             estimator=build_estimator_from_model_spec(spec),
-            fitting_cutoff="2020-02-12",
         )
         columns = tuple(dict.fromkeys((*spec.input_columns, "timestamp")))
         prediction = prediction_callable(spec.input_columns, result.prediction_model)(
@@ -192,8 +196,12 @@ def test_prediction_builder_binds_backend_package_to_actual_model_owner(
         max_train_rows=len(frame),
     )
     estimator = build_estimator_from_model_spec(model_spec)
-    model_result = model_fitting._fit_model_result_from_frames(
-        (frame,), model_spec, estimator=estimator, fitting_cutoff="2014-01-02"
+    model_result = model_fitting._fit_model_result(
+        model_fitting._collect_training_frame(
+            (frame,), model_spec, fitting_cutoff="2014-01-02"
+        ),
+        model_spec,
+        estimator=estimator,
     )
     prediction_spec = PredictionSpec(
         prediction_id=f"{model_algorithm}_prediction",

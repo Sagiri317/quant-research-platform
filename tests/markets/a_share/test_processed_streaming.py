@@ -450,7 +450,6 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
         return InterimImportResult(
             artifact_roots={data_id: root},
             skipped=(),
-            pruning_report_text="synthetic boundary",
         )
 
     profile = replace(
@@ -1020,8 +1019,12 @@ def test_asynchronous_own_market_label_endpoints_and_mask_batches(
     )
     assert dates[2] not in panel.index
     mask = saved["execution_mask"].query("asset_id == '000001'").set_index("timestamp")
+    execution_at = panel.index[panel.index > dates[1]][0]
     actual_mask = portfolio_production._mask_values(
-        mask.loc[[dates[1]]].reset_index(), pd.Index(["000001"])
+        mask.loc[[dates[1]]].reset_index().assign(execution_at=execution_at),
+        pd.Index(["000001"]),
+        execution_at,
+        frozenset(),
     )
     assert actual_mask["can_enter"].all() and actual_mask["can_exit"].all()
     label = (

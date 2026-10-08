@@ -30,7 +30,6 @@ def test_normalized_original_bytes_nulls_clock_and_hash(tmp_path, monkeypatch):
         dataset_type="trades",
         symbol="BTCUSDT",
         date="2026-08-01",
-        byte_budget=1024**2,
     )
     assert (root / "data.csv.gz").read_bytes() == raw
     assert manifest["row_count"] == 2
@@ -68,7 +67,6 @@ def test_normalized_rejects_wrong_schema_and_preserves_existing_output(
             dataset_type="quotes",
             symbol="BTC-USDT-SWAP",
             date="2026-08-01",
-            byte_budget=1024**2,
         )
     assert not (tmp_path / "bad").exists()
     with pytest.raises(ValueError, match="scope_invalid"):
@@ -78,7 +76,6 @@ def test_normalized_rejects_wrong_schema_and_preserves_existing_output(
             dataset_type="incremental_book_L2",
             symbol="BTCUSDT",
             date="2026-08-01",
-            byte_budget=1024**2,
         )
 
 
@@ -95,7 +92,6 @@ def test_normalized_manifest_mutation_during_iteration(tmp_path, monkeypatch):
         dataset_type="trades",
         symbol="ETHUSDT",
         date="2026-08-01",
-        byte_budget=1024**2,
     )
     rows = iter_records(
         root.parent,
@@ -127,7 +123,6 @@ def test_source_identity_rejects_equal_length_changed_gzip(tmp_path, monkeypatch
         dataset_type="trades",
         symbol="BTCUSDT",
         date="2026-08-01",
-        byte_budget=1024**2,
     )
     scope = dict(
         exchange="bybit",
@@ -163,7 +158,6 @@ def test_declared_normalized_member_missing_is_identity_failure(
         dataset_type="trades",
         symbol="BTCUSDT",
         date="2026-08-01",
-        byte_budget=1024**2,
     )
     assert source_identity(tmp_path, "synthetic", **scope) is not None
     path = root / "data.csv.gz"

@@ -43,9 +43,8 @@ type _EvaluationOutputChunk = tuple[pd.DataFrame, pd.DataFrame, dict[str, object
 
 
 class _EvaluationStreamingState:
-    def __init__(self, *, spec: EvaluationSpec, n_groups: int) -> None:
+    def __init__(self, *, spec: EvaluationSpec) -> None:
         self._spec = spec
-        self._n_groups = n_groups
         self._filter_columns_used: tuple[str, ...] = ()
         self._filter_definition = ""
         self._rows_input = 0
@@ -305,7 +304,7 @@ class _EvaluationStreamingState:
             max_timestamp=None
             if self._max_timestamp is None
             else time_value_isoformat(self._max_timestamp, preserve_datetime=True),
-            n_groups=self._n_groups,
+            n_groups=self._spec.n_groups,
             skipped_timestamp_count=self._skipped_timestamp_count,
         )
 
@@ -342,19 +341,16 @@ def build_evaluation_result_from_frames(
     frames: Iterable[pd.DataFrame],
     *,
     spec: EvaluationSpec,
-    signal_columns: tuple[str, ...],
-    label_columns: tuple[str, ...],
-    n_groups: int,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
 ) -> EvaluationResult:
-    state = _EvaluationStreamingState(spec=spec, n_groups=n_groups)
+    state = _EvaluationStreamingState(
+        spec=spec,
+    )
     output_chunks = (
         _iter_single_asset_time_series_output_chunks(
             frames,
             spec=spec,
-            signal_columns=signal_columns,
-            label_columns=label_columns,
             asset_column=asset_column,
             source_columns_by_kind=source_columns_by_kind,
             summary_state=state,
@@ -363,9 +359,6 @@ def build_evaluation_result_from_frames(
         else _iter_evaluation_output_chunks(
             frames,
             spec=spec,
-            signal_columns=signal_columns,
-            label_columns=label_columns,
-            n_groups=n_groups,
             asset_column=asset_column,
             source_columns_by_kind=source_columns_by_kind,
             summary_state=state,
@@ -431,13 +424,13 @@ def _iter_single_asset_time_series_output_chunks(
     frames: Iterable[pd.DataFrame],
     *,
     spec: EvaluationSpec,
-    signal_columns: tuple[str, ...],
-    label_columns: tuple[str, ...],
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
     summary_state: _EvaluationStreamingState | None = None,
 ) -> Iterator[_EvaluationOutputChunk]:
     """Yield one bounded across-time correlation row per signal-label pair."""
+    signal_columns = tuple(signal.signal_id for signal in spec.signals)
+    label_columns = spec.label_columns
     from quant_research_platform.research.filtering import apply_filter_mode
 
     numeric_columns = (*signal_columns, *label_columns)
@@ -469,7 +462,6 @@ def _iter_single_asset_time_series_output_chunks(
     for chunk in _iter_evaluation_work_frames(
         frames,
         spec=spec,
-        label_columns=label_columns,
         asset_column=asset_column,
         source_columns_by_kind=source_columns_by_kind,
     ):
@@ -587,9 +579,6 @@ def _iter_evaluation_output_chunks(
     frames: Iterable[pd.DataFrame],
     *,
     spec: EvaluationSpec,
-    signal_columns: tuple[str, ...],
-    label_columns: tuple[str, ...],
-    n_groups: int,
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
     summary_state: _EvaluationStreamingState | None = None,
@@ -600,7 +589,6 @@ def _iter_evaluation_output_chunks(
     work_frames = _iter_evaluation_work_frames(
         frames,
         spec=spec,
-        label_columns=label_columns,
         asset_column=asset_column,
         source_columns_by_kind=source_columns_by_kind,
     )
@@ -609,33 +597,30 @@ def _iter_evaluation_output_chunks(
             filtered, filter_metadata = apply_filter_mode(
                 chunk, mode=spec.filter_mode, metadata_key="filter_mode"
             )
-            filtered_chunks = _iter_evaluation_filtered_chunks(
+            output = _evaluate_filtered_frame(
                 filtered,
                 filter_metadata,
-                signal_columns=signal_columns,
-                label_columns=label_columns,
-                n_groups=n_groups,
+                spec=spec,
                 asset_column=asset_column,
             )
-            with closing_iterator(filtered_chunks):
-                for output in filtered_chunks:
-                    if summary_state is not None:
-                        summary_state.consume(*output)
-                    try:
-                        yield output
-                    except GeneratorExit:
-                        return
+            if summary_state is not None:
+                summary_state.consume(*output)
+            try:
+                yield output
+            except GeneratorExit:
+                return
 
 
-def _iter_evaluation_filtered_chunks(
+def _evaluate_filtered_frame(
     filtered: pd.DataFrame,
     filter_metadata: Mapping[str, object],
     *,
-    signal_columns: tuple[str, ...],
-    label_columns: tuple[str, ...],
-    n_groups: int,
+    spec: EvaluationSpec,
     asset_column: str,
-) -> Iterator[_EvaluationOutputChunk]:
+) -> _EvaluationOutputChunk:
+    signal_columns = tuple(signal.signal_id for signal in spec.signals)
+    label_columns = spec.label_columns
+    n_groups = spec.n_groups
     timestamps = strict_timestamp_series(
         filtered["timestamp"], error="invalid_evaluation_timestamp_values"
     )
@@ -700,17 +685,17 @@ def _iter_evaluation_filtered_chunks(
         else None,
         "skipped_timestamp_count": len(skipped_timestamps),
     }
-    yield (metrics, grouped, metadata)
+    return (metrics, grouped, metadata)
 
 
 def _iter_evaluation_work_frames(
     frames: Iterable[pd.DataFrame],
     *,
     spec: EvaluationSpec,
-    label_columns: tuple[str, ...],
     asset_column: str,
     source_columns_by_kind: Mapping[str, Sequence[str]] | None = None,
 ) -> Iterator[pd.DataFrame]:
+    label_columns = spec.label_columns
     required = {
         "timestamp",
         asset_column,

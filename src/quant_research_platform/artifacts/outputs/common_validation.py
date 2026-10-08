@@ -6,12 +6,11 @@ from pathlib import Path
 
 import pandas as pd
 
-from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.contracts.filtering import (
     filter_definition,
     required_filter_columns,
 )
-from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.storage.identity import require_unaliased_path
 from quant_research_platform.storage.layout import StorageLayout
@@ -156,18 +155,8 @@ def derive_output_bundle_root(
     layout: StorageLayout,
     expected_definition_id: str,
 ) -> Path:
-    try:
-        definition = output_catalog().get(output_spec.output_definition_id)
-    except KeyError as exc:
-        raise ValueError("output_spec_mismatch") from exc
-    if definition.output_definition_id != expected_definition_id:
+    if output_spec.output_definition_id != expected_definition_id:
         raise ValueError("output_spec_mismatch")
-    if definition.run_type != output_spec.run_type:
-        raise ValueError("output_spec_mismatch")
-    if definition.scope != output_spec.scope:
-        raise ValueError("output_spec_mismatch")
-    if output_spec.scope != OutputScope.LOCAL_ONLY:
-        raise ValueError("output_scope_must_be_local_only")
     output_bundle = Path(layout.project_root) / "outputs" / output_spec.output_id
     require_unaliased_path(
         output_bundle, error="output_bundle_must_not_be_dataset_root"

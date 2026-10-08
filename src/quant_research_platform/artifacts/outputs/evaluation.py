@@ -38,7 +38,7 @@ from quant_research_platform.contracts.time import time_value_isoformat
 from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.policy.share_safety import (
-    evidence_text_stream_unsafe_reason,
+    evidence_text_unsafe_reason,
 )
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
@@ -61,7 +61,6 @@ def write_evaluation_outputs_from_chunks(
     spec: EvaluationSpec,
     output_spec: OutputSpec,
     layout: StorageLayout,
-    n_groups: int,
 ) -> Path:
     """Persist managed evaluation chunks without retaining aggregate frames."""
     output_bundle = derive_output_bundle_root(
@@ -72,7 +71,9 @@ def write_evaluation_outputs_from_chunks(
 
     def _write(temp_root: Path) -> None:
         facts = _write_evaluation_artifact_chunks(
-            chunks, temp_root=temp_root, spec=spec, n_groups=n_groups
+            chunks,
+            temp_root=temp_root,
+            spec=spec,
         )
         evaluation_diagnostics, ic_summary, group_spread_summary, coverage_summary = (
             summary_factory()
@@ -95,29 +96,21 @@ def write_evaluation_outputs_from_chunks(
             ic_summary=ic_summary,
             group_spread_summary=group_spread_summary,
             spec=spec,
-            n_groups=n_groups,
         )
         facts["ic_summary_rows"] = len(ic_summary)
         facts["group_spread_summary_rows"] = len(group_spread_summary)
         validate_evaluation_diagnostics_consistency(
             evaluation_diagnostics=evaluation_diagnostics,
             spec=spec,
-            n_groups=n_groups,
             **facts,
         )
         write_parquet(
             ic_summary,
             temp_root / "ic_summary.parquet",
-            engine="pyarrow",
-            compression="zstd",
-            index=False,
         )
         write_parquet(
             group_spread_summary,
             temp_root / "group_spread_summary.parquet",
-            engine="pyarrow",
-            compression="zstd",
-            index=False,
         )
         rendered_summary = evaluation_report.render_evaluation_summary(
             spec=spec,
@@ -126,10 +119,7 @@ def write_evaluation_outputs_from_chunks(
             group_spread_summary=group_spread_summary,
             coverage_summary=coverage_summary,
         )
-        unsafe_summary = evidence_text_stream_unsafe_reason(
-            rendered_summary[offset : offset + 2048].encode("utf-8")
-            for offset in range(0, len(rendered_summary), 2048)
-        )
+        unsafe_summary = evidence_text_unsafe_reason(rendered_summary)
         if unsafe_summary is not None:
             raise ValueError(f"evaluation_summary_share_unsafe: {unsafe_summary}")
         filesystem_write_text(
@@ -155,7 +145,6 @@ def _write_evaluation_artifact_chunks(
     *,
     temp_root: Path,
     spec: EvaluationSpec,
-    n_groups: int,
 ) -> dict[str, object]:
     paths = {
         "metrics": temp_root / "metrics.parquet",
@@ -235,7 +224,6 @@ def _write_evaluation_artifact_chunks(
                         columns=EVALUATION_GROUP_SPREAD_SUMMARY_COLUMNS
                     ),
                     spec=spec,
-                    n_groups=n_groups,
                 )
                 timestamps = strict_timestamp_series(
                     metrics["timestamp"], error="evaluation_diagnostics_inconsistent"
@@ -317,9 +305,6 @@ def _write_evaluation_artifact_chunks(
             write_parquet(
                 empty_frames.get(name, pd.DataFrame(columns=list(columns))),
                 paths[name],
-                engine="pyarrow",
-                compression="zstd",
-                index=False,
             )
     return {
         "rows_input": rows_input,

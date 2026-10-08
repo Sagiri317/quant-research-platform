@@ -9,34 +9,14 @@ from pathlib import Path
 import pytest
 
 from quant_research_platform.sources.tardis.raw import import_slices, iter_native_slice
-
-
-def _slices(root: Path, first: bytes = b"", *, count=144):
-    root.mkdir()
-    result = []
-    for offset in range(0, count * 10, 10):
-        path = root / f"native-{offset:04d}.gz"
-        path.write_bytes(gzip.compress(first if offset == 0 else b"", mtime=0))
-        result.append(path)
-    return result
-
-
-def _snapshot(timestamp="2026-09-01T00:00:01.000000Z"):
-    value = {
-        "stream": "btcusdt@depthSnapshot",
-        "generated": True,
-        "data": {"lastUpdateId": 100, "bids": [["100", "2"]], "asks": [["101", "2"]]},
-    }
-    return (timestamp + " " + json.dumps(value) + "\n").encode()
+from tests.helpers.tardis import _slices, _snapshot
 
 
 def test_import_preserves_native_compressed_bytes_and_disconnect_line(tmp_path):
     slices = _slices(tmp_path / "source", _snapshot() + b"\n")
     destination = tmp_path / "published"
-    result = import_slices(
-        destination, date="2026-09-01", slices=slices, byte_budget=1024**2
-    )
-    assert len(result["files"]) == 144
+    result = import_slices(destination, date="2026-09-01", slices=slices)
+    assert len(result["files"]) == 1
     for source, member in zip(slices, result["files"], strict=True):
         assert member["path"].endswith(".txt.gz")
         actual = (destination / member["path"]).read_bytes()
@@ -67,21 +47,17 @@ def test_bad_native_input_is_not_published(tmp_path, first):
     slices = _slices(tmp_path / "source", first)
     destination = tmp_path / "published"
     with pytest.raises(ValueError):
-        import_slices(
-            destination, date="2026-09-01", slices=slices, byte_budget=1024**2
-        )
+        import_slices(destination, date="2026-09-01", slices=slices)
     assert not destination.exists()
 
 
-def test_byte_budget_failure_preserves_input_and_removes_staging(tmp_path):
+def test_import_preserves_input_without_byte_quota(tmp_path):
     slices = _slices(tmp_path / "source", _snapshot())
     before = slices[0].read_bytes()
-    with pytest.raises(ValueError, match="tardis_download_budget_exceeded"):
-        import_slices(
-            tmp_path / "published", date="2026-09-01", slices=slices, byte_budget=1
-        )
+    destination = tmp_path / "published"
+    import_slices(destination, date="2026-09-01", slices=slices)
     assert slices[0].read_bytes() == before
-    assert not (tmp_path / "published").exists()
+    assert destination.exists()
 
 
 def test_native_line_order_is_preserved_without_a_fabricated_clock(tmp_path):
@@ -152,7 +128,6 @@ def test_archive_duration_and_source_identity_are_not_limited_to_one_day(
         date="2026-12-31",
         offset_minutes=1430,
         slices=slices,
-        byte_budget=1024**2,
     )
     assert len(manifest["files"]) == count
     assert manifest["files"][-1]["offset_minutes"] == 1430 + (count - 1) * 10
@@ -185,7 +160,6 @@ def test_download_crosses_midnight_using_native_calendar_addresses(
         date="2026-12-31",
         offset_minutes=1430,
         slice_count=3,
-        byte_budget=1024**2,
     )
     assert [(r["from"][0], r["offset"][0]) for r in requests] == [
         ("2026-12-31", "1430"),
@@ -203,7 +177,6 @@ def test_invalid_slice_range_is_not_published(tmp_path, offset, count):
             date="2026-09-01",
             offset_minutes=offset,
             slices=slices,
-            byte_budget=1024**2,
         )
     assert not (tmp_path / "published").exists()
 
@@ -252,7 +225,6 @@ def test_approved_native_scopes_publish_and_reopen(
         exchange=exchange,
         symbols=(symbol,),
         channels=channels,
-        byte_budget=1024**2,
     )
     assert result["exchange"] == exchange
     assert result["symbols"] == [symbol]
@@ -287,7 +259,6 @@ def test_native_scope_rejects_unapproved_requests(
             exchange=exchange,
             symbols=symbols,
             channels=channels,
-            byte_budget=1024,
         )
     assert not (tmp_path / "out").exists()
 
@@ -351,7 +322,7 @@ def test_native_trade_history_preserves_exact_identities():
 
 
 def test_trade_order_failure_retains_safe_source_coordinates(tmp_path):
-    from tests.sources.tardis.test_replay import _line
+    from tests.helpers.tardis import _line
 
     def trade(identifier):
         return _line(
@@ -380,7 +351,6 @@ def test_trade_order_failure_retains_safe_source_coordinates(tmp_path):
             tmp_path / "published",
             date="2026-09-01",
             slices=_slices(tmp_path / "native", trade(10) + trade(9), count=1),
-            byte_budget=1024**2,
         )
     note = " ".join(caught.value.__notes__)
     assert all(
@@ -425,7 +395,6 @@ def test_import_iterator_close_preserves_first_failure(
             tmp_path / "published",
             date="2026-09-01",
             slices=_slices(tmp_path / "native", _snapshot(), count=1),
-            byte_budget=1024**2,
         )
     assert caught.value is (primary if body_fails else secondary)
     if body_fails:
@@ -462,16 +431,13 @@ def _download_archive(kind, root):
     from quant_research_platform.sources.tardis.raw import download_slices
 
     if kind == "native":
-        return download_slices(
-            root, date="2026-08-01", slice_count=1, byte_budget=1024**2
-        )
+        return download_slices(root, date="2026-08-01", slice_count=1)
     return download_dataset(
         root,
         exchange="bybit",
         dataset_type="trades",
         symbol="BTCUSDT",
         date="2026-08-01",
-        byte_budget=1024**2,
     )
 
 
@@ -583,7 +549,6 @@ def test_declared_native_member_missing_is_invalid_not_unacquired(
         root,
         date="2026-08-01",
         slices=_slices(tmp_path / "native", count=1),
-        byte_budget=1024**2,
     )
     assert market_source_identity(root, "synthetic") is not None
     assert native_source_identity(root, "synthetic", **scope) is not None
@@ -621,7 +586,6 @@ def test_native_manifest_removed_after_selection_is_identity_failure(
         root,
         date="2026-08-01",
         slices=_slices(tmp_path / "native", count=1),
-        byte_budget=1024**2,
     )
     original = replay._capture_raw_file_identity
     calls = 0
@@ -666,12 +630,8 @@ def test_native_sidecar_digest_preserves_failure_and_existing_archive(
 
     def publish(destination):
         if kind == "import":
-            return raw.import_slices(
-                destination, date="2026-09-01", slices=slices, byte_budget=1024**2
-            )
-        return raw.download_slices(
-            destination, date="2026-09-01", slice_count=1, byte_budget=1024**2
-        )
+            return raw.import_slices(destination, date="2026-09-01", slices=slices)
+        return raw.download_slices(destination, date="2026-09-01", slice_count=1)
 
     good = tmp_path / "good"
     manifest = publish(good)

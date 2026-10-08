@@ -392,89 +392,6 @@ def test_research_dataset_assembles_intraday_timestamp_window(tmp_path: Path) ->
     assert sorted(result["timestamp"].unique()) == list(timestamps[1:])
 
 
-def test_research_dataset_assembler_generates_feature_transforms_from_factors(
-    tmp_path: Path,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    processed_catalog = make_demo_processed_catalog()
-    dataset_catalog = ResearchDatasetCatalog(
-        (
-            ResearchDatasetSpec(
-                data_id="demo",
-                market_id=MarketId("a_share"),
-                input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
-                base_input_data_id="demo_annotations",
-                factor_columns=("momentum_20d",),
-                feature_columns=("momentum_20d_zscore",),
-                feature_transforms=(
-                    FeatureTransformSpec(
-                        transform_id="momentum_20d_zscore",
-                        source_columns=("momentum_20d",),
-                        output_columns=("momentum_20d_zscore",),
-                        transform="cross_sectional_zscore",
-                    ),
-                ),
-                label_columns=("forward_return_20d",),
-                filter_columns=("eligible", "can_enter", "can_exit"),
-                context_columns=("market_type",),
-                frequency=DataFrequency.DAILY,
-                grain=DataGrain.RESEARCH_ROW,
-                column_roles={
-                    "market_id": ColumnRole.KEY,
-                    "asset_id": ColumnRole.KEY,
-                    "timestamp": ColumnRole.TIMESTAMP,
-                    "momentum_20d": ColumnRole.FACTOR,
-                    "momentum_20d_zscore": ColumnRole.FEATURE,
-                    "forward_return_20d": ColumnRole.LABEL,
-                    "eligible": ColumnRole.UNIVERSE,
-                    "can_enter": ColumnRole.MASK,
-                    "can_exit": ColumnRole.MASK,
-                    "market_type": ColumnRole.CONTEXT,
-                },
-                primary_key=PLATFORM_ASSET_TIME_KEY,
-                partition_columns=("year",),
-            ),
-        )
-    )
-    write_demo_processed_inputs(layout, processed_catalog)
-    assemble_research_dataset(
-        layout=layout,
-        dataset_catalog=dataset_catalog,
-        processed_catalog=processed_catalog,
-        dataset_id="demo",
-        time_window=TimeWindow("2014-01-02", "2014-01-03"),
-    )
-    result = pd.concat(
-        iter_research_dataset_chunks(
-            layout,
-            market_id=MarketId("a_share"),
-            dataset_id="demo",
-            time_window=TimeWindow("2014-01-02", "2014-01-03"),
-        ),
-        ignore_index=True,
-    ).sort_values(["timestamp", "asset_id"])
-    assert list(result.columns) == [
-        "market_id",
-        "asset_id",
-        "timestamp",
-        "momentum_20d",
-        "momentum_20d_zscore",
-        "forward_return_20d",
-        "eligible",
-        "can_enter",
-        "can_exit",
-        "market_type",
-    ]
-    assert result["momentum_20d_zscore"].tolist() == pytest.approx(
-        [-1.0, 1.0, 1.0, -1.0]
-    )
-    validate_research_input(
-        result,
-        dataset_catalog.get("demo"),
-        input_columns=("momentum_20d", "momentum_20d_zscore"),
-    )
-
-
 def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
     tmp_path: Path,
 ) -> None:
@@ -542,87 +459,6 @@ def test_assembly_keeps_nanosecond_windows_through_persisted_inputs(
         ignore_index=True,
     )
     pd.testing.assert_frame_equal(result, frame, check_exact=True)
-
-
-def test_custom_feature_spec_survives_context_and_persisted_assembly(
-    tmp_path: Path,
-) -> None:
-    layout = StorageLayout(project_root=tmp_path)
-    roles = {
-        "market_id": ColumnRole.KEY,
-        "asset_id": ColumnRole.KEY,
-        "timestamp": ColumnRole.TIMESTAMP,
-        "factor": ColumnRole.FACTOR,
-        "label": ColumnRole.LABEL,
-        "eligible": ColumnRole.UNIVERSE,
-        "industry_level1_code": ColumnRole.CONTEXT,
-        "log_float_market_cap": ColumnRole.CONTEXT,
-    }
-    source = ProcessedDataSpec(
-        data_id="custom_inputs",
-        market_id=MarketId("a_share"),
-        kind=ProcessedDataKind.PANEL,
-        frequency=DataFrequency.DAILY,
-        grain=DataGrain.ASSET_TIMESTAMP,
-        column_roles=roles,
-        primary_key=PLATFORM_ASSET_TIME_KEY,
-        partition_columns=("year",),
-    )
-    datasets = make_research_dataset_catalog(
-        data_id="custom_rank",
-        input_data_ids=(source.data_id,),
-        base_input_data_id=source.data_id,
-        factor_columns=("factor",),
-        feature_columns=("rank_1",),
-        feature_transforms=(
-            FeatureTransformSpec(
-                transform_id="rank_1",
-                source_columns=("factor",),
-                output_columns=("rank_1",),
-                transform="cross_sectional_rank",
-            ),
-        ),
-        label_columns=("label",),
-        filter_columns=("eligible",),
-        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
-        context_columns=("industry_level1_code", "log_float_market_cap"),
-    )
-    frame = pd.DataFrame(
-        {
-            "market_id": "a_share",
-            "asset_id": ["a", "b", "c"],
-            "timestamp": pd.to_datetime(["2020-01-03"] * 3),
-            "factor": [1.0, 2.0, 3.0],
-            "label": 0.0,
-            "eligible": True,
-            "industry_level1_code": "A",
-            "log_float_market_cap": [1.0, 2.0, 3.0],
-        }
-    )
-    write_dataset(
-        layout.processed_data_root(source.market_id, source.kind, source.data_id),
-        frame,
-        spec=source,
-    )
-    window = TimeWindow("2020-01-03", "2020-01-03")
-    assemble_research_dataset(
-        layout=layout,
-        dataset_catalog=datasets,
-        processed_catalog=ProcessedDataCatalog((source,)),
-        dataset_id="custom_rank",
-        time_window=window,
-    )
-    result = pd.concat(
-        iter_research_dataset_chunks(
-            layout,
-            market_id=MarketId("a_share"),
-            dataset_id="custom_rank",
-            time_window=window,
-        ),
-        ignore_index=True,
-    )
-    assert result["rank_1"].tolist() == pytest.approx([1 / 3, 2 / 3, 1.0])
-    assert not any(column.startswith("feature_") for column in result)
 
 
 def test_research_dataset_session_complete_chunks_preserve_output(
@@ -1227,3 +1063,97 @@ def test_model_target_uses_last_participating_label_maturity_and_keeps_raw_clock
         )
         == 2
     )
+
+
+@pytest.mark.parametrize("recipe", ("a_share_canonical", "a_share_quantile_1_99"))
+def test_named_feature_recipe_assembles_complete_sessions_and_persists_identity(
+    tmp_path, recipe
+):
+    import numpy as np
+
+    from quant_research_platform.research.features.transforms import (
+        a_share_feature_pipeline,
+    )
+    from quant_research_platform.storage.datasets.schema import data_spec_payload
+
+    layout = StorageLayout(project_root=tmp_path)
+    transform = FeatureTransformSpec(recipe, ("factor",))
+    context = ("industry_standard_id", "industry_level1_code", "log_float_market_cap")
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": [f"asset_{i:03d}" for i in range(120)],
+            "timestamp": pd.Timestamp("2020-01-03"),
+            "factor": np.sin(np.arange(120)),
+            "label": 0.0,
+            "eligible": True,
+            "industry_standard_id": "fixture",
+            "industry_level1_code": "A",
+            "log_float_market_cap": np.arange(120) * 0.01,
+        }
+    )
+    frame.loc[119, "factor"] = 1000.0
+    roles = {
+        "market_id": ColumnRole.KEY,
+        "asset_id": ColumnRole.KEY,
+        "timestamp": ColumnRole.TIMESTAMP,
+        "factor": ColumnRole.FACTOR,
+        "label": ColumnRole.LABEL,
+        "eligible": ColumnRole.UNIVERSE,
+        **dict.fromkeys(context, ColumnRole.CONTEXT),
+    }
+    source = ProcessedDataSpec(
+        data_id="recipe_inputs",
+        market_id=MarketId("a_share"),
+        kind=ProcessedDataKind.PANEL,
+        frequency=DataFrequency.DAILY,
+        grain=DataGrain.ASSET_TIMESTAMP,
+        column_roles=roles,
+        primary_key=PLATFORM_ASSET_TIME_KEY,
+        partition_columns=("year",),
+    )
+    datasets = make_research_dataset_catalog(
+        data_id="recipe_case",
+        input_data_ids=(source.data_id,),
+        base_input_data_id=source.data_id,
+        factor_columns=("factor",),
+        feature_columns=transform.output_columns,
+        feature_transforms=(transform,),
+        label_columns=("label",),
+        filter_columns=("eligible",),
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+        context_columns=context,
+    )
+    write_dataset(
+        layout.processed_data_root(source.market_id, source.kind, source.data_id),
+        (frame.iloc[i : i + 25] for i in range(0, len(frame), 25)),
+        spec=source,
+    )
+    window = TimeWindow("2020-01-03", "2020-01-03")
+    assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=datasets,
+        processed_catalog=ProcessedDataCatalog((source,)),
+        dataset_id="recipe_case",
+        time_window=window,
+    )
+    saved = pd.concat(
+        iter_research_dataset_chunks(
+            layout,
+            market_id=MarketId("a_share"),
+            dataset_id="recipe_case",
+            time_window=window,
+        ),
+        ignore_index=True,
+    )
+    expected = a_share_feature_pipeline(
+        frame, factor_columns=("factor",), recipe_id=recipe
+    )
+    for column in ("factor", *transform.output_columns):
+        pd.testing.assert_series_equal(
+            saved[column], expected[column], check_exact=True
+        )
+    assert saved.feature_factor.notna().all()
+    assert data_spec_payload(datasets.get("recipe_case"))["feature_transforms"] == [
+        {"recipe_id": recipe, "source_columns": ["factor"]},
+    ]

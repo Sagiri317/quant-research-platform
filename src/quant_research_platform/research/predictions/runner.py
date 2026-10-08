@@ -31,6 +31,7 @@ from quant_research_platform.research.models.persisted import (
 from quant_research_platform.research.predictions.outputs import (
     PredictionResult,
     _add_a_share_scores,
+    _PredictionBuildState,
     build_prediction_result_from_frames,
 )
 from quant_research_platform.runtime.dataframes import iter_complete_time_frames
@@ -88,7 +89,7 @@ def build_prediction_result_from_persisted_model(
             for column in item["model_metadata"]["input_columns"]
         )
     )
-    state = _PredictionMetadataState(selected_input_columns)
+    state = _PredictionBuildState()
 
     def output_chunks() -> Iterable[pd.DataFrame]:
         if access_window == "development":
@@ -262,60 +263,11 @@ def build_prediction_result_from_persisted_model(
             selection_group=selection_group,
             access_window=access_window,
         ),
-        prediction_metadata_factory=lambda: state.metadata(prediction_spec),
+        prediction_metadata_factory=lambda: state.prediction_metadata(
+            spec=prediction_spec, input_columns=selected_input_columns
+        ),
         _close=source.close,
     )
-
-
-class _PredictionMetadataState:
-    def __init__(self, input_columns: tuple[str, ...]) -> None:
-        self.input_columns = input_columns
-        self._metadata: list[dict[str, object]] = []
-
-    def add(self, metadata: dict[str, object]) -> None:
-        self._metadata.append(metadata)
-
-    def metadata(self, spec) -> dict[str, object]:
-        if len(self._metadata) == 0:
-            raise ValueError("empty_prediction_window")
-        first = self._metadata[0]
-        effective_end = max(
-            (
-                pd.Timestamp(item["effective_test_end"])
-                for item in self._metadata
-                if item["effective_test_end"] is not None
-            ),
-            default=None,
-        )
-        if effective_end is None:
-            raise ValueError("empty_prediction_window")
-        return {
-            "prediction_mode": spec.prediction_mode,
-            "sample_filter_mode": spec.sample_filter_mode,
-            "filter_columns_used": first["filter_columns_used"],
-            "filter_definition": first["filter_definition"],
-            "rows_input": sum(int(item["rows_input"]) for item in self._metadata),
-            "rows_after_filter_mode": sum(
-                int(item["rows_after_filter_mode"]) for item in self._metadata
-            ),
-            "rows_after_input_dropna": sum(
-                int(item["rows_after_input_dropna"]) for item in self._metadata
-            ),
-            "prediction_rows": sum(
-                int(item["prediction_rows"]) for item in self._metadata
-            ),
-            "train_end": spec.train_end,
-            "test_start": spec.test_start,
-            "requested_test_end": spec.test_end,
-            "effective_test_end": effective_end.date().isoformat()
-            if spec.prediction_mode == "a_share_oos"
-            else effective_end.isoformat(),
-            "is_oos": spec.is_oos,
-            "is_final_oos_window": spec.is_final_oos_window,
-            "input_columns": list(self.input_columns),
-            "input_count": len(self.input_columns),
-            "prediction_column": spec.prediction_column,
-        }
 
 
 def build_crypto_predictions(
@@ -378,7 +330,7 @@ def build_crypto_predictions(
             evaluation_asset_ids=tuple(entries[0]["evaluation_asset_ids"]),
             sample_filter_mode=entries[0]["model_metadata"]["sample_filter_mode"],
         )
-        state = _PredictionMetadataState(inputs)
+        state = _PredictionBuildState()
 
         def output_chunks(entries=entries, spec=spec, state=state, inputs=inputs):
             for entry in entries:
@@ -429,7 +381,7 @@ def build_crypto_predictions(
                         except GeneratorExit:
                             return
                     state.add(result.prediction_metadata_factory())
-            if len(state._metadata) != len(entries):
+            if state.segments != len(entries):
                 raise ValueError("crypto_prediction_fold_coverage_invalid")
 
         source = output_chunks()
@@ -439,6 +391,8 @@ def build_crypto_predictions(
             persisted_model.prediction_lineage(
                 model_id, time_window, access_window=access_window
             ),
-            lambda state=state, spec=spec: state.metadata(spec),
+            lambda state=state, spec=spec, inputs=inputs: state.prediction_metadata(
+                spec=spec, input_columns=inputs
+            ),
             source.close,
         )

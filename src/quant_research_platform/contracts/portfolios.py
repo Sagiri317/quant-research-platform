@@ -7,6 +7,8 @@ from dataclasses import dataclass, replace
 from math import isclose, isfinite, ulp
 from typing import Literal
 
+import pandas as pd
+
 from quant_research_platform.contracts.validation import (
     strict_finite_float,
 )
@@ -62,47 +64,6 @@ PORTFOLIO_LEDGER_COST_COLUMNS = (
     "transfer_fee_cost",
     "slippage_cost",
     "impact_cost",
-)
-CONTINUOUS_EXECUTION_COLUMNS = (
-    "decision_timestamp",
-    "execution_date",
-    "asset_id",
-    "pre_trade_notional",
-    "target_notional",
-    "executed_delta_notional",
-    "post_trade_notional",
-    "holding_return",
-    "end_notional",
-    *PORTFOLIO_LEDGER_COST_COLUMNS,
-    "block_reason",
-    "adv20",
-    "alpha_score",
-    "decision_delta_weight",
-    "expected_alpha",
-    "benchmark_weight",
-    "asset_specific_variance",
-    "decision_reason",
-    "alpha_status",
-    "alpha_undefined_reason",
-    "alpha_slope",
-    "alpha_intercept",
-    "alpha_slope_se",
-    "alpha_slope_t",
-    "alpha_slope_pvalue",
-    "alpha_slope_ci_low",
-    "alpha_slope_ci_high",
-    "alpha_weighted_r2",
-    "alpha_inference_status",
-    "alpha_inference_reason",
-    "alpha_r2_status",
-    "alpha_r2_reason",
-    "alpha_coverage",
-    "alpha_valid_dates",
-    "alpha_scheduled_dates",
-    "predicted_tracking_error",
-    "portfolio_factor_variance",
-    "portfolio_specific_variance",
-    "expected_transaction_cost",
 )
 
 
@@ -814,3 +775,36 @@ class TradeCostComponents:
             + self.slippage_cost
             + self.impact_cost
         )
+
+
+def _portfolio_session_frame(
+    frame: pd.DataFrame | None, required_columns: tuple[str, ...]
+) -> pd.DataFrame:
+    if frame is None:
+        return pd.DataFrame(columns=required_columns)
+    if type(frame) is not pd.DataFrame or not set(required_columns).issubset(
+        frame.columns
+    ):
+        raise ValueError("portfolio_input_schema_invalid")
+    result = frame.loc[:, list(required_columns)].copy()
+    if "asset_id" in result:
+        result["asset_id"] = result["asset_id"].astype("string")
+    if "timestamp" in result:
+        result["timestamp"] = pd.to_datetime(
+            result["timestamp"], errors="raise"
+        ).dt.normalize()
+    if "asset_id" in result and result["asset_id"].isna().any():
+        raise ValueError("portfolio_input_key_invalid")
+    if "timestamp" in result and result["timestamp"].isna().any():
+        raise ValueError("portfolio_input_key_invalid")
+    if {"timestamp", "asset_id"}.issubset(result.columns) and result.duplicated(
+        ["timestamp", "asset_id"]
+    ).any():
+        raise ValueError("portfolio_input_key_invalid")
+    return result.sort_values(
+        [column for column in ("timestamp", "asset_id") if column in result],
+        kind="mergesort",
+    ).reset_index(drop=True)
+
+
+_EXECUTION_COLUMNS = ("asset_id", "timestamp", "can_enter", "can_exit")

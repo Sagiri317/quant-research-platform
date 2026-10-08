@@ -24,12 +24,10 @@ def test_target_spec_and_plan_are_immutable_control_contracts() -> None:
     spec = TargetSpec(
         target_id="dataset",
         dependencies=("panel",),
-        producer_id="a_share_dataset",
     )
     plan = TargetPlan(
         target_id=spec.target_id,
         upstream_target_ids=spec.dependencies,
-        producer_id=spec.producer_id,
         decision=PlanDecision.BUILD,
         requested_identity="a" * 64,
     )
@@ -40,7 +38,6 @@ def test_target_spec_and_plan_are_immutable_control_contracts() -> None:
         "requested_identity": "a" * 64,
         "matching_instance_identity": None,
         "upstream_identities": {},
-        "producer_binding": "a_share_dataset",
         "decision": "BUILD",
         "blocker": None,
         "rebuild": False,
@@ -92,7 +89,6 @@ def test_build_plan_requires_requested_identity() -> None:
         TargetPlan(
             target_id="dataset",
             upstream_target_ids=(),
-            producer_id="producer",
             decision=PlanDecision.BUILD,
         )
 
@@ -100,7 +96,6 @@ def test_build_plan_requires_requested_identity() -> None:
         TargetPlan(
             target_id="dataset",
             upstream_target_ids=(),
-            producer_id="producer",
             decision=PlanDecision.BUILD,
             requested_identity="a" * 64,
             matching_instance_identity="a" * 64,
@@ -108,7 +103,6 @@ def test_build_plan_requires_requested_identity() -> None:
     rebuilt = TargetPlan(
         target_id="dataset",
         upstream_target_ids=(),
-        producer_id="producer",
         decision=PlanDecision.BUILD,
         requested_identity="a" * 64,
         matching_instance_identity="a" * 64,

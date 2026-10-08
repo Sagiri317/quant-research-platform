@@ -86,7 +86,7 @@ def test_research_report_round_trips_only_matching_run_semantics(
     )
 
 
-def test_report_keeps_numeric_byte_counts_and_rejects_stock_strings(tmp_path):
+def test_report_keeps_numeric_byte_counts_and_stock_strings(tmp_path):
     envelope, payload = _report()
     payload["sections"]["run observations"] = {
         "metrics": {"read_bytes": {"value": 393216, "unit": "bytes"}}
@@ -103,10 +103,15 @@ def test_report_keeps_numeric_byte_counts_and_rejects_stock_strings(tmp_path):
     )
     assert "393,216" in filesystem_read_text(root / "report.md", encoding="utf-8")
     payload["sections"]["Data/Coverage"]["sample"] = "600000.SH"
-    with pytest.raises(ValueError, match="unsafe_evidence: stock_sample"):
-        write_research_report_artifact(
-            tmp_path / "private", envelope=envelope, payload=payload
-        )
+    root = write_research_report_artifact(
+        tmp_path / "stock", envelope=envelope, payload=payload
+    )
+    assert (
+        read_research_report_artifact(
+            root, expected_identity=envelope.instance_identity
+        )["sections"]["Data/Coverage"]["sample"]
+        == "600000.SH"
+    )
 
 
 @pytest.mark.parametrize(
@@ -188,7 +193,7 @@ def test_report_reader_preserves_valid_published_markdown_from_another_renderer(
     def forbidden(_payload):
         raise AssertionError("reader_rerendered_published_markdown")
 
-    monkeypatch.setattr(research, "_markdown", forbidden)
+    monkeypatch.setattr(research, "render_research_report", forbidden)
     assert (
         research.read_research_report_artifact(root, expected_identity=root.name)
         == payload

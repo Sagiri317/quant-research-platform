@@ -8,15 +8,13 @@ import gzip
 import hashlib
 import math
 import os
+import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    require_free_disk_headroom,
-)
 from quant_research_platform.sources.tardis.raw import (
     _COPY_BYTES,
     _date,
@@ -32,7 +30,6 @@ from quant_research_platform.storage.identity import (
     require_unaliased_path,
 )
 from quant_research_platform.storage.manifests import read_manifest
-from quant_research_platform.storage.raw_snapshots import MAX_RECORD_BYTES
 
 SCHEMA_ID = "qrp-tardis-normalized-archive"
 _COMMON = ("exchange", "symbol", "timestamp", "local_timestamp")
@@ -84,16 +81,17 @@ def _rows(path, *, exchange, dataset_type, symbol, date, sha256):
         _verified_file(path, expected_sha256=sha256) as raw,
         closing_iterator(gzip.GzipFile(fileobj=raw)) as stream,
     ):
+        csv.field_size_limit(sys.maxsize)
         header = None
         number = -1
         while True:
             number += 1
-            line = stream.readline(MAX_RECORD_BYTES + 1)
+            line = stream.readline()
             if not line:
                 if header is None:
                     raise ValueError("tardis_normalized_header_missing")
                 return
-            if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
+            if not line.endswith(b"\n"):
                 raise ValueError("tardis_normalized_record_invalid")
             try:
                 cells = next(csv.reader((line.decode("utf-8"),), strict=True))
@@ -150,14 +148,11 @@ def _rows(path, *, exchange, dataset_type, symbol, date, sha256):
                 return
 
 
-def download_dataset(output_root, *, exchange, dataset_type, symbol, date, byte_budget):
+def download_dataset(output_root, *, exchange, dataset_type, symbol, date):
     """Keep original gzip bytes and validate every row before atomic publication."""
     url = _request_url(exchange, dataset_type, symbol, date)
-    if type(byte_budget) is not int or byte_budget <= 0:
-        raise ValueError("tardis_download_budget_invalid")
 
     def write(root):
-        require_free_disk_headroom(root, reserve_bytes=byte_budget)
         path = root / "data.csv.gz"
         digest = hashlib.sha256()
         size = 0
@@ -176,9 +171,6 @@ def download_dataset(output_root, *, exchange, dataset_type, symbol, date, byte_
                 raise ValueError("tardis_http_response_invalid")
             while block := response.read(_COPY_BYTES):
                 size += len(block)
-                if size > byte_budget:
-                    raise ValueError("tardis_download_budget_exceeded")
-                require_free_disk_headroom(root, reserve_bytes=len(block))
                 output.write(block)
                 digest.update(block)
             output.flush()

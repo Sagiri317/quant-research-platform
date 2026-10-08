@@ -19,10 +19,8 @@ from quant_research_platform.contracts.experiments import (
     validate_trial_ledger_reference,
 )
 from quant_research_platform.contracts.json_codec import (
-    MAX_QRP_JSON_BYTES,
-    bounded_qrp_json_object_snapshot,
     canonical_identity_bytes,
-    render_qrp_json_object,
+    qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.targets import _operation_evidence
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -51,7 +49,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
-    read_bounded_qrp_json,
+    read_qrp_json_file,
     write_manifest,
 )
 from quant_research_platform.storage.parquet import (
@@ -344,7 +342,7 @@ def read_semantic_artifact_record(
         if expected_member_identities is None
         else expected_member_identities["manifest.json"]
     )
-    payload = read_bounded_qrp_json(
+    payload = read_qrp_json_file(
         root / "manifest.json", expected_identity=manifest_identity
     )[1]
     if set(payload) != {
@@ -396,7 +394,7 @@ def read_semantic_artifact_operational_metadata(
 
 
 def _operational_metadata(value: object) -> dict[str, object]:
-    snapshot = bounded_qrp_json_object_snapshot(value, max_bytes=MAX_QRP_JSON_BYTES)
+    snapshot = qrp_json_object_snapshot(value)
     if set(snapshot) - {
         "model_trial_ledgers",
         "model_phase_observations",
@@ -432,7 +430,7 @@ def _operational_metadata(value: object) -> dict[str, object]:
                 or set(phase)
                 != {
                     "phase",
-                    "selection_group",
+                    "selection_groups",
                     "family_id",
                     "quarter_id",
                     "fit_count",
@@ -441,8 +439,9 @@ def _operational_metadata(value: object) -> dict[str, object]:
                 or type(phase["phase"]) is not str
                 or phase["phase"]
                 not in {"shared_candidate_fit", "group_scoring", "final_refit"}
-                or (type(phase["selection_group"]) not in {str, type(None)})
-                or (phase["selection_group"] not in {None, "global", "quarterly"})
+                or type(phase["selection_groups"]) is not list
+                or phase["selection_groups"]
+                not in ([], ["global"], ["quarterly"], ["global", "quarterly"])
                 or (type(phase["fit_count"]) is not int)
                 or (phase["fit_count"] < 0)
                 or (type(phase["observations"]) is not dict)
@@ -538,10 +537,8 @@ def _member_inventory(
 ) -> tuple[dict[str, object], ...]:
     members: list[dict[str, object]] = []
     identities: dict[str, DatasetFileIdentity] = {}
-    encoded_bytes = 0
 
     def record(relative: str, child: Path) -> None:
-        nonlocal encoded_bytes
         if expected_paths is not None and relative not in expected_paths:
             raise ValueError("semantic_artifact_member_integrity_invalid")
         identity = (
@@ -551,9 +548,6 @@ def _member_inventory(
         )
         identities[relative] = identity
         member = _member_record(relative, child, identity=identity)
-        encoded_bytes += len(render_qrp_json_object(member).encode("utf-8"))
-        if encoded_bytes > MAX_QRP_JSON_BYTES:
-            raise ValueError("semantic_artifact_member_limit_exceeded")
         members.append(member)
 
     _visit_member_paths(root, record)
@@ -581,7 +575,6 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
     except ValueError as exc:
         raise ValueError("semantic_artifact_root_invalid") from exc
     pending = []
-    path_bytes = 0
     try:
         try:
             pending.append((root, "", root_identity, filesystem_scandir(root)))
@@ -598,9 +591,6 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
                         raise ValueError("semantic_artifact_member_set_changed")
                     continue
                 relative = f"{prefix}/{entry.name}" if prefix else entry.name
-                path_bytes += len(relative.encode("utf-8")) + 2
-                if path_bytes > MAX_QRP_JSON_BYTES:
-                    raise ValueError("semantic_artifact_member_limit_exceeded")
                 if entry.is_symlink():
                     raise ValueError("semantic_artifact_member_invalid")
                 child = directory / entry.name

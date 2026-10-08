@@ -5,7 +5,6 @@ from __future__ import annotations
 from collections.abc import Iterable, Mapping
 from pathlib import PurePosixPath
 
-from quant_research_platform.artifacts.definitions import output_catalog
 from quant_research_platform.artifacts.outputs.evaluation_validation import (
     EVALUATION_ARTIFACTS,
     validate_evaluation_output_metadata_shape,
@@ -71,10 +70,8 @@ def validate_output_manifest_business_envelope(
         raise ValueError("output_manifest_definition_id_invalid") from exc
     if output_id == output_definition_id:
         raise ValueError("output_manifest_output_id_invalid")
-    try:
-        definition = output_catalog().get(output_definition_id)
-    except KeyError as exc:
-        raise ValueError("output_manifest_definition_id_invalid") from exc
+    if output_definition_id not in _OUTPUT_DEFINITION_FILES:
+        raise ValueError("output_manifest_definition_id_invalid")
 
     run_id = value["run_id"]
     if type(run_id) is not str:
@@ -93,9 +90,11 @@ def validate_output_manifest_business_envelope(
         validate_evaluation_output_metadata_shape(metadata)
     else:
         raise ValueError("output_manifest_definition_id_invalid")
-    if "run_type" in metadata and metadata["run_type"] != definition.run_type:
+    if "run_type" in metadata and metadata[
+        "run_type"
+    ] != output_definition_id.removesuffix("_outputs"):
         raise ValueError("output_manifest_metadata_invalid")
-    if "scope" in metadata and metadata["scope"] != str(definition.scope):
+    if "scope" in metadata and metadata["scope"] != "LOCAL_ONLY":
         raise ValueError("output_manifest_metadata_invalid")
     evidence_payload: dict[str, object] = {}
     if output_definition_id == "prediction_outputs":

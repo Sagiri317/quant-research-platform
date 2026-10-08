@@ -32,9 +32,7 @@ def _write(raw, *, rows=(), metadata_changes=None):
     def validate(root):
         manifest = read_manifest(root / "response.metadata.json")
         assert manifest["metadata"] == metadata
-        for _row in iter_csv_snapshot(
-            root, expected_manifest=manifest, max_bytes=1024 * 1024
-        ):
+        for _row in iter_csv_snapshot(root, expected_manifest=manifest):
             pass
 
     write_csv_snapshot(
@@ -42,7 +40,6 @@ def _write(raw, *, rows=(), metadata_changes=None):
         columns=FUNDING_COLUMNS,
         rows=rows,
         metadata=metadata,
-        max_bytes=1024 * 1024,
         validate=validate,
     )
 
@@ -263,6 +260,8 @@ def test_funding_adjacent_sources_require_declared_order_and_all_roots(tmp_path)
 def test_funding_unconsumed_later_source_is_verified_at_exit(
     tmp_path, monkeypatch, interrupt
 ):
+    import os
+
     import quant_research_platform.storage.raw_snapshots as snapshots
 
     handles = []
@@ -294,7 +293,9 @@ def test_funding_unconsumed_later_source_is_verified_at_exit(
         with read_funding_observations(tuple(roots), symbol="BTCUSDT") as source:
             assert next(source.forecasts).available_at_ns == 0
             path = roots[1] / "response.csv"
+            before = path.stat()
             path.write_bytes(path.read_bytes().replace(b"200", b"201"))
+            os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))
             if interrupt:
                 raise primary
     if interrupt:
@@ -403,3 +404,30 @@ def test_funding_coverage_status_types_reject_in_reader_and_identity(tmp_path, b
     } == changed_before
     assert {path.name: path.read_bytes() for path in good.iterdir()} == before
     assert funding_source_identity((good,), "ledger", symbol="BTCUSDT") == identity
+
+
+@pytest.mark.parametrize("member", ["response.csv", "response.metadata.json", "extra"])
+def test_funding_exit_proves_bytes_and_members_without_forecast_consumption(
+    tmp_path, member
+):
+    import os
+
+    raw = tmp_path / "raw"
+    _write(raw, rows=(("forecast", 0, 100, None, None, []),))
+    root = raw.parent / "funding" / "BTCUSDT"
+    with pytest.raises(ValueError):
+        with read_funding_observations((root,), symbol="BTCUSDT"):
+            path = root / member
+            if member == "extra":
+                path.write_bytes(b"extra")
+            else:
+                before = path.stat()
+                original = path.read_bytes()
+                changed = (
+                    original.replace(b"100", b"101")
+                    if member.endswith("csv")
+                    else original.replace(b"synthetic", b"synthEtic")
+                )
+                assert changed != original and len(changed) == len(original)
+                path.write_bytes(changed)
+                os.utime(path, ns=(before.st_atime_ns, before.st_mtime_ns))

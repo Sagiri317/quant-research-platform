@@ -8,6 +8,7 @@ import pytest
 
 from quant_research_platform.contracts.business_manifest import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+from quant_research_platform.contracts.targets import TargetPlan
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.models import fitting, production
@@ -180,7 +181,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
             empty_patch.setattr(production, "_model_input_chunks", no_legal_validation)
             empty_patch.setattr(
                 production.fitting,
-                "_fit_model_result_from_frames",
+                "_fit_model_result",
                 lambda *args, **kwargs: pytest.fail("empty validation reached fitting"),
             )
             empty_patch.setattr(
@@ -215,7 +216,7 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
     from quant_research_platform.contracts.business_manifest import (
         build_business_manifest_envelope,
     )
-    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.contracts.predictions import PredictionSpec
     from quant_research_platform.storage.layout import StorageLayout
     from quant_research_platform.storage.semantic_artifacts import (
@@ -278,8 +279,6 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
                     "prediction_outputs",
                     f"run_{spec.prediction_id}",
                     "crypto",
-                    "prediction",
-                    OutputScope.LOCAL_ONLY,
                 ),
                 layout=StorageLayout(staging),
                 output_chunks=(frame,),
@@ -304,7 +303,6 @@ def check_crypto_model_staging(*, layout, profile, saved):
     import json
     import pickle
     import shutil
-    from types import SimpleNamespace
 
     from sklearn.dummy import DummyRegressor
 
@@ -316,7 +314,6 @@ def check_crypto_model_staging(*, layout, profile, saved):
         _read_model_member,
         write_crypto_model_artifact,
     )
-    from quant_research_platform.runtime import resources
     from quant_research_platform.storage import parquet as parquet_storage
     from quant_research_platform.storage.identity import native_filesystem_path
     from quant_research_platform.storage.semantic_artifacts import (
@@ -641,7 +638,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
                 yield member
 
         message = {
-            "seed": "crypto_model_refit_binding_invalid",
+            "seed": "model_state_metadata_mismatch",
             "parameters": "crypto_model_parameters_misaligned",
             "missing_fold": "crypto_model_fold_coverage_invalid",
             "training_assets": "crypto_model_fold_binding_invalid",
@@ -649,20 +646,15 @@ def check_crypto_model_staging(*, layout, profile, saved):
             "refit_window": "crypto_model_fit_window_invalid",
             "trial_reference": "crypto_model_trial_references_invalid",
             "trial_binding": "crypto_model_trial_binding_invalid",
-            "disk": "insufficient_free_disk",
+            "disk": "model_write_failed",
             "primary": "model_pickle_primary",
         }[failure]
         primary = KeyboardInterrupt("model_pickle_primary")
         with pytest.MonkeyPatch.context() as patch:
             if failure == "disk":
-                patch.setattr(
-                    resources.shutil,
-                    "disk_usage",
-                    lambda _path: SimpleNamespace(free=1),
-                )
 
                 def reject_dump(*_args, **_kwargs):
-                    raise AssertionError("pickle_started_before_disk_admission")
+                    raise OSError("model_write_failed")
 
                 patch.setattr(persisted.pickle, "dump", reject_dump)
             if failure == "primary":
@@ -672,7 +664,7 @@ def check_crypto_model_staging(*, layout, profile, saved):
 
                 patch.setattr(persisted.pickle, "dump", fail_dump)
             expected = (
-                RuntimeError
+                OSError
                 if failure == "disk"
                 else KeyboardInterrupt
                 if failure == "primary"
@@ -1129,10 +1121,15 @@ def check_crypto_single_refit_lifecycle(tmp_path, monkeypatch):
             protocol=bound,
             layout=layout,
             spec=target,
-            planned={
-                "requested_identity": empty_envelope.instance_identity,
-                "upstream_identities": {dataset_id: dataset_identity},
-            },
+            planned=TargetPlan(
+                target_id=target.target_id,
+                upstream_target_ids=tuple(target.dependencies),
+                decision="BUILD",
+                **{
+                    "requested_identity": empty_envelope.instance_identity,
+                    "upstream_identities": {dataset_id: dataset_identity},
+                },
+            ),
             target_layout=layout,
             time_window=empty_window,
             research_window=empty_research_window,

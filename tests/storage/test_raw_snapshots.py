@@ -21,12 +21,10 @@ def test_csv_consumed_digest_is_verified_on_every_exit(
         columns=("value",),
         rows=((1,), (2,)),
         metadata={"source": "synthetic"},
-        max_bytes=1024,
         validate=lambda path: list(
             iter_csv_snapshot(
                 path,
                 expected_manifest=read_manifest(path / "response.metadata.json"),
-                max_bytes=1024,
             )
         ),
     )
@@ -37,7 +35,7 @@ def test_csv_consumed_digest_is_verified_on_every_exit(
         replacement = original.replace(b"2\n", b"3\n")
         assert replacement != original and len(replacement) == len(original)
         path.write_bytes(replacement)
-    rows = iter_csv_snapshot(root, expected_manifest=manifest, max_bytes=1024)
+    rows = iter_csv_snapshot(root, expected_manifest=manifest)
     assert next(rows) == (1,)
 
     def finish():
@@ -66,7 +64,7 @@ def test_csv_consumed_digest_is_verified_on_every_exit(
     assert read_manifest(root / "response.metadata.json") == manifest
 
 
-def test_raw_cell_codec_preserves_types_canonical_bytes_and_bounds():
+def test_raw_cell_codec_preserves_types_and_canonical_bytes():
     from quant_research_platform.storage.raw_snapshots import (
         decode_raw_cell,
         encode_raw_cell,
@@ -90,8 +88,16 @@ def test_raw_cell_codec_preserves_types_canonical_bytes_and_bounds():
     for invalid in (" 1", "1 ", "1e0", '"\\u4e2d"', '{"other":1}'):
         with pytest.raises(ValueError):
             decode_raw_cell(invalid)
-    with pytest.raises(ValueError, match="raw_csv_cell_bound_exceeded"):
-        decode_raw_cell('"' + "x" * (64 * 1024 + 1) + '"')
+    value = "x" * (1024 * 1024 + 1)
+    assert decode_raw_cell(encode_raw_cell(value)) == value
+    nested = b"bytes"
+    for _ in range(70):
+        nested = [nested]
+    assert decode_raw_cell(encode_raw_cell(nested)) == nested
+    cyclic = []
+    cyclic.append(cyclic)
+    with pytest.raises(ValueError, match="raw_csv_cycle"):
+        encode_raw_cell(cyclic)
 
 
 @pytest.mark.parametrize("field", ["byte_count", "metadata"])
@@ -106,19 +112,15 @@ def test_raw_manifest_expected_identity_preserves_json_numeric_types(tmp_path, f
         columns=("value",),
         rows=((1,), (2,)),
         metadata={"revision": 1},
-        max_bytes=1024,
         validate=lambda path: list(
             iter_csv_snapshot(
                 path,
                 expected_manifest=read_manifest(path / "response.metadata.json"),
-                max_bytes=1024,
             )
         ),
     )
     manifest = read_manifest(root / "response.metadata.json")
-    assert list(
-        iter_csv_snapshot(root, expected_manifest=manifest, max_bytes=1024)
-    ) == [(1,), (2,)]
+    assert list(iter_csv_snapshot(root, expected_manifest=manifest)) == [(1,), (2,)]
     changed = deepcopy(manifest)
     if field == "byte_count":
         changed["byte_count"] = float(changed["byte_count"])
@@ -127,4 +129,21 @@ def test_raw_manifest_expected_identity_preserves_json_numeric_types(tmp_path, f
     assert changed == manifest
     assert canonical_identity_bytes(changed) != canonical_identity_bytes(manifest)
     with pytest.raises(ValueError, match="raw_csv_metadata_invalid"):
-        list(iter_csv_snapshot(root, expected_manifest=changed, max_bytes=1024))
+        list(iter_csv_snapshot(root, expected_manifest=changed))
+
+
+def test_raw_snapshot_long_cell_and_record_roundtrip(tmp_path):
+    root = tmp_path / "large"
+    value = "x" * (1024 * 1024 + 1) + '\n"quoted"'
+
+    def read(path):
+        return list(
+            iter_csv_snapshot(
+                path, expected_manifest=read_manifest(path / "response.metadata.json")
+            )
+        )
+
+    write_csv_snapshot(
+        root, columns=("value",), rows=((value,),), metadata={}, validate=read
+    )
+    assert read(root) == [(value,)]

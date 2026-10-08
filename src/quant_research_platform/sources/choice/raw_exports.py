@@ -23,8 +23,8 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
-    read_bounded_qrp_json,
     read_manifest,
+    read_qrp_json_file,
 )
 from quant_research_platform.storage.raw_snapshots import (
     iter_csv_snapshot,
@@ -72,7 +72,6 @@ class ChoiceRequest:
     arguments: tuple[str, str, str]
     sdk_version: str
     cutoff: date
-    max_response_bytes: int
 
     def identity(self) -> str:
         return hashlib.sha256(
@@ -87,8 +86,6 @@ class ChoiceRequest:
             or len(self.arguments) != 3
             or any(type(value) is not str for value in self.arguments)
             or type(self.cutoff) is not date
-            or type(self.max_response_bytes) is not int
-            or self.max_response_bytes <= 0
             or type(self.sdk_version) is not str
             or not self.sdk_version
         ):
@@ -230,7 +227,6 @@ class ChoiceRawSession:
                 columns=(*_PREFIX, *response.Indicators),
                 rows=observed_rows(),
                 metadata=metadata,
-                max_bytes=request.max_response_bytes,
                 validate=lambda staging: deque(
                     _validated_rows(staging, request, metadata, require_complete=False),
                     maxlen=0,
@@ -252,7 +248,7 @@ def read_choice_response(
     metadata = response = header = {}
     data = [] if request.endpoint == "sector" else {}
     row = value = None
-    manifest = read_bounded_qrp_json(
+    manifest = read_qrp_json_file(
         root / "response.metadata.json",
         expected_identity=expected_metadata_identity,
     )[1]
@@ -443,11 +439,7 @@ def _validated_rows(
         raise ValueError("raw_csv_metadata_invalid")
     if manifest["columns"] != [*_PREFIX, *response["Indicators"]]:
         raise ValueError("choice_saved_columns_invalid")
-    if (
-        type(manifest["row_count"]) is not int
-        or manifest["row_count"] < 0
-        or manifest["row_count"] * len(manifest["columns"]) > request.max_response_bytes
-    ):
+    if type(manifest["row_count"]) is not int or manifest["row_count"] < 0:
         raise ValueError("choice_saved_shape_invalid")
     if request.endpoint != "ctr" and manifest["row_count"] != len(
         response["Codes"]
@@ -455,11 +447,7 @@ def _validated_rows(
         raise ValueError("choice_saved_shape_invalid")
     scope = _empty_scope()
     count = 0
-    with closing_iterator(
-        iter_csv_snapshot(
-            root, expected_manifest=manifest, max_bytes=request.max_response_bytes
-        )
-    ) as rows:
+    with closing_iterator(iter_csv_snapshot(root, expected_manifest=manifest)) as rows:
         for row in rows:
             if len(row) != len(response["Indicators"]) + 2 or type(row[0]) is not str:
                 raise ValueError("choice_saved_shape_invalid")

@@ -120,7 +120,7 @@ def test_native_epoch_invalidates_all_assets_only_after_known_clock(tmp_path, mo
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
     from quant_research_platform.storage.layout import StorageLayout
-    from tests.sources.tardis.test_raw import _slices
+    from tests.helpers.tardis import _slices
 
     origin = pd.Timestamp("2026-09-01").value
 
@@ -184,7 +184,6 @@ def test_native_epoch_invalidates_all_assets_only_after_known_clock(tmp_path, mo
         root,
         date="2026-09-01",
         slices=_slices(tmp_path / "native", native, count=1),
-        byte_budget=1024**2,
         channels=STATE_CHANNELS,
     )
     with open_market_source(root) as archive:
@@ -267,7 +266,7 @@ def test_native_force_windows_preserve_exact_mass_resets_and_early_close(tmp_pat
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
     from quant_research_platform.storage.layout import StorageLayout
-    from tests.sources.tardis.test_raw import _slices
+    from tests.helpers.tardis import _slices
 
     origin = pd.Timestamp("2026-09-01", tz="UTC").value
     native = []
@@ -313,7 +312,6 @@ def test_native_force_windows_preserve_exact_mass_resets_and_early_close(tmp_pat
         archive_root,
         date="2026-09-01",
         slices=_slices(tmp_path / "native", b"".join(native), count=1),
-        byte_budget=1024**2,
         channels=STATE_CHANNELS,
     )
     panel = pd.DataFrame(

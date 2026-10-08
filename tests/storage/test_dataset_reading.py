@@ -606,7 +606,7 @@ def test_fingerprint_hashes_ordinary_frame_without_normalized_copy(
         (pa.map_(pa.string(), pa.int64()), [[("a", 1)], [("b", 2)]]),
     ),
 )
-def test_fingerprint_rejects_generalized_nested_values_before_hashing(
+def test_fingerprint_hashes_nested_values_with_exact_scalar_grammar(
     data_type: pa.DataType, values: list[object], monkeypatch: pytest.MonkeyPatch
 ) -> None:
     frame = pd.DataFrame({"value": values})
@@ -616,15 +616,15 @@ def test_fingerprint_rejects_generalized_nested_values_before_hashing(
         "hash_pandas_object",
         lambda *_args, **_kwargs: pytest.fail("nested_value_was_hashed"),
     )
-    with pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"):
-        tuple(
-            dataset_fingerprinting._iter_fingerprint_hashes(frame, arrow_schema=schema)
-        )
+    (hashes,) = dataset_fingerprinting._iter_fingerprint_hashes(
+        frame, arrow_schema=schema
+    )
+    assert len(hashes) == 2 and hashes[0] != hashes[1]
 
 
 @pytest.mark.parametrize("data_type", (pa.float16(), pa.float32(), pa.float64()))
 @pytest.mark.parametrize("values", ((-0.0, 0.0), (1.0, 2.0)))
-def test_fingerprint_rejects_float_primary_keys_before_hashing(
+def test_fingerprint_normalizes_float_primary_key_zero(
     data_type: pa.DataType, values, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     frame = pd.DataFrame({"asset_id": values})
@@ -634,9 +634,7 @@ def test_fingerprint_rejects_float_primary_keys_before_hashing(
         "hash_pandas_object",
         lambda *_args, **_kwargs: pytest.fail("float_primary_key_was_hashed"),
     )
-    with pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"):
-        tuple(
-            dataset_fingerprinting._iter_fingerprint_hashes(
-                frame, arrow_schema=schema, primary_key=("asset_id",)
-            )
-        )
+    (hashes,) = dataset_fingerprinting._iter_fingerprint_hashes(
+        frame, arrow_schema=schema, primary_key=("asset_id",)
+    )
+    assert bool(hashes[0] == hashes[1]) == (values[0] == values[1])

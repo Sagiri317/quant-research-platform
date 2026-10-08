@@ -7,6 +7,7 @@ from zoneinfo import ZoneInfo
 import pandas as pd
 import pytest
 
+from quant_research_platform.research.models.fitting import _collect_training_frame
 from quant_research_platform.runtime.dataframes import (
     iter_complete_session_frames,
     iter_complete_time_frames,
@@ -167,7 +168,7 @@ def test_complete_time_frames_early_close_reports_cleanup_failures(
 def test_model_training_concat_keeps_irregularly_selected_rows(chunk_rows):
     from quant_research_platform.contracts.models import ModelSpec
     from quant_research_platform.research.models.fitting import (
-        _fit_model_result_from_frames,
+        _fit_model_result,
     )
     from quant_research_platform.research.models.supervised import (
         build_estimator_from_model_spec,
@@ -189,11 +190,14 @@ def test_model_training_concat_keeps_irregularly_selected_rows(chunk_rows):
         label_column="label",
     )
     estimator = build_estimator_from_model_spec(spec)
-    fitted = _fit_model_result_from_frames(
-        (frame.iloc[i : i + chunk_rows] for i in range(0, 8, chunk_rows)),
+    fitted = _fit_model_result(
+        _collect_training_frame(
+            (frame.iloc[i : i + chunk_rows] for i in range(0, 8, chunk_rows)),
+            spec,
+            fitting_cutoff="2020-01-04",
+        ),
         spec,
         estimator=estimator,
-        fitting_cutoff="2020-01-04",
     )
     assert fitted.metadata["rows_after_input_label_dropna"] == 6
     actual = fitted.prediction_model.predict(pd.DataFrame({"x": [0.0, 1.0, 4.0]}))

@@ -36,6 +36,8 @@ qrp report build --profile <profile> --project-root <project> --run-id <run_id>
 
 两市场的 research run 均通过 --research-plan <configuration.json> 读取显式研究配置。
 profile、scenario、研究窗口、因子、模型与组合选择都来自该文件；示例位于 configs/research/。
+`stage` 可选 `dataset`、`evaluation`、`models`、`research`，每次在所选阶段停止；
+比较多个配置后再由用户或获授权 agent 选择下一阶段，精确来源引用见[研究配置合同](docs/architecture.md#研究配置)。
 Crypto 配置的 research_plan 还须给出时间切分与执行假设；可选择连续回测或遇真实缺口独立分段，午夜不重置账户。
 研究运行返回不可变尝试标识 run_id；报告只消费指定运行引用的已发布产物。
 默认运行开发区间；没有合法开发冻结产物时，--holdout 必须明确拒绝。

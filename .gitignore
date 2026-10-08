@@ -21,12 +21,6 @@ env/
 # 构建和报告输出
 build/
 dist/
-node_modules/
-web/node_modules/
-web/dist/
-web/playwright-report/
-web/test-results/
-.playwright-cli/
 .run/
 /outputs/
 *.egg-info/

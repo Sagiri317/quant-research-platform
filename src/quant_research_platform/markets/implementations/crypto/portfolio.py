@@ -1448,30 +1448,6 @@ def validate_maker_calibration(artifact, envelope):
                 ):
                     raise ValueError("crypto_calibration_event_coordinates_invalid")
                 covered = max(covered, stop)
-                # Preserve full-source rejection order without retaining fold history.
-                if sample_id == 0:
-                    history_counts = dict.fromkeys(("buy", "sell", "events"), 0)
-                    with closing_iterator(model._source_samples()) as history:
-                        for historical_sample in history:
-                            history_counts[historical_sample["side"]] += 1
-                    with closing_iterator(
-                        _calibration_rows(
-                            artifact,
-                            "crypto_maker_events.parquet",
-                            (("fold_id", "==", fold_id),),
-                        )
-                    ) as history:
-                        for expected, (event_id, group) in enumerate(
-                            groupby(history, key=lambda row: row.event_id),
-                            start=history_counts["events"],
-                        ):
-                            if next(group).event_kind == "book":
-                                for _row in group:
-                                    pass
-                            if event_id != expected:
-                                raise ValueError(
-                                    "crypto_calibration_event_order_invalid"
-                                )
                 while window and window[0].event_id < start:
                     event = window.popleft()
                     if event.kind in ("book", "boundary"):

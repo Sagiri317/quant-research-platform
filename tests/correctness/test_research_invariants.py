@@ -20,7 +20,8 @@ from quant_research_platform.research.labels.forward_returns import (
     add_forward_return_labels,
 )
 from quant_research_platform.research.models.fitting import (
-    _fit_model_result_from_frames,
+    _collect_training_frame,
+    _fit_model_result,
 )
 from quant_research_platform.research.models.scaler import (
     ModelMatrixScaler,
@@ -223,11 +224,10 @@ def test_supervised_models_persist_a_training_only_scaler() -> None:
             "eligible": True,
         }
     )
-    result = _fit_model_result_from_frames(
-        [frame],
+    result = _fit_model_result(
+        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02"),
         spec,
         estimator=build_estimator_from_model_spec(spec),
-        fitting_cutoff="2024-01-02",
     )
     fitted = result
     assert fitted.metadata["scaler"]["columns"] == ["feature"]
@@ -264,11 +264,10 @@ def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
             "label_available_at": timestamp,
         }
     )
-    result = _fit_model_result_from_frames(
-        (frame,),
+    result = _fit_model_result(
+        _collect_training_frame((frame,), spec, fitting_cutoff=timestamp),
         spec,
         estimator=build_estimator_from_model_spec(spec),
-        fitting_cutoff=timestamp,
     )
     metadata = validate_model_metadata_core(result.metadata)
     assert metadata["hyperparameters"] == metadata["resolved_hyperparameters"] == {}
@@ -306,11 +305,10 @@ def test_model_fitting_excludes_labels_unavailable_at_fitting_cutoff() -> None:
         }
     )
 
-    result = _fit_model_result_from_frames(
-        [frame],
+    result = _fit_model_result(
+        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02"),
         spec,
         estimator=build_estimator_from_model_spec(spec),
-        fitting_cutoff="2024-01-02",
     )
     fitted = result
     assert fitted.metadata["rows_after_input_label_dropna"] == 2
@@ -338,11 +336,10 @@ def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
             "eligible": True,
         }
     )
-    result = _fit_model_result_from_frames(
-        [frame],
+    result = _fit_model_result(
+        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02"),
         spec,
         estimator=build_estimator_from_model_spec(spec),
-        fitting_cutoff="2024-01-02",
     )
     fitted = result
     predictions = fitted.prediction_model.predict(
@@ -1618,7 +1615,7 @@ def test_label_maturity_preserves_ineligible_observations_for_unfiltered_evaluat
 
 def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missing():
     from quant_research_platform.research.models.fitting import (
-        iter_legal_training_chunks,
+        _collect_training_frame,
         model_training_read_columns,
     )
 
@@ -1642,13 +1639,15 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
             "feature_observed_x": [1, 0, 0],
         }
     )
-    chunks = list(
-        iter_legal_training_chunks(
-            [frame],
-            train_end=pd.Timestamp("2024-01-02"),
-            label_column="label",
-            input_columns=inputs,
+    training, _, _ = _collect_training_frame(
+        [frame],
+        ModelSpec(
+            model_id="flags",
             model_algorithm="linear_regression",
-        )
+            input_feature_columns=inputs,
+            label_column="label",
+            sample_filter_mode="unfiltered",
+        ),
+        fitting_cutoff=pd.Timestamp("2024-01-02"),
     )
-    assert chunks[0].asset_id.tolist() == ["a", "b"]
+    assert training.asset_id.tolist() == ["a", "b"]

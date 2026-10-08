@@ -479,8 +479,6 @@ def simulate_taker(
     observation_window_ns: tuple[int, int] | None = None,
     on_terminal_book=None,
     on_ledger: Callable[[PortfolioLedgerBatch], None] | None = None,
-    on_fill: Callable[[Mapping[str, Any]], None] | None = None,
-    on_equity: Callable[[Mapping[str, Any]], None] | None = None,
 ) -> dict[str, Any]:
     """Freeze the net-gain maximizing order at decision time, then execute later."""
 
@@ -527,8 +525,6 @@ def simulate_taker(
 
     def resolved_fill(fill):
         economics.diagnostic(dict(fill))
-        if on_fill is not None:
-            on_fill(fill)
 
     blocked_decisions = undefined_decisions = 0
     orders = deque()
@@ -962,24 +958,6 @@ def simulate_taker(
                 )
             last_gross = None if marked is None else marked["gross_pnl"]
             last_net = None if marked is None else marked["net_pnl"]
-            if on_equity is not None:
-                on_equity(
-                    dict(
-                        timestamp_ms=decision_time,
-                        decision_time_ms=decision_time,
-                        effective_time_ms=decision_time + config.latency_ms,
-                        state_observed_time_ms=None
-                        if latest_state is None
-                        else latest_state.observed_time_ms,
-                        position=economics.quantity,
-                        gross_pnl=last_gross,
-                        fees=-economics.cost_cashflows,
-                        net_pnl=last_net,
-                        requested_quantity=selected,
-                        expected_net_gain=gain,
-                        decision_reason=reason,
-                    )
-                )
             equity_rows += 1
             if selected:
                 created_orders += 1
@@ -1854,8 +1832,6 @@ def simulate_maker(
     observation_window_ns=None,
     on_terminal_book=None,
     on_ledger=None,
-    on_fill=None,
-    on_equity=None,
 ):
     """Freeze passive quotes at decisions; replay delayed replacements and expiry."""
     if calibrations is None and (
@@ -1912,8 +1888,6 @@ def simulate_maker(
 
     def resolved_fill(fill):
         economics.diagnostic(dict(fill))
-        if on_fill is not None:
-            on_fill(fill)
 
     def observed_order_end(order):
         return min(
@@ -2457,22 +2431,9 @@ def simulate_maker(
                         ),
                     )
                 )
-            marked = None
             if mid is not None or economics.quantity == 0:
-                marked = economics.mark(
-                    decision_time_ns, mid, diagnostics=tuple(diagnostics)
-                )
+                economics.mark(decision_time_ns, mid, diagnostics=tuple(diagnostics))
             process_until(decision_time_ns)
-            if on_equity is not None:
-                on_equity(
-                    {
-                        "timestamp_ms": row["timestamp_ms"],
-                        "position": economics.quantity,
-                        "gross_pnl": None if marked is None else marked["gross_pnl"],
-                        "net_pnl": None if marked is None else marked["net_pnl"],
-                        "fees": -economics.cost_cashflows,
-                    }
-                )
             equity_rows += 1
         if decision_windows_ns is not None:
             while window_index < len(decision_windows_ns):

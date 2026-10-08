@@ -153,11 +153,10 @@ def test_fitting_counts_raw_filter_and_label_rows_once() -> None:
             ),
         }
     )
-    result = fitting._fit_model_result_from_frames(
-        (frame,),
+    result = fitting._fit_model_result(
+        fitting._collect_training_frame((frame,), spec, fitting_cutoff="2018-12-31"),
         spec,
         estimator=build_estimator_from_model_spec(spec),
-        fitting_cutoff="2018-12-31",
     )
     model_result = result
     assert model_result.metadata["rows_input"] == 4
@@ -259,9 +258,8 @@ def test_seed_changes_by_quarter_component_and_refit_kind(
             metadata=_metadata(("x",)), prediction_model=_column_predictor("x")
         )
 
-    monkeypatch.setattr(fitting, "_fit_model_result_from_frames", fit_model)
+    monkeypatch.setattr(fitting, "_fit_model_result", fit_model)
     _fit_selected_model_result(
-        training_counts={},
         dataset_spec=SimpleNamespace(primary_key=("timestamp", "asset_id")),
         selected_spec=base,
         candidate_parameters=dict(base.hyperparameters),
@@ -713,21 +711,26 @@ def test_candidates_fit_once_and_both_groups_have_real_final_models(
             ],
         },
     ]
-    calls = []
-    original = fitting._fit_model_result_from_frames
+    calls, prepared = [], []
+    original = fitting._fit_model_result
 
-    def fit(frames, spec, **kwargs):
-        calls.append((spec.model_id, kwargs["fitting_cutoff"]))
-        return original(frames, spec, **kwargs)
+    def fit(training, spec, **kwargs):
+        calls.append(spec.model_id)
+        prepared.append(training)
+        before = training[0].copy(deep=True)
+        result = original(training, spec, **kwargs)
+        pd.testing.assert_frame_equal(training[0], before, check_exact=True)
+        return result
 
-    monkeypatch.setattr(fitting, "_fit_model_result_from_frames", fit)
+    monkeypatch.setattr(fitting, "_fit_model_result", fit)
     preflight_model_specs(specs)
     case = shared_model_case(
         tmp_path,
         specs=specs,
         protocol=shared_model_protocol(specs, configurations=configurations),
     )
-    assert len(calls) == 6 * 3 + 2 * 2
+    assert len(calls) == 6 * 3 + 2
+    assert len({id(item) for item in prepared}) == 6 * 2 + 2
     assert len(case.artifact.candidate_models) == 18
     assert len(case.artifact.final_models) == 4
     assert set(case.artifact.selections["global"]) == {"final"}
@@ -752,6 +755,11 @@ def test_candidates_fit_once_and_both_groups_have_real_final_models(
             == [{"start": "2014-01-01", "end": "2019-06-30"}]
         )
         assert entries[0]["model_metadata"] == entries[1]["model_metadata"]
+        assert entries[0]["model_member"] == entries[1]["model_member"]
+        assert (
+            entries[0]["refit_trial_semantic_identity"]
+            == entries[1]["refit_trial_semantic_identity"]
+        )
         g = read_quarterly_predictor(case.artifact, "global", family.model_id)
         q = read_quarterly_predictor(case.artifact, "quarterly", family.model_id)
         np.testing.assert_array_equal(
@@ -762,7 +770,7 @@ def test_candidates_fit_once_and_both_groups_have_real_final_models(
         plan, records = read_model_trial_ledger_reference(case.layout, reference)
         if plan.stage == "refit":
             assert plan.folds == ()
-            assert plan.selection_group in {"global", "quarterly"}
+            assert plan.selection_groups == ("global", "quarterly")
             assert plan.selection_metric is None
             assert set(records[0].metrics) == {"n_train"}
 
@@ -869,7 +877,7 @@ def test_prediction_request_clips_saved_rows_without_retraining(
     def forbidden(*args, **kwargs):
         raise AssertionError("development_prediction_refit")
 
-    monkeypatch.setattr(fitting, "_fit_model_result_from_frames", forbidden)
+    monkeypatch.setattr(fitting, "_fit_model_result", forbidden)
     result = _prediction_result(case, group=group, start="2019-01-03", end="2019-04-02")
     bundle = write_prediction_result(case.layout, result)
     frame = pd.read_parquet(bundle / "prediction.parquet")
@@ -894,7 +902,6 @@ def test_prediction_rejects_uncovered_quarter(tmp_path):
         "quarter_coordinate",
         "quarter_matrix",
         "selection_winner",
-        "selection_score",
         "selection_cutoff",
         "selection_coverage",
         "final_group",
@@ -959,7 +966,7 @@ def test_model_member_mutation_is_rejected_before_loading_predictor(
     tmp_path, monkeypatch
 ):
     case = shared_model_case(tmp_path)
-    path = case.root / "models/final/global/linear_regression.pkl"
+    path = case.root / case.artifact.final_models[0]["model_member"]
     filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
     monkeypatch.setattr(
         persisted.pickle, "load", lambda *_: pytest.fail("load before identity")
@@ -987,7 +994,7 @@ def test_model_member_io_preserves_failure_class(
             filesystem_write_bytes(
                 target,
                 filesystem_read_bytes(
-                    case.root / "models/final/global/linear_regression.pkl"
+                    case.root / case.artifact.final_models[0]["model_member"]
                 ),
             )
 
@@ -1157,21 +1164,19 @@ def test_final_refit_strength_and_state_follow_actual_rows(tmp_path, max_train_r
         ).all()
 
 
-def test_disk_admission_precedes_pickle_and_preserves_old_good(tmp_path, monkeypatch):
-    from quant_research_platform.runtime import resources
-
+def test_pickle_io_failure_preserves_old_good(tmp_path, monkeypatch):
     case = shared_model_case(tmp_path / "good")
     before = _file_bytes(case.root)
     calls = []
-    monkeypatch.setattr(
-        persisted.pickle, "dump", lambda *_args, **_kwargs: calls.append(True)
-    )
-    monkeypatch.setattr(
-        resources.shutil, "disk_usage", lambda _path: SimpleNamespace(free=1)
-    )
-    with pytest.raises(RuntimeError, match="insufficient_free_disk"):
+
+    def fail_dump(*_args, **_kwargs):
+        calls.append(True)
+        raise OSError("model_write_failed")
+
+    monkeypatch.setattr(persisted.pickle, "dump", fail_dump)
+    with pytest.raises(OSError, match="model_write_failed"):
         shared_model_case(tmp_path / "failed")
-    assert calls == []
+    assert calls == [True]
     assert _file_bytes(case.root) == before
 
 
@@ -1671,3 +1676,107 @@ def test_overridden_base_parameters_preserve_native_model_science(tmp_path, half
     ) != canonical_json_hash(
         protocols[0].target_manifest(protocols[0].model_selection_target_id, "MODEL")
     )
+
+
+def test_model_reader_uses_published_science_but_publisher_rechecks(
+    tmp_path, monkeypatch
+):
+    case = shared_model_case(tmp_path / "good")
+
+    def change(relative, payload):
+        if relative == "selections/global/final.json":
+            payload["selection"]["families"][0]["trial_metrics"][0][
+                "validation_rankic"
+            ] = -0.75
+
+    root = _republish(case, tmp_path / "rewritten", mutate=change)
+    original_load = persisted.pickle.load
+    original_score = persisted.evaluate_model_trial_metrics_from_chunks
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("published metadata read recomputed science or loaded a predictor")
+
+    monkeypatch.setattr(persisted.pickle, "load", forbidden)
+    monkeypatch.setattr(
+        persisted, "evaluate_model_trial_metrics_from_chunks", forbidden
+    )
+    artifact = read_quarterly_model_artifact(root, trial_layout=case.layout)
+    assert (
+        artifact.selections["global"]["final"]["families"][0]["trial_metrics"][0][
+            "validation_rankic"
+        ]
+        == -0.75
+    )
+    monkeypatch.setattr(persisted.pickle, "load", original_load)
+    monkeypatch.setattr(
+        persisted, "evaluate_model_trial_metrics_from_chunks", original_score
+    )
+    with pytest.raises(ValueError, match="model_selection_decision_mismatch"):
+        persisted._validate_a_share_model_payload(
+            root,
+            artifact.envelope,
+            artifact.member_records,
+            list(artifact.trial_ledgers),
+            case.layout,
+            verify_science=True,
+        )
+    predictor = read_quarterly_predictor(artifact, "global", "linear_regression")
+    assert np.isfinite(predictor.predict(case.frame[["x"]])).all()
+
+
+def test_distinct_final_choices_have_distinct_real_refits(tmp_path, monkeypatch):
+    spec = ModelSpec(
+        model_id="ridge_x",
+        model_algorithm="ridge_regression",
+        input_factor_columns=("x",),
+        label_column="label",
+    )
+    protocol = shared_model_protocol(
+        (spec,),
+        configurations=[
+            {
+                "model_id": spec.model_id,
+                "hyperparameters": {},
+                "parameter_candidates": [
+                    {"regularization_strength": 0.01},
+                    {"regularization_strength": 0.1},
+                ],
+            }
+        ],
+    )
+    original_select = persisted._select_a_share_models
+
+    def select(*args, **kwargs):
+        result = original_select(*args, **kwargs)
+        # Exercise refit identity independently of the statistical winner rule.
+        if kwargs["decision_id"] == "final":
+            family = result["families"][0]
+            choice = family["config_tie_break_order"][kwargs["group"] == "quarterly"]
+            family["selected_config_id"] = result["selected_model_id"] = choice
+        return result
+
+    calls = []
+    original_fit = fitting._fit_model_result
+
+    def fit(training, spec, **kwargs):
+        calls.append(spec.model_id)
+        return original_fit(training, spec, **kwargs)
+
+    monkeypatch.setattr(persisted, "_select_a_share_models", select)
+    monkeypatch.setattr(fitting, "_fit_model_result", fit)
+    case = shared_model_case(tmp_path, specs=(spec,), protocol=protocol)
+    assert len(calls) == 6 * 2 + 2
+    left, right = case.artifact.final_models
+    assert left["model_id"] != right["model_id"]
+    assert left["model_member"] != right["model_member"]
+    assert (
+        left["refit_trial_semantic_identity"] != right["refit_trial_semantic_identity"]
+    )
+    groups = []
+    for reference in case.artifact.trial_ledgers:
+        plan, records = read_model_trial_ledger_reference(case.layout, reference)
+        if plan.stage == "refit":
+            groups.append(plan.selection_groups)
+            assert len(records) == 1 and records[0].status == "completed"
+            assert records[0].holdout_accessed is False
+    assert groups == [("global",), ("quarterly",)]

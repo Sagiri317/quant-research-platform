@@ -12,8 +12,7 @@ from quant_research_platform.sources.binance.funding import read_funding_observa
 from quant_research_platform.sources.tardis.funding import import_funding_history
 from quant_research_platform.sources.tardis.raw import import_slices
 from quant_research_platform.sources.tardis.replay import open_tardis_archive
-from tests.sources.tardis.test_raw import _slices
-from tests.sources.tardis.test_replay import _line
+from tests.helpers.tardis import _line, _slices
 
 
 @pytest.mark.parametrize("source_id", ["binance", "xoomar"])
@@ -64,9 +63,7 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
         ]
         original = json.dumps({"data": {"current": [], "history": rows}}).encode()
     response.write_bytes(original)
-    import_slices(
-        tmp_path / "published", date="2026-09-01", slices=slices, byte_budget=1024**2
-    )
+    import_slices(tmp_path / "published", date="2026-09-01", slices=slices)
     with open_tardis_archive(tmp_path / "published") as day:
         import_funding_history(
             day,
@@ -77,7 +74,6 @@ def test_forecast_does_not_use_future_settlement_and_original_is_verified(
             http_status=200,
             start_ms=start_ms,
             end_ms=start_ms + slice_count * 600000 - 1,
-            byte_budget=1024**2,
         )
         full_window = TimeWindow(
             pd.Timestamp(start_ms, unit="ms"),
@@ -147,7 +143,7 @@ def _publish_funding_archive(root, date, *, include_funding=True):
     ).replace(b"2026-09-01T", (date + "T").encode())
     slices = _slices(root / ("native-" + date), native, count=1)
     destination = root / ("archive-" + date)
-    import_slices(destination, date=date, slices=slices, byte_budget=1024**2)
+    import_slices(destination, date=date, slices=slices)
     if include_funding:
         response = root / (date + "-settlements.json")
         response.write_text(
@@ -173,7 +169,6 @@ def _publish_funding_archive(root, date, *, include_funding=True):
                 http_status=200,
                 start_ms=start_ms,
                 end_ms=start_ms + 600000 - 1,
-                byte_budget=1024**2,
             )
     return destination
 
@@ -196,9 +191,7 @@ def test_native_settlements_are_authoritative_after_coordinated_csv_rewrite(
         original_manifest = read_manifest(original_root / "response.metadata.json")
         original_bytes = (original_root.parent / "settlements.json").read_bytes()
         rows = list(
-            iter_csv_snapshot(
-                original_root, expected_manifest=original_manifest, max_bytes=1024**2
-            )
+            iter_csv_snapshot(original_root, expected_manifest=original_manifest)
         )
         changed = []
         for row in rows:
@@ -220,16 +213,15 @@ def test_native_settlements_are_authoritative_after_coordinated_csv_rewrite(
 
         def validate_csv(root):
             manifest = read_manifest(root / "response.metadata.json")
-            assert tuple(
-                iter_csv_snapshot(root, expected_manifest=manifest, max_bytes=1024**2)
-            ) == tuple(changed)
+            assert tuple(iter_csv_snapshot(root, expected_manifest=manifest)) == tuple(
+                changed
+            )
 
         write_csv_snapshot(
             rewritten,
             columns=original_manifest["columns"],
             rows=changed,
             metadata=original_manifest["metadata"],
-            max_bytes=1024**2,
             validate=validate_csv,
         )
         rewritten_manifest = read_manifest(rewritten / "response.metadata.json")
@@ -454,7 +446,6 @@ def test_native_forecast_type_is_checked_before_numeric_conversion(
         destination,
         date="2026-09-01",
         slices=_slices(tmp_path / "native", native, count=1),
-        byte_budget=1024**2,
     )
     original = {p.name: p.read_bytes() for p in destination.glob("*.gz")}
     with open_tardis_archive(destination) as archive:
@@ -465,7 +456,6 @@ def test_native_forecast_type_is_checked_before_numeric_conversion(
             http_status=200,
             start_ms=start,
             end_ms=start + 600000 - 1,
-            byte_budget=1024**2,
             request_limit=1000,
         )
         if expected is None:
@@ -510,7 +500,6 @@ def test_effective_limit_cannot_certify_a_truncated_settlement_window(tmp_path):
             http_status=200,
             start_ms=start,
             end_ms=start + 600000 - 1,
-            byte_budget=1024**2,
         )
         import_funding_history(archive, **kwargs, request_limit=1000)
         root = destination / "funding/BTCUSDT/observations"
@@ -588,10 +577,8 @@ def test_settlement_read_handle_close_preserves_primary(
     assert handles and all(handle.closed for handle in handles)
 
 
-@pytest.mark.parametrize("case", ("over", "equal", "identity", "long", "short"))
-def test_import_rejects_oversized_settlement_with_bounded_reads(
-    tmp_path, monkeypatch, case
-):
+@pytest.mark.parametrize("case", ("identity", "long", "short"))
+def test_import_rejects_changed_settlement_before_decode(tmp_path, monkeypatch, case):
     from dataclasses import replace
 
     import quant_research_platform.sources.tardis.funding as funding
@@ -645,16 +632,12 @@ def test_import_rejects_oversized_settlement_with_bounded_reads(
         return Handle(handle)
 
     def no_decode(*_args, **_kwargs):
-        pytest.fail("a rejected oversized source must not reach its decoder")
+        pytest.fail("a changed source must not reach its decoder")
 
     monkeypatch.setattr(funding, "open_filesystem_file", open_handle)
     monkeypatch.setattr(funding, "_settlement_response", no_decode)
     start = pd.Timestamp("2026-09-01").value // 1000000
-    reason = (
-        "tardis_funding_budget_exceeded"
-        if case in {"over", "equal"}
-        else "tardis_funding_source_changed"
-    )
+    reason = "tardis_funding_source_changed"
     with open_tardis_archive(destination) as archive:
         with pytest.raises(ValueError, match="^" + reason + "$"):
             funding.import_funding_history(
@@ -666,10 +649,9 @@ def test_import_rejects_oversized_settlement_with_bounded_reads(
                 http_status=200,
                 start_ms=start,
                 end_ms=start + 600000 - 1,
-                byte_budget=size if case == "equal" else size - 1,
             )
     assert identity_calls == 2
-    assert requests and max(requests) <= 1024**2
+    assert requests == [size + 1]
     assert sum(returned) <= size + 1
     assert sum(returned) == size + {"long": 1, "short": -1}.get(case, 0)
     assert handles and all(handle.closed for handle in handles)
@@ -724,7 +706,6 @@ def test_import_settlement_handle_close_preserves_primary(
                 http_status=200,
                 start_ms=start,
                 end_ms=start + 600000 - 1,
-                byte_budget=1024**2,
             )
     assert caught.value is (primary if body_fails else secondary)
     if body_fails:

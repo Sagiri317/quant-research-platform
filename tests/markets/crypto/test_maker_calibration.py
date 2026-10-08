@@ -13,6 +13,7 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     simulate_maker,
 )
 from tests.helpers.binance_hft import _quote
+from tests.helpers.portfolio_ledger import capture_fill_rows
 from tests.markets.crypto.calibration_test_support import (
     calibration_from_paths,
     calibration_inputs,
@@ -45,8 +46,7 @@ def _run_calibrated(paths, errors, *, books, trades, quotes, latency):
         funding_events=(),
         funding_forecasts=(FundingForecast(0, 2000000000, ()),),
         calibrations={"fold": model},
-        on_ledger=batches.append,
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append, batches.append),
     )
     gains = [
         row.number
@@ -487,8 +487,7 @@ def test_calibrated_maker_compares_old_expiry_with_real_cancel_replace(
         funding_events=(),
         funding_forecasts=(FundingForecast(0, 1000000000, ()),),
         calibrations={"fold": model},
-        on_ledger=batches.append,
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append, batches.append),
     )
     assert result["created_orders"] == (3 if keep_wins else 4)
     assert [fill["timestamp_ms"] for fill in fills] == (

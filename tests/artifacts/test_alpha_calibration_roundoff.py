@@ -12,11 +12,11 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 )
 from quant_research_platform.research.portfolios.accounting import (
     calibrate_expected_alpha,
+    frozen_alpha_calibration,
 )
 from quant_research_platform.research.portfolios.production import (
     _ALPHA_DIAGNOSTICS,
     _completed_calibration_rows,
-    frozen_alpha_calibration,
 )
 from quant_research_platform.research.predictions.outputs import _add_a_share_scores
 from quant_research_platform.storage.identity import filesystem_read_bytes

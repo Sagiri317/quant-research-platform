@@ -538,10 +538,9 @@ def test_float_primary_key_zero_identity_publication(tmp_path, dtype):
     restored = read_dataset(root)
     assert restored["asset_id"].dtype == frame["asset_id"].dtype
     assert sorted(restored["asset_id"]) == [1.0, 2.0]
-    with pytest.raises(ValueError, match="unsupported_dataset_fingerprint_value"):
-        fingerprint_dataset(root)
+    assert fingerprint_dataset(root).row_count == 2
     comparison = compare_datasets(root, root)
-    assert comparison.status == "INSPECTION_FAILED"
+    assert comparison.status == "MATCH"
 
 
 @pytest.mark.parametrize(
@@ -834,7 +833,10 @@ def test_writer_resolves_nested_nulls_independently_of_parts_and_chunks(
         assert manifest["file_count"] == (
             len(expected_partitions) if mode == "whole" else len(frame)
         )
-        assert manifest["primary_key"] == key
+        saved_spec = json.loads((root / "spec.json").read_text())
+        assert saved_spec["primary_key"] == key
+        assert manifest["spec_identity"] == canonical_json_hash(saved_spec)
+        assert not (set(saved_spec) - {"schema_id"}) & set(manifest)
         assert manifest["schema_hash"] == canonical_json_hash(
             manifest["physical_schema"]
         )
@@ -1021,7 +1023,11 @@ def test_dataset_statistics_use_only_contract_time_key_and_read_old_files(
     from quant_research_platform.storage.parquet import _matching_row_groups
 
     spec = make_processed_dataset_spec(
-        "time_statistics", partition_columns=("year",) if with_time_key else ()
+        "time_statistics",
+        partition_columns=("year",) if with_time_key else (),
+        primary_key=("market_id", "asset_id", "timestamp")
+        if with_time_key
+        else ("market_id", "asset_id"),
     )
     roles = dict(spec.column_roles)
     roles["session_at"] = roles.pop("timestamp")
@@ -1076,3 +1082,31 @@ def test_dataset_statistics_use_only_contract_time_key_and_read_old_files(
                         parquet, list(session.parquet_filters or ())
                     ) == list(range(parquet.metadata.num_row_groups))
     assert compare_datasets(before, after).status == "MATCH"
+
+
+def test_spec_semantics_checked_once_per_write_and_read_boundary(tmp_path, monkeypatch):
+    from quant_research_platform.contracts.data import DataSpec
+    from quant_research_platform.storage.datasets.reading import open_dataset_session
+
+    spec = make_processed_dataset_spec()
+    original = DataSpec.__post_init__
+    calls = []
+
+    def validate(value):
+        calls.append(value.data_id)
+        original(value)
+
+    monkeypatch.setattr(DataSpec, "__post_init__", validate)
+    root = make_dataset_artifact_root(tmp_path)
+    write_dataset(root, make_default_dataset_frame(), spec=spec)
+    # The incoming frozen object and the staged persisted wire are separate boundaries.
+    assert calls == [spec.data_id, spec.data_id]
+    calls.clear()
+    session = open_dataset_session(root, columns=None, time_window=None)
+    assert calls == [spec.data_id]
+    session.verify()
+    payload = json.loads((root / "spec.json").read_text())
+    payload["column_roles"]["value"] = "context"
+    (root / "spec.json").write_text(json.dumps(payload))
+    with pytest.raises(ValueError, match="dataset_manifest_spec_mismatch"):
+        open_dataset_session(root, columns=None, time_window=None)

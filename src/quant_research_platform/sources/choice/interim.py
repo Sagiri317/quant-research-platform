@@ -8,7 +8,7 @@ import re
 from collections.abc import Iterator, Mapping
 from dataclasses import dataclass
 from datetime import date, timedelta
-from itertools import groupby, islice
+from itertools import islice
 from pathlib import Path
 
 import pandas as pd
@@ -54,9 +54,8 @@ from quant_research_platform.storage.identity import (
     require_unaliased_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
+from quant_research_platform.storage.manifests import read_qrp_json_file
 
-_INDICATORS = tuple(field for fields in FINANCIAL_FIELDS.values() for field in fields)
 _DISCLOSURE_INDICATORS = {"STMTACTDATE", "ACTUALISSUINGDATE", "ITEMVALUECHANGEDATE"}
 
 
@@ -131,7 +130,8 @@ def normalize_first_disclosure_frame(frame: pd.DataFrame) -> pd.DataFrame:
     ).reset_index(drop=True)
 
 
-def _raw_requests(raw_root: Path, *, financial: bool):
+def _raw_requests(raw_root: Path, *, data_id: str):
+    indicators = FINANCIAL_FIELDS.get(data_id, {})
     root = require_unaliased_path(Path(raw_root), error="choice_raw_identity_changed")
     try:
         entries = filesystem_scandir(root / "css")
@@ -147,7 +147,7 @@ def _raw_requests(raw_root: Path, *, financial: bool):
             require_unaliased_path(directory, error="choice_raw_identity_changed")
             path = directory / "response.metadata.json"
             expected = dataset_file_identity(path)
-            manifest = read_bounded_qrp_json(path, expected_identity=expected)[1]
+            manifest = read_qrp_json_file(path, expected_identity=expected)[1]
             try:
                 payload = manifest["metadata"]["request"]
                 if type(payload["arguments"]) is not list:
@@ -157,7 +157,6 @@ def _raw_requests(raw_root: Path, *, financial: bool):
                     arguments=tuple(payload["arguments"]),
                     sdk_version=payload["sdk_version"],
                     cutoff=date.fromisoformat(payload["cutoff"]),
-                    max_response_bytes=manifest["byte_count"],
                 )
                 request_identity = request.identity()
             except (KeyError, TypeError) as error:
@@ -174,14 +173,10 @@ def _raw_requests(raw_root: Path, *, financial: bool):
             )
             fields = set(request.arguments[1].upper().split(","))
             disclosure = bool(_DISCLOSURE_INDICATORS.intersection(fields))
-            financial_fields = bool(set(_INDICATORS).intersection(fields))
-            if financial and financial_fields and "reporttype" in options:
+            financial_fields = bool(set(indicators).intersection(fields))
+            if financial_fields and "reporttype" in options:
                 raise ValueError("choice_financial_css_reporttype_unsupported")
-            snapshot = (
-                financial
-                and financial_fields
-                and (options.get("type", "1") in {"1", "3"})
-            )
+            snapshot = financial_fields and (options.get("type", "1") in {"1", "3"})
             if "reportdate" not in options or not (disclosure or snapshot):
                 continue
             _yield_value = (directory, request, options, disclosure)
@@ -194,9 +189,7 @@ def _raw_requests(raw_root: Path, *, financial: bool):
 def _source_snapshot(raw_root: Path, data_id: str):
     interim_catalog().get(data_id)
     members = {}
-    with closing_iterator(
-        _raw_requests(raw_root, financial=data_id != FIRST_DISCLOSURE_DATA_ID)
-    ) as requests:
+    with closing_iterator(_raw_requests(raw_root, data_id=data_id)) as requests:
         for root, _request, _options, _disclosure in requests:
             for name in ("response.csv", "response.metadata.json"):
                 path = root / name
@@ -286,13 +279,14 @@ def _values(cells):
     return result
 
 
-def _raw_index(raw_root, financial, *, members):
+def _raw_index(raw_root, data_id, *, members):
+    indicators = FINANCIAL_FIELDS.get(data_id, {})
     index = ExactPrimaryKeyIndex(
         primary_key=("source_coordinate",),
     )
 
     def rows():
-        with closing_iterator(_raw_requests(raw_root, financial=financial)) as requests:
+        with closing_iterator(_raw_requests(raw_root, data_id=data_id)) as requests:
             for root, request, options, disclosure in requests:
                 period = date.fromisoformat(options["reportdate"]).isoformat()
                 try:
@@ -381,12 +375,10 @@ def _raw_index(raw_root, financial, *, members):
                                         yield _yield_value
                                     except GeneratorExit:
                                         return
-                    if (
-                        financial
-                        and set(_INDICATORS).intersection(values)
-                        and (options.get("type", "1") in {"1", "3"})
+                    if set(indicators).intersection(values) and (
+                        options.get("type", "1") in {"1", "3"}
                     ):
-                        for field in set(_INDICATORS).intersection(values):
+                        for field in set(indicators).intersection(values):
                             _yield_value = _identity_payload_row(
                                 index,
                                 "snapshot",
@@ -414,13 +406,13 @@ def _raw_index(raw_root, financial, *, members):
     return index
 
 
-def _snapshot(index, pair, day, branch):
+def _snapshot(index, pair, day, branch, indicators):
     coordinate = [*pair, day.isoformat(), branch]
-    fields = [_get(index, "snapshot", [*coordinate, field]) for field in _INDICATORS]
+    fields = [_get(index, "snapshot", [*coordinate, field]) for field in indicators]
     if all(value is None for value in fields):
         return None
     missing = [
-        field for field, value in zip(_INDICATORS, fields, strict=True) if value is None
+        field for field, value in zip(indicators, fields, strict=True) if value is None
     ]
     if missing:
         error = PortfolioTargetBlocked("choice_financial_snapshot_field_missing")
@@ -434,19 +426,19 @@ def _snapshot(index, pair, day, branch):
     }
 
 
-def _report_versions(index, pair, first, end):
-    initial = _snapshot(index, pair, first, "1")
+def _report_versions(index, pair, first, end, indicators):
+    initial = _snapshot(index, pair, first, "1", indicators)
     if initial is None:
         raise PortfolioTargetBlocked("choice_first_disclosure_snapshot_missing")
     current = initial["values"].copy()
-    initial_adjusted = _snapshot(index, pair, first, "3")
+    initial_adjusted = _snapshot(index, pair, first, "3", indicators)
     if initial_adjusted is not None:
         for position, value in enumerate(initial_adjusted["values"]):
             if value is None:
                 continue
             if current[position] is not None and current[position] != value:
                 error = ValueError("choice_financial_version_values_conflict")
-                error.add_note(f"public_date={first}; field={_INDICATORS[position]}")
+                error.add_note(f"public_date={first}; field={indicators[position]}")
                 identities = sorted(
                     {
                         *initial["request_identities"],
@@ -467,10 +459,12 @@ def _report_versions(index, pair, first, end):
             changed: dict[int, set[float | None]] = {}
             requests = []
             for branch in ("1", "3"):
-                after = _snapshot(index, pair, event, branch)
+                after = _snapshot(index, pair, event, branch, indicators)
                 if after is None:
                     raise PortfolioTargetBlocked("choice_revision_snapshot_missing")
-                before = _snapshot(index, pair, event - timedelta(days=1), branch)
+                before = _snapshot(
+                    index, pair, event - timedelta(days=1), branch, indicators
+                )
                 if (
                     before is not None
                     and branches[branch] is not None
@@ -503,7 +497,7 @@ def _report_versions(index, pair, first, end):
                     error = ValueError("choice_financial_version_values_conflict")
                     error.add_note(
                         f"report_period={pair[1]}; public_date={event}; "
-                        f"field={_INDICATORS[position]}"
+                        f"field={indicators[position]}"
                     )
                     error.add_note(f"request_identities={sorted(set(requests))}")
                     raise error
@@ -578,7 +572,7 @@ def _rows(index, data_id, start, end) -> Iterator[tuple[object, ...]]:
                     return
                 continue
             for public_date, revised, values in _report_versions(
-                index, pair, first, end
+                index, pair, first, end, tuple(FINANCIAL_FIELDS[data_id])
             ):
                 _yield_value = (
                     pair[0][:6],
@@ -588,10 +582,7 @@ def _rows(index, data_id, start, end) -> Iterator[tuple[object, ...]]:
                     revised,
                     public_date.isoformat() if revised else None,
                     f"correction@{public_date}" if revised else "original",
-                    *(
-                        values[_INDICATORS.index(field)]
-                        for field in FINANCIAL_FIELDS[data_id]
-                    ),
+                    *values,
                 )
                 try:
                     yield _yield_value
@@ -655,11 +646,8 @@ def materialize_interim_data(
     if start is not None and end is not None and start > end:
         raise ValueError("choice_interim_window_invalid")
     written, skipped = {}, []
-    for financial, grouped in groupby(
-        specs, key=lambda spec: spec.data_id != FIRST_DISCLOSURE_DATA_ID
-    ):
-        group = tuple(grouped)
-        (identity, members) = _source_snapshot(root, group[0].data_id)
+    sources = [(spec, *_source_snapshot(root, spec.data_id)) for spec in specs]
+    for spec, identity, members in sources:
         if (
             instance_metadata is not None
             and COMMON_MANIFEST_METADATA_KEY in instance_metadata
@@ -670,32 +658,31 @@ def materialize_interim_data(
             if envelope["semantic_metadata"]["raw_content_identity"] != identity:
                 raise ValueError("choice_raw_identity_changed")
 
-        index = _raw_index(root, financial, members=members)
-        for spec in group:
+        index = _raw_index(root, spec.data_id, members=members)
 
-            def verify_source(_receipt, data_id=spec.data_id, expected=identity):
-                if source_content_identity(root, data_id) != expected:
-                    raise ValueError("choice_raw_identity_changed")
+        def verify_source(_receipt, data_id=spec.data_id, expected=identity):
+            if source_content_identity(root, data_id) != expected:
+                raise ValueError("choice_raw_identity_changed")
 
-            rows = _rows(index, spec.data_id, start, end)
-            frames = _frames(rows, spec)
-            target = layout.target_root(
-                spec.data_id,
-                layout.interim_data_root(SOURCE_ID, spec.data_id),
-            )
-            with closing_iterator(rows), closing_iterator(frames):
-                try:
-                    write_dataset(
-                        target,
-                        frames,
-                        spec=spec,
-                        instance_metadata=instance_metadata,
-                        staged_validator=verify_source,
-                    )
-                except ValueError as error:
-                    if str(error) != "empty_dataset_schema_missing":
-                        raise
-                    skipped.append(spec.data_id)
-                    continue
-            written[spec.data_id] = target
+        rows = _rows(index, spec.data_id, start, end)
+        frames = _frames(rows, spec)
+        target = layout.target_root(
+            spec.data_id,
+            layout.interim_data_root(SOURCE_ID, spec.data_id),
+        )
+        with closing_iterator(rows), closing_iterator(frames):
+            try:
+                write_dataset(
+                    target,
+                    frames,
+                    spec=spec,
+                    instance_metadata=instance_metadata,
+                    staged_validator=verify_source,
+                )
+            except ValueError as error:
+                if str(error) != "empty_dataset_schema_missing":
+                    raise
+                skipped.append(spec.data_id)
+                continue
+        written[spec.data_id] = target
     return ChoiceInterimImportResult(written, tuple(skipped))

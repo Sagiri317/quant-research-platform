@@ -14,6 +14,7 @@ from quant_research_platform.artifacts.statistics import (
     read_statistics_artifact,
     write_statistics_artifact,
 )
+from quant_research_platform.contracts.targets import TargetPlan
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerCalibration,
@@ -39,8 +40,8 @@ from quant_research_platform.workflows import research
 from tests.artifacts.test_statistics_artifact import maker_calibration_tables
 from tests.helpers.binance_hft import _quote, hft_research_plan
 from tests.helpers.research_configuration import research_configuration
+from tests.helpers.tardis import _slices
 from tests.markets.crypto.test_hft_execution import _maker_config, _state
-from tests.sources.tardis.test_raw import _slices
 
 
 def _publish(root, date, *, fine):
@@ -98,7 +99,6 @@ def _publish(root, date, *, fine):
         destination,
         date=date,
         slices=_slices(root / ("native-" + date), "".join(native).encode(), count=1),
-        byte_budget=1024**2,
     )
     return destination.relative_to(root).as_posix()
 
@@ -234,10 +234,15 @@ def test_frozen_archive_identity_and_persisted_maker_units(
             protocol=protocols[access],
             layout=layout,
             spec=specs[access],
-            planned={
-                "requested_identity": envelope.instance_identity,
-                "matching_instance_identity": envelope.instance_identity,
-            },
+            planned=TargetPlan(
+                target_id=specs[access].target_id,
+                upstream_target_ids=tuple(specs[access].dependencies),
+                decision="REUSE",
+                **{
+                    "requested_identity": envelope.instance_identity,
+                    "matching_instance_identity": envelope.instance_identity,
+                },
+            ),
             raw_root=raw,
             time_window=TimeWindow(
                 envelope.research_window["start"], envelope.research_window["end"]

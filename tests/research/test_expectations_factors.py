@@ -5,7 +5,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.research.factors.expectations.calculations import (
-    build_expectations_features,
+    _prepare_expectations,
 )
 
 
@@ -25,9 +25,7 @@ def test_latest_declaration_keeps_same_day_median_and_next_session_gate():
     observations = pd.DataFrame(
         {"asset_id": "asset", "timestamp": sessions, "close": 10.0}
     )
-    actual = build_expectations_features(
-        records, observations, trading_sessions=sessions
-    )
+    actual = _prepare_expectations(records, trading_sessions=sessions)(observations)
     assert actual.iloc[0, 2:].isna().all()
     assert actual.loc[1, "forward_earnings_yield_fy1"] == 1.0
     assert actual.loc[1, "forecast_dispersion_fy1"] == 1.0
@@ -35,15 +33,13 @@ def test_latest_declaration_keeps_same_day_median_and_next_session_gate():
     future = records.iloc[[0]].assign(
         declare_date=pd.Timestamp("2025-01-06"), forecast_eps=1000.0
     )
-    changed = build_expectations_features(
-        pd.concat([records, future]), observations, trading_sessions=sessions
-    )
+    changed = _prepare_expectations(
+        pd.concat([records, future]), trading_sessions=sessions
+    )(observations)
     pd.testing.assert_frame_equal(actual.iloc[:2], changed.iloc[:2], check_exact=True)
-    insufficient = build_expectations_features(
-        records.loc[records.institution_id.ne("C")],
-        observations,
-        trading_sessions=sessions,
-    )
+    insufficient = _prepare_expectations(
+        records.loc[records.institution_id.ne("C")], trading_sessions=sessions
+    )(observations)
     assert insufficient.iloc[:, 2:].isna().all().all()
 
 
@@ -71,9 +67,9 @@ def test_freshness_includes_declaration_day_limit_only(freshness):
     observations = pd.DataFrame(
         {"asset_id": "asset", "timestamp": dates, "close": 10.0}
     )
-    actual = build_expectations_features(
-        records, observations, trading_sessions=sessions, freshness_days=freshness
-    )
+    actual = _prepare_expectations(
+        records, trading_sessions=sessions, freshness_days=freshness
+    )(observations)
     assert actual.forward_earnings_yield_fy1.iloc[:2].tolist() == [2.0, 2.0]
     assert actual.iloc[2, 2:].isna().all()
 
@@ -101,9 +97,7 @@ def test_year_end_forecast_period_rolls_without_changing_price_basis():
             "adj_close": 100.0,
         }
     )
-    actual = build_expectations_features(
-        records, observations, trading_sessions=sessions
-    )
+    actual = _prepare_expectations(records, trading_sessions=sessions)(observations)
     assert actual.forward_earnings_yield_fy1.tolist() == [0.2, 0.4]
     assert actual.forward_earnings_yield_fy2.tolist() == [0.4, 0.6]
 
@@ -130,9 +124,7 @@ def test_missing_or_nonpositive_close_preserves_rows_and_later_forecasts():
             "close": [10.0, None, np.nan, pd.NA, 0.0, -1.0, 10.0],
         }
     )
-    actual = build_expectations_features(
-        records, observations, trading_sessions=sessions
-    )
+    actual = _prepare_expectations(records, trading_sessions=sessions)(observations)
     pd.testing.assert_frame_equal(
         actual.loc[:, ["asset_id", "timestamp"]],
         observations.loc[:, ["asset_id", "timestamp"]],
@@ -237,11 +229,9 @@ def test_asset_candidate_scan_preserves_interleaved_observation_positions(monkey
         return original(asset_id, timestamp, close, forecast, **kwargs)
 
     monkeypatch.setattr(calculations, "_features_for_observation", observed)
-    actual = build_expectations_features(
-        records,
-        observations,
-        trading_sessions=pd.bdate_range("2025-01-03", "2025-01-07"),
-    )
+    actual = _prepare_expectations(
+        records, trading_sessions=pd.bdate_range("2025-01-03", "2025-01-07")
+    )(observations)
     assert actual.asset_id.tolist() == observations.asset_id.tolist()
     assert actual.forward_earnings_yield_fy1.tolist()[::2] == [0.5, 0.2]
     assert actual.iloc[1, 2:].isna().all()
@@ -266,9 +256,7 @@ def test_fy2_does_not_skip_a_missing_calendar_year():
     observations = pd.DataFrame(
         {"asset_id": "asset", "timestamp": sessions[-1:], "close": 10.0}
     )
-    actual = build_expectations_features(
-        records, observations, trading_sessions=sessions
-    )
+    actual = _prepare_expectations(records, trading_sessions=sessions)(observations)
     assert actual.forward_earnings_yield_fy1.iloc[0] == 0.2
     assert pd.isna(actual.forward_earnings_yield_fy2.iloc[0])
 
@@ -575,7 +563,7 @@ def test_bound_freshness_drives_native_source_window_and_processed_identity(
 
 
 @pytest.mark.parametrize("failure", ("source", "schema", "parameter"))
-def test_expectation_preparation_keeps_full_source_error_order(failure):
+def test_expectation_preparation_and_query_reject_invalid_boundaries(failure):
     records = pd.DataFrame(
         {
             "asset_id": ["unobserved"],
@@ -593,6 +581,7 @@ def test_expectation_preparation_keeps_full_source_error_order(failure):
         }
     )
     if failure == "schema":
+        records["institution_id"] = "valid"
         observations = observations.drop(columns="close")
     expected = {
         "source": "expectations_institution_id_invalid",
@@ -600,12 +589,11 @@ def test_expectation_preparation_keeps_full_source_error_order(failure):
         "parameter": "expectations_freshness_invalid",
     }[failure]
     with pytest.raises(ValueError, match=expected):
-        build_expectations_features(
+        _prepare_expectations(
             records,
-            observations,
             trading_sessions=pd.bdate_range("2025-01-02", periods=3),
             freshness_days=0 if failure == "parameter" else 90,
-        )
+        )(observations)
 
 
 @pytest.mark.parametrize("freshness", (90, 180))
@@ -651,12 +639,11 @@ def test_expectation_queries_keep_position_with_duplicate_index_and_nullable_clo
         index=[8, 8, -1, 99, 3, 3],
     )
     observations["timestamp"] = observations.timestamp.dt.as_unit("ns")
-    actual = build_expectations_features(
+    actual = _prepare_expectations(
         records,
-        observations,
         trading_sessions=pd.bdate_range("2025-01-03", "2025-01-08"),
         freshness_days=freshness,
-    )
+    )(observations)
     pd.testing.assert_frame_equal(
         actual[["asset_id", "timestamp"]],
         observations[["asset_id", "timestamp"]].reset_index(drop=True),

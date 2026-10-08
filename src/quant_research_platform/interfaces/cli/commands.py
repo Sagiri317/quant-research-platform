@@ -14,7 +14,7 @@ from quant_research_platform.profiles.research import (
     research_profile,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
+from quant_research_platform.storage.manifests import read_qrp_json_file
 from quant_research_platform.workflows import research
 
 app = typer.Typer(add_completion=False)
@@ -128,7 +128,7 @@ def research_run(
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
     try:
-        configuration = read_bounded_qrp_json(research_plan)[1]
+        configuration = read_qrp_json_file(research_plan)[1]
         profile_id = configuration.get("profile_id")
         if type(profile_id) is not str:
             raise ValueError("research_configuration_profile_invalid")

@@ -29,8 +29,8 @@ from quant_research_platform.research.factors.price_volume.definitions import (
 )
 from quant_research_platform.research.features.transforms import (
     _mad_winsorize,
-    canonical_feature_pipeline,
-    canonical_feature_transforms,
+    a_share_feature_pipeline,
+    feature_transforms,
 )
 from quant_research_platform.research.models.scaler import ModelMatrixScaler
 from quant_research_platform.research.portfolios.risk import preprocess_risk_styles
@@ -260,8 +260,8 @@ def test_extreme_mad_preserves_complete_canonical_features_under_units_change(tm
             "factor": values,
         }
     )
-    actual = canonical_feature_pipeline(frame, factor_columns=("factor",))
-    scaled = canonical_feature_pipeline(
+    actual = a_share_feature_pipeline(frame, factor_columns=("factor",))
+    scaled = a_share_feature_pipeline(
         frame.assign(factor=values / 1e308), factor_columns=("factor",)
     )
     np.testing.assert_allclose(
@@ -315,7 +315,7 @@ def test_canonical_degeneracy_diagnostics_accumulate_in_native_manifest(
     import quant_research_platform.storage.datasets.writing as writing
 
     monkeypatch.setattr(writing, "DEFAULT_BATCH_ROWS", 37)
-    transforms = canonical_feature_transforms(("factor",))
+    transforms = feature_transforms(("factor",))
     roles = {
         "market_id": ColumnRole.KEY,
         "asset_id": ColumnRole.KEY,

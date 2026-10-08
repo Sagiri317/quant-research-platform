@@ -14,9 +14,6 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     FORMAL_BENCHMARKS,
 )
 
-APPROVED_BENCHMARK_IDS = frozenset(
-    benchmark_id for benchmark_id, _name in FORMAL_BENCHMARKS.values()
-)
 _WEIGHT_COLUMNS = (
     "market_id",
     "benchmark_id",
@@ -27,14 +24,14 @@ _WEIGHT_COLUMNS = (
 
 
 def iter_benchmark_weight_snapshots(index_info_interim, weight_frames):
-    """Validate complete dates and require both benchmarks across the input window."""
+    """Validate every available benchmark without requiring unrelated benchmarks."""
     observed = set()
     for frame in weight_frames:
         normalized = _normalize_benchmark_weight_snapshots(index_info_interim, frame)
         observed.update(normalized["benchmark_id"])
         yield normalized
         del normalized, frame
-    if observed != APPROVED_BENCHMARK_IDS:
+    if not observed:
         raise ValueError("a_share_benchmark_coverage_incomplete")
 
 
@@ -69,12 +66,6 @@ def _normalize_benchmark_weight_snapshots(
         index_info["index_name"],
         error="a_share_benchmark_index_name_invalid",
     )
-    for source_id, (_benchmark_id, expected_name) in FORMAL_BENCHMARKS.items():
-        names = set(
-            index_info.loc[index_info["source_asset_id"].eq(source_id), "index_name"]
-        )
-        if names != {expected_name}:
-            raise ValueError("a_share_benchmark_index_identity_invalid")
 
     weights = weight_interim.loc[
         weight_interim["source_asset_id"].isin(FORMAL_BENCHMARKS)
@@ -83,6 +74,14 @@ def _normalize_benchmark_weight_snapshots(
         weights["source_asset_id"],
         error="a_share_benchmark_source_index_invalid",
     )
+    for source_id in weights["source_asset_id"].unique():
+        _benchmark_id, expected_name = FORMAL_BENCHMARKS[source_id]
+        names = set(
+            index_info.loc[index_info["source_asset_id"].eq(source_id), "index_name"]
+        )
+        if names != {expected_name}:
+            raise ValueError("a_share_benchmark_index_identity_invalid")
+
     weights["benchmark_id"] = weights["source_asset_id"].map(
         {source_id: values[0] for source_id, values in FORMAL_BENCHMARKS.items()}
     )

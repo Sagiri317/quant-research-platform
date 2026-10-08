@@ -67,7 +67,7 @@ from quant_research_platform.contracts.models import (
     CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
     model_spec_payload,
 )
-from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+from quant_research_platform.contracts.outputs import OutputSpec
 from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
 )
@@ -289,17 +289,46 @@ def plan_targets(
 ) -> dict[str, object]:
     if action == "report build":
         raise ValueError("report_run_id_required")
-    return _plan_targets(
+    terminals = tuple(sorted(set(terminal_targets)))
+    scenario = scenario_id or (
+        terminals[0]
+        if action == "dataset build" and terminals
+        else _default_scenario_id(profile)
+    )
+    protocol = profile.protocol(scenario_id=scenario, access_window="development")
+    software = software_identity or production_software_identity()
+    window = _research_window(protocol, research_window)
+    instances, _sessions = _plan_targets(
         profile=profile,
         action=action,
-        terminal_targets=terminal_targets,
+        terminal_targets=terminals,
         layout=layout,
-        scenario_id=scenario_id,
+        protocol=protocol,
         rebuild=rebuild,
         raw_root=raw_root,
-        research_window=research_window,
-        software_identity=software_identity,
+        research_window=window,
+        software_identity=software,
     )
+    plans = [plan for request, plan in instances if request.publish]
+    blocked = [plan for _, plan in instances if plan.decision is PlanDecision.BLOCKED]
+    return {
+        "stage": action,
+        "plan": True,
+        "profile_id": profile.profile_id,
+        "rebuild": rebuild,
+        "terminal_targets": list(terminals),
+        "transitive_dependencies": [
+            plan.target_id for plan in plans if plan.target_id not in terminals
+        ],
+        "targets": [plan.payload() for plan in plans],
+        "status": RunStatus.BLOCKED.value if blocked else RunStatus.COMPLETE.value,
+        "blockers": [
+            {"target_id": plan.target_id, "reason": plan.blocker} for plan in blocked
+        ],
+        "protocol": protocol.manifest(),
+        "software_identity": software.identity_hash,
+        "research_window": window,
+    }
 
 
 def _plan_targets(
@@ -308,29 +337,21 @@ def _plan_targets(
     action: str,
     terminal_targets: Iterable[str],
     layout: StorageLayout,
-    scenario_id: str | None = None,
+    protocol: Any,
     rebuild: bool = False,
     raw_root: Path | None = None,
-    research_window: Mapping[str, object] | None = None,
+    research_window: Mapping[str, object],
     software_identity: ProductionSoftwareIdentity | None = None,
-    reference_sink: dict[str, TargetPlan] | None = None,
-    instance_sink: list[tuple[_TargetRequest, TargetPlan]] | None = None,
-    reuse_sessions: dict[Path, DatasetSession] | None = None,
-) -> dict[str, object]:
+) -> tuple[tuple[tuple[_TargetRequest, TargetPlan], ...], dict[Path, DatasetSession]]:
     if action == "report build":
         raise ValueError("report_run_id_required")
     terminals = tuple(sorted(set(terminal_targets)))
-    scenario = scenario_id or (
-        terminals[0]
-        if action == "dataset build" and terminals
-        else _default_scenario_id(profile)
-    )
-    protocol = profile.protocol(scenario_id=scenario, access_window="development")
     protocol_terminals = tuple(sorted(set(protocol.terminal_targets(action))))
     if action != "data materialize" and terminals != protocol_terminals:
         raise ValueError("protocol_terminal_targets_invalid")
     software = software_identity or production_software_identity()
-    window = _research_window(protocol, research_window)
+    window = research_window
+    reuse_sessions: dict[Path, DatasetSession] = {}
     source_root = raw_root or _default_raw_root(layout)
     specs = _target_specs(
         profile,
@@ -339,7 +360,6 @@ def _plan_targets(
     )
     ordered = resolve_target_graph(specs, terminals)
     requested = set(terminals)
-    plans: list[TargetPlan] = []
     by_request: dict[tuple[str, TimeWindow], TargetPlan] = {}
     requests = _target_requests(profile, action, protocol, ordered, terminals, window)
     for request in requests:
@@ -356,23 +376,16 @@ def _plan_targets(
             plan = TargetPlan(
                 target_id=spec.target_id,
                 upstream_target_ids=(),
-                producer_id=spec.producer_id,
                 decision=PlanDecision.REUSE,
                 requested_identity=reference["instance_identity"],
                 matching_instance_identity=reference["instance_identity"],
                 upstream_identities=target["upstream_identities"],
                 rebuild=False,
-                producer_kind=profile.producer_bindings[spec.producer_id].kind,
+                producer_kind=profile.producer_bindings[spec.target_id].kind,
                 schema_identity=reference["schema_identity"],
                 artifact_root=reference["path"],
             )
-            if request.publish:
-                plans.append(plan)
-                if reference_sink is not None:
-                    reference_sink[spec.target_id] = plan
             by_request[request.key] = plan
-            if instance_sink is not None:
-                instance_sink.append((request, plan))
             continue
         data_spec = _catalog_data_spec(profile, spec.target_id)
         target_window = request.time_window
@@ -402,10 +415,8 @@ def _plan_targets(
         )
         if blocked_dependency is not None:
             blocker = f"dependency_blocked: {blocked_dependency}"
-        elif spec.producer_id is None:
-            blocker = "capability_not_implemented"
         else:
-            binding = profile.producer_bindings.get(spec.producer_id)
+            binding = profile.producer_bindings.get(spec.target_id)
             if binding is None:
                 blocker = (
                     "capability_not_implemented"
@@ -523,7 +534,6 @@ def _plan_targets(
         plan = TargetPlan(
             target_id=spec.target_id,
             upstream_target_ids=tuple(sorted(spec.dependencies)),
-            producer_id=spec.producer_id,
             decision=decision,
             blocker=blocker,
             requested_identity=requested_identity,
@@ -534,34 +544,10 @@ def _plan_targets(
             schema_identity=schema_identity,
             artifact_root=artifact_root,
         )
-        if request.publish:
-            plans.append(plan)
-            if reference_sink is not None:
-                reference_sink[spec.target_id] = plan
         by_request[request.key] = plan
-        if instance_sink is not None:
-            instance_sink.append((request, plan))
-    blocked = [
-        plan for plan in by_request.values() if plan.decision is PlanDecision.BLOCKED
-    ]
-    return {
-        "stage": action,
-        "plan": True,
-        "profile_id": profile.profile_id,
-        "rebuild": rebuild,
-        "terminal_targets": list(terminals),
-        "transitive_dependencies": [
-            plan.target_id for plan in plans if plan.target_id not in requested
-        ],
-        "targets": [plan.payload() for plan in plans],
-        "status": RunStatus.BLOCKED.value if blocked else RunStatus.COMPLETE.value,
-        "blockers": [
-            {"target_id": plan.target_id, "reason": plan.blocker} for plan in blocked
-        ],
-        "protocol": protocol.manifest(),
-        "software_identity": software.identity_hash,
-        "research_window": window,
-    }
+    return tuple(
+        (request, by_request[request.key]) for request in requests
+    ), reuse_sessions
 
 
 def data_materialize(
@@ -575,13 +561,15 @@ def data_materialize(
     plan: bool = False,
     rebuild: bool = False,
 ) -> dict[str, object]:
+    protocol = profile.protocol(
+        scenario_id=_default_scenario_id(profile), access_window="development"
+    )
     selected = tuple(
         data_ids
-        or profile.protocol(
-            scenario_id=_default_scenario_id(profile), access_window="development"
-        ).terminal_targets("data materialize")
+        or protocol.terminal_targets("data materialize")
         or (spec.data_id for spec in profile.interim.list())
     )
+    window = _research_window(protocol, None, start_date=start_date, end_date=end_date)
     if plan:
         return plan_targets(
             profile=profile,
@@ -590,34 +578,17 @@ def data_materialize(
             layout=layout,
             raw_root=raw_root,
             rebuild=rebuild,
-            research_window=_research_window(
-                profile.protocol(
-                    scenario_id=_default_scenario_id(profile),
-                    access_window="development",
-                ),
-                None,
-                start_date=start_date,
-                end_date=end_date,
-            ),
+            research_window=window,
         )
     return _execute_action(
         profile=profile,
+        protocol=protocol,
         action="data materialize",
         terminal_targets=selected,
         layout=layout,
-        time_window=None,
         raw_root=raw_root,
-        start_date=start_date,
-        end_date=end_date,
         rebuild=rebuild,
-        research_window=_research_window(
-            profile.protocol(
-                scenario_id=_default_scenario_id(profile), access_window="development"
-            ),
-            None,
-            start_date=start_date,
-            end_date=end_date,
-        ),
+        research_window=window,
     )
 
 
@@ -632,6 +603,9 @@ def dataset_build(
     rebuild: bool = False,
     raw_root: Path | None = None,
 ) -> dict[str, object]:
+    protocol = profile.protocol(scenario_id=dataset_id, access_window="development")
+    window = _research_window(protocol, None, start_date=start_date, end_date=end_date)
+    source = raw_root or _default_raw_root(layout)
     if plan:
         return plan_targets(
             profile=profile,
@@ -640,31 +614,55 @@ def dataset_build(
             layout=layout,
             scenario_id=dataset_id,
             rebuild=rebuild,
-            raw_root=raw_root or _default_raw_root(layout),
-            research_window=_research_window(
-                profile.protocol(scenario_id=dataset_id, access_window="development"),
-                None,
-                start_date=start_date,
-                end_date=end_date,
-            ),
+            raw_root=source,
+            research_window=window,
         )
     return _execute_action(
         profile=profile,
+        protocol=protocol,
         action="dataset build",
         terminal_targets=(dataset_id,),
         layout=layout,
-        time_window=TimeWindow(start_date, end_date),
-        start_date=start_date,
-        end_date=end_date,
         rebuild=rebuild,
-        raw_root=raw_root or _default_raw_root(layout),
-        research_window=_research_window(
-            profile.protocol(scenario_id=dataset_id, access_window="development"),
-            None,
-            start_date=start_date,
-            end_date=end_date,
-        ),
+        raw_root=source,
+        research_window=window,
     )
+
+
+def _validate_stage_selection(profile, layout, protocol):
+    configuration = protocol.configuration()
+    if "stage_selection" not in configuration:
+        return
+    stages = ("dataset", "evaluation", "models", "research")
+    for source in configuration["stage_selection"]["sources"]:
+        record = read_research_run_record(
+            layout.research_run_path(source["run_id"]),
+            expected_profile_id=profile.profile_id,
+        )
+        previous = record.payload()["protocol"]["research_configuration"]
+        if (
+            record.status is not RunStatus.COMPLETE
+            or record.research_window["access"] != "development"
+            or record.scenario_id != protocol.scenario_id
+            or previous["windows"] != configuration["windows"]
+            or stages.index(previous["stage"]) >= stages.index(configuration["stage"])
+            or source["target_id"] not in record.terminal_targets
+        ):
+            raise ValueError("research_stage_source_ineligible")
+        reference = next(
+            (
+                item
+                for item in record.target_results
+                if item.target_id == source["target_id"]
+            ),
+            None,
+        )
+        if (
+            reference is None
+            or reference.instance_identity != source["instance_identity"]
+        ):
+            raise ValueError("research_stage_source_identity_mismatch")
+        read_validated_reference(layout, reference)
 
 
 def research_run(
@@ -691,14 +689,19 @@ def research_run(
     selected_window = research_plan["windows"]["holdout" if holdout else "development"]
     start_date, end_date = selected_window["start"], selected_window["end"]
     protocol = profile.protocol(scenario_id=scenario_id, access_window="development")
+    if holdout and research_plan["stage"] != "research":
+        raise ValueError("holdout_requires_research_stage")
+    _validate_stage_selection(profile, layout, protocol)
     if not plan:
         model_ids = tuple(
             dict.fromkeys(
                 model_id
-                for target in protocol.target_specs("research run")
-                if target.producer_id
-                and profile.producer_bindings.get(target.producer_id) is not None
-                and profile.producer_bindings[target.producer_id].kind
+                for target in resolve_target_graph(
+                    _target_specs(profile, action="research run", protocol=protocol),
+                    protocol.terminal_targets("research run"),
+                )
+                if profile.producer_bindings.get(target.target_id) is not None
+                and profile.producer_bindings[target.target_id].kind
                 is ProducerKind.MODEL
                 for model_id in protocol.model_ids_for_target(target.target_id)
             )
@@ -808,12 +811,10 @@ def research_run(
         result = _execute_action(
             run_id=run_id,
             profile=profile,
+            protocol=protocol,
             action="research run",
             terminal_targets=terminals,
             layout=layout,
-            time_window=TimeWindow(start_date, end_date),
-            start_date=start_date,
-            end_date=end_date,
             rebuild=rebuild,
             raw_root=raw_root or _default_raw_root(layout),
             research_window=window,
@@ -1133,15 +1134,13 @@ def _inspect_run_target(*, profile, layout, target_id, run_id):
 def _execute_action(
     *,
     profile: ResearchProfile,
+    protocol: Any,
     action: str,
     terminal_targets: tuple[str, ...],
     layout: StorageLayout,
-    time_window: TimeWindow | None,
     raw_root: Path | None,
-    start_date: str | None,
-    end_date: str | None,
     rebuild: bool = False,
-    research_window: Mapping[str, object] | None = None,
+    research_window: Mapping[str, object],
     software_identity: ProductionSoftwareIdentity | None = None,
     result_sink: dict[str, TargetResult] | None = None,
     reference_sink: dict[str, TargetPlan] | None = None,
@@ -1156,13 +1155,11 @@ def _execute_action(
         return _execute_targets(
             run_id=run_id,
             profile=profile,
+            protocol=protocol,
             action=action,
             terminal_targets=terminal_targets,
             layout=layout,
-            time_window=time_window,
             raw_root=raw_root,
-            start_date=start_date,
-            end_date=end_date,
             rebuild=rebuild,
             research_window=research_window,
             software_identity=software_identity,
@@ -1175,15 +1172,13 @@ def _execute_action(
 def _execute_targets(
     *,
     profile: ResearchProfile,
+    protocol: Any,
     action: str,
     terminal_targets: tuple[str, ...],
     layout: StorageLayout,
-    time_window: TimeWindow | None,
     raw_root: Path | None,
-    start_date: str | None,
-    end_date: str | None,
     rebuild: bool = False,
-    research_window: Mapping[str, object] | None = None,
+    research_window: Mapping[str, object],
     software_identity: ProductionSoftwareIdentity | None = None,
     result_sink: dict[str, TargetResult] | None = None,
     reference_sink: dict[str, TargetPlan] | None = None,
@@ -1191,37 +1186,29 @@ def _execute_targets(
     observe=None,
 ) -> dict[str, object]:
     source_root = raw_root or _default_raw_root(layout)
-    scenario_id = _scenario_from_terminal(profile, action, terminal_targets)
-    protocol = profile.protocol(scenario_id=scenario_id, access_window="development")
     software = software_identity or production_software_identity()
-    window = _research_window(
-        protocol,
-        research_window,
-        time_window=time_window,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    planned_references: dict[str, TargetPlan] = {}
-    instance_plans: list[tuple[_TargetRequest, TargetPlan]] = []
-    reuse_sessions: dict[Path, DatasetSession] = {}
-    _plan_targets(
+    window = research_window
+    instance_plans, reuse_sessions = _plan_targets(
         profile=profile,
         action=action,
         terminal_targets=terminal_targets,
         layout=layout,
-        scenario_id=scenario_id,
+        protocol=protocol,
         rebuild=rebuild,
         raw_root=source_root,
         research_window=window,
         software_identity=software,
-        reference_sink=planned_references,
-        instance_sink=instance_plans,
-        reuse_sessions=reuse_sessions,
     )
-    plans = {request.key: plan.payload() for request, plan in instance_plans}
+    plans = {request.key: plan for request, plan in instance_plans}
     instance_results: dict[tuple[str, TimeWindow], TargetResult] = {}
     if reference_sink is not None:
-        reference_sink.update(planned_references)
+        reference_sink.update(
+            {
+                request.spec.target_id: plan
+                for request, plan in instance_plans
+                if request.publish
+            }
+        )
     results = result_sink if result_sink is not None else {}
 
     def record_result(request, result):
@@ -1233,18 +1220,17 @@ def _execute_targets(
     candidate_workspace: RebuildCandidateWorkspace | None = None
     candidate_materialized = False
     with ExitStack() as operation:
-        for request, _plan in instance_plans:
+        for request, planned in instance_plans:
             spec = request.spec
             if observe is not None:
                 observe()
-            planned = plans[request.key]
-            if planned["decision"] == PlanDecision.BLOCKED.value:
+            if planned.decision is PlanDecision.BLOCKED:
                 record_result(
                     request,
                     TargetResult(
                         target_id=spec.target_id,
                         status=TargetStatus.BLOCKED,
-                        reason=str(planned["blocker"]),
+                        reason=str(planned.blocker),
                     ),
                 )
                 continue
@@ -1268,10 +1254,10 @@ def _execute_targets(
                 )
                 continue
             is_candidate = (
-                planned["rebuild"] and planned["matching_instance_identity"] is not None
+                planned.rebuild and planned.matching_instance_identity is not None
             )
             try:
-                if planned["decision"] == PlanDecision.REUSE.value:
+                if planned.decision is PlanDecision.REUSE:
                     result = _reuse_target(
                         profile=profile,
                         protocol=protocol,
@@ -1285,7 +1271,7 @@ def _execute_targets(
                                 profile,
                                 layout,
                                 spec.target_id,
-                                planned["requested_identity"],
+                                planned.requested_identity,
                             )
                         ),
                     )
@@ -1302,7 +1288,7 @@ def _execute_targets(
                             profile,
                             output_layout,
                             spec.target_id,
-                            planned["requested_identity"],
+                            planned.requested_identity,
                         )
                     target_layout = _target_layout(
                         profile=profile,
@@ -1338,7 +1324,7 @@ def _execute_targets(
                     reason=str(exc),
                 )
             except (ImportError, KeyError, TypeError, ValueError) as exc:
-                kind = profile.producer_bindings[spec.producer_id].kind
+                kind = profile.producer_bindings[spec.target_id].kind
                 reason = {
                     ProducerKind.INTERIM: "interim_build_failed",
                     ProducerKind.PROCESSED: "processed_build_failed",
@@ -1361,7 +1347,7 @@ def _execute_targets(
                         profile,
                         layout,
                         spec.target_id,
-                        planned["requested_identity"],
+                        planned.requested_identity,
                     )
                     comparison = (
                         compare_semantic_artifacts(
@@ -1373,7 +1359,7 @@ def _execute_targets(
                     rebuild_evidence.append(
                         {
                             "target_id": spec.target_id,
-                            "instance_identity": planned["requested_identity"],
+                            "instance_identity": planned.requested_identity,
                             "candidate_token": candidate_workspace.token,
                             "comparison_status": comparison.status,
                         }
@@ -1395,7 +1381,7 @@ def _execute_targets(
                     rebuild_evidence.append(
                         {
                             "target_id": spec.target_id,
-                            "instance_identity": planned["requested_identity"],
+                            "instance_identity": planned.requested_identity,
                             "candidate_token": candidate_workspace.token,
                             "comparison_status": "BUILD_BLOCKED",
                         }
@@ -1426,7 +1412,7 @@ def _build_target(
     protocol: Any,
     layout: StorageLayout,
     spec: TargetSpec,
-    planned: dict[str, object],
+    planned: TargetPlan,
     time_window: TimeWindow,
     access: str,
     software_identity: ProductionSoftwareIdentity,
@@ -1434,13 +1420,13 @@ def _build_target(
     raw_root: Path,
     run_id: str | None = None,
 ) -> TargetResult:
-    if spec.producer_id is None:
+    if spec.target_id not in profile.producer_bindings:
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.BLOCKED,
             reason="producer_binding_missing",
         )
-    requested_identity = planned["requested_identity"]
+    requested_identity = planned.requested_identity
     if type(requested_identity) is not str:
         return TargetResult(
             target_id=spec.target_id,
@@ -1463,7 +1449,7 @@ def _build_target(
             software_identity=software_identity,
             raw_root=raw_root,
         )
-    binding = profile.producer_bindings[spec.producer_id]
+    binding = profile.producer_bindings[spec.target_id]
     if binding.kind is not _producer_kind(data_spec):
         return TargetResult(
             target_id=spec.target_id,
@@ -1513,7 +1499,7 @@ def _build_target(
         profile=profile,
         data_spec=data_spec,
         research_window=target_research_window,
-        upstream_identities=planned["upstream_identities"],
+        upstream_identities=planned.upstream_identities,
         software_identity=software_identity,
         raw_content_identity=raw_identity,
     )
@@ -1641,7 +1627,7 @@ def _build_semantic_target(
     raw_root: Path,
     run_id: str | None = None,
 ) -> TargetResult:
-    binding = profile.producer_bindings.get(spec.producer_id or "")
+    binding = profile.producer_bindings.get(spec.target_id)
     if binding is None:
         return TargetResult(
             target_id=spec.target_id,
@@ -1678,11 +1664,11 @@ def _build_semantic_target(
         target_spec=spec,
         data_spec=None,
         research_window=research_window,
-        upstream_identities=planned["upstream_identities"],
+        upstream_identities=planned.upstream_identities,
         software_identity=software_identity,
         raw_content_identity=raw_identity,
     )
-    if envelope.instance_identity != planned["requested_identity"]:
+    if envelope.instance_identity != planned.requested_identity:
         raise PortfolioTargetBlocked("source_identity_changed")
     logical_root = _target_logical_root(profile, layout, spec.target_id)
     if logical_root is None:
@@ -1694,7 +1680,7 @@ def _build_semantic_target(
         model_target = f"{protocol.scenario_id}_models"
         persisted = read_crypto_model_artifact(
             target_layout.target_root(model_target, Path("__missing_model__")),
-            expected_identity=planned["upstream_identities"][model_target],
+            expected_identity=planned.upstream_identities[model_target],
             trial_layout=target_layout,
         )
 
@@ -1745,7 +1731,6 @@ def _build_semantic_target(
                         spec.target_id, evaluation_spec.market_id, "evaluation"
                     ),
                     layout=StorageLayout(staging),
-                    n_groups=evaluation_spec.n_groups,
                 )
 
             try:
@@ -1828,7 +1813,7 @@ def _build_semantic_target(
         if len(model_dependencies) != 1:
             raise ValueError("prediction_model_dependency_invalid")
         model_target = model_dependencies[0]
-        model_identity = planned["upstream_identities"].get(model_target)
+        model_identity = planned.upstream_identities.get(model_target)
         if type(model_identity) is not str:
             raise ValueError("model_identity_missing")
         persisted = read_quarterly_model_artifact(
@@ -1883,7 +1868,7 @@ def _build_semantic_target(
             layout=target_layout,
             protocol_manifest=target_protocol,
             time_window=time_window,
-            upstream_identities=planned["upstream_identities"],
+            upstream_identities=planned.upstream_identities,
         )
         if group == "crypto_maker_calibration":
             write_statistics_artifact(
@@ -1913,7 +1898,7 @@ def _build_semantic_target(
                     f"{protocol.scenario_id}_{candidate.candidate_id}_ledger",
                     Path("__missing_ledger__"),
                 ),
-                expected_identity=planned["upstream_identities"][
+                expected_identity=planned.upstream_identities[
                     f"{protocol.scenario_id}_{candidate.candidate_id}_ledger"
                 ],
             )
@@ -1931,6 +1916,23 @@ def _build_semantic_target(
             envelope=envelope,
             tables=tables,
             table_group="portfolio",
+        )
+    elif (
+        binding.kind is ProducerKind.STATISTIC
+        and spec.target_id == protocol.factor_statistics_target_id
+    ):
+        tables = binding.producer(
+            layout=target_layout,
+            dataset_catalog=profile.research_datasets,
+            dataset_id=protocol.scenario_id,
+            protocol_manifest=target_protocol,
+            time_window=time_window,
+        )
+        write_statistics_artifact(
+            logical_root,
+            envelope=envelope,
+            tables=tables,
+            table_group="factor",
         )
     elif binding.kind is ProducerKind.STATISTIC:
         dependency_kinds = {
@@ -1964,7 +1966,7 @@ def _build_semantic_target(
         prediction_target = prediction_dependencies[0]
         model_target = model_dependencies[0]
         dataset_target = dataset_dependencies[0]
-        model_identity = planned["upstream_identities"].get(model_target)
+        model_identity = planned.upstream_identities.get(model_target)
         if type(model_identity) is not str:
             raise ValueError("model_identity_missing")
         persisted = read_quarterly_model_artifact(
@@ -1985,7 +1987,7 @@ def _build_semantic_target(
                 target_layout.target_root(
                     global_target, Path("__missing_global_statistics__")
                 ),
-                expected_identity=planned["upstream_identities"][global_target],
+                expected_identity=planned.upstream_identities[global_target],
             )
         (_manifest, prediction_lookup) = read_prediction_output_bundle(
             prediction_root / "outputs" / prediction_target,
@@ -2027,7 +2029,7 @@ def _build_semantic_target(
                 protocol_manifest=target_protocol,
                 dataset_catalog=profile.research_datasets,
                 output_window=time_window,
-                upstream_identities=planned["upstream_identities"],
+                upstream_identities=planned.upstream_identities,
                 expected_funding_identity=raw_identity,
                 raw_root=raw_root,
                 **callback,
@@ -2078,7 +2080,7 @@ def _build_semantic_target(
         portfolio_chunks = binding.producer(
             candidate=candidate,
             layout=target_layout,
-            upstream_identities=planned["upstream_identities"],
+            upstream_identities=planned.upstream_identities,
             output_window=time_window,
             input_window=protocol.data_window,
             formal_dataset_window=protocol.formal_dataset_window,
@@ -2151,8 +2153,6 @@ def _output_spec_for_target(
         output_definition_id=f"{run_type}_outputs",
         run_id=f"run_{target_id}",
         market_id=market_id,
-        run_type=run_type,
-        scope=OutputScope.LOCAL_ONLY,
     )
 
 
@@ -2464,13 +2464,13 @@ def _reuse_target(
     protocol: Any,
     layout: StorageLayout,
     spec: TargetSpec,
-    planned: dict[str, object],
+    planned: TargetPlan,
     raw_root: Path,
     time_window: TimeWindow,
     session: DatasetSession | None = None,
 ) -> TargetResult:
-    requested_identity = planned["requested_identity"]
-    matching_identity = planned["matching_instance_identity"]
+    requested_identity = planned.requested_identity
+    matching_identity = planned.matching_instance_identity
     if type(requested_identity) is not str or requested_identity != matching_identity:
         raise ValueError("reuse_identity_invalid")
     root = _target_instance_root(
@@ -2481,7 +2481,7 @@ def _reuse_target(
     )
     data_spec = _catalog_data_spec(profile, spec.target_id)
     if data_spec is None:
-        binding = profile.producer_bindings[spec.producer_id]
+        binding = profile.producer_bindings[spec.target_id]
         if binding.source_identity is not None:
             envelope = read_semantic_artifact(
                 root, expected_identity=requested_identity
@@ -2514,7 +2514,7 @@ def _reuse_target(
             instance_identity=requested_identity,
         )
     envelope = _validate_published_target(root, requested_identity)
-    binding = profile.producer_bindings.get(spec.producer_id or "")
+    binding = profile.producer_bindings.get(spec.target_id)
     if isinstance(data_spec, InterimDataSpec) or (
         binding is not None and binding.source_identity is not None
     ):
@@ -2617,40 +2617,22 @@ def _validate_semantic_target_root(
     trial_layout: StorageLayout | None = None,
     expected_member_identities=None,
 ) -> None:
-    binding = profile.producer_bindings.get(spec.producer_id or "")
+    binding = profile.producer_bindings.get(spec.target_id)
     if binding is None:
         raise ValueError("producer_binding_missing")
-    identities = {}
-    envelope, _members = read_semantic_artifact_record(
-        root,
-        expected_identity=expected_identity,
-        expected_member_identities=expected_member_identities,
-        member_identities=identities,
-    )
-    if envelope["logical_artifact_id"] != spec.target_id:
-        raise ValueError("semantic_artifact_logical_id_mismatch")
-
-    def output_identities(output_id):
-        prefix = f"outputs/{output_id}/"
-        return {
-            path[len(prefix) :]: identity
-            for path, identity in identities.items()
-            if path.startswith(prefix)
-        }
-
     if binding.kind is ProducerKind.STATISTIC:
-        read_statistics_artifact(
+        artifact = read_statistics_artifact(
             root,
             expected_identity=expected_identity,
-            expected_member_identities=identities,
+            expected_member_identities=expected_member_identities,
             validate_tables=validate_maker_calibration
             if protocol.protocol_id == "crypto_hft"
             and protocol.statistics_table_group(spec.target_id)
             == "crypto_maker_calibration"
             else None,
         )
-        return
-    if binding.kind is ProducerKind.PORTFOLIO:
+        envelope = artifact.envelope
+    elif binding.kind is ProducerKind.PORTFOLIO:
         if (
             protocol.protocol_id == "crypto_hft"
             and protocol.execution_target_for_target(spec.target_id).execution_mode
@@ -2660,29 +2642,58 @@ def _validate_semantic_target_root(
                 read_crypto_episode_artifact,
             )
 
-            read_crypto_episode_artifact(
+            artifact = read_crypto_episode_artifact(
                 root,
                 expected_identity=expected_identity,
-                expected_member_identities=identities,
+                expected_member_identities=expected_member_identities,
             )
+            envelope = artifact._envelope
         else:
-            read_portfolio_ledger_artifact(
+            artifact = read_portfolio_ledger_artifact(
                 root,
                 expected_identity=expected_identity,
-                expected_member_identities=identities,
+                expected_member_identities=expected_member_identities,
             )
+            envelope = artifact.envelope
+    elif binding.kind is ProducerKind.MODEL:
+        persisted = (
+            read_crypto_model_artifact
+            if protocol.protocol_id == "crypto_hft"
+            else read_quarterly_model_artifact
+        )(
+            root,
+            expected_identity=expected_identity,
+            trial_layout=trial_layout,
+            expected_member_identities=expected_member_identities,
+        )
+        envelope = persisted.envelope
+    else:
+        identities = {}
+        envelope, _members = read_semantic_artifact_record(
+            root,
+            expected_identity=expected_identity,
+            expected_member_identities=expected_member_identities,
+            member_identities=identities,
+        )
+    if envelope["logical_artifact_id"] != spec.target_id:
+        raise ValueError("semantic_artifact_logical_id_mismatch")
+    if binding.kind in {ProducerKind.STATISTIC, ProducerKind.PORTFOLIO}:
         return
+
+    def output_identities(output_id):
+        prefix = f"outputs/{output_id}/"
+        return {
+            path[len(prefix) :]: identity
+            for path, identity in identities.items()
+            if path.startswith(prefix)
+        }
+
     if protocol.protocol_id == "crypto_hft" and binding.kind in {
         ProducerKind.MODEL,
         ProducerKind.PREDICTION,
     }:
         if binding.kind is ProducerKind.MODEL:
-            return read_crypto_model_artifact(
-                root,
-                expected_identity=expected_identity,
-                trial_layout=trial_layout,
-                expected_member_identities=identities,
-            )
+            return persisted
         else:
             model_target = f"{protocol.scenario_id}_models"
             model_identity = envelope["upstream_identities"][model_target]
@@ -2717,12 +2728,6 @@ def _validate_semantic_target_root(
                     raise ValueError("crypto_prediction_model_lineage_invalid")
         return
     if binding.kind is ProducerKind.MODEL:
-        persisted = read_quarterly_model_artifact(
-            root,
-            expected_identity=expected_identity,
-            trial_layout=trial_layout,
-            expected_member_identities=identities,
-        )
         expected_model_ids = protocol.model_ids_for_target(spec.target_id)
         for decisions in persisted.selections.values():
             for selection in decisions.values():
@@ -2750,7 +2755,6 @@ def _validate_semantic_target_root(
                 expected_run_id=f"run_{spec.target_id}",
                 expected_member_identities=output_identities(spec.target_id),
             )
-            validate_evaluation_output_metadata_shape(manifest["metadata"])
         except (KeyError, TypeError, ValueError) as exc:
             raise ValueError(
                 f"evaluation_inner_artifact_invalid:{_semantic_failure_code(exc)}"
@@ -2822,7 +2826,6 @@ def _target_specs(
     specs: list[TargetSpec] = [
         TargetSpec(
             target_id=spec.data_id,
-            producer_id=spec.data_id,
         )
         for spec in profile.interim.list()
     ]
@@ -2830,7 +2833,6 @@ def _target_specs(
         TargetSpec(
             target_id=spec.data_id,
             dependencies=spec.source_input_data_ids + spec.processed_input_data_ids,
-            producer_id=spec.data_id,
         )
         for spec in profile.processed.list()
     )
@@ -2847,7 +2849,6 @@ def _target_specs(
     specs.extend(
         TargetSpec(
             target_id=source_id,
-            producer_id=source_id,
         )
         for source_id in unbound_source_ids
     )
@@ -2855,7 +2856,6 @@ def _target_specs(
         TargetSpec(
             target_id=spec.data_id,
             dependencies=spec.input_data_ids,
-            producer_id=spec.data_id,
         )
         for spec in profile.research_datasets.list()
     )
@@ -3006,9 +3006,7 @@ def _target_envelope_for_spec(
             software_identity=software_identity,
             raw_content_identity=raw_content_identity,
         )
-    if target_spec.producer_id is None:
-        raise ValueError("producer_binding_missing")
-    binding = profile.producer_bindings.get(target_spec.producer_id)
+    binding = profile.producer_bindings.get(target_spec.target_id)
     if binding is None:
         raise ValueError("producer_binding_missing")
     semantic_payload = _semantic_target_payload(
@@ -3090,6 +3088,8 @@ def _semantic_target_payload(
             if protocol.protocol_id == "crypto_hft"
             else "portfolio"
             if target_spec.target_id == f"{protocol.scenario_id}_portfolio_statistics"
+            else "factor"
+            if target_spec.target_id == protocol.factor_statistics_target_id
             else "research"
         )
         payload["statistics_tables"] = {
@@ -3364,14 +3364,14 @@ def _target_layout(
     profile: ResearchProfile,
     layout: StorageLayout,
     spec: TargetSpec,
-    plans: Mapping[str, object],
+    plans: Mapping[str, TargetPlan],
 ) -> StorageLayout:
     roots: dict[str, Path] = {}
     for target_id in (*spec.dependencies, spec.target_id):
         planned = plans.get(target_id)
-        if not isinstance(planned, Mapping):
+        if planned is None:
             raise ValueError("target_plan_missing")
-        identity = planned.get("requested_identity")
+        identity = planned.requested_identity
         if type(identity) is not str:
             raise ValueError("target_instance_identity_missing")
         roots[target_id] = _target_instance_root(
@@ -3420,26 +3420,6 @@ def _default_raw_root(layout: StorageLayout) -> Path:
 
 def _interim_raw_root(raw_root: Path, spec: InterimDataSpec) -> Path:
     return Path(raw_root) / str(spec.source_id)
-
-
-def _scenario_from_terminal(
-    profile: ResearchProfile,
-    action: str,
-    terminal_targets: tuple[str, ...],
-) -> str:
-    if action == "data materialize":
-        return _default_scenario_id(profile)
-    if action == "dataset build":
-        return terminal_targets[0]
-    datasets = tuple(spec.data_id for spec in profile.research_datasets.list())
-    for scenario_id in datasets:
-        if terminal_targets == tuple(
-            profile.protocol(
-                scenario_id=scenario_id, access_window="development"
-            ).terminal_targets(action)
-        ):
-            return scenario_id
-    raise ValueError("protocol_terminal_target_invalid")
 
 
 def _default_scenario_id(profile: ResearchProfile) -> str:

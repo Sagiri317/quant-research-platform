@@ -1,4 +1,4 @@
-"""Immutable, bounded raw CSV snapshots with a single metadata sidecar."""
+"""Immutable raw CSV snapshots with a single metadata sidecar."""
 
 from __future__ import annotations
 
@@ -7,12 +7,12 @@ import hashlib
 import io
 import json
 import os
+import sys
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
 from quant_research_platform.contracts.json_codec import canonical_identity_bytes
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
@@ -24,8 +24,6 @@ from quant_research_platform.storage.identity import (
 from quant_research_platform.storage.manifests import read_manifest, write_manifest
 
 SCHEMA_ID = "qrp-raw-csv-snapshot"
-MAX_RECORD_BYTES = 1024 * 1024
-_MAX_CELL_CHARACTERS = 64 * 1024
 _CELL_ENCODER = json.JSONEncoder(ensure_ascii=False, separators=(",", ":"))
 
 
@@ -38,27 +36,27 @@ def _decode_bytes(value: dict[str, object]) -> bytes:
 _CELL_DECODER = json.JSONDecoder(object_hook=_decode_bytes)
 
 
-def encode_raw_cell(value: object, *, _depth: int = 0) -> str:
-    """JSON preserves SDK strings/lists/null/bool/int/float without CSV coercion."""
-    if _depth > 16 or (
-        type(value) in (str, bytes, list) and len(value) > _MAX_CELL_CHARACTERS
-    ):
-        raise ValueError("raw_csv_cell_bound_exceeded")
-    if type(value) is bytes:
-        return _CELL_ENCODER.encode({"bytes_hex": value.hex()})
-    if value is not None and type(value) not in (str, int, float, bool, list):
+def encode_raw_cell(value: object) -> str:
+    """Preserve SDK scalar types, including nonfinite source values and bytes."""
+    active: set[int] = set()
+
+    def native(item: object) -> object:
+        if type(item) is bytes:
+            return {"bytes_hex": item.hex()}
+        if type(item) is list:
+            identity = id(item)
+            if identity in active:
+                raise ValueError("raw_csv_cycle")
+            active.add(identity)
+            try:
+                return [native(child) for child in item]
+            finally:
+                active.remove(identity)
+        if item is None or type(item) in (str, int, float, bool):
+            return item
         raise ValueError("raw_csv_value_type_invalid")
-    if type(value) is list:
-        parts = []
-        size = 2
-        for item in value:
-            part = encode_raw_cell(item, _depth=_depth + 1)
-            size += len(part) + 1
-            if size > _MAX_CELL_CHARACTERS:
-                raise ValueError("raw_csv_cell_bound_exceeded")
-            parts.append(part)
-        return "[" + ",".join(parts) + "]"
-    return _CELL_ENCODER.encode(value)
+
+    return _CELL_ENCODER.encode(native(value))
 
 
 def decode_raw_cell(text: str) -> object:
@@ -71,19 +69,8 @@ def decode_raw_cell(text: str) -> object:
 def _record(values: Iterable[str]) -> bytes:
     buffer = io.StringIO(newline="")
 
-    def bounded_values() -> Iterator[str]:
-        total = 0
-        for value in values:
-            total += len(value)
-            if len(value) > _MAX_CELL_CHARACTERS or total > MAX_RECORD_BYTES:
-                raise ValueError("raw_csv_cell_bound_exceeded")
-            yield value
-
-    csv.writer(buffer, lineterminator="\n").writerow(bounded_values())
-    value = buffer.getvalue().encode("utf-8")
-    if len(value) > MAX_RECORD_BYTES:
-        raise ValueError("raw_csv_record_bound_exceeded")
-    return value
+    csv.writer(buffer, lineterminator="\n").writerow(values)
+    return buffer.getvalue().encode("utf-8")
 
 
 def write_csv_snapshot(
@@ -92,7 +79,6 @@ def write_csv_snapshot(
     columns: tuple[str, ...],
     rows: Iterable[tuple[object, ...]],
     metadata: dict[str, object],
-    max_bytes: int,
     validate: Callable[[Path], object],
 ) -> None:
     """Publish caller-provided rows atomically."""
@@ -105,9 +91,6 @@ def write_csv_snapshot(
         or len(set(columns)) != len(columns)
     ):
         raise ValueError("raw_csv_columns_invalid")
-    if type(max_bytes) is not int or max_bytes <= 0:
-        raise ValueError("raw_csv_byte_bound_invalid")
-    require_free_disk_headroom(root, reserve_bytes=max_bytes + MAX_RECORD_BYTES)
 
     def write(staging: Path) -> None:
         digest = hashlib.sha256()
@@ -115,8 +98,6 @@ def write_csv_snapshot(
         handle = open_filesystem_file(staging / "response.csv", "xb")
         with closing_iterator(handle):
             header = _record(columns)
-            if len(header) > max_bytes:
-                raise ValueError("raw_csv_byte_bound_exceeded")
             handle.write(header)
             digest.update(header)
             size += len(header)
@@ -125,8 +106,6 @@ def write_csv_snapshot(
                     raise ValueError("raw_csv_row_width_invalid")
                 record = _record(encode_raw_cell(value) for value in row)
                 size += len(record)
-                if size > max_bytes:
-                    raise ValueError("raw_csv_byte_bound_exceeded")
                 handle.write(record)
                 digest.update(record)
                 count += 1
@@ -150,7 +129,7 @@ def write_csv_snapshot(
 
 
 def iter_csv_snapshot(
-    root: Path, *, expected_manifest: dict[str, object], max_bytes: int
+    root: Path, *, expected_manifest: dict[str, object]
 ) -> Iterator[tuple[object, ...]]:
     """Stream rows and verify complete consumed content on every exit."""
     root = require_unaliased_path(root, error="raw_csv_path_invalid")
@@ -187,7 +166,7 @@ def iter_csv_snapshot(
         raise ValueError("raw_csv_metadata_invalid")
     path = root / "response.csv"
     identity = dataset_file_identity(path)
-    if identity.size != manifest["byte_count"] or identity.size > max_bytes:
+    if identity.size != manifest["byte_count"]:
         raise ValueError("raw_csv_byte_count_invalid")
     handle = open_filesystem_file(path)
     digest = hashlib.sha256()
@@ -197,9 +176,10 @@ def iter_csv_snapshot(
             raise ValueError("raw_csv_identity_changed")
 
         def records() -> Iterator[list[str]]:
-            while line := handle.readline(MAX_RECORD_BYTES + 1):
-                if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
-                    raise ValueError("raw_csv_record_bound_exceeded")
+            csv.field_size_limit(sys.maxsize)
+            while line := handle.readline():
+                if not line.endswith(b"\n"):
+                    raise ValueError("raw_csv_record_invalid")
                 digest.update(line)
                 try:
                     values = next(csv.reader([line.decode("utf-8")], strict=True))

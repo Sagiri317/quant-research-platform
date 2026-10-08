@@ -563,11 +563,6 @@
             "2026-07-01-BTCUSDT-trades",
             "2026-08-01-BTCUSDT-trades",
             "2026-09-01-BTCUSDT-trades"
-          ],
-          "derivative_ticker": [
-            "2026-07-01-BTCUSDT-derivative_ticker",
-            "2026-08-01-BTCUSDT-derivative_ticker",
-            "2026-09-01-BTCUSDT-derivative_ticker"
           ]
         },
         "ETHUSDT": {
@@ -580,11 +575,6 @@
             "2026-07-01-ETHUSDT-trades",
             "2026-08-01-ETHUSDT-trades",
             "2026-09-01-ETHUSDT-trades"
-          ],
-          "derivative_ticker": [
-            "2026-07-01-ETHUSDT-derivative_ticker",
-            "2026-08-01-ETHUSDT-derivative_ticker",
-            "2026-09-01-ETHUSDT-derivative_ticker"
           ]
         }
       },
@@ -602,11 +592,6 @@
             "2026-07-01-BTC-USDT-SWAP-trades",
             "2026-08-01-BTC-USDT-SWAP-trades",
             "2026-09-01-BTC-USDT-SWAP-trades"
-          ],
-          "derivative_ticker": [
-            "2026-07-01-BTC-USDT-SWAP-derivative_ticker",
-            "2026-08-01-BTC-USDT-SWAP-derivative_ticker",
-            "2026-09-01-BTC-USDT-SWAP-derivative_ticker"
           ]
         },
         "ETH-USDT-SWAP": {
@@ -619,11 +604,6 @@
             "2026-07-01-ETH-USDT-SWAP-trades",
             "2026-08-01-ETH-USDT-SWAP-trades",
             "2026-09-01-ETH-USDT-SWAP-trades"
-          ],
-          "derivative_ticker": [
-            "2026-07-01-ETH-USDT-SWAP-derivative_ticker",
-            "2026-08-01-ETH-USDT-SWAP-derivative_ticker",
-            "2026-09-01-ETH-USDT-SWAP-derivative_ticker"
           ]
         }
       },

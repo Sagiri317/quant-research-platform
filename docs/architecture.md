@@ -49,7 +49,7 @@ signal 是评估/组合使用的排序、权重或交易意图，evaluation 是�
 每个模型的输入、算法和参数、使用的组合参数，以及 windows.development/windows.holdout。
 research run 只通过显式研究配置选择 profile、scenario 和研究窗口，不接受独立覆盖参数，避免双重选择来源。
 配置窗口必须位于协议访问边界内；选择窗口不会授予留出访问权。CORE6、PV25、Crypto baseline 是普通示例配置，
-运行入口不隐式选择它们，不动态展开“全部因子”。仅评估和完整研究复用同一 DAG。
+运行入口不隐式选择它们，不动态展开“全部因子”。各阶段复用同一 DAG。
 profiles 把确定的配置绑定到现有 catalog/protocol/producer，完整配置保存在 protocol 与 run 记录。
 Crypto 的所选标签并列评估，模型消费各自声明的标签；不接纳无科学消费者的 `evaluation.primary_label`。
 每个 target 仅绑定真正影响其计算的规范合同；workflow、业务 envelope、trial、writer 和 reader
@@ -67,13 +67,34 @@ Crypto 的训练、评估资产由每个模型的显式范围决定，不由模�
 Crypto 的训练、验证和OOS时段必须由 `research_plan` 声明；A股不接受该字段，时间访问范围来自
 `windows`，季度选择规则仍由既有 A股 protocol 管理。
 
-研究配置的 `stage=evaluation` 通过同一 DAG 只生成已选因子评估。
+研究配置显式选择一次运行的停止边界，不自动推进下一阶段：
+
+| stage | 请求的终端 |
+|---|---|
+| `dataset` | 已选数据集；模型与组合列表为空 |
+| `evaluation` | 因子评估；A 股另发布独立因子统计，模型与组合列表为空 |
+| `models` | 模型及验证比较；A 股包括 G/Q 预测统计，组合列表为空 |
+| `research` | 所选完整研究目标；只在该阶段允许冻结后的 holdout |
+
+每个阶段可分别运行多个具名配置并比较其报告。程序保留原有模型推荐、验证 IC 和风险诊断；
+用户或获授权 agent 决定一个或多个下一阶段配置，分别调用同一入口。不自动合成模型，
+不展开配置笛卡尔积，不人为引入近似并列阈值。已显式选择 `research` 表示授权本次完整 DAG。
+
+下一阶段配置可附 `stage_selection`，字段为 `selected_by`（`user` 或 `agent`）、非空 `reason`、
+非空 `sources`；每个来源只有 `run_id`、`target_id`、`instance_identity`。入口核对来源运行完成、
+同 profile/scenario/windows、严格更早阶段、development 访问、终端目标以及原生产物完整身份。
+这记录选择依据；实际计算输入仍由目标 DAG 的精确依赖身份决定，不能用来源引用冒充输入复用。
+完整选择保存在冻结配置/run 和报告中；所选配置产生的新训练仍遵守各自成熟截止。
+A 股开发期看过阶段结果后形成的选择注明 `development_stage_selection_exploratory`，
+不把选后的开发期联合推断当作预先确定的检验。holdout 不参与选择，仍需匹配已完成完整开发运行。
+
 报告重建从指定 run 记录中的冻结 JSON 重新绑定完整目录，不沿用调用者上一次裁剪的选择。
 配置绑定由既有市场 protocol/catalog owner 完成；artifact reader 只消费绑定后的选择与持久化证据。
 模型、预测、组合和稳健性分析未被请求时，
 相应部分记为 `UNDEFINED / not_requested`，不制造缺产物 blocker。
 A股与 Crypto 的评估报告均从同一个验证精确身份的 artifact reader 读取真实评估汇总；
-A股因子评估报告不依赖模型统计产物。
+A股因子评估和 `${scenario}_factor_statistics` 不依赖拟合模型；后者独立发布因子诊断及
+等权/总市值加权 Fama–MacBeth。模型统计仅持有预测和模型比较，不复制因子统计。
 
 配置文件不存运行产物。研究数据、模型和报告使用 data 分层与 instances 身份目录；
 研究运行记录为 `data/runs/research/<run_id>.json`，trial 为 `data/runs/trials/<run_id>/`。
@@ -133,9 +154,11 @@ TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指�
 各市场的产物身份绑定实际 producer、source callback 和所用 writer/reader 的代码依赖，
 从真实 callable/partial 展开包内静态模块导入闭包（含父包、函数内导入），不维护另一份文件注册表。
 模块内容按完整模块保守失效；workflow 与 profile 组合根单独绑定完整内容，不递归聚合入口的所有导入。
-`runtime.resources` 与 `runtime.execution_metrics` 仅提供性能批次默认值、实际 CPU/磁盘容量与操作观测，
+`runtime.resources` 与 `runtime.execution_metrics` 仅提供性能批次默认值、实际 CPU 容量与操作观测，
 其代码变更保留在运行 provenance，不使科学产物失效；科学公式不得放入这两个 owner。
 分帧、来源解码、数值计算、合同、存储与校验代码仍进入产物依赖。
+统计、组合和模型的原生 reader 返回已经验证的业务封装，workflow 直接核对其目标身份，
+不在同一调用边界先重复扫描一次通用封装。新消费会话、引用绑定和迭代退出仍保留内容校验。
 完整且经原生 reader 验证的精确匹配节点直接 REUSE；真实输入、规格、窗口、计算依赖或上游身份
 变化仅沿对应 DAG 子图传播。留出复用资格比较精确科学产物身份、冻结输入及窗口，
 不因单独的操作 provenance 变化宣称科学证据发生修正；冻结模型、未访问留出与失败边界保持原合同。
@@ -146,8 +169,10 @@ TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指�
 QRP 自有 JSON 使用严格 UTF-8、顶层对象和精确 schema_id，拒绝重复键及非有限数并确定性写入。
 自有接口、规格和 schema 不维护版本号；当前字段合同与精确内容、软件依赖身份共同决定可用性。
 合同变更后重建不匹配的机器产物，不设置旧格式兼容路径；真实依赖版本和来源数据修订身份保留。
-控制 manifest、plan 和 trial 事件保留 1 MiB 序列化格式边界，包含末尾换行；
-这不是内存额度。读取只接受 manifest 声明的成员，并核对完整身份与终态。
+控制 manifest、plan、trial、原始响应和 CSV 记录不设人为总字节、列数、嵌套深度或整数位数额度。
+Python 自身的解析/递归限制不被全局修改；循环、非法类型、截断和非有限内部 JSON 仍明确拒绝。
+研究数据、股票代码、供应商信息和数值计数不按隐私误拒；共享边界继续拒绝凭据与本机绝对路径。读取按捕获的实际长度检查增长或截断，
+只接受 manifest 声明的成员，并核对完整身份与终态。
 trial 记录由 storage 的唯一读写实现验证，消费者直接取得普通记录，不设预算作用域。
 
 ## 执行与性能
@@ -172,7 +197,7 @@ CPU 参数结合物理核、affinity 和实际 bandwidth quota 解析，避免�
 
 ## 发布与失败
 
-已知写入字节量时执行磁盘预检；Parquet 编码大小由实际写入确定，空间不足由原生 I/O 明确失败。
+不执行磁盘预留或写入容量准入；空间不足由实际 write、flush 或 fsync 的原生 I/O 明确失败。
 事务使用同父目录 UUID 暂存及平台原生不覆盖移动，
 或归属明确的替换。成功才原子发布，失败保留原有已验证产物；
 只清理本次操作能证明创建的资源。

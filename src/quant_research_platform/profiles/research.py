@@ -26,6 +26,7 @@ from quant_research_platform.research.portfolios.diagnostics import (
 )
 from quant_research_platform.research.protocols import a_share, crypto_hft
 from quant_research_platform.research.statistics_production import (
+    build_a_share_factor_statistics_tables,
     build_a_share_statistics_tables,
 )
 from quant_research_platform.sources import (
@@ -216,6 +217,7 @@ def _a_share_profile() -> ResearchProfile:
                     ProducerKind.STATISTIC,
                     partial(
                         build_portfolio_statistics_tables,
+                        iter_portfolio_sessions=a_share_producer.iter_portfolio_sessions,
                         unified_trading_sessions=unified_trading_sessions,
                     ),
                 )
@@ -235,6 +237,13 @@ def _a_share_profile() -> ResearchProfile:
                 )
                 for scenario_id in a_share.SCENARIO_IDS
                 for group in ("global", "quarterly")
+            },
+            **{
+                f"{scenario_id}_factor_statistics": ProducerBinding(
+                    ProducerKind.STATISTIC,
+                    build_a_share_factor_statistics_tables,
+                )
+                for scenario_id in a_share.SCENARIO_IDS
             },
             **{
                 f"{scenario_id}_{group}_statistics": ProducerBinding(
@@ -257,10 +266,10 @@ def _a_share_profile() -> ResearchProfile:
 
 @cache
 def _crypto_profile() -> ResearchProfile:
-    from quant_research_platform.artifacts.crypto_hft import (
+    from quant_research_platform.artifacts.outputs import read_prediction_output_bundle
+    from quant_research_platform.artifacts.research import (
         produce_crypto_report,
     )
-    from quant_research_platform.artifacts.outputs import read_prediction_output_bundle
     from quant_research_platform.markets.implementations.crypto.ids import (
         HFT_PANEL_DATA_ID,
     )
@@ -440,12 +449,16 @@ def bind_research_configuration(
             prepare_trade_cost,
             require_fee_coverage,
         )
+        from quant_research_platform.markets.implementations.a_share.processed import (
+            producer as a_share_producer,
+        )
         from quant_research_platform.research.portfolios.production import (
             build_portfolio_ledger,
         )
 
         portfolio_producer = partial(
             build_portfolio_ledger,
+            iter_portfolio_sessions=a_share_producer.iter_portfolio_sessions,
             fee_schedule_from_frame=fee_schedule_from_frame,
             require_fee_coverage=require_fee_coverage,
             prepare_trade_cost=prepare_trade_cost,
@@ -674,7 +687,7 @@ def bind_research_configuration(
                 for kinds in source["archives"].values():
                     if (
                         type(kinds) is not dict
-                        or set(kinds) != {"quotes", "trades", "derivative_ticker"}
+                        or set(kinds) != {"quotes", "trades"}
                         or any(
                             type(paths) is not list
                             or not paths

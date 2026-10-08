@@ -66,10 +66,9 @@ def _analyst_rows():
         ("market_cap", "Nshrb", "b_float_shares"),
     ),
 )
-def test_csmar_keep_override_persists_declared_source_projection(
+def test_csmar_fixed_projection_preserves_dtypes_duplicates_and_raw(
     tmp_path, chunksize, data_id, source_column, kept_column
 ):
-    import json
 
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.layout import StorageLayout
@@ -128,32 +127,13 @@ def test_csmar_keep_override_persists_declared_source_projection(
         .reset_index(drop=True)
     )
     assert kept_column not in default_frame
-    overrides = tmp_path / "keep.json"
-    filesystem_write_text(
-        overrides,
-        json.dumps({data_id: {"keep": [kept_column], "drop": []}}),
-        encoding="utf-8",
-    )
-    result = interim.materialize_interim_data(
-        layout=StorageLayout(tmp_path / "kept"),
-        raw_root=raw,
-        data_ids=(data_id,),
-        chunksize=chunksize,
-        override_path=overrides,
-    )
-    root = result.artifact_roots[data_id]
-    saved = read_dataset(root).sort_values("source_asset_id").reset_index(drop=True)
-    assert kept_column in saved
-    assert saved[kept_column].tolist() == [row[source_column]] * 2
-    assert str(saved[kept_column].dtype) == "float64"
-    from quant_research_platform.storage.manifests import read_bounded_qrp_json
+    root = default.artifact_roots[data_id]
+    saved = default_frame
+    from quant_research_platform.storage.manifests import read_qrp_json_file
 
-    _raw_spec, declared = read_bounded_qrp_json(root / "spec.json")
-    assert declared["column_roles"][kept_column] == "context"
+    _raw_spec, declared = read_qrp_json_file(root / "spec.json")
     assert set(declared["column_roles"]) == set(saved.columns)
-    pd.testing.assert_frame_equal(
-        saved.loc[:, default_frame.columns], default_frame, check_exact=True
-    )
+    assert tuple(saved.columns) == interim.INTERIM_COLUMNS_BY_DATA_ID[data_id]
     assert saved.source_asset_id.tolist() == ["000001", "000002"]
     assert str(saved.timestamp.dtype) == "datetime64[ns]"
     assert (
@@ -162,7 +142,6 @@ def test_csmar_keep_override_persists_declared_source_projection(
         ]
         == 1
     )
-    assert kept_column in result.pruning_report_text
     assert _file_bytes(raw) == raw_bytes
 
 
@@ -827,16 +806,6 @@ def test_csmar_materialization_replays_each_dataset_from_one_inventory(
     data_ids = ("trading_calendar", "index_weights")
     single = StorageLayout(tmp_path / "single")
     combined = StorageLayout(tmp_path / "combined")
-    real_content_hash = interim.content_hash_for_files
-    calls = 0
-
-    def hash_stream(files, **kwargs):
-        nonlocal calls
-        assert iter(files) is files
-        calls += 1
-        return real_content_hash(files, **kwargs)
-
-    monkeypatch.setattr(interim, "content_hash_for_files", hash_stream)
     expected = {}
     for data_id in data_ids:
         result = interim.materialize_interim_data(
@@ -851,8 +820,6 @@ def test_csmar_materialization_replays_each_dataset_from_one_inventory(
         actual = read_dataset(result.artifact_roots[data_id])
         pd.testing.assert_frame_equal(actual, expected[data_id], check_exact=True)
         assert len(actual) == 2
-    # Each selected dataset is hashed before reading and again before publication.
-    assert calls == 8
 
 
 @pytest.mark.parametrize("member_count", (1, 32))
@@ -1042,23 +1009,19 @@ def test_financial_raw_decoder_rejects_invalid_numeric_fact(
         _collect_raw_export(path, dataset, chunksize=1)
 
 
-def test_provider_header_bound_accepts_160_and_rejects_161_fields(
+def test_provider_header_accepts_extra_optional_fields(
     tmp_path: Path,
 ) -> None:
     required = raw_exports.RAW_TABLE_CONTRACTS["trading_calendar"].required_columns
-    for width in (160, 161):
+    for width in (160, 161, 200):
         columns = (
             *required,
             *(f"Optional{index}" for index in range(width - len(required))),
         )
         path = tmp_path / f"provider-{width}.csv"
         filesystem_write_text(path, ",".join(columns) + "\n", encoding="utf-8")
-        if width == 160:
-            inspection = raw_schemas.inspect_raw_export_file(path)
-            assert inspection.columns == columns
-        else:
-            with pytest.raises(ValueError, match="csmar_raw_export_schema_invalid"):
-                raw_schemas.inspect_raw_export_file(path)
+        inspection = raw_schemas.inspect_raw_export_file(path)
+        assert inspection.columns == columns
 
 
 def test_financial_correction_date_order_is_validated() -> None:
@@ -1091,10 +1054,9 @@ def test_csmar_identity_rejects_requested_bad_schema(
 
 @pytest.mark.parametrize("order", ("first_empty", "last_empty", "all_empty"))
 @pytest.mark.parametrize("chunksize", (1, 2))
-def test_analyst_drop_projection_is_independent_of_empty_chunk_order(
+def test_analyst_fixed_projection_is_independent_of_empty_chunk_order(
     tmp_path, order, chunksize
 ):
-    import json
 
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.layout import StorageLayout
@@ -1113,20 +1075,13 @@ def test_analyst_drop_projection_is_independent_of_empty_chunk_order(
         else [invalid]
     )
     _write_csmar(raw, "analyst_forecast", rows)
-    overrides = tmp_path / "drop.json"
-    filesystem_write_text(
-        overrides,
-        json.dumps({"analyst_forecast": {"keep": [], "drop": ["analyst_ids"]}}),
-        encoding="utf-8",
-    )
     result = interim.materialize_interim_data(
         layout=layout,
         data_ids=("analyst_forecast",),
-        override_path=overrides,
         chunksize=chunksize,
     )
     saved = read_dataset(result.artifact_roots["analyst_forecast"])
-    assert "analyst_ids" not in saved
+    assert "analyst_ids" in saved
     assert len(saved) == (0 if order == "all_empty" else 1)
 
 
@@ -1191,11 +1146,7 @@ def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
 
     raw = _collect_raw_export(index_path, "index_info")
     normalized = interim.normalize_raw_frame(raw, "index_info")
-    pruned, _ = interim._apply_output_column_rules_validated(
-        normalized,
-        "index_info",
-        overrides=interim._validated_column_overrides({}),
-    )
+    pruned = normalized.loc[:, list(interim.INTERIM_COLUMNS_BY_DATA_ID["index_info"])]
 
     assert len(raw) == len(pruned) == 4
     by_asset = pruned.set_index("source_asset_id")
@@ -1286,7 +1237,7 @@ def test_read_export_header_preserves_keyboard_interrupt_over_close_failure(
     close_calls = 0
     path = tmp_path / "export.csv"
     filesystem_write_text(path, '"quoted\nvalue",header\n', encoding="utf-8")
-    original_close = raw_schemas._BoundedCsvRecords.close
+    original_close = raw_schemas._CsvRecords.close
 
     def interrupted(_self):
         raise primary
@@ -1297,8 +1248,8 @@ def test_read_export_header_preserves_keyboard_interrupt_over_close_failure(
         original_close(self)
         raise OSError("header_close_failed")
 
-    monkeypatch.setattr(raw_schemas._BoundedCsvRecords, "__next__", interrupted)
-    monkeypatch.setattr(raw_schemas._BoundedCsvRecords, "close", failing_close)
+    monkeypatch.setattr(raw_schemas._CsvRecords, "__next__", interrupted)
+    monkeypatch.setattr(raw_schemas._CsvRecords, "close", failing_close)
     with pytest.raises(KeyboardInterrupt) as raised:
         raw_schemas.read_export_header(path)
     assert raised.value is primary
@@ -2306,16 +2257,15 @@ def test_cr_only_physical_fragments_preserve_interim_rows(
 
 
 @pytest.mark.parametrize("ending", (b"\n", b"\r"))
-def test_true_oversize_record_after_short_header_cannot_publish(
-    tmp_path, real_csv_handles, ending
-):
+def test_long_record_after_short_header_can_publish(tmp_path, real_csv_handles, ending):
+    from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.layout import StorageLayout
 
     header, rows = _short_analyst_csv_records(1)
     row = rows[0]
     row[5] += "x" * (1048654 - len(",".join(row)))
     record = ",".join(row).encode()
-    assert len(record) == 1048654 > raw_schemas.MAX_LOGICAL_RECORD_BYTES
+    assert len(record) == 1048654 > 1024 * 1024
     payload = header + ending + record + ending
     layout = StorageLayout(tmp_path)
     raw_root = layout.raw_source_root("csmar")
@@ -2326,11 +2276,12 @@ def test_true_oversize_record_after_short_header_cannot_publish(
     assert not filesystem_exists(target)
     assert raw_schemas.read_export_header(path) == tuple(header.decode().split(","))
     assert interim.source_content_identity(raw_root, "analyst_forecast") is not None
-    with pytest.raises(ValueError, match="^csmar_logical_record_exceeds_source_limit$"):
-        interim.materialize_interim_data(
-            layout=layout, raw_root=raw_root, data_ids=("analyst_forecast",)
-        )
-    assert not filesystem_exists(target)
+    interim.materialize_interim_data(
+        layout=layout, raw_root=raw_root, data_ids=("analyst_forecast",)
+    )
+    saved = read_dataset(target)
+    assert len(saved) == 1
+    assert saved["institution_id"].iloc[0] == row[5]
     assert filesystem_read_bytes(path) == payload
 
 
@@ -2362,3 +2313,19 @@ def test_invalid_utf8_is_rejected_in_csv_records(tmp_path, real_csv_handles, pay
     finally:
         records.close()
     assert filesystem_read_bytes(path) == payload
+
+
+@pytest.mark.parametrize("ending", ("\n", "\r", "\r\n"))
+def test_long_quoted_csv_record_preserves_embedded_newlines(tmp_path, ending):
+    import csv
+    import io
+
+    value = "x" * (1024 * 1024 + 1) + '\r\n"quoted",tail'
+    buffer = io.StringIO(newline="")
+    csv.writer(buffer, lineterminator=ending).writerow([value, "second"])
+    payload = buffer.getvalue().encode()
+    path = tmp_path / "quoted.csv"
+    filesystem_write_bytes(path, payload)
+    assert list(raw_schemas.iter_export_csv_records(path)) == [
+        ([value, "second"], len(payload))
+    ]

@@ -579,8 +579,8 @@ def test_zero_cost_sell_buy_transition_is_exact_and_normalized() -> None:
         result.asset_ledger.set_index("asset_id")["post_trade_notional"]
         / result.nav_after
     ).to_dict() == {"a": 0.0, "b": 1.0, "c": 0.0}
-    assert result.cash_weight == pytest.approx(0.0)
-    assert result.total_cost == pytest.approx(0.0)
+    assert (result.post_trade_cash / result.nav_after) == pytest.approx(0.0)
+    assert _execution_cost(result) == pytest.approx(0.0)
     ledger = result.asset_ledger
     assert ledger["asset_id"].tolist() == ["a", "b", "c"]
     assert (
@@ -630,7 +630,7 @@ def test_zero_adv_is_legal_zero_fill_and_missing_adv_only_blocks_demand() -> Non
     )
     assert zero.asset_ledger["reason"].notna().all()
     assert set(zero.asset_ledger["reason"]) == {"adv_capacity"}
-    assert zero.total_cost == 0.0
+    assert _execution_cost(zero) == 0.0
     for missing_adv in (pd.Series(dtype="float64"), pd.Series({"a": float("nan")})):
         no_trade = execute_continuous_target(
             pd.Series({"a": 1.0}),
@@ -691,7 +691,7 @@ def test_empty_asset_transition_is_a_cash_only_ledger() -> None:
     assert result.pre_trade_cash == pytest.approx(100.0)
     assert result.post_trade_cash == pytest.approx(100.0)
     assert result.nav_after == pytest.approx(100.0)
-    assert result.total_cost == pytest.approx(0.0)
+    assert _execution_cost(result) == pytest.approx(0.0)
 
 
 def test_blocked_sell_cannot_fund_buy_and_cash_partial_is_pro_rata() -> None:
@@ -782,9 +782,11 @@ def test_cash_rotation_with_cost_keeps_target_cash_and_reconciles_delta() -> Non
         cost_source_identity="0" * 64,
     )
     assert result.pre_trade_cash == pytest.approx(50.0)
-    assert result.target_weights.sum() == pytest.approx(0.5)
-    assert result.total_cost > 0.0
-    assert result.post_trade_cash == pytest.approx(50.0 - result.total_cost)
+    assert (
+        result.asset_ledger.target_notional.sum() / result.nav_before
+    ) == pytest.approx(0.5)
+    assert _execution_cost(result) > 0.0
+    assert result.post_trade_cash == pytest.approx(50.0 - _execution_cost(result))
     assert result.asset_ledger["executed_delta_notional"].sum() == pytest.approx(0.0)
 
 
@@ -803,10 +805,17 @@ def test_turnover_excludes_cost_and_drift_feeds_next_rebalance() -> None:
         cost_for_trade=_a_share_cost(schedule, {"a": "shanghai", "b": "shanghai"}),
         cost_source_identity=schedule.content_identity,
     )
-    assert first.realized_turnover == pytest.approx(1.0)
+    assert (
+        0.5
+        * (
+            first.asset_ledger.executed_delta_notional.abs().sum()
+            + abs(first.asset_ledger.executed_delta_notional.sum())
+        )
+        / first.nav_before
+    ) == pytest.approx(1.0)
     first_ledger = first.asset_ledger
-    assert first.total_cost > 0.0
-    assert first.total_cost == pytest.approx(
+    assert _execution_cost(first) > 0.0
+    assert _execution_cost(first) == pytest.approx(
         float(
             first_ledger.loc[
                 :,
@@ -822,7 +831,7 @@ def test_turnover_excludes_cost_and_drift_feeds_next_rebalance() -> None:
             .sum()
         )
     )
-    assert first.nav_after == pytest.approx(first.nav_before - first.total_cost)
+    assert first.nav_after == pytest.approx(first.nav_before - _execution_cost(first))
     drifted, drift_cash, drift_nav = drift_continuous_holdings(
         pd.Series({"a": 60.0, "b": 30.0}), 10.0, pd.Series({"a": 0.1, "b": -0.1})
     )
@@ -957,7 +966,7 @@ def test_buy_costs_are_admitted_before_cash_sizing() -> None:
         ),
         cost_source_identity="0" * 64,
     )
-    assert result.cash_weight >= -1e-12
+    assert (result.post_trade_cash / result.nav_after) >= -1e-12
     tiny = execute_continuous_target(
         pd.Series({"asset": 0.0}),
         pd.Series({"asset": 1e-13}),
@@ -975,7 +984,7 @@ def test_buy_costs_are_admitted_before_cash_sizing() -> None:
     )
     tiny_delta = float(tiny.asset_ledger["executed_delta_notional"].iloc[0])
     assert 0.0 < tiny_delta < 1e-12
-    assert tiny.total_cost > 0.0
+    assert _execution_cost(tiny) > 0.0
 
 
 def test_simple_target_includes_all_boundary_ties() -> None:
@@ -1115,7 +1124,7 @@ def test_scaled_execution_costs_reconcile_cash(nav):
         cost_for_trade=_a_share_cost(schedule, {"a": "shanghai"}),
         cost_source_identity=schedule.content_identity,
     )
-    assert result.total_cost / nav == pytest.approx(0.003, rel=1e-14, abs=0)
+    assert _execution_cost(result) / nav == pytest.approx(0.003, rel=1e-14, abs=0)
     assert result.nav_after / nav == pytest.approx(0.997, rel=1e-14, abs=0)
     assert result.post_trade_cash == result.nav_after
     assert result.asset_ledger["post_trade_notional"].tolist() == [0.0]
@@ -1161,5 +1170,22 @@ def test_cash_search_vector_costs_build_trade_details_only_once():
     assert result.asset_ledger.executed_delta_notional.tolist() == pytest.approx(
         [40.0, 40.0]
     )
-    assert result.total_cost == pytest.approx(8.0)
+    assert _execution_cost(result) == pytest.approx(8.0)
     assert result.post_trade_cash == pytest.approx(0.0, abs=1e-12)
+
+
+def _execution_cost(result):
+    return float(
+        result.asset_ledger.loc[
+            :,
+            [
+                "commission_cost",
+                "stamp_duty_cost",
+                "transfer_fee_cost",
+                "slippage_cost",
+                "impact_cost",
+            ],
+        ]
+        .sum()
+        .sum()
+    )

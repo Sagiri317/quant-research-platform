@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import os
 from pathlib import Path
 
 from fastapi import FastAPI, Query
-from fastapi.middleware.cors import CORSMiddleware
 
 from quant_research_platform.interfaces import queries
 from quant_research_platform.interfaces.api.errors import (
@@ -25,21 +23,6 @@ from quant_research_platform.profiles.research import (
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 
-CORS_ORIGINS_ENV = "QRP_CORS_ORIGINS"
-DEFAULT_CORS_ORIGINS = (
-    "http://127.0.0.1:5173",
-    "http://localhost:5173",
-)
-
-
-def _cors_origins_from_env() -> list[str]:
-    origins = list(DEFAULT_CORS_ORIGINS)
-    env_value = os.environ.get(CORS_ORIGINS_ENV, "")
-    for origin in (item.strip() for item in env_value.split(";")):
-        if origin and origin not in origins:
-            origins.append(origin)
-    return origins
-
 
 def create_app(*, project_root: Path | None = None) -> FastAPI:
     """Create the QRP API app."""
@@ -51,12 +34,6 @@ def create_app(*, project_root: Path | None = None) -> FastAPI:
             "Read-only local catalog and explicitly selected "
             "published research evidence."
         ),
-    )
-    app.add_middleware(
-        CORSMiddleware,
-        allow_origins=_cors_origins_from_env(),
-        allow_methods=["GET", "OPTIONS"],
-        allow_headers=["*"],
     )
     register_api_error_handlers(app)
     _include_routes(

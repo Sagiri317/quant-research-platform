@@ -13,12 +13,14 @@ from quant_research_platform.contracts.experiments import (
     validate_trial_record_against_plan,
 )
 from quant_research_platform.contracts.json_codec import (
-    MAX_QRP_JSON_BYTES,
-    bounded_rendered_qrp_json_object_size,
     canonical_identity_bytes,
+    qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.models import (
     validate_completed_model_trial_metrics,
+)
+from quant_research_platform.policy.share_safety import (
+    evidence_json_value_unsafe_reason,
 )
 from quant_research_platform.storage.atomic import (
     atomic_write_directory,
@@ -33,18 +35,19 @@ from quant_research_platform.storage.identity import (
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
     _qrp_json_file_identity,
-    read_bounded_qrp_json,
     read_bounded_qrp_json_directory,
+    read_qrp_json_file,
 )
 
 
 def append_trial_record(root: Path, plan: ExperimentPlan, record: TrialRecord) -> Path:
     if not isinstance(record, TrialRecord):
         raise TypeError("trial_record_required")
-    plan_payload, record_payload = (plan.protocol_payload(), record.payload())
-    for payload in (plan_payload, record_payload):
-        bounded_rendered_qrp_json_object_size(payload, max_bytes=MAX_QRP_JSON_BYTES - 1)
+    plan_payload = qrp_json_object_snapshot(plan.protocol_payload())
+    record_payload = qrp_json_object_snapshot(record.payload())
     validate_trial_record_against_plan(plan, record)
+    if evidence_json_value_unsafe_reason([plan_payload, record_payload]) is not None:
+        raise ValueError("trial_evidence_unsafe")
     if not filesystem_exists(root):
 
         def write(staging: Path) -> None:
@@ -83,9 +86,10 @@ def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
     if members != {"plan.json", "records"}:
         raise ValueError("dataset_metadata_directory_member_invalid")
     identity = _qrp_json_file_identity(root / "plan.json")
-    saved = ExperimentPlan.from_payload(
-        read_bounded_qrp_json(root / "plan.json", expected_identity=identity)[1]
-    )
+    plan_payload = read_qrp_json_file(root / "plan.json", expected_identity=identity)[1]
+    if evidence_json_value_unsafe_reason(plan_payload) is not None:
+        raise ValueError("trial_evidence_unsafe")
+    saved = ExperimentPlan.from_payload(plan_payload)
     if plan is not None and canonical_identity_bytes(
         saved.protocol_payload()
     ) != canonical_identity_bytes(plan.protocol_payload()):
@@ -94,6 +98,11 @@ def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
     entries = read_bounded_qrp_json_directory(
         root / "records", max_members=2 * plan.trial_budget
     )
+    if (
+        evidence_json_value_unsafe_reason([payload for _, payload in entries])
+        is not None
+    ):
+        raise ValueError("trial_evidence_unsafe")
     events = {name: TrialRecord.from_payload(payload) for name, payload in entries}
     starts = {
         record.attempt_index: record

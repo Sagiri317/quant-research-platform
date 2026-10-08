@@ -28,6 +28,7 @@ from quant_research_platform.contracts.targets import (
     ProducerBinding,
     ProducerKind,
     ResearchRunTargetResult,
+    TargetPlan,
     TargetSpec,
     TargetStatus,
 )
@@ -231,7 +232,6 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         return InterimImportResult(
             artifact_roots={source_id: output_root},
             skipped=(),
-            pruning_report_text="formal synthetic source",
         )
 
     def dataset_producer(**kwargs: object) -> object:
@@ -559,15 +559,22 @@ def test_model_failure_blocks_real_semantic_descendant(
         base,
         producer_bindings={
             **base.producer_bindings,
-            "model": ProducerBinding(ProducerKind.MODEL, fail_model),
+            "pv_all_model_selection_refit": ProducerBinding(
+                ProducerKind.MODEL, fail_model
+            ),
         },
     )
     model_target = "pv_all_model_selection_refit"
     terminals = base.protocol(scenario_id="pv_all").terminal_targets("research run")
     target_specs = (
-        TargetSpec(model_target, producer_id="model"),
+        TargetSpec(
+            model_target,
+        ),
         *(
-            TargetSpec(target_id, dependencies=(model_target,), producer_id=target_id)
+            TargetSpec(
+                target_id,
+                dependencies=(model_target,),
+            )
             for target_id in terminals
         ),
     )
@@ -579,14 +586,15 @@ def test_model_failure_blocks_real_semantic_descendant(
 
     result = research._execute_action(  # noqa: SLF001
         profile=profile,
+        protocol=profile.protocol(
+            scenario_id=research._default_scenario_id(profile),
+            access_window="development",
+        ),
         run_id="run_failure",
         action="research run",
         terminal_targets=terminals,
         layout=StorageLayout(project_root=tmp_path),
-        time_window=TimeWindow("2019-01-01", "2019-03-31"),
         raw_root=tmp_path / "raw",
-        start_date="2019-01-01",
-        end_date="2019-03-31",
         research_window={
             "start": "2019-01-01",
             "end": "2019-03-31",
@@ -609,16 +617,36 @@ def test_model_failure_blocks_real_semantic_descendant(
 
 def test_target_graph_is_permutation_stable() -> None:
     first = (
-        TargetSpec("root", ("b", "a"), producer_id="root"),
-        TargetSpec("a", producer_id="a"),
-        TargetSpec("b", ("leaf",), producer_id="b"),
-        TargetSpec("leaf", producer_id="leaf"),
+        TargetSpec(
+            "root",
+            ("b", "a"),
+        ),
+        TargetSpec(
+            "a",
+        ),
+        TargetSpec(
+            "b",
+            ("leaf",),
+        ),
+        TargetSpec(
+            "leaf",
+        ),
     )
     second = (
-        TargetSpec("root", ("a", "b"), producer_id="root"),
-        TargetSpec("b", ("leaf",), producer_id="b"),
-        TargetSpec("leaf", producer_id="leaf"),
-        TargetSpec("a", producer_id="a"),
+        TargetSpec(
+            "root",
+            ("a", "b"),
+        ),
+        TargetSpec(
+            "b",
+            ("leaf",),
+        ),
+        TargetSpec(
+            "leaf",
+        ),
+        TargetSpec(
+            "a",
+        ),
     )
 
     assert tuple(
@@ -728,22 +756,23 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
     )
     assert a_share.terminal_targets("research run") == (
         "pv_all_evaluation",
+        "pv_all_factor_statistics",
         "pv_all_global_statistics",
         "pv_all_quarterly_statistics",
         *ledger_ids,
         "pv_all_portfolio_statistics",
     )
     assert a_share_specs["pv_all_evaluation"].dependencies == ("pv_all",)
-    assert a_share_specs["pv_all_evaluation"].producer_id == "pv_all_evaluation"
+    assert a_share_specs["pv_all_evaluation"].target_id == "pv_all_evaluation"
     model_id = "pv_all_model_selection_refit"
     assert a_share_specs[model_id].dependencies == ("pv_all",)
-    assert a_share_specs[model_id].producer_id == model_id
+    assert a_share_specs[model_id].target_id == model_id
     assert a_profile.producer_bindings[model_id].kind is ProducerKind.MODEL
     for group in ("global", "quarterly"):
         prediction = f"pv_all_{group}_persisted_predictions"
         statistics = f"pv_all_{group}_statistics"
         assert a_share_specs[prediction].dependencies == ("pv_all", model_id)
-        assert a_share_specs[prediction].producer_id == prediction
+        assert a_share_specs[prediction].target_id == prediction
         assert a_profile.producer_bindings[prediction].kind is ProducerKind.PREDICTION
         assert a_share_specs[statistics].dependencies == (
             prediction,
@@ -751,7 +780,7 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
             "pv_all",
             *(("pv_all_global_statistics",) if group == "quarterly" else ()),
         )
-        assert a_share_specs[statistics].producer_id == statistics
+        assert a_share_specs[statistics].target_id == statistics
         assert a_profile.producer_bindings[statistics].kind is ProducerKind.STATISTIC
     assert "pv_all_ew_rank_model" not in a_share_specs
     assert "pv_all_ew_rank_predictions" not in a_share_specs
@@ -776,11 +805,13 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
             "trading_calendar",
             "a_share_fee_schedule",
             "market_panel_1d",
+            "market_bars_1d",
+            "stock_master",
             *first.risk_context_target_ids,
         )
         for candidate in selected:
             target = f"pv_all_{candidate.candidate_id}_ledger"
-            assert a_share_specs[target].producer_id == target
+            assert a_share_specs[target].target_id == target
             assert (
                 candidate.prediction_target_id
                 == f"pv_all_{group}_persisted_predictions"
@@ -934,7 +965,6 @@ def test_interim_binding_receives_one_requested_target(
         return InterimImportResult(
             artifact_roots={data_id: output_root},
             skipped=(),
-            pruning_report_text="test",
         )
 
     def source_identity(_raw_root: Path, _data_id: str) -> str:
@@ -1012,7 +1042,6 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
         return InterimImportResult(
             artifact_roots={data_id: output_root},
             skipped=(),
-            pruning_report_text="test",
         )
 
     def source_identity(raw: Path, _data_id: str) -> str:
@@ -1169,7 +1198,6 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
         return InterimImportResult(
             artifact_roots={data_id: output_root},
             skipped=(),
-            pruning_report_text="test",
         )
 
     def source_identity(raw: Path, _data_id: str) -> str:
@@ -1320,7 +1348,6 @@ def _calendar_rebuild_profile(
         return InterimImportResult(
             artifact_roots={data_id: output_root},
             skipped=(),
-            pruning_report_text="test",
         )
 
     def source_identity(raw: Path, _data_id: str) -> str:
@@ -1834,7 +1861,6 @@ def test_rebuild_blocked_before_materialization_cleans_empty_candidate(
         return InterimImportResult(
             artifact_roots={},
             skipped=(data_id,),
-            pruning_report_text="blocked",
         )
 
     blocked_profile = replace(
@@ -1917,7 +1943,6 @@ def test_rebuild_reuses_published_upstream_unless_explicitly_requested(
         return InterimImportResult(
             artifact_roots={descendant_id: output_root},
             skipped=(),
-            pruning_report_text="test",
         )
 
     profile = replace(
@@ -1935,11 +1960,12 @@ def test_rebuild_reuses_published_upstream_unless_explicitly_requested(
         },
     )
     declared_specs = (
-        TargetSpec(source_id, producer_id=source_id),
+        TargetSpec(
+            source_id,
+        ),
         TargetSpec(
             descendant_id,
             dependencies=(source_id,),
-            producer_id=descendant_id,
         ),
     )
 
@@ -2429,7 +2455,6 @@ def test_target_local_validation_preserves_independent_production(
         return InterimImportResult(
             artifact_roots={name: persisted(name, kwargs)},
             skipped=(),
-            pruning_report_text="synthetic",
         )
 
     @contextmanager
@@ -2473,9 +2498,16 @@ def test_target_local_validation_preserves_independent_production(
         research,
         "_target_specs",
         lambda *_args, **_kwargs: (
-            TargetSpec(a, producer_id=a),
-            TargetSpec(b, dependencies=(a,), producer_id=b),
-            TargetSpec(c, producer_id=c),
+            TargetSpec(
+                a,
+            ),
+            TargetSpec(
+                b,
+                dependencies=(a,),
+            ),
+            TargetSpec(
+                c,
+            ),
         ),
     )
     raw = tmp_path / "raw"
@@ -2731,7 +2763,7 @@ def test_formal_prediction_dispatch_preserves_planned_window_and_identity(
         target_id = kwargs["spec"].target_id
         assert kwargs["time_window"] == expected_window
         assert (
-            kwargs["planned"]["requested_identity"]
+            kwargs["planned"].requested_identity
             == public_targets[target_id]["requested_identity"]
         )
         active_dispatch.append(target_id)
@@ -2743,7 +2775,7 @@ def test_formal_prediction_dispatch_preserves_planned_window_and_identity(
         return TargetResult(
             target_id,
             status,
-            instance_identity=kwargs["planned"]["requested_identity"],
+            instance_identity=kwargs["planned"].requested_identity,
         )
 
     def build_prerequisite_or_prediction(**kwargs):
@@ -2756,7 +2788,7 @@ def test_formal_prediction_dispatch_preserves_planned_window_and_identity(
         return TargetResult(
             target_id,
             TargetStatus.BUILT,
-            instance_identity=kwargs["planned"]["requested_identity"],
+            instance_identity=kwargs["planned"].requested_identity,
         )
 
     def reuse_prediction(**kwargs):
@@ -2774,13 +2806,11 @@ def test_formal_prediction_dispatch_preserves_planned_window_and_identity(
     )
     result = research._execute_action(
         profile=bound,
+        protocol=protocol,
         action="research run",
         terminal_targets=tuple(protocol.terminal_targets("research run")),
         layout=layout,
-        time_window=TimeWindow(start, "2023-12-31"),
         raw_root=tmp_path / "raw",
-        start_date=start,
-        end_date="2023-12-31",
         research_window={"start": start, "end": "2023-12-31", "access": "development"},
         run_id="run_formal_prediction_window",
     )
@@ -2809,7 +2839,6 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
     target = TargetSpec(
         target_id="prediction",
         dependencies=("model",),
-        producer_id="prediction",
     )
     protocol = SimpleNamespace(
         protocol_id="a_share_low_frequency",
@@ -2904,13 +2933,16 @@ def test_model_selection_rejects_protocol_family_mismatch(
         manifest=lambda: {"selection_tie_break": ["linear_regression"]},
         model_ids_for_target=lambda _target_id: (expected_model_id,),
     )
-    target = TargetSpec(model_target, producer_id=model_target)
+    target = TargetSpec(
+        model_target,
+    )
     selection = {
         "candidate_family_ids": [expected_model_id],
         "tie_break_order": [expected_model_id],
         "selected_family_id": "different_family",
     }
     persisted = SimpleNamespace(
+        envelope={"logical_artifact_id": model_target},
         selections={"global": {"final": selection}},
         candidate_models=(
             {
@@ -2923,11 +2955,6 @@ def test_model_selection_rejects_protocol_family_mismatch(
             },
         ),
         final_models=(),
-    )
-    monkeypatch.setattr(
-        research,
-        "read_semantic_artifact_record",
-        lambda *_args, **_kwargs: ({"logical_artifact_id": model_target}, {}),
     )
     monkeypatch.setattr(
         research,
@@ -3053,10 +3080,15 @@ def test_evaluation_result_is_owned_before_atomic_publication_callback(
             protocol=protocol,
             layout=layout,
             spec=target,
-            planned={
-                "requested_identity": envelope.instance_identity,
-                "upstream_identities": {},
-            },
+            planned=TargetPlan(
+                target_id=target.target_id,
+                upstream_target_ids=tuple(target.dependencies),
+                decision="BUILD",
+                **{
+                    "requested_identity": envelope.instance_identity,
+                    "upstream_identities": {},
+                },
+            ),
             target_layout=layout,
             time_window=window,
             research_window=window_payload,
@@ -3172,3 +3204,118 @@ def test_materialize_rejects_invalid_single_endpoint_before_sources(
                 plan=plan,
             )
     assert not (tmp_path / "data").exists()
+
+
+def test_stage_choice_validates_published_source_and_never_uses_holdout(tmp_path):
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from quant_research_platform.artifacts.evidence import write_json_evidence
+    from quant_research_platform.artifacts.research import write_research_run_record
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.targets import (
+        ResearchRunRecord,
+        ResearchRunTargetResult,
+        RunStatus,
+        unmeasured_operation_evidence,
+    )
+    from quant_research_platform.storage.semantic_artifacts import (
+        write_semantic_artifact,
+    )
+
+    layout = StorageLayout(project_root=tmp_path)
+    windows = {
+        "development": {"start": "2019-01-01", "end": "2023-12-31"},
+        "holdout": {"start": "2024-01-01", "end": "2025-12-31"},
+    }
+    target_id = "pv_all_factor_statistics"
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=target_id,
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={**windows["development"], "access": "development"},
+        upstream_identities={},
+        semantic_metadata={},
+    )
+    logical = layout.semantic_artifact_root(MarketId("a_share"), target_id)
+    root = write_semantic_artifact(
+        logical,
+        envelope,
+        lambda staging: write_json_evidence(
+            staging / "value.json", {"schema_id": "stage-test", "status": "DEFINED"}
+        ),
+    )
+    reference = ResearchRunTargetResult(
+        target_id,
+        ProducerKind.STATISTIC,
+        TargetStatus.BUILT,
+        instance_identity=envelope.instance_identity,
+        schema_identity=envelope.schema_identity,
+        artifact_root=logical.relative_to(tmp_path).as_posix(),
+    )
+    source_protocol = {
+        "scenario_id": "pv_all",
+        "access_window": "development",
+        "research_configuration": {"stage": "evaluation", "windows": windows},
+    }
+    source = ResearchRunRecord(
+        run_id="run_source",
+        profile_id="a_share_csmar_choice",
+        scenario_id="pv_all",
+        protocol=source_protocol,
+        protocol_identity=canonical_json_hash(source_protocol),
+        research_window={**windows["development"], "access": "development"},
+        software_identity="c" * 64,
+        terminal_targets=(target_id,),
+        target_results=(reference,),
+        status=RunStatus.COMPLETE,
+        operation_evidence=unmeasured_operation_evidence("fixture"),
+    )
+    write_research_run_record(layout.research_run_path(source.run_id), source)
+    choice = {
+        "run_id": source.run_id,
+        "target_id": target_id,
+        "instance_identity": envelope.instance_identity,
+    }
+    config = {
+        "stage": "models",
+        "windows": windows,
+        "stage_selection": {
+            "selected_by": "agent",
+            "reason": "Compare development evidence",
+            "sources": [choice],
+        },
+    }
+    profile = SimpleNamespace(profile_id=source.profile_id)
+    protocol = SimpleNamespace(scenario_id="pv_all", configuration=lambda: config)
+    research._validate_stage_selection(profile, layout, protocol)
+    choice["instance_identity"] = "d" * 64
+    with pytest.raises(ValueError, match="research_stage_source_identity_mismatch"):
+        research._validate_stage_selection(profile, layout, protocol)
+    choice["instance_identity"] = envelope.instance_identity
+    config["stage"] = "evaluation"
+    with pytest.raises(ValueError, match="research_stage_source_ineligible"):
+        research._validate_stage_selection(profile, layout, protocol)
+    config["stage"] = "models"
+    holdout_protocol = {**source_protocol, "access_window": "holdout"}
+    holdout = replace(
+        source,
+        run_id="run_holdout_choice",
+        protocol=holdout_protocol,
+        protocol_identity=canonical_json_hash(holdout_protocol),
+        research_window={**windows["holdout"], "access": "holdout"},
+        holdout_evidence={"qualification": "HOLDOUT_FIRST_EVIDENCE", "prior_runs": []},
+    )
+    write_research_run_record(layout.research_run_path(holdout.run_id), holdout)
+    choice["run_id"] = holdout.run_id
+    with pytest.raises(ValueError, match="research_stage_source_ineligible"):
+        research._validate_stage_selection(profile, layout, protocol)
+    choice["run_id"] = source.run_id
+    # A valid run whose artifact was modified cannot be chosen by its old identity.
+    (root / "value.json").write_text('{"status":"CHANGED"}')
+    with pytest.raises(ValueError):
+        research._validate_stage_selection(profile, layout, protocol)

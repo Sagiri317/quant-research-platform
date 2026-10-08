@@ -174,7 +174,7 @@ def test_refit_stage_has_one_resolved_candidate_and_no_selection_score():
             TimeWindow(date(2021, 2, 1), date(2022, 7, 31)),
         ),
         fit_cutoff=date(2023, 1, 31),
-        selection_group="global",
+        selection_groups=("global",),
         candidate_ids=("ridge",),
         candidate_parameters={"ridge": {"random_seed": 7}},
         trial_budget=1,
@@ -185,6 +185,8 @@ def test_refit_stage_has_one_resolved_candidate_and_no_selection_score():
     )
     assert ExperimentPlan.from_payload(refit.protocol_payload()) == refit
     assert refit.protocol_hash != plan.protocol_hash
+    shared = replace(refit, selection_groups=("global", "quarterly"))
+    assert ExperimentPlan.from_payload(shared.protocol_payload()) == shared
     for changes in (
         {"selection_metric": "validation_rankic"},
         {"trial_budget": 2},
@@ -218,25 +220,35 @@ def test_refit_stage_has_one_resolved_candidate_and_no_selection_score():
     for parents in (("b" * 64, "a" * 64), ("a" * 64, "a" * 64), ("invalid",)):
         with pytest.raises(ValueError, match="^experiment_selection_parents_invalid$"):
             replace(refit, selection_ledger_semantic_identities=parents)
-    for group in (None, [], {}, False, 1):
+    for group in (
+        None,
+        [],
+        {},
+        False,
+        1,
+        (),
+        ("global", "global"),
+        ("quarterly", "global"),
+        ("unknown",),
+    ):
         with pytest.raises(ValueError, match="^experiment_selection_group_required$"):
-            replace(refit, selection_group=group)
+            replace(refit, selection_groups=group)
     with pytest.raises(ValueError, match="^experiment_selection_group_invalid$"):
-        replace(plan, selection_group="global")
+        replace(plan, selection_groups=("global",))
     assert replace(refit, fit_cutoff=refit.fit_windows[-1].end)
     for changes in (
         {"fit_cutoff": date(2023, 1, 30)},
         {"fit_windows": (refit.fit_windows[0],)},
         {"selection_ledger_semantic_identities": ("a" * 64,)},
-        {"selection_group": "quarterly"},
+        {"selection_groups": ("quarterly",)},
     ):
         changed = replace(refit, **changes)
         assert changed.protocol_hash != refit.protocol_hash
         assert ExperimentPlan.from_payload(changed.protocol_payload()) == changed
-    crypto = replace(refit, market_id=MarketId("crypto"), selection_group=None)
+    crypto = replace(refit, market_id=MarketId("crypto"), selection_groups=())
     assert ExperimentPlan.from_payload(crypto.protocol_payload()) == crypto
     with pytest.raises(ValueError, match="^experiment_selection_group_invalid$"):
-        replace(crypto, selection_group="global")
+        replace(crypto, selection_groups=("global",))
 
 
 @pytest.mark.parametrize(

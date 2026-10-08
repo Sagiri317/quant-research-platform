@@ -22,8 +22,6 @@ def calculate_factors_for_panel(
     *,
     definitions: Sequence[FactorDefinition],
     output_window: TimeWindow | None = None,
-    trading_calendar: pd.DataFrame | None = None,
-    market_history: pd.DataFrame | None = None,
 ) -> pd.DataFrame:
     requested = tuple(definitions)
     _require_factor_input_columns(panel_frame, requested)
@@ -38,31 +36,6 @@ def calculate_factors_for_panel(
         ]
     if not requested:
         return output_source.loc[:, ["market_id", "asset_id", "timestamp"]].copy()
-    if families == ("market_model",):
-        pieces = list(
-            _market_model_frames(
-                (panel_frame,),
-                trading_calendar=trading_calendar,
-                market_history=market_history,
-            )
-        )
-        calculated = (
-            pd.concat(pieces, ignore_index=True)
-            if pieces
-            else pd.DataFrame(
-                columns=(
-                    "asset_id",
-                    "timestamp",
-                    "beta_252d",
-                    "residual_volatility_60d",
-                )
-            )
-        )
-        return _with_keys(
-            output_source,
-            calculated,
-            output_columns=tuple(definition.output_column for definition in requested),
-        )
     if families == ("fundamental",):
         return _with_keys(
             output_source,

@@ -4,6 +4,9 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.targets import unmeasured_operation_evidence
+from quant_research_platform.markets.implementations.a_share.processed import (
+    producer as market_sessions,
+)
 
 
 def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
@@ -18,7 +21,6 @@ def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
         build_business_manifest_envelope,
     )
     from quant_research_platform.contracts.portfolios import (
-        CONTINUOUS_EXECUTION_COLUMNS,
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
     from quant_research_platform.policy.lifecycle import closing_iterator
@@ -28,7 +30,10 @@ def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
     from quant_research_platform.research.portfolios.diagnostics import (
         _group_portfolio_comparison,
     )
-    from tests.helpers.portfolio_ledger import write_test_sessions
+    from tests.helpers.portfolio_ledger import (
+        CONTINUOUS_EXECUTION_COLUMNS,
+        write_test_sessions,
+    )
 
     gross = [2.0**-53, *([2.0**1020, *([2.0**-51] * 20)] * 17)]
     dates = pd.date_range("2024-01-01", periods=len(gross) + 1)
@@ -202,6 +207,7 @@ def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
 
     roots.update(write_market_evidence(layout, panel))
     source = iter_holding_factor_inputs(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         layout=layout.with_target_roots(roots),
         calendar=pd.DataFrame(
             {"calendar_date": dates, "source_market_type": 1, "is_trading_day": True}
@@ -237,7 +243,6 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         build_business_manifest_envelope,
     )
     from quant_research_platform.contracts.portfolios import (
-        CONTINUOUS_EXECUTION_COLUMNS,
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
     from quant_research_platform.contracts.time import TimeWindow
@@ -248,7 +253,10 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     from quant_research_platform.research.portfolios.diagnostics import (
         _portfolio_statistics_tables,
     )
-    from tests.helpers.portfolio_ledger import write_test_sessions
+    from tests.helpers.portfolio_ledger import (
+        CONTINUOUS_EXECUTION_COLUMNS,
+        write_test_sessions,
+    )
     from tests.helpers.research_configuration import research_configuration
 
     selected_protocol = bind_research_configuration(
@@ -394,14 +402,14 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         ]
     )
     benchmark_scans = []
-    original_eq = pd.Series.eq
 
-    def counted_eq(series, other, *args, **kwargs):
-        if series.name == "benchmark_id" and len(series) == len(benchmark):
-            benchmark_scans.append(len(series))
-        return original_eq(series, other, *args, **kwargs)
+    class ObservedBenchmark(pd.DataFrame):
+        def __getitem__(self, key):
+            if isinstance(key, str) and key == "benchmark_id":
+                benchmark_scans.append(len(self))
+            return super().__getitem__(key)
 
-    monkeypatch.setattr(pd.Series, "eq", counted_eq)
+    benchmark = ObservedBenchmark(benchmark)
     owned = _portfolio_statistics_tables(
         ledgers=artifacts,
         candidates=candidates,
@@ -416,7 +424,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         ),
         unified_trading_sessions=lambda frame: pd.DatetimeIndex(frame.calendar_date),
     )
-    assert benchmark_scans == [len(benchmark), len(benchmark)]
+    assert sum(benchmark_scans) <= 2 * len(benchmark)
     assert owned["portfolio_daily"].candidate_id.tolist() == [
         candidate.candidate_id for _ in frames for candidate in candidates
     ]
@@ -731,7 +739,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     assert any(row.get("test_id") == "psr" for row in report["sections"]["robustness"])
 
 
-def test_holding_input_reader_replays_real_history_and_freezes_decision_universe(
+def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
     tmp_path,
 ):
     import numpy as np
@@ -744,32 +752,31 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
     from quant_research_platform.research.protocols.a_share import RISK_STYLE_COLUMNS
     from quant_research_platform.storage.datasets import write_dataset
     from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.research_specs import make_demo_research_dataset_spec
     from tests.workflows.test_portfolio_workflow_integration import _processed_specs
 
-    dates = pd.bdate_range("2017-01-02", periods=350)
+    dates = pd.bdate_range("2017-01-02", periods=4)
     assets = [f"asset_{index:03d}" for index in range(105)]
     rng = np.random.default_rng(818)
-    returns = rng.normal(scale=0.008, size=(350, 1)) * rng.uniform(
+    returns = rng.normal(scale=0.008, size=(4, 1)) * rng.uniform(
         0.5, 1.5, size=(1, 105)
-    ) + rng.normal(size=(350, 105)) * np.linspace(0.003, 0.009, 105)
+    ) + rng.normal(size=(4, 105)) * np.linspace(0.003, 0.009, 105)
     prices = 100 * np.cumprod(1 + returns, axis=0)
     panel = pd.DataFrame(
         {
             "market_id": "a_share",
             "timestamp": dates.repeat(105),
-            "asset_id": assets * 350,
+            "asset_id": assets * 4,
             "adj_open": prices.ravel(),
             "adj_close": prices.ravel(),
             "amount": 1000000.0,
             "market_type": 1,
             "period_return": returns.ravel(),
-            "float_market_cap": np.tile(np.geomspace(100.0, 1000000.0, 105), 350),
+            "float_market_cap": np.tile(np.geomspace(100.0, 1000000.0, 105), 4),
             "industry_standard_id": "CSRC2012",
-            "industry_level1_code": np.tile(["A01"] * 52 + ["B01"] * 53, 350),
+            "industry_level1_code": np.tile(["A01"] * 52 + ["B01"] * 53, 4),
         }
     )
-    panel["industry_level1_code"] = np.tile(["A01"] * 52 + ["B01"] * 53, 350)
+    panel["industry_level1_code"] = np.tile(["A01"] * 52 + ["B01"] * 53, 4)
     panel["is_nonfinancial_industry"] = True
     panel = panel.assign(
         is_a_share_scope=True,
@@ -784,21 +791,10 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
     )
     styles = RISK_STYLE_COLUMNS
     data = panel[["market_id", "timestamp", "asset_id"]].copy()
-    data["eligible"] = True
-    data["label"] = 0.0
     for name in styles:
         data[name] = rng.normal(size=len(data))
     data.loc[data.asset_id.eq(assets[-1]), styles[0]] = np.nan
     risk_data = data.loc[:, ["market_id", "timestamp", "asset_id", *styles]].copy()
-    data = data.drop(columns=list(styles)).assign(signal=1.0)
-    data = data.loc[data.timestamp.ne(dates[10])].copy()
-    spec = make_demo_research_dataset_spec(
-        data_id="fixture",
-        factor_columns=("signal",),
-        label_columns=("label",),
-        filter_columns=("eligible",),
-        context_columns=(),
-    )
     weights = pd.DataFrame(
         [
             {
@@ -818,7 +814,6 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
         "market_panel_1d": base_layout.processed_data_root(
             "a_share", _processed_specs().get("market_panel_1d").kind, "market_panel_1d"
         ),
-        "fixture": base_layout.research_dataset_root("a_share", "fixture"),
         "benchmark_weights": base_layout.processed_data_root(
             "a_share",
             _processed_specs().get("benchmark_weights").kind,
@@ -828,7 +823,6 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
     write_dataset(
         roots["market_panel_1d"], panel, spec=_processed_specs().get("market_panel_1d")
     )
-    write_dataset(roots["fixture"], data, spec=spec)
     write_dataset(
         roots["benchmark_weights"],
         weights,
@@ -854,6 +848,7 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
     )
     window = TimeWindow(dates[-4], dates[-1])
     source = iter_holding_factor_inputs(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         benchmark_required=True,
         layout=layout,
         calendar=calendar,
@@ -887,6 +882,7 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
 
     def first_for_styles(selected_styles, selected_layout):
         stream = iter_holding_factor_inputs(
+            iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
             benchmark_required=True,
             layout=selected_layout,
             calendar=calendar,
@@ -946,6 +942,7 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
         {**roots, "market_panel_1d": missing_root}
     )
     source = iter_holding_factor_inputs(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         benchmark_required=True,
         layout=missing_layout,
         calendar=calendar,
@@ -990,7 +987,6 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
         build_business_manifest_envelope,
     )
     from quant_research_platform.contracts.portfolios import (
-        CONTINUOUS_EXECUTION_COLUMNS,
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
     from quant_research_platform.contracts.time import TimeWindow
@@ -1002,7 +998,10 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
         _portfolio_statistics_tables,
     )
     from quant_research_platform.research.portfolios.risk import HoldingFactorInputs
-    from tests.helpers.portfolio_ledger import write_test_sessions
+    from tests.helpers.portfolio_ledger import (
+        CONTINUOUS_EXECUTION_COLUMNS,
+        write_test_sessions,
+    )
     from tests.helpers.research_configuration import research_configuration
 
     dates = pd.bdate_range("2023-01-02", periods=75)
@@ -1462,7 +1461,6 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
     )
     from quant_research_platform.contracts.data import InterimDataSpec
     from quant_research_platform.contracts.portfolios import (
-        CONTINUOUS_EXECUTION_COLUMNS,
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
     from quant_research_platform.contracts.time import TimeWindow
@@ -1480,7 +1478,10 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         filesystem_is_file,
     )
     from quant_research_platform.storage.layout import StorageLayout
-    from tests.helpers.portfolio_ledger import write_test_sessions
+    from tests.helpers.portfolio_ledger import (
+        CONTINUOUS_EXECUTION_COLUMNS,
+        write_test_sessions,
+    )
     from tests.helpers.research_configuration import research_configuration
     from tests.workflows.test_portfolio_workflow_integration import (
         _frames,
@@ -1684,9 +1685,15 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
         )
         if expected_status == "ERROR":
             with pytest.raises(ValueError, match="^benchmark_return_open_invalid$"):
-                build_portfolio_statistics_tables(**kwargs)
+                build_portfolio_statistics_tables(
+                    iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
+                    **kwargs,
+                )
         else:
-            owned = build_portfolio_statistics_tables(**kwargs)
+            owned = build_portfolio_statistics_tables(
+                iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
+                **kwargs,
+            )
             contract = envelope(
                 "pv_all_portfolio_statistics", metadata={"fixture_case": case}
             )

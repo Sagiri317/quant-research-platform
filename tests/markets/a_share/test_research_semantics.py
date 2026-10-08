@@ -16,7 +16,7 @@ from quant_research_platform.research.datasets.assembler import (
 )
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.features.transforms import (
-    canonical_feature_pipeline,
+    a_share_feature_pipeline,
     neutralize_cross_section,
 )
 from quant_research_platform.research.protocols.a_share import (
@@ -131,7 +131,7 @@ def test_insufficient_neutralization_is_missing_not_observed_zero() -> None:
         }
     )
 
-    result = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    result = a_share_feature_pipeline(frame, factor_columns=("factor",))
 
     assert result["feature_factor"].isna().all()
     assert result["feature_missing_factor"].tolist() == [1, 1]
@@ -150,11 +150,11 @@ def test_missing_factor_in_other_industry_does_not_change_valid_neutralization()
         }
     )
     valid = frame.iloc[:200].copy()
-    for operation in (neutralize_cross_section, canonical_feature_pipeline):
+    for operation in (neutralize_cross_section, a_share_feature_pipeline):
         expected = operation(valid, factor_columns=("factor",))
         result = operation(frame, factor_columns=("factor",))
         pd.testing.assert_frame_equal(result.iloc[:200], expected)
-        if operation is canonical_feature_pipeline:
+        if operation is a_share_feature_pipeline:
             assert result.feature_observed_factor.iloc[:200].eq(1).all()
             assert result.feature_missing_factor.iloc[-1] == 1
         else:
@@ -311,7 +311,7 @@ def test_neutralization_constant_has_no_artificial_alpha_and_keeps_small_variati
             "factor": 2.3 + variation * np.sin(axis),
         }
     )
-    actual = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    actual = a_share_feature_pipeline(frame, factor_columns=("factor",))
     assert actual.feature_observed_factor.eq(1).all()
     assert actual.feature_missing_factor.eq(0).all()
     if variation == 0:
@@ -329,7 +329,7 @@ def test_exact_industry_size_span_is_zero_but_one_ulp_signal_survives(
     reverse, origin, step, groups
 ):
     from quant_research_platform.research.features.transforms import (
-        canonical_feature_pipeline,
+        a_share_feature_pipeline,
         neutralize_cross_section,
     )
 
@@ -351,13 +351,13 @@ def test_exact_industry_size_span_is_zero_but_one_ulp_signal_survives(
         frame = frame.iloc[::-1]
     residual = neutralize_cross_section(frame, factor_columns=("factor",))
     assert residual.factor.eq(0.0).all()
-    actual = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    actual = a_share_feature_pipeline(frame, factor_columns=("factor",))
     assert actual.feature_factor.eq(0.0).all()
     assert actual.feature_observed_factor.eq(1).all()
     assert actual.feature_missing_factor.eq(0).all()
     changed = frame.copy()
     changed.loc[60, "factor"] = np.nextafter(changed.loc[60, "factor"], np.inf)
-    perturbed = canonical_feature_pipeline(changed, factor_columns=("factor",))
+    perturbed = a_share_feature_pipeline(changed, factor_columns=("factor",))
     assert perturbed.feature_factor.ne(0.0).any()
     assert perturbed.feature_observed_factor.eq(1).all()
 
@@ -368,7 +368,7 @@ def test_neutralization_preserves_single_ulp_projection(offset, changed):
     from fractions import Fraction
 
     from quant_research_platform.research.features.transforms import (
-        canonical_feature_pipeline,
+        a_share_feature_pipeline,
         neutralize_cross_section,
     )
 
@@ -401,7 +401,7 @@ def test_neutralization_preserves_single_ulp_projection(offset, changed):
     )
     actual = neutralize_cross_section(frame, factor_columns=("factor",))
     np.testing.assert_array_equal(actual["factor"], residuals)
-    features = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    features = a_share_feature_pipeline(frame, factor_columns=("factor",))
     np.testing.assert_allclose(
         features["feature_factor"], expected, rtol=1e-14, atol=1e-14
     )
@@ -421,8 +421,8 @@ def test_auxiliary_size_winsorization_matches_full_configuration():
             "factor": np.sin(np.arange(120)),
         }
     )
-    single = canonical_feature_pipeline(frame, factor_columns=("factor",))
-    full = canonical_feature_pipeline(
+    single = a_share_feature_pipeline(frame, factor_columns=("factor",))
+    full = a_share_feature_pipeline(
         frame, factor_columns=("factor", "log_float_market_cap")
     )
     pd.testing.assert_series_equal(
@@ -432,7 +432,7 @@ def test_auxiliary_size_winsorization_matches_full_configuration():
     frame.loc[0, "factor"] = np.nan
     frame.loc[1, "log_float_market_cap"] = np.nan
     frame.loc[2, "industry_level1_code"] = None
-    result = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    result = a_share_feature_pipeline(frame, factor_columns=("factor",))
     assert result.feature_factor.iloc[0] == 0.0
     assert result.feature_factor.iloc[1:3].isna().all()
     assert result.feature_missing_factor.iloc[:3].eq(1).all()
@@ -469,7 +469,7 @@ def test_canonical_industry_residuals_keep_same_code_standards_distinct():
         }
     )
     before = frame.copy(deep=True)
-    result = canonical_feature_pipeline(frame, factor_columns=("factor",))
+    result = a_share_feature_pipeline(frame, factor_columns=("factor",))
     assert result["feature_factor"].eq(0.0).all()
     assert result["feature_observed_factor"].eq(1.0).all()
     pd.testing.assert_frame_equal(frame, before)

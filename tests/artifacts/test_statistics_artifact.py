@@ -31,7 +31,23 @@ MAKER_MODEL_IDS = next(
 
 
 @pytest.fixture
-def tables():
+def tables(request):
+    parameters = getattr(request.node, "callspec", None)
+    parameters = {} if parameters is None else parameters.params
+    selected = parameters.get(
+        "member", parameters.get("name", parameters.get("table", ""))
+    ).removesuffix(".parquet")
+    group = (
+        "factor"
+        if "factor_case" in parameters
+        or selected
+        in {
+            "factor_diagnostics",
+            "fama_macbeth",
+            "fama_macbeth_periods",
+        }
+        else "research"
+    )
     row = dict(
         family_id="family",
         factor_id="factor",
@@ -93,12 +109,13 @@ def tables():
                 }
             ]
         )
-        for member in statistics.STATISTICS_TABLE_GROUPS["research"]
+        for member in statistics.STATISTICS_TABLE_GROUPS[group]
         if member != "model_group_comparison.parquet"
     }
-    result["model_group_comparison"] = pa.Table.from_pylist(
-        [], schema=statistics._ARROW_SCHEMAS["model_group_comparison.parquet"]
-    ).to_pandas()
+    if group == "research":
+        result["model_group_comparison"] = pa.Table.from_pylist(
+            [], schema=statistics._ARROW_SCHEMAS["model_group_comparison.parquet"]
+        ).to_pandas()
     for frame in result.values():
         if "timestamp" in frame:
             frame["timestamp"] = frame["timestamp"].astype("datetime64[ns]")
@@ -423,7 +440,13 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
     assert read_semantic_artifact_record(root) == original
 
 
-@pytest.mark.parametrize("member", statistics.STATISTICS_TABLE_GROUPS["research"])
+@pytest.mark.parametrize(
+    "member",
+    (
+        *statistics.STATISTICS_TABLE_GROUPS["research"],
+        *statistics.STATISTICS_TABLE_GROUPS["factor"],
+    ),
+)
 @pytest.mark.parametrize("mutation", ["status", "reason", "count", "undefined"])
 def test_research_table_rejects_invalid_values_at_write_and_read(
     tmp_path, tables, envelope, member, mutation
@@ -460,9 +483,15 @@ def _assert_rejected_at_write_and_read(
     envelope,
     member,
     *,
-    table_group="research",
+    table_group=None,
     error="statistics_table_",
 ):
+    if table_group is None:
+        table_group = (
+            "factor"
+            if member in statistics.STATISTICS_TABLE_GROUPS["factor"]
+            else "research"
+        )
     with pytest.raises(ValueError, match=error):
         statistics.write_statistics_artifact(
             tmp_path / "rejected",
@@ -512,7 +541,13 @@ def test_defined_research_measurements_cannot_be_missing(
     _assert_rejected_at_write_and_read(tmp_path, tables, envelope, f"{name}.parquet")
 
 
-@pytest.mark.parametrize("member", statistics.STATISTICS_TABLE_GROUPS["research"])
+@pytest.mark.parametrize(
+    "member",
+    (
+        *statistics.STATISTICS_TABLE_GROUPS["research"],
+        *statistics.STATISTICS_TABLE_GROUPS["factor"],
+    ),
+)
 @pytest.mark.parametrize("value", [True, 1.5, 2**63])
 def test_research_table_counts_reject_lossy_coercion(
     tmp_path, tables, envelope, member, value
@@ -524,7 +559,10 @@ def test_research_table_counts_reject_lossy_coercion(
     tables[name][count] = pd.Series([value], dtype=object)
     with pytest.raises(ValueError, match="statistics_table_count_invalid"):
         statistics.write_statistics_artifact(
-            tmp_path / "rejected", envelope=envelope, tables=tables
+            tmp_path / "rejected",
+            envelope=envelope,
+            tables=tables,
+            table_group="factor" if "factor_diagnostics" in tables else "research",
         )
 
 
@@ -535,7 +573,10 @@ def test_group_comparison_integral_counts_round_trip(tmp_path, tables, envelope,
         [count], dtype=object
     )
     root = statistics.write_statistics_artifact(
-        tmp_path / "valid", envelope=envelope, tables=tables
+        tmp_path / "valid",
+        envelope=envelope,
+        tables=tables,
+        table_group="factor" if "factor_diagnostics" in tables else "research",
     )
     artifact = statistics.read_statistics_artifact(
         root, expected_identity=envelope.instance_identity
@@ -601,12 +642,15 @@ def test_research_statistics_tables_round_trip_by_factor_case(
             ],
         ] = 0
     root = statistics.write_statistics_artifact(
-        tmp_path / "statistics", envelope=envelope, tables=tables
+        tmp_path / "statistics",
+        envelope=envelope,
+        tables=tables,
+        table_group="factor" if "factor_diagnostics" in tables else "research",
     )
     artifact = statistics.read_statistics_artifact(
         root, expected_identity=envelope.instance_identity
     )
-    for member in statistics.STATISTICS_TABLE_GROUPS["research"]:
+    for member in statistics.STATISTICS_TABLE_GROUPS["factor"]:
         with artifact.table(member) as actual:
             pd.testing.assert_frame_equal(
                 actual, tables[member.removesuffix(".parquet")]
@@ -628,7 +672,10 @@ def test_writer_cleanup_preserves_primary(tmp_path, tables, envelope, monkeypatc
     monkeypatch.setattr(pq.ParquetWriter, "write_table", interrupt)
     with pytest.raises(KeyboardInterrupt) as caught:
         statistics.write_statistics_artifact(
-            tmp_path / "statistics", envelope=envelope, tables=tables
+            tmp_path / "statistics",
+            envelope=envelope,
+            tables=tables,
+            table_group="factor" if "factor_diagnostics" in tables else "research",
         )
     assert caught.value is primary
     assert any("RuntimeError" in note for note in primary.__notes__)
@@ -1358,7 +1405,10 @@ def test_undefined_model_inference_preserves_descriptive_mean(
     ]
     frame.loc[0, inference_columns] = float("nan")
     root = statistics.write_statistics_artifact(
-        tmp_path / "descriptive", envelope=envelope, tables=tables
+        tmp_path / "descriptive",
+        envelope=envelope,
+        tables=tables,
+        table_group="factor" if "factor_diagnostics" in tables else "research",
     )
     artifact = statistics.read_statistics_artifact(
         root, expected_identity=envelope.instance_identity
@@ -1442,7 +1492,10 @@ def test_defined_group_comparison_requires_descriptive_facts(
         )
     else:
         root = statistics.write_statistics_artifact(
-            tmp_path / "group", envelope=envelope, tables=tables
+            tmp_path / "group",
+            envelope=envelope,
+            tables=tables,
+            table_group="factor" if "factor_diagnostics" in tables else "research",
         )
         artifact = statistics.read_statistics_artifact(
             root, expected_identity=envelope.instance_identity
@@ -1698,7 +1751,7 @@ def test_maker_validator_closes_native_stream_and_preserves_primary(
         "trade_cross_batch",
     ],
 )
-def test_maker_validator_preserves_full_load_compound_error_priority(
+def test_maker_validator_rejects_compound_damage_without_error_priority(
     tmp_path, monkeypatch, maker_calibration_tables, damage
 ):
     from functools import partial
@@ -1754,22 +1807,13 @@ def test_maker_validator_preserves_full_load_compound_error_priority(
             )
 
     root = write_semantic_artifact(tmp_path / "compound", envelope, write)
-    artifact = statistics.read_statistics_artifact(
-        root,
-        expected_identity=envelope.instance_identity,
-        validate_tables=lambda *_: None,
-    )
-    original_model = portfolio.MakerCalibration(
-        partial(portfolio._calibration_samples, artifact, "fold_1"),
-        partial(portfolio._calibration_events, artifact, "fold_1"),
-        price_unit="0.1",
-    )
-    with pytest.raises((KeyError, ValueError)) as original:
-        next(original_model.events(0, 1))
-    with pytest.raises(type(original.value)) as current:
+    before = {path.name: path.read_bytes() for path in root.iterdir() if path.is_file()}
+    with pytest.raises(ValueError):
         statistics.read_statistics_artifact(
             root,
             expected_identity=envelope.instance_identity,
             validate_tables=portfolio.validate_maker_calibration,
         )
-    assert current.value.args == original.value.args
+    assert {
+        path.name: path.read_bytes() for path in root.iterdir() if path.is_file()
+    } == before

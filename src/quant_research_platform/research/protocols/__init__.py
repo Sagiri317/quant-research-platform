@@ -11,16 +11,16 @@ def bind_research_selection(profile, library, configuration):
     from quant_research_platform.catalog.models import ModelCatalog
     from quant_research_platform.contracts.columns import ColumnRole
     from quant_research_platform.contracts.json_codec import (
-        bounded_qrp_json_object_snapshot,
+        qrp_json_object_snapshot,
     )
     from quant_research_platform.contracts.models import _thaw_model_hyperparameters
     from quant_research_platform.research.features.transforms import (
         canonical_feature_input_factors,
-        canonical_feature_transforms,
+        feature_transforms,
     )
     from quant_research_platform.research.protocols import a_share, crypto_hft
 
-    config = bounded_qrp_json_object_snapshot(configuration, max_bytes=1024 * 1024)
+    config = qrp_json_object_snapshot(configuration)
     required = {
         "schema_id",
         "profile_id",
@@ -36,13 +36,44 @@ def bind_research_selection(profile, library, configuration):
         required.add("primary_portfolio_id")
     else:
         required.add("source_archives")
-    if set(config) - {"research_plan", "auxiliary_sources"} != required or (
+    if set(config) - (
+        {"research_plan", "auxiliary_sources", "feature_recipe", "stage_selection"}
+        if str(profile.market_id) == "a_share"
+        else {"research_plan", "auxiliary_sources", "stage_selection"}
+    ) != required or (
         config["schema_id"] != "qrp-research-configuration"
         or config["profile_id"] != profile.profile_id
         or type(config["stage"]) is not str
-        or config["stage"] not in {"evaluation", "research"}
+        or config["stage"] not in {"dataset", "evaluation", "models", "research"}
     ):
         raise ValueError("research_configuration_invalid")
+    selection = config.get("stage_selection")
+    if "stage_selection" in config:
+        if (
+            type(selection) is not dict
+            or set(selection) != {"selected_by", "reason", "sources"}
+            or selection["selected_by"] not in ("user", "agent")
+            or type(selection["reason"]) is not str
+            or not selection["reason"].strip()
+            or type(selection["sources"]) is not list
+            or not selection["sources"]
+            or config["stage"] == "dataset"
+        ):
+            raise ValueError("research_stage_selection_invalid")
+        from quant_research_platform.contracts.json_codec import canonical_json_hash
+
+        seen = set()
+        for source in selection["sources"]:
+            if (
+                type(source) is not dict
+                or set(source) != {"run_id", "target_id", "instance_identity"}
+                or any(type(value) is not str or not value for value in source.values())
+            ):
+                raise ValueError("research_stage_reference_invalid")
+            identity = canonical_json_hash(source)
+            if identity in seen:
+                raise ValueError("research_stage_reference_duplicate")
+            seen.add(identity)
     from quant_research_platform.contracts.time import TimeWindow
 
     if str(profile.market_id) == "crypto":
@@ -98,6 +129,11 @@ def bind_research_selection(profile, library, configuration):
     ):
         raise ValueError("research_evaluation_configuration_invalid")
     if a_share_market:
+        from quant_research_platform.contracts.features import FEATURE_RECIPES
+
+        recipe_id = config.setdefault("feature_recipe", "a_share_canonical")
+        if type(recipe_id) is not str or recipe_id not in FEATURE_RECIPES:
+            raise ValueError("unsupported_feature_recipe")
         freshness = evaluation.get("forecast_freshness_days", 90)
         if type(freshness) is not int or freshness not in {90, 180}:
             raise ValueError("research_forecast_freshness_invalid")
@@ -127,9 +163,13 @@ def bind_research_selection(profile, library, configuration):
         raise ValueError("research_evaluation_label_invalid")
     if type(config["models"]) is not list or type(config["portfolios"]) is not list:
         raise ValueError("research_model_portfolio_selection_invalid")
-    if config["stage"] == "evaluation" and (config["models"] or config["portfolios"]):
+    if config["stage"] in {"dataset", "evaluation"} and (
+        config["models"] or config["portfolios"]
+    ):
         raise ValueError("evaluation_only_has_model_or_portfolio")
-    if config["stage"] == "research" and not config["models"]:
+    if config["stage"] == "models" and config["portfolios"]:
+        raise ValueError("model_stage_has_portfolios")
+    if config["stage"] in {"models", "research"} and not config["models"]:
         raise ValueError("research_models_required")
     factors_by_column = {item.output_column: item for item in profile.factors.list()}
     feature_sources = (
@@ -245,7 +285,9 @@ def bind_research_selection(profile, library, configuration):
     if len(set(evaluation["factors"])) != len(evaluation["factors"]):
         raise ValueError("research_evaluation_factor_duplicate")
     transforms = (
-        canonical_feature_transforms(canonical_factors) if canonical_factors else ()
+        feature_transforms(canonical_factors, recipe_id=recipe_id)
+        if canonical_factors
+        else ()
     )
     features = tuple(
         name for transform in transforms for name in transform.output_columns
@@ -384,10 +426,11 @@ def bind_research_selection(profile, library, configuration):
         raise ValueError("research_portfolio_duplicate")
     selected_model_ids = {model.model_id for model in models}
     if (
-        config["stage"] == "research"
+        config["stage"] in {"models", "research"}
         and config["comparison_model_id"] not in selected_model_ids
     ) or (
-        config["stage"] == "evaluation" and config["comparison_model_id"] is not None
+        config["stage"] in {"dataset", "evaluation"}
+        and config["comparison_model_id"] is not None
     ):
         raise ValueError("research_comparison_model_invalid")
     for candidate in candidates:

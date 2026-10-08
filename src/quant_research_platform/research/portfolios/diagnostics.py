@@ -620,6 +620,7 @@ def iter_holding_factor_inputs(
     risk_context_target_ids,
     benchmark_required,
     risk_config: FactorRiskConfig | None = None,
+    iter_portfolio_sessions,
 ):
     """Stream aligned inputs, retaining only decision/entry/end prices."""
     from quant_research_platform.contracts.time import TimeWindow
@@ -627,7 +628,6 @@ def iter_holding_factor_inputs(
         _ENHANCED_PANEL_COLUMNS,
         _enhanced_risk_cross,
         _iter_input_sessions,
-        _iter_portfolio_sessions,
         _risk_context_input_sessions,
         _validate_input_keys,
     )
@@ -654,7 +654,7 @@ def iter_holding_factor_inputs(
 
         panels = channels.enter_context(
             closing_iterator(
-                _iter_portfolio_sessions(
+                iter_portfolio_sessions(
                     layout=layout,
                     panel_root=layout.target_root("market_panel_1d", None),
                     panel_columns=_ENHANCED_PANEL_COLUMNS,
@@ -832,6 +832,7 @@ def build_portfolio_statistics_tables(
     time_window,
     unified_trading_sessions,
     layout,
+    iter_portfolio_sessions,
 ):
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.types import DatasetReadMode
@@ -917,6 +918,7 @@ def build_portfolio_statistics_tables(
     )
     inputs = {
         styles: iter_holding_factor_inputs(
+            iter_portfolio_sessions=iter_portfolio_sessions,
             layout=layout,
             calendar=calendar,
             time_window=time_window,

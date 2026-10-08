@@ -42,7 +42,7 @@ from quant_research_platform.storage.identity import (
     filesystem_is_file,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
+from quant_research_platform.storage.manifests import read_qrp_json_file
 
 SOURCE_ID = SourceId("reference")
 A_SHARE_FEE_SCHEDULE_DATA_ID = "a_share_fee_schedule"
@@ -158,7 +158,8 @@ def materialize_interim_data(
         if data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID:
             metadata, members, identity = retained.enter_context(_industry_source(root))
         else:
-            identity = source_content_identity(root, data_id)
+            source = load_a_share_fee_source(reference_root=root)
+            identity = source.source_identity
         if (
             instance_metadata is not None
             and COMMON_MANIFEST_METADATA_KEY in instance_metadata
@@ -174,9 +175,6 @@ def materialize_interim_data(
                 frame = frame.loc[frame["timestamp"].le(pd.Timestamp(end_date))].copy()
             spec = _industry_snapshots_spec()
         else:
-            source = load_a_share_fee_source(reference_root=root)
-            if source.source_identity != identity:
-                raise ValueError("reference_raw_identity_changed")
             frame = _frame_from_rows(source.rows)
             spec = fee_schedule_spec()
 
@@ -262,9 +260,7 @@ def _industry_source(reference_root):
     root = Path(reference_root) / A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     path = root / _INDUSTRY_MANIFEST_NAME
     expected = dataset_file_identity(path)
-    raw, metadata = read_bounded_qrp_json(
-        path, expected_identity=expected, max_bytes=128 * 1024
-    )
+    raw, metadata = read_qrp_json_file(path, expected_identity=expected)
     if (
         set(metadata) != {"schema_id", "files", "snapshots"}
         or metadata["schema_id"] != "a_share_industry_snapshots/0.1"
@@ -356,7 +352,7 @@ def _industry_frame(metadata, members):
     rows = []
     for snapshot in metadata["snapshots"]:
         path, expected = members[snapshot["candidate_file"]]
-        raw, candidate = read_bounded_qrp_json(path, expected_identity=expected)
+        raw, candidate = read_qrp_json_file(path, expected_identity=expected)
         if (
             hashlib.sha256(raw).hexdigest()
             != metadata["files"][snapshot["candidate_file"]]

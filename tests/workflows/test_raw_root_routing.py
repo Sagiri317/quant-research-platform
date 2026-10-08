@@ -5,7 +5,11 @@ from pathlib import Path
 
 import pytest
 
-from quant_research_platform.contracts.targets import ProducerBinding, ProducerKind
+from quant_research_platform.contracts.targets import (
+    ProducerBinding,
+    ProducerKind,
+    TargetPlan,
+)
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.storage.identity import content_hash_for_files
@@ -302,10 +306,15 @@ def test_crypto_semantic_source_identity_and_producer_share_one_root(
             protocol=protocol,
             layout=layout,
             spec=target,
-            planned={
-                "requested_identity": envelope.instance_identity,
-                "upstream_identities": upstream,
-            },
+            planned=TargetPlan(
+                target_id=target.target_id,
+                upstream_target_ids=tuple(target.dependencies),
+                decision="BUILD",
+                **{
+                    "requested_identity": envelope.instance_identity,
+                    "upstream_identities": upstream,
+                },
+            ),
             target_layout=layout,
             time_window=window,
             research_window=research_window,

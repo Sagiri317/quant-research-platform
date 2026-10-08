@@ -49,17 +49,8 @@ def build_a_share_report(
     portfolio_statistics = evidence["portfolio_statistics"]
     scenario = record.scenario_id
     factor_section = {
-        group: {
-            "status": "DEFINED",
-            "statistics_identity": result["identity"],
-            "row_count": result["factor_row_count"],
-            "defined_rows": result["factor_defined_rows"],
-            "undefined_rows": result["factor_undefined_rows"],
-            "results": result["factor_diagnostics"],
-        }
-        if result.get("status") == "DEFINED"
-        else dict(result)
-        for group, result in statistics.items()
+        "evaluation": dict(evidence["factor_evaluation"]),
+        "inference": dict(evidence["factor_statistics"]),
     }
     portfolio_rows = [dict(item) for item in portfolios if type(item) is dict]
     if len(portfolio_rows) != len(portfolios):
@@ -214,13 +205,15 @@ def build_a_share_report(
             sections["OOS prediction"][group]["reality_checks"] = result[
                 "model_reality_checks"
             ]
-    if configuration["stage"] == "evaluation":
-        sections["factor diagnostics"] = dict(evidence["factor_evaluation"])
+    if configuration["stage"] in {"dataset", "evaluation"}:
         for name in ("model selection", "OOS prediction", "robustness"):
             sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
     if not configuration["portfolios"]:
         for name in ("portfolio", "cost", "risk", "capacity", "attribution"):
             sections[name] = {"status": "UNDEFINED", "reason": "not_requested"}
+    sections["development vs holdout"]["stage_selection"] = configuration.get(
+        "stage_selection"
+    )
     return {
         "schema_id": REPORT_SCHEMA_ID,
         "run_id": record.run_id,

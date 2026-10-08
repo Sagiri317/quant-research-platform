@@ -7,98 +7,12 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from quant_research_platform.contracts.features import FeatureTransformSpec
 from quant_research_platform.research import statistics, statistics_production
-from quant_research_platform.research.features.transforms import (
-    apply_feature_transforms,
-)
 from quant_research_platform.research.portfolios.risk import (
     FactorRiskConfig,
     FactorRiskState,
     _ewma_covariance,
 )
-
-
-@pytest.mark.parametrize(
-    "kind,expected",
-    [
-        ("winsorize", [-5e307, 5e307]),
-        ("winsorized_rank", [0.5, 1.0]),
-        ("winsorized_zscore", [-1.0, 1.0]),
-    ],
-)
-def test_extreme_winsor_interpolation_keeps_order_and_float64(kind, expected):
-    frame = pd.DataFrame(
-        {"timestamp": [pd.Timestamp("2023-01-02")] * 2, "factor": [-1e308, 1e308]}
-    )
-    transformed = apply_feature_transforms(
-        frame,
-        (
-            FeatureTransformSpec(
-                "extreme", ("factor",), kind, ("feature",), (0.25, 0.75)
-            ),
-        ),
-    )
-    assert transformed.feature.dtype == "float64"
-    assert transformed.feature.tolist() == expected
-
-
-@pytest.mark.parametrize("fill_transform", [True, False])
-def test_median_filling_keeps_null_groups_ties_and_source(fill_transform):
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2023-01-02"] * 3 + ["2023-01-03"] * 2),
-            "factor": pd.Series([1e308, 1e308, pd.NA, pd.NA, pd.NA], dtype="Float64"),
-        }
-    )
-    before = frame.copy()
-    kind = "fillna_median" if fill_transform else "winsorize"
-    spec = FeatureTransformSpec(
-        "median", ("factor",), kind, ("feature",), fillna_policy="median"
-    )
-    transformed = apply_feature_transforms(frame, (spec,))
-    assert transformed.feature.dtype == "float64"
-    assert transformed.feature.iloc[:3].tolist() == [1e308] * 3
-    assert transformed.feature.iloc[3:].isna().all()
-    pd.testing.assert_frame_equal(frame, before, check_exact=True)
-
-
-def test_winsor_rank_keeps_ties_nulls_and_native_dataset_roundtrip(tmp_path):
-    from quant_research_platform.storage.datasets import read_dataset, write_dataset
-    from tests.helpers.research_specs import make_demo_research_dataset_spec
-
-    frame = pd.DataFrame(
-        {
-            "market_id": "a_share",
-            "asset_id": ["a", "b", "c", "d"],
-            "timestamp": pd.Series(
-                [pd.Timestamp("2023-01-02")] * 4, dtype="datetime64[ns]"
-            ),
-            "factor": [-1e308, 1e308, 1e308, np.nan],
-            "label": 0.0,
-        }
-    )
-    transform = FeatureTransformSpec(
-        "rank", ("factor",), "winsorized_rank", ("feature",), (0.25, 0.75)
-    )
-    transformed = apply_feature_transforms(frame, (transform,))
-    assert transformed.feature.iloc[:3].tolist() == [1 / 3, 5 / 6, 5 / 6]
-    assert pd.isna(transformed.feature.iloc[3])
-    spec = make_demo_research_dataset_spec(
-        data_id="numeric_rank",
-        factor_columns=("factor",),
-        feature_columns=("feature",),
-        feature_transforms=(transform,),
-        label_columns=("label",),
-        filter_columns=(),
-        context_columns=(),
-    )
-    from quant_research_platform.storage.layout import StorageLayout
-
-    root = StorageLayout(tmp_path).research_dataset_root("a_share", spec.data_id)
-    write_dataset(root, transformed, spec=spec)
-    saved = read_dataset(root, columns=tuple(transformed.columns))
-    pd.testing.assert_frame_equal(saved, transformed, check_exact=True)
 
 
 def _risk_cross(returns, caps, timestamp="2023-01-02"):
@@ -592,3 +506,15 @@ def test_optimizer_covariance_validation_keeps_error_priority(kind, error):
             nav=100.0,
             assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
         )
+
+
+def test_named_quantile_recipe_keeps_extreme_interpolation_order_and_nulls():
+    from quant_research_platform.research.features.transforms import _winsorize
+
+    values = pd.Series([-1e308, 1e308, np.nan, 1e308, 1e308])
+    timestamps = pd.Series([0, 0, 0, 1, 1])
+    result = _winsorize(values, values.groupby(timestamps))
+    np.testing.assert_allclose(
+        result.to_numpy(), [-9.8e307, 9.8e307, np.nan, 1e308, 1e308], rtol=1e-15
+    )
+    assert result.dtype == "float64"

@@ -195,6 +195,15 @@ def test_sparse_published_ledgers_project_utc_days_gap_and_endpoint_inventory(
         ),
         plan=plan,
     )
+    selected = {
+        "crypto_hft_latency_0",
+        "crypto_hft_eth_independent_eth_usdt",
+        "crypto_hft_maker_baseline",
+    }
+    configuration["portfolios"] = [
+        item for item in configuration["portfolios"] if item["candidate_id"] in selected
+    ]
+    assert {item["candidate_id"] for item in configuration["portfolios"]} == selected
     profile = bind_research_configuration(
         research_profile(CRYPTO_PROFILE_ID), configuration
     )

@@ -1,35 +1,13 @@
-"""Batch sizing and actual local CPU/disk capacity."""
+"""Batch sizing and actual local CPU capacity."""
 
 from __future__ import annotations
 
 import os
-import shutil
 import sys
 from collections.abc import Iterator
 from pathlib import Path
 
 DEFAULT_BATCH_ROWS = 65536
-
-
-def require_free_disk_headroom(path: Path, *, reserve_bytes: int) -> int:
-    """Require owner-specified free-space headroom on the target volume."""
-
-    reserve = _exact_nonnegative_int(
-        reserve_bytes,
-        error="invalid_runtime_resource_disk_reserve",
-    )
-    from quant_research_platform.storage.identity import (
-        filesystem_exists,
-        native_filesystem_path,
-    )
-
-    candidate = Path(path)
-    while not filesystem_exists(candidate) and candidate != candidate.parent:
-        candidate = candidate.parent
-    free = shutil.disk_usage(native_filesystem_path(candidate)).free
-    if free < reserve:
-        raise RuntimeError("insufficient_free_disk")
-    return free
 
 
 def _cgroup_v2_directories() -> Iterator[Path]:
@@ -87,11 +65,5 @@ def model_cpu_capacity() -> tuple[int, int]:
 
 def _exact_positive_int(value: object, *, error: str) -> int:
     if isinstance(value, bool) or type(value) is not int or value <= 0:
-        raise ValueError(error)
-    return value
-
-
-def _exact_nonnegative_int(value: object, *, error: str) -> int:
-    if isinstance(value, bool) or type(value) is not int or value < 0:
         raise ValueError(error)
     return value

@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-from numbers import Real
-
 import pandas as pd
 
 from quant_research_platform.contracts.evaluations import (
@@ -32,9 +30,9 @@ def render_evaluation_summary(
         f"- research_dataset_id: `{spec.research_dataset_id}`",
         f"- signals: `{signals}`",
         f"- labels: `{labels}`",
-        f"- rows_input: `{evaluation_diagnostics.rows_input:,}`",
-        f"- rows_after_filter: `{evaluation_diagnostics.rows_after_filter_mode:,}`",
-        f"- timestamp_count: `{evaluation_diagnostics.timestamp_count:,}`",
+        f"- rows_input: `{evaluation_diagnostics.rows_input}`",
+        f"- rows_after_filter: `{evaluation_diagnostics.rows_after_filter_mode}`",
+        f"- timestamp_count: `{evaluation_diagnostics.timestamp_count}`",
         f"- min_timestamp: `{evaluation_diagnostics.min_timestamp}`",
         f"- max_timestamp: `{evaluation_diagnostics.max_timestamp}`",
     ]
@@ -99,6 +97,4 @@ def _markdown_table(frame: pd.DataFrame, columns: tuple[str, ...]) -> str:
 def _markdown_cell(value: object) -> str:
     if pd.isna(value):
         return ""
-    if isinstance(value, Real) and not isinstance(value, bool):
-        return f"{value:,}"
     return str(value).replace("|", r"\|")

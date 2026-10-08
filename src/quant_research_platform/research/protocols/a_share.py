@@ -50,7 +50,7 @@ from quant_research_platform.research.factors.price_volume.definitions import (
     price_volume_factor_definitions,
 )
 from quant_research_platform.research.features.transforms import (
-    canonical_feature_transforms,
+    feature_transforms,
 )
 from quant_research_platform.research.filtering import A_SHARE_ELIGIBILITY_FACTS
 from quant_research_platform.research.labels.forward_returns import (
@@ -286,6 +286,18 @@ class AShareProtocol:
                 if self.forecast_freshness_days == 180
                 else "primary",
             },
+            "feature_recipe": {
+                "recipe_id": self.configuration().get(
+                    "feature_recipe", "a_share_canonical"
+                )
+                if self.configuration_json is not None
+                else "a_share_canonical",
+                "role": "robustness"
+                if self.configuration_json is not None
+                and self.configuration().get("feature_recipe", "a_share_canonical")
+                == "a_share_quantile_1_99"
+                else "primary",
+            },
             "training_weighting": {
                 "role": "robustness"
                 if self.configuration_json is not None
@@ -362,6 +374,11 @@ class AShareProtocol:
         base = {
             key: full[key] for key in ("protocol_id", "scenario_id", "access_window")
         }
+        if (
+            self.configuration_json is not None
+            and "stage_selection" in self.configuration()
+        ):
+            base["stage_selection"] = self.configuration()["stage_selection"]
         if producer_kind == "MODEL":
             base.update(
                 {
@@ -394,7 +411,10 @@ class AShareProtocol:
                     )
                 }
             )
-        elif producer_kind == "STATISTIC" and target_id in self.statistics_target_ids:
+        elif producer_kind == "STATISTIC" and target_id in (
+            *self.statistics_target_ids,
+            self.factor_statistics_target_id,
+        ):
             base.update(
                 {
                     key: full[key]
@@ -409,9 +429,14 @@ class AShareProtocol:
             )
             base["research_configuration"] = {
                 key: self.configuration()[key]
-                for key in ("evaluation", "comparison_model_id")
+                for key in (
+                    ("evaluation",)
+                    if target_id == self.factor_statistics_target_id
+                    else ("evaluation", "comparison_model_id")
+                )
             }
-            base["selection_group"] = self.selection_group_for_target(target_id)
+            if target_id != self.factor_statistics_target_id:
+                base["selection_group"] = self.selection_group_for_target(target_id)
         else:
             base.update(
                 {
@@ -438,6 +463,7 @@ class AShareProtocol:
                 base["frozen_development"] = self.frozen_development
         if producer_kind == "STATISTIC":
             base["training_weighting"] = full["training_weighting"]
+            base["feature_recipe"] = full["feature_recipe"]
             configuration = self.configuration()
             consumed = set(self.factor_columns)
             if configuration is not None:
@@ -483,6 +509,7 @@ class AShareProtocol:
         if target_id in {
             f"{self.scenario_id}_evaluation",
             *self.statistics_target_ids,
+            self.factor_statistics_target_id,
         }:
             return analysis_windows(self.manifest(), window)[0]
         if target_id == self.model_selection_target_id:
@@ -505,7 +532,7 @@ class AShareProtocol:
 
     def freeze_development(self, record, references, frozen, artifacts):
         from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
-        from quant_research_platform.research.portfolios.production import (
+        from quant_research_platform.research.portfolios.accounting import (
             frozen_alpha_calibration,
         )
 
@@ -595,7 +622,6 @@ class AShareProtocol:
                         else ()
                     ),
                 ),
-                producer_id=f"{dataset}_{candidate.candidate_id}_ledger",
             )
             for candidate in portfolio_candidates
         )
@@ -603,18 +629,16 @@ class AShareProtocol:
             TargetSpec(
                 evaluation,
                 dependencies=(dataset,),
-                producer_id=evaluation,
             ),
+            TargetSpec(self.factor_statistics_target_id, dependencies=(dataset,)),
             TargetSpec(
                 model_selection,
                 dependencies=() if self.access_window == "holdout" else (dataset,),
-                producer_id=model_selection,
             ),
             *(
                 TargetSpec(
                     predictions,
                     dependencies=(dataset, model_selection),
-                    producer_id=predictions,
                 )
                 for predictions in self.prediction_target_ids
             ),
@@ -631,7 +655,6 @@ class AShareProtocol:
                             else ()
                         ),
                     ),
-                    producer_id=statistics,
                 )
                 for predictions, statistics in zip(
                     self.prediction_target_ids, self.statistics_target_ids, strict=True
@@ -665,7 +688,6 @@ class AShareProtocol:
                         )
                     )
                 ),
-                producer_id=f"{dataset}_portfolio_statistics",
             ),
         )
 
@@ -679,6 +701,10 @@ class AShareProtocol:
             f"{self.scenario_id}_{group}_persisted_predictions"
             for group in ("global", "quarterly")
         )
+
+    @property
+    def factor_statistics_target_id(self):
+        return f"{self.scenario_id}_factor_statistics"
 
     @property
     def statistics_target_ids(self):
@@ -772,10 +798,16 @@ class AShareProtocol:
             return (self.scenario_id,)
         if action == "research run":
             if self.configuration_json is not None:
+                if self.configuration()["stage"] == "dataset":
+                    return (self.scenario_id,)
                 if self.configuration()["stage"] == "evaluation":
-                    return (f"{self.scenario_id}_evaluation",)
+                    return (
+                        f"{self.scenario_id}_evaluation",
+                        self.factor_statistics_target_id,
+                    )
                 return (
                     f"{self.scenario_id}_evaluation",
+                    self.factor_statistics_target_id,
                     *self.statistics_target_ids,
                     *(
                         f"{self.scenario_id}_{candidate.candidate_id}_ledger"
@@ -789,6 +821,7 @@ class AShareProtocol:
                 )
             return (
                 f"{self.scenario_id}_evaluation",
+                self.factor_statistics_target_id,
                 *self.statistics_target_ids,
                 f"{self.scenario_id}_portfolio_statistics",
                 *(
@@ -803,8 +836,14 @@ class AShareProtocol:
 
 def _inference_blocker(manifest):
     """Exclude independent robustness runs only from formal joint inference."""
+    if "stage_selection" in manifest or "stage_selection" in manifest.get(
+        "research_configuration", {}
+    ):
+        return "development_stage_selection_exploratory"
     if manifest.get("expectations", {}).get("role") == "robustness":
         return "expectations_robustness_excluded"
+    if manifest.get("feature_recipe", {}).get("role") == "robustness":
+        return "feature_recipe_robustness_excluded"
     if manifest.get("training_weighting", {}).get("role") == "robustness":
         return "training_weighting_robustness_excluded"
     return None
@@ -853,6 +892,43 @@ def model_folds(
             )
         )
     return tuple(folds)
+
+
+def model_selection_windows(fold_windows, *, chronology, development_window, complete):
+    """Own quarterly and final selection cutoffs over already validated folds."""
+    months = chronology["scoring_lookback_months"]
+    start = pd.Timestamp(development_window["start"])
+    cutoff = pd.Timestamp(development_window["end"])
+    decisions = [
+        (
+            "quarterly",
+            quarter,
+            pd.Timestamp(train_end),
+            TimeWindow(
+                pd.Timestamp(validation_start).to_period("Q").start_time
+                - pd.DateOffset(months=months),
+                pd.Timestamp(train_end),
+            ),
+        )
+        for quarter, train_end, validation_start in fold_windows
+        if pd.Timestamp(validation_start) >= start
+    ]
+    if complete:
+        decisions.extend(
+            (
+                ("global", "final", cutoff, TimeWindow(start, cutoff)),
+                (
+                    "quarterly",
+                    "final",
+                    cutoff,
+                    TimeWindow(
+                        cutoff + pd.Timedelta(days=1) - pd.DateOffset(months=months),
+                        cutoff,
+                    ),
+                ),
+            )
+        )
+    return tuple(decisions)
 
 
 def analysis_windows(
@@ -1072,7 +1148,7 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
             )
             for column in all_columns
         }
-        transforms = canonical_feature_transforms(factor_columns)
+        transforms = feature_transforms(factor_columns)
         input_data_ids = [
             market_ids.MARKET_PANEL_ID,
             market_ids.PRICE_VOLUME_DATA_ID,

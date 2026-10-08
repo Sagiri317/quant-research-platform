@@ -13,16 +13,7 @@ from quant_research_platform.sources.binance.replay import (
     iter_reconstructed_depth,
 )
 from quant_research_platform.sources.tardis.raw import import_slices
-from tests.sources.tardis.test_raw import _slices
-
-
-def _line(second, channel, payload):
-    value = {"stream": "btcusdt@" + channel, "data": payload}
-    if channel == "depthSnapshot":
-        value["generated"] = True
-    return (
-        f"2026-09-01T00:00:{second:02d}.000000Z " + json.dumps(value) + "\n"
-    ).encode()
+from tests.helpers.tardis import _line, _slices
 
 
 def _delta(second, first, last, previous, quantity="3"):
@@ -63,7 +54,7 @@ def test_late_snapshot_has_no_early_book_or_coverage(tmp_path, bridge):
     )
     slices = _slices(tmp_path / "native", native)
     published = tmp_path / "published"
-    import_slices(published, date="2026-09-01", slices=slices, byte_budget=1024**2)
+    import_slices(published, date="2026-09-01", slices=slices)
     with open_market_source(published) as source:
         stats = ReconstructionStats()
         books = []
@@ -163,7 +154,7 @@ def test_vendor_clock_panel_persists_nullable_monotonic_and_native_identity(
             )
         native = "".join(converted).encode()
     slices = _slices(tmp_path / "native", native)
-    import_slices(tmp_path / "published", date=date, slices=slices, byte_budget=1024**2)
+    import_slices(tmp_path / "published", date=date, slices=slices)
     with open_market_source(tmp_path / "published") as source:
         stats = ReconstructionStats()
         frames = iter_panel_frames(
@@ -236,16 +227,14 @@ def test_execution_end_stops_inside_invalid_book_segment(tmp_path, monkeypatch):
         + _delta(5, 104, 104, 103)
         + _delta(6, 105, 105, 104)
     )
-    slices = _slices(tmp_path / "native", native)
+    slices = _slices(tmp_path / "native", native, count=2)
     future = (
         b"\n"
         + _line(1, "depthSnapshot", dict(snapshot, lastUpdateId=200))
         + _delta(2, 199, 201, 198)
     ).replace(b"T00:00:", b"T00:10:")
     slices[1].write_bytes(gzip.compress(future))
-    import_slices(
-        tmp_path / "published", date="2026-09-01", slices=slices, byte_budget=1024**2
-    )
+    import_slices(tmp_path / "published", date="2026-09-01", slices=slices)
     seen = []
     original = tardis_replay.iter_native_slice
 
@@ -321,8 +310,8 @@ def test_native_schema_full_import_and_shared_trade_replay(
     slices = _slices(tmp_path / "native", native)
     original = slices[0].read_bytes()
     published = tmp_path / "published"
-    result = import_slices(published, date=date, slices=slices, byte_budget=1024**2)
-    assert len(result["files"]) == 144
+    result = import_slices(published, date=date, slices=slices)
+    assert len(result["files"]) == 1
     assert (published / result["files"][0]["path"]).read_bytes() == original
     with open_market_source(published) as source:
         actual = list(iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"))
@@ -367,7 +356,7 @@ def test_native_schema_invalid_fields_fail_atomic_full_import(tmp_path, date, ch
     slices = _slices(tmp_path / "native", native)
     published = tmp_path / "published"
     with pytest.raises(ValueError):
-        import_slices(published, date=date, slices=slices, byte_budget=1024**2)
+        import_slices(published, date=date, slices=slices)
     assert not published.exists()
 
 
@@ -379,14 +368,13 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
 
     import quant_research_platform.sources.binance.replay as binance_replay
     from quant_research_platform.sources import market_source_identity
-    from tests.sources.tardis.test_raw import _snapshot
+    from tests.helpers.tardis import _snapshot
 
     root = tmp_path / "published"
     manifest = import_slices(
         root,
         date="2026-09-01",
         slices=_slices(tmp_path / "native", _snapshot()),
-        byte_budget=1024**2,
     )
     assert market_source_identity(root, "panel")
     target = root / (
@@ -524,7 +512,6 @@ def test_midnight_preserves_native_book_factor_and_label_continuity(
         date="2026-12-31",
         offset_minutes=1430,
         slices=slices,
-        byte_budget=1024**2,
     )
     with open_market_source(tmp_path / "published") as source:
         stats = ReconstructionStats()
@@ -621,7 +608,6 @@ def test_trade_resends_preserve_raw_bytes_and_count_each_identity_once(
     kwargs = dict(
         date="2026-09-01",
         slices=slices,
-        byte_budget=1024**2,
         exchange=exchange,
         symbols=("btcusdt",),
         channels=("depth", "depthSnapshot", "aggTrade"),
@@ -694,7 +680,7 @@ def test_archive_four_cursors_share_one_native_scan_and_close(
     )
     slices = _slices(tmp_path / "native", native, count=1)
     published = tmp_path / "published"
-    import_slices(published, date="2026-09-01", slices=slices, byte_budget=1024**2)
+    import_slices(published, date="2026-09-01", slices=slices)
     original = replay.iter_native_slice
     native_open = raw.open_filesystem_file
     temporary_file = replay.TemporaryFile
@@ -814,7 +800,6 @@ def test_archive_tail_shares_native_scan_and_preserves_replay(tmp_path, monkeypa
         published,
         date="2026-09-01",
         slices=_slices(tmp_path / "native", native, count=1),
-        byte_budget=1024**2,
     )
     calls = Counter()
     original_records = replay.iter_native_slice
@@ -1017,7 +1002,6 @@ def test_disjoint_archives_preserve_reset_ids_through_processed_publication(
             slices=_slices(
                 tmp_path / ("native-" + path), "".join(converted).encode(), count=1
             ),
-            byte_budget=1024**2,
         )
     with opener(tmp_path) as source:
         assert [
@@ -1206,7 +1190,6 @@ def test_disconnect_snapshot_and_bridge_share_recovered_observation(tmp_path):
         published,
         date="2026-09-01",
         slices=_slices(tmp_path / "native", native, count=1),
-        byte_budget=1024**2,
     )
     with open_market_source(published) as source:
         stats = ReconstructionStats()
@@ -1271,7 +1254,6 @@ def test_archive_actual_spans_sort_equivalent_cross_midnight_slices(tmp_path):
             date=date,
             offset_minutes=offset,
             slices=slices[native],
-            byte_budget=1024**2,
         )
     offset_file = manifests["offset"]["files"][0]
     next_day_file = manifests["next_day"]["files"][0]

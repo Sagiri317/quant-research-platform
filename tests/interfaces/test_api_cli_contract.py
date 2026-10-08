@@ -656,8 +656,13 @@ def _write_metric_run(project_root, value):
 @pytest.mark.parametrize("anyio_backend", ["asyncio"])
 @pytest.mark.parametrize(
     "value",
-    [10**400 + 1, 10**4095, 2**53 + 1, float.fromhex("0x1.fffffffffffffp+1023")],
-    ids=["large_integer", "json_integer_limit", "exact_integer", "maximum_float"],
+    [10**400 + 1, 10**4096, 2**53 + 1, float.fromhex("0x1.fffffffffffffp+1023")],
+    ids=[
+        "large_integer",
+        "past_removed_integer_limit",
+        "exact_integer",
+        "maximum_float",
+    ],
 )
 async def test_status_api_preserves_native_operation_metric_precision(
     anyio_backend, tmp_path, value
@@ -695,7 +700,6 @@ async def test_status_api_preserves_native_operation_metric_precision(
         (float("nan"), "qrp_json_nonfinite_number"),
         (float("inf"), "qrp_json_nonfinite_number"),
         (-float("inf"), "qrp_json_nonfinite_number"),
-        (10**4096, "qrp_json_integer_too_large"),
     ],
     ids=[
         "true",
@@ -706,7 +710,6 @@ async def test_status_api_preserves_native_operation_metric_precision(
         "nan",
         "positive_infinity",
         "negative_infinity",
-        "over_integer_limit",
     ],
 )
 async def test_invalid_persisted_operation_metrics_keep_api_failure_projection(
@@ -738,3 +741,19 @@ async def test_invalid_persisted_operation_metrics_keep_api_failure_projection(
     assert valid.status_code == 200 and valid.json() == record.payload()
     assert good.read_bytes() == before
     assert candidate.read_bytes() == raw
+
+
+def test_api_get_from_former_browser_origin_has_no_cors_grant():
+    async def request():
+        async with AsyncClient(
+            transport=ASGITransport(app=create_app()), base_url="http://test"
+        ) as client:
+            plain = await client.get("/api/catalog/labels")
+            origin = await client.get(
+                "/api/catalog/labels", headers={"Origin": "http://localhost:5173"}
+            )
+            assert origin.status_code == plain.status_code == 200
+            assert origin.json() == plain.json()
+            assert "access-control-allow-origin" not in origin.headers
+
+    asyncio.run(request())

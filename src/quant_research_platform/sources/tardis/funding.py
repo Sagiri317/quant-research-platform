@@ -13,7 +13,6 @@ from quant_research_platform.contracts.validation import (
     strict_finite_float,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.sources.binance.funding import (
     FUNDING_COLUMNS,
     FUNDING_SCHEMA_ID,
@@ -52,7 +51,6 @@ def import_funding_history(
     http_status,
     start_ms,
     end_ms,
-    byte_budget,
     request_limit,
 ):
     """Preserve source bytes and publish forecasts with vendor availability."""
@@ -87,29 +85,15 @@ def import_funding_history(
         or (end_ms + 1) * 1_000_000 != end_ns
     ):
         raise ValueError("tardis_funding_request_coverage_invalid")
-    if type(byte_budget) is not int or byte_budget <= 0:
-        raise ValueError("tardis_funding_budget_invalid")
     path = require_unaliased_path(
         Path(response_path), error="tardis_funding_source_invalid"
     )
     identity = dataset_file_identity(path)
     raw = events = metadata = native = None
     with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-        if identity.size >= byte_budget:
-            byte_count = 0
-            while byte_count <= identity.size:
-                block = handle.read(min(1024 * 1024, identity.size + 1 - byte_count))
-                if not block:
-                    break
-                byte_count += len(block)
-                del block
-        else:
-            raw = handle.read(identity.size + 1)
-            byte_count = len(raw)
-    if identity != dataset_file_identity(path) or byte_count != identity.size:
+        raw = handle.read(identity.size + 1)
+    if identity != dataset_file_identity(path) or len(raw) != identity.size:
         raise ValueError("tardis_funding_source_changed")
-    if byte_budget <= byte_count:
-        raise ValueError("tardis_funding_budget_exceeded")
     events, proof = _settlement_response(
         raw,
         source_id=source_id,
@@ -225,7 +209,6 @@ def import_funding_history(
             raise ValueError("tardis_funding_source_changed")
 
     def publish(staging):
-        require_free_disk_headroom(staging, reserve_bytes=len(raw))
         filesystem_write_bytes(staging / "settlements.json", raw)
         projected = rows()
         with closing_iterator(projected):
@@ -234,7 +217,6 @@ def import_funding_history(
                 columns=FUNDING_COLUMNS,
                 rows=projected,
                 metadata=metadata,
-                max_bytes=byte_budget - len(raw),
                 validate=validate,
             )
 

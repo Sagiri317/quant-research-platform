@@ -24,8 +24,6 @@ from quant_research_platform.storage.identity import (
 
 from .field_mappings import RAW_TABLE_CONTRACTS, missing_raw_column_names
 from .raw_schemas import (
-    LOGICAL_RECORD_LIMIT_ERROR,
-    MAX_LOGICAL_RECORD_BYTES,
     _infer_dataset_from_header,
     infer_dataset_from_native_export,
     inspect_raw_export_file,
@@ -230,7 +228,6 @@ def _raw_export_path_session(
 def iter_index_info_rows(
     export_path: Path, *, expected_identity: DatasetFileIdentity | None
 ) -> Iterator[tuple[list[str], list[str], int]]:
-    record_limit_bytes = MAX_LOGICAL_RECORD_BYTES
     rows = iter(
         _iter_csv_records(
             export_path, require_exact_width=False, expected_identity=expected_identity
@@ -281,8 +278,6 @@ def iter_index_info_rows(
                     len(pending_row) <= 6 and len(record) >= remaining_columns
                 )
                 next_bytes = pending_bytes + source_bytes
-                if next_bytes > record_limit_bytes:
-                    raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
                 suffix = _append_continuation_fields(
                     continuations,
                     iter(record),
@@ -308,12 +303,10 @@ def iter_index_info_rows(
                 continue
             if len(record) > len(header):
                 if _record_starts_index_info(record):
-                    row = _normalize_bounded_index_info_record(
+                    row = _normalize_index_info_record(
                         record, row_number, continuation_spool=continuations
                     )
                 elif complete_row is not None:
-                    if complete_bytes + source_bytes > record_limit_bytes:
-                        raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
                     _append_continuation_fields(
                         continuations, iter(record), field_count=len(record)
                     )
@@ -346,8 +339,6 @@ def iter_index_info_rows(
                     del row
                     continue
                 if complete_row is not None:
-                    if complete_bytes + source_bytes > record_limit_bytes:
-                        raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
                     _append_continuation_fields(
                         continuations, row, field_count=len(row)
                     )
@@ -397,7 +388,7 @@ def _record_starts_index_info(record: list[str]) -> bool:
     return bool(INDEX_INFO_CODE_RE.fullmatch(first))
 
 
-def _normalize_bounded_index_info_record(
+def _normalize_index_info_record(
     record: list[str], row_number: int | None, *, continuation_spool: list[str]
 ) -> list[str]:
     """Normalize an over-width index record while preserving text continuations."""

@@ -79,10 +79,7 @@ def test_fingerprint_consumer_failure_retains_primary_and_reader_identity_error(
     with pytest.raises(primary_type) as caught:
         fingerprint_dataset(root)
     assert caught.value is primary
-    assert primary.__notes__ == [
-        "file identity verification also failed: ValueError",
-        "dataset verification also failed: ValueError",
-    ]
+    assert primary.__notes__ == ["iterator close also failed: ValueError"]
     gc.collect()
     assert unraisable == []
 
@@ -102,8 +99,11 @@ def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
     write_dataset(right, changed, spec=make_processed_dataset_spec("collision_right"))
     collision = fingerprint_dataset(left)
 
-    def owned_collision(*_args, **_kwargs):
-        return collision
+    original_fingerprint = dataset_comparison.fingerprint_dataset_session
+
+    def owned_collision(context, **kwargs):
+        actual = original_fingerprint(context, **kwargs)
+        return replace(actual, content_hash=collision.content_hash)
 
     monkeypatch.setattr(
         dataset_comparison, "fingerprint_dataset_session", owned_collision
@@ -143,7 +143,10 @@ def test_compare_treats_partition_and_file_boundaries_as_layout_only(
     )
     fingerprints = iter((fingerprint, right_fingerprint))
 
-    def owned_fingerprint(*_args, **_kwargs):
+    original_fingerprint = dataset_comparison.fingerprint_dataset_session
+
+    def owned_fingerprint(context, **kwargs):
+        original_fingerprint(context, **kwargs)
         return next(fingerprints)
 
     monkeypatch.setattr(
@@ -184,7 +187,7 @@ def test_compare_propagates_programmer_errors(
         dataset_comparison.compare_datasets(left, right)
 
 
-def test_compare_rejects_mutation_between_fingerprint_and_exact_pass(
+def test_compare_rejects_mutation_after_both_decoded_sources(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     left = make_dataset_artifact_root(tmp_path, "mutation_left")
@@ -229,7 +232,7 @@ def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
         write_dataset(
             root, frame, spec=make_processed_dataset_spec(f"final_barrier_{side}")
         )
-    batches = dataset_comparison.iter_dataset_file_batches
+    batches = dataset_fingerprinting.iter_dataset_file_batches
     injected = False
 
     def index_then_mutate(context, **kwargs: object):
@@ -246,7 +249,7 @@ def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
         )
 
     monkeypatch.setattr(
-        dataset_comparison, "iter_dataset_file_batches", index_then_mutate
+        dataset_fingerprinting, "iter_dataset_file_batches", index_then_mutate
     )
     comparison = compare_datasets(roots["left"], roots["right"])
     assert injected
@@ -555,14 +558,59 @@ def test_exact_comparison_keeps_missing_extra_and_nullable_changed_counts(
             (frame.iloc[:1], frame.iloc[1:]),
             spec=make_processed_dataset_spec(side),
         )
-    sessions = {
-        side: dataset_reading.open_dataset_session(root, columns=None, time_window=None)
-        for side, root in roots.items()
+    comparison = compare_datasets(roots["left"], roots["right"])
+    assert comparison.status == "CONTENT_MISMATCH"
+    assert comparison.summary["exact"] == {
+        "missing_row_count": 1,
+        "extra_row_count": 1,
+        "changed_row_count": changed,
     }
-    assert dataset_comparison._exact_comparison_counts(
-        sessions["left"],
-        sessions["right"],
-        primary_key=("market_id", "asset_id", "timestamp"),
-    ) == {"missing_row_count": 1, "extra_row_count": 1, "changed_row_count": changed}
-    for session in sessions.values():
-        session.verify()
+
+
+@pytest.mark.parametrize("changed", [False, True])
+def test_compare_nested_values_and_float_keys_decodes_each_member_once(
+    tmp_path, monkeypatch, changed
+):
+    roots = {
+        side: make_dataset_artifact_root(tmp_path, side) for side in ("left", "right")
+    }
+    for side, root in roots.items():
+        frame = pd.DataFrame(
+            {
+                "market_id": ["a_share", "a_share"],
+                "asset_id": [-0.0 if side == "left" else 0.0, 1.0],
+                "timestamp": pd.to_datetime(["2020-01-01", "2020-01-02"]),
+                "value": [[1, None], [2, 4 if changed and side == "right" else 3]],
+            }
+        )
+        write_dataset(root, frame, spec=make_processed_dataset_spec(side))
+    decoded = {}
+    original = dataset_reading.iter_declared_parquet_member_batches
+
+    def observe(path, **kwargs):
+        decoded[path] = decoded.get(path, 0) + 1
+        yield from original(path, **kwargs)
+
+    monkeypatch.setattr(
+        dataset_reading, "iter_declared_parquet_member_batches", observe
+    )
+    result = compare_datasets(roots["left"], roots["right"])
+    assert result.status == ("CONTENT_MISMATCH" if changed else "MATCH")
+    assert result.summary["exact"] == {
+        "missing_row_count": 0,
+        "extra_row_count": 0,
+        "changed_row_count": int(changed),
+    }
+    assert decoded and set(decoded.values()) == {1}
+    from quant_research_platform.contracts.time import TimeWindow
+
+    decoded.clear()
+    projected = compare_datasets(
+        roots["left"],
+        roots["right"],
+        columns=("value",),
+        time_window=TimeWindow("2020-01-01", "2020-01-01"),
+    )
+    assert projected.status == "MATCH"
+    assert projected.summary["row_count"] == {"left": 1, "right": 1}
+    assert decoded and set(decoded.values()) == {1}

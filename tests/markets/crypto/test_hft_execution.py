@@ -33,6 +33,7 @@ from quant_research_platform.research.portfolios.diagnostics import (
 )
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from tests.helpers.binance_hft import KNOWN_NO_FUNDING, _coverage, _quote
+from tests.helpers.portfolio_ledger import capture_fill_rows
 
 
 @pytest.mark.usefixtures("coordinate_scale")
@@ -77,7 +78,7 @@ def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
         funding_events=(),
         funding_forecasts=(FundingForecast(0, 1000000000, ()),),
         calibrations={"fold": calibration},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
     )
     assert result["created_orders"] == 4
     assert [fill["timestamp_ms"] for fill in fills] == [650]
@@ -97,7 +98,7 @@ def test_fixed_maker_inventory_controls_change_real_fill_quantity():
             ),
             observed_coverage={"s1": _coverage(0, 201)},
             trade_coverage={"trade-connection-1": _coverage(0, 201)},
-            on_fill=fills.append,
+            on_ledger=capture_fill_rows(fills.append),
             capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
             asset_id="btc_usdt",
             funding_events=(),
@@ -264,7 +265,7 @@ def test_common_panel_maker_quotes_use_raw_execution_identities(wrong_identity) 
         config=_maker_config(),
         observed_coverage={"s1": _coverage(0, 201)},
         trade_coverage={"trade-connection-1": _coverage(0, 201)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -284,7 +285,7 @@ def test_taker_uses_latest_actual_state_at_effective_time() -> None:
         prediction_column="prediction",
         config=_taker_config(latency_ms=10),
         observed_coverage={"s1": _coverage(0, 15)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -314,7 +315,7 @@ def test_failing_fill_observer_is_not_replayed_during_cleanup() -> None:
             prediction_column="prediction",
             config=_taker_config(),
             observed_coverage={"s1": _coverage(0, 300)},
-            on_fill=fail,
+            on_ledger=capture_fill_rows(fail),
             capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
             asset_id="btc_usdt",
             funding_events=(),
@@ -333,7 +334,7 @@ def test_taker_walks_known_l2_and_reports_partial_coverage_honestly() -> None:
         prediction_column="prediction",
         config=_taker_config(latency_ms=10, order_quantity=1.5),
         observed_coverage={"s1": _coverage(0, 11)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -359,7 +360,7 @@ def test_taker_does_not_fill_after_coverage_or_explicit_boundary() -> None:
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"s1": _coverage(0, 49)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -379,7 +380,7 @@ def test_taker_terminal_pnl_is_unknown_after_book_boundary() -> None:
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"s1": _coverage(0, 50)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -431,7 +432,7 @@ def test_taker_markout_uses_latest_state_as_of_target(at_target, tail) -> None:
         prediction_column="prediction",
         config=_taker_config(),
         observed_coverage={"s1": _coverage(0, 300)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -475,7 +476,7 @@ def test_maker_same_price_depletion_partial_fill_and_order_lifetime() -> None:
         config=_maker_config(),
         observed_coverage={"s1": _coverage(0, 201)},
         trade_coverage={"trade-connection-1": _coverage(0, 201)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -503,7 +504,7 @@ def test_maker_trade_through_fills_and_boundary_blocks_stale_trade() -> None:
         config=_maker_config(),
         observed_coverage={"s1": _coverage(0, 74)},
         trade_coverage={"trade-connection-1": _coverage(0, 101)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -523,7 +524,7 @@ def test_maker_terminal_pnl_is_unknown_after_uncovered_state() -> None:
         config=_maker_config(),
         observed_coverage={"s1": _coverage(0, 75)},
         trade_coverage={"trade-connection-1": _coverage(0, 101)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -545,7 +546,7 @@ def test_maker_terminal_pnl_preserves_flat_realized_cash_after_boundary() -> Non
         config=_maker_config(),
         observed_coverage={"s1": _coverage(0, 75)},
         trade_coverage={"trade-connection-1": _coverage(0, 101)},
-        on_fill=fills.append,
+        on_ledger=capture_fill_rows(fills.append),
         capital=PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
         asset_id="btc_usdt",
         funding_events=(),
@@ -611,8 +612,7 @@ def test_taker_freezes_orders_across_overlapping_latency_and_future_book_changes
             capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
             asset_id="btc_usdt",
             funding_events=(),
-            on_fill=fills.append,
-            on_ledger=ledger.append,
+            on_ledger=capture_fill_rows(fills.append, ledger.append),
         )
         quantities = [
             row.number
@@ -697,11 +697,18 @@ def test_taker_depth_breakpoint_optimum_zero_and_unavailable_decision():
             capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
             asset_id="btc_usdt",
             funding_events=(),
-            on_fill=fills.append,
-            on_equity=equity.append,
+            on_ledger=capture_fill_rows(fills.append, equity.append),
         )
-        assert equity[0]["requested_quantity"] == quantity
-        assert equity[0]["decision_reason"] == reason
+        decisions = [
+            {row.name: row for row in batch.diagnostics}
+            for batch in equity
+            if any(row.name == "decision_reason" for row in batch.diagnostics)
+        ]
+        if reason == "decision_book_unavailable":
+            assert not decisions
+        else:
+            assert decisions[0]["decision_requested_quantity"].number == quantity
+            assert decisions[0]["decision_reason"].text == reason
         assert result["selection_status"] == (
             "UNDEFINED"
             if reason
@@ -816,7 +823,7 @@ def coordinate_scale(request, monkeypatch):
 def test_observation_stop_does_not_rewrite_maker_decision_or_cancel_pending_quote():
     results = []
     for stop in (400000000, 1000000000):
-        batches, equity, fills = ([], [], [])
+        batches, fills = ([], [])
         result = _simulate_maker(
             [_state(stamp) for stamp in (0, 350, 390, 500, 900)],
             [],
@@ -829,11 +836,14 @@ def test_observation_stop_does_not_rewrite_maker_decision_or_cancel_pending_quot
             funding_events=(),
             decision_windows_ns=((0, 2000000000),),
             observation_window_ns=(0, stop),
-            on_ledger=batches.append,
-            on_equity=equity.append,
-            on_fill=fills.append,
+            on_ledger=capture_fill_rows(fills.append, batches.append),
         )
-        results.append((result, batches, equity, fills))
+        decisions = [
+            batch
+            for batch in batches
+            if any(row.name.startswith("maker_") for row in batch.diagnostics)
+        ]
+        results.append((result, batches, decisions, fills))
     assert results[0][2] == results[1][2]
     assert results[0][0]["cancelled_orders"] == 0
     assert results[0][0]["censored_pending_command_count"] == 2

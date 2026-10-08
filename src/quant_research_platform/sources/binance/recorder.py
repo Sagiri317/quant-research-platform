@@ -32,9 +32,6 @@ from quant_research_platform.contracts.json_codec import (
 )
 from quant_research_platform.contracts.order_book import BookBoundary
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    require_free_disk_headroom,
-)
 from quant_research_platform.sources.binance.ids import (
     FUTURES_HFT_RECORDING_SCOPE,
     FUTURES_MARKET_TYPE,
@@ -76,7 +73,6 @@ MAX_WS_QUEUE = 4
 MAX_REST_RESPONSE_BYTES = 4 * 1024 * 1024
 REST_REQUEST_TIMEOUT_SECONDS = 15.0
 SNAPSHOT_LIMITS = {SPOT_MARKET_TYPE: 5000, FUTURES_MARKET_TYPE: 1000}
-_RECORDER_DISK_CHECK_BYTES = 1024 * 1024
 
 
 @dataclass(frozen=True)
@@ -202,7 +198,6 @@ class _RunWriter:
     _interval_raw_handle: Any | None = field(default=None, init=False, repr=False)
     _interval_gzip_handle: Any | None = field(default=None, init=False, repr=False)
     _interval_record_count: int = field(default=0, init=False, repr=False)
-    _disk_bytes_remaining: int = field(default=0, init=False, repr=False)
 
     def write(
         self,
@@ -248,7 +243,6 @@ class _RunWriter:
                 ).encode("utf-8")
                 + b"\n"
             )
-            self._admit_disk_growth(len(line))
             self._capture_seq = capture_seq
             hour = receive_time[:13]
             for key in tuple(self._handles):
@@ -340,7 +334,6 @@ class _RunWriter:
                 ).encode("utf-8")
                 + b"\n"
             )
-            self._admit_disk_growth(len(line))
             self._open_interval_file()
             assert self._interval_gzip_handle is not None
             self._interval_gzip_handle.write(line)
@@ -363,14 +356,6 @@ class _RunWriter:
         self._interval_raw_handle = raw_handle
         self._interval_gzip_handle = gzip_handle
         self._interval_path = path
-
-    def _admit_disk_growth(self, logical_bytes: int) -> None:
-        if logical_bytes <= self._disk_bytes_remaining:
-            self._disk_bytes_remaining -= logical_bytes
-            return
-        admitted = max(_RECORDER_DISK_CHECK_BYTES, logical_bytes)
-        require_free_disk_headroom(self.root, reserve_bytes=2 * admitted)
-        self._disk_bytes_remaining = admitted - logical_bytes
 
     def _close_key(self, key: tuple[str, str, str, str, str]) -> None:
         opened = self._handles.pop(key, None)
@@ -399,8 +384,6 @@ class _RunWriter:
                 return
             failure = self._close_stream_handles()
             try:
-                if self._interval_gzip_handle is None:
-                    self._admit_disk_growth(1)
                 self._open_interval_file()
                 assert self._interval_gzip_handle is not None
                 assert self._interval_raw_handle is not None
@@ -1325,7 +1308,6 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
         "run_id": uuid.uuid4().hex,
         "recording_scope": config.scope,
         "status": status,
-        "market_data_status": status,
         "venue": "binance",
         "symbols": list(config.symbols),
         "market_types": list(market_types),

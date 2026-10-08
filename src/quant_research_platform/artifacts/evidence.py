@@ -13,7 +13,7 @@ from quant_research_platform.policy.share_safety import (
 from quant_research_platform.storage.atomic import atomic_write_json, atomic_write_text
 from quant_research_platform.storage.manifests import (
     _qrp_json_file_identity,
-    read_bounded_qrp_json,
+    read_qrp_json_file,
 )
 
 
@@ -34,9 +34,7 @@ def read_json_evidence(
     identity = _qrp_json_file_identity(path)
     if expected_member is not None and identity.size != expected_member["size"]:
         raise ValueError(error)
-    raw, payload = read_bounded_qrp_json(
-        path, expected_identity=identity, max_bytes=identity.size
-    )
+    raw, payload = read_qrp_json_file(path, expected_identity=identity)
     if (
         expected_member is not None
         and hashlib.sha256(raw).hexdigest() != expected_member["sha256"]

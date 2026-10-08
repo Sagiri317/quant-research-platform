@@ -473,7 +473,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         raise AssertionError("REUSE must not fit")
 
     with monkeypatch.context() as patch:
-        patch.setattr(fitting, "_fit_model_result_from_frames", no_fit)
+        patch.setattr(fitting, "_fit_model_result", no_fit)
         reused = research.research_run(
             profile=profile,
             layout=layout,
@@ -531,7 +531,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
         if item["candidate_id"] in selected_ids
     ]
     with monkeypatch.context() as patch:
-        patch.setattr(fitting, "_fit_model_result_from_frames", no_fit)
+        patch.setattr(fitting, "_fit_model_result", no_fit)
         mode_development = research.research_run(
             profile=profile,
             layout=layout,
@@ -655,7 +655,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     filesystem_unlink(eth_metadata)
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(fitting, "_fit_model_result_from_frames", no_fit)
+            patch.setattr(fitting, "_fit_model_result", no_fit)
             missing_eth = research.research_run(
                 profile=profile,
                 layout=layout,
@@ -707,7 +707,7 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
     }
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(fitting, "_fit_model_result_from_frames", no_fit)
+            patch.setattr(fitting, "_fit_model_result", no_fit)
             incomplete_run = research.research_run(
                 profile=profile,
                 layout=layout,
@@ -1178,9 +1178,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
         filesystem_write_bytes(path, gzip.compress(rows, mtime=0))
         slices.append(path)
     raw = tmp_path / "archive"
-    import_slices(
-        raw, date="2026-09-01", offset_minutes=1430, slices=slices, byte_budget=1024**2
-    )
+    import_slices(raw, date="2026-09-01", offset_minutes=1430, slices=slices)
     settlements = tmp_path / "settlements.json"
     filesystem_write_text(settlements, "[]", encoding="utf-8")
     start_ms = pd.Timestamp("2026-09-01T23:50:00Z").value // 1_000_000
@@ -1197,7 +1195,6 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
                 http_status=200,
                 start_ms=start_ms,
                 end_ms=start_ms + 1_200_000 - 1,
-                byte_budget=1024**2,
             )
     plan = hft_research_plan()
     for window in [
@@ -1241,7 +1238,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
     def forbidden(*args, **kwargs):
         pytest.fail("holdout must not fit, select, or calibrate")
 
-    monkeypatch.setattr(fitting, "_fit_model_result_from_frames", forbidden)
+    monkeypatch.setattr(fitting, "_fit_model_result", forbidden)
     monkeypatch.setattr(portfolio, "produce_maker_calibration", forbidden)
     trials = {
         path: filesystem_read_bytes(path)

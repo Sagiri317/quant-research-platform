@@ -68,7 +68,7 @@ def iter_dataset_part_batches(
         metadata = _part_metadata(
             parquet_file,
             identity=identity,
-            require_logical_dtypes=metadata_observer is not None,
+            require_logical_dtypes=False,
         )
         if metadata_observer is not None:
             metadata_observer(metadata)

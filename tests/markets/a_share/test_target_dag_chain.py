@@ -56,7 +56,6 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
         return InterimImportResult(
             artifact_roots={data_id: output_root},
             skipped=(),
-            pruning_report_text="synthetic market source",
         )
 
     bindings = {
@@ -133,7 +132,6 @@ def test_fundamental_pit_and_factors_reach_the_same_target_dag(tmp_path: Path) -
         return InterimImportResult(
             artifact_roots={data_id: output_root},
             skipped=(),
-            pruning_report_text="synthetic financial source",
         )
 
     bindings = {
@@ -584,7 +582,6 @@ def _windowed_source_profile(frames, calls, *, reject_before=None, reject_at=Non
         return InterimImportResult(
             artifact_roots={data_id: root},
             skipped=(),
-            pruning_report_text="synthetic windowed source",
         )
 
     return replace(
@@ -879,13 +876,23 @@ def test_mixed_window_interruption_preserves_completed_public_result_sink(
     with pytest.raises(KeyboardInterrupt) as caught:
         research._execute_action(
             profile=profile,
+            protocol=profile.protocol(
+                scenario_id=research._default_scenario_id(profile),
+                access_window="development",
+            ),
+            research_window=research._research_window(
+                profile.protocol(
+                    scenario_id=research._default_scenario_id(profile),
+                    access_window="development",
+                ),
+                None,
+                start_date=str(requested[0].date()),
+                end_date=str(requested[-1].date()),
+            ),
             action="data materialize",
             terminal_targets=("market_panel_1d", "price_volume_facts"),
             layout=StorageLayout(tmp_path),
-            time_window=None,
             raw_root=tmp_path / "raw",
-            start_date=str(requested[0].date()),
-            end_date=str(requested[-1].date()),
             result_sink=sink,
         )
     assert caught.value is primary

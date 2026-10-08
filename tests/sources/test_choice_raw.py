@@ -46,9 +46,7 @@ def _request(endpoint: str = "ctr") -> ChoiceRequest:
         ),
         "sector": ("001004", "2025-12-31", ""),
     }[endpoint]
-    return ChoiceRequest(
-        endpoint, arguments, "official-sdk-test", date(2025, 12, 31), 1024 * 1024
-    )
+    return ChoiceRequest(endpoint, arguments, "official-sdk-test", date(2025, 12, 31))
 
 
 @pytest.mark.parametrize("endpoint", ["ctr", "css", "sector"])
@@ -103,7 +101,6 @@ def test_documented_ctr_report_type_is_forwarded_and_persisted_exactly(tmp_path:
         ),
         "official-sdk-test",
         date(2025, 12, 31),
-        1024 * 1024,
     )
     sdk = SDK(
         _response(
@@ -207,19 +204,25 @@ def test_empty_success_and_failed_attempt_then_explicit_success(tmp_path: Path) 
         assert sdk.calls == 2
 
 
-def test_invalid_shape_or_oversize_preserves_old_good(tmp_path: Path) -> None:
+def test_invalid_shape_preserves_old_good_and_long_cell_is_accepted(
+    tmp_path: Path,
+) -> None:
     request = _request()
     sdk = SDK(_response(Indicators=["QKMZ"], Data={"0": [1]}))
     with choice_session(sdk) as session:
         root = session.fetch(StorageLayout(tmp_path), request)
         original = filesystem_read_bytes(root / "response.csv")
-        for values in ([1, 2], ["x" * (65536 + 1)]):
-            sdk.response = _response(Indicators=["QKMZ"], Data={"0": values})
-            different = replace(request, sdk_version="other-sdk")
-            with pytest.raises(ValueError):
-                session.fetch(StorageLayout(tmp_path), different)
-            assert filesystem_read_bytes(root / "response.csv") == original
+        different = replace(request, sdk_version="other-sdk")
+        sdk.response = _response(Indicators=["QKMZ"], Data={"0": [1, 2]})
+        with pytest.raises(ValueError):
+            session.fetch(StorageLayout(tmp_path), different)
+        assert filesystem_read_bytes(root / "response.csv") == original
         assert len(list(filesystem_iterdir(root.parent))) == 1
+        values = ["x" * (1024 * 1024 + 1)]
+        sdk.response = _response(Indicators=["QKMZ"], Data={"0": values})
+        published = session.fetch(StorageLayout(tmp_path), different)
+        assert read_choice_response(published, different)["Data"]["0"] == values
+        assert filesystem_read_bytes(root / "response.csv") == original
 
 
 def test_atomic_failure_preserves_primary_and_session_exclusivity(

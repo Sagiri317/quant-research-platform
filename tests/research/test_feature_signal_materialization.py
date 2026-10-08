@@ -64,26 +64,6 @@ def test_signal_overlap_sets_preserve_unique_contract_and_error_order():
     assert count == 1312
 
 
-def test_winsorize_clips_by_timestamp_quantiles_instead_of_zscore() -> None:
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-02"]),
-            "momentum_20d": [0.0, 10.0, 100.0],
-        }
-    )
-    spec = FeatureTransformSpec(
-        transform_id="momentum_20d_winsorized",
-        source_columns=("momentum_20d",),
-        transform="winsorize",
-        output_columns=("momentum_20d_winsorized",),
-        winsorize_quantiles=(0.2, 0.8),
-    )
-    result = apply_feature_transforms(frame, (spec,))
-    assert result["momentum_20d_winsorized"].tolist() == pytest.approx(
-        [4.0, 10.0, 64.0]
-    )
-
-
 def test_winsorization_preserves_positional_groups_and_duplicate_indexes():
     frame = pd.DataFrame(
         {
@@ -106,63 +86,32 @@ def test_winsorization_preserves_positional_groups_and_duplicate_indexes():
         index=[3, 3, 1, 1, 3, 7, 3, 7, 1, 1],
     )
     before = frame.copy(deep=True)
-    spec = FeatureTransformSpec(
-        "positional", ("factor",), "winsorize", ("feature",), (0.25, 0.75)
-    )
-    actual = apply_feature_transforms(frame, (spec,))
+    from quant_research_platform.research.features.transforms import _winsorize
+
+    values = frame["factor"]
+    actual = _winsorize(values, values.groupby(frame["timestamp"], sort=False))
     expected = pd.Series(
-        [7.5, 7.0, -5e307, 10.0, np.nan, 32.5, 5e307, 10.0, np.nan, 5.0],
+        [0.3, 7.0, -9.8e307, 10.0, np.nan, 97.3, 9.8e307, 10.0, np.nan, 5.0],
         index=frame.index,
-        name="feature",
+        name="factor",
     )
-    pd.testing.assert_series_equal(actual["feature"], expected, check_exact=True)
+    pd.testing.assert_series_equal(actual, expected, rtol=1e-15, atol=1e-15)
     pd.testing.assert_frame_equal(frame, before, check_exact=True)
-    empty = apply_feature_transforms(frame.iloc[:0], (spec,))
-    assert empty.empty and empty["feature"].dtype == "float64"
-
-
-def test_fillna_transform_names_apply_their_fill_policy() -> None:
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(["2024-01-02", "2024-01-02", "2024-01-02"]),
-            "factor": [1.0, None, 3.0],
-        }
+    empty = _winsorize(
+        values.iloc[:0], values.iloc[:0].groupby(frame["timestamp"].iloc[:0])
     )
-    zero_spec = FeatureTransformSpec(
-        transform_id="factor_fillna_zero",
-        source_columns=("factor",),
-        transform="fillna_zero",
-        output_columns=("factor_zero",),
-    )
-    median_spec = FeatureTransformSpec(
-        transform_id="factor_fillna_median",
-        source_columns=("factor",),
-        transform="fillna_median",
-        output_columns=("factor_median",),
-    )
-    zero_result = apply_feature_transforms(frame, (zero_spec,))
-    median_result = apply_feature_transforms(frame, (median_spec,))
-    assert zero_result["factor_zero"].tolist() == pytest.approx([1.0, 0.0, 3.0])
-    assert median_result["factor_median"].tolist() == pytest.approx([1.0, 2.0, 3.0])
+    assert empty.empty and empty.dtype == "float64"
 
 
 def test_zero_variance_zscore_keeps_numeric_output() -> None:
     frame = pd.DataFrame(
         {"timestamp": [pd.Timestamp("2024-01-02")] * 3, "factor": [1.0, 1.0, 1.0]}
     )
-    result = apply_feature_transforms(
-        frame,
-        (
-            FeatureTransformSpec(
-                transform_id="factor_zscore",
-                source_columns=("factor",),
-                transform="cross_sectional_zscore",
-                output_columns=("factor_zscore",),
-            ),
-        ),
-    )
-    assert result["factor_zscore"].dtype == "float64"
-    assert result["factor_zscore"].tolist() == [0.0, 0.0, 0.0]
+    from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
+
+    result = _stable_zscore(frame["factor"])
+    assert result.dtype == "float64"
+    assert result.tolist() == [0.0, 0.0, 0.0]
 
 
 def test_tiny_nonconstant_zscores_remain_valid() -> None:
@@ -172,35 +121,32 @@ def test_tiny_nonconstant_zscores_remain_valid() -> None:
             "factor": np.array([1e-320, 2e-320, 3e-320]),
         }
     )
-    feature = FeatureTransformSpec(
-        transform_id="factor_zscore",
-        source_columns=("factor",),
-        transform="cross_sectional_zscore",
-        output_columns=("factor_zscore",),
-    )
     signal = SignalSpec(
         signal_id="factor_signal",
         source_kind="factor",
         source_column="factor",
         transform="zscore",
     )
-    feature_result = apply_feature_transforms(frame, (feature,))
+    from quant_research_platform.compute.dataframe.cross_section import _stable_zscore
+
+    feature_result = _stable_zscore(frame["factor"])
     signal_result = normalize_signal_frame(frame, (signal,))
     expected = [-1.224744871391589, 0.0, 1.224744871391589]
-    assert feature_result["factor_zscore"].tolist() == pytest.approx(expected)
+    assert feature_result.tolist() == pytest.approx(expected)
     assert signal_result["factor_signal"].tolist() == pytest.approx(expected)
 
 
 @pytest.mark.parametrize("value", ["not-a-number", float("inf"), float("-inf")])
 def test_feature_transforms_reject_invalid_numeric_sources(value: object) -> None:
     frame = pd.DataFrame({"timestamp": [pd.Timestamp("2024-01-02")], "factor": [value]})
-    spec = FeatureTransformSpec(
-        transform_id="factor_rank",
-        source_columns=("factor",),
-        transform="cross_sectional_rank",
-        output_columns=("factor_rank",),
+    frame = frame.assign(
+        eligible=True,
+        industry_standard_id="fixture",
+        industry_level1_code="A",
+        log_float_market_cap=0.0,
     )
-    with pytest.raises(ValueError, match="invalid_feature_transform_source"):
+    spec = FeatureTransformSpec("a_share_canonical", ("factor",))
+    with pytest.raises(ValueError, match="invalid_feature_factor"):
         apply_feature_transforms(frame, (spec,))
 
 

@@ -152,6 +152,24 @@ class DataSpec:
         missing = [column for column in self.primary_key if column not in column_roles]
         if missing:
             raise ValueError(f"missing_primary_key_columns: {', '.join(missing)}")
+        invalid_key_roles = [
+            column
+            for column in self.primary_key
+            if column_roles[column] not in {ColumnRole.KEY, ColumnRole.TIMESTAMP}
+        ]
+        if invalid_key_roles:
+            raise ValueError(
+                f"invalid_primary_key_roles: {', '.join(invalid_key_roles)}"
+            )
+        timestamps = [
+            column
+            for column in self.primary_key
+            if column_roles[column] is ColumnRole.TIMESTAMP
+        ]
+        if not self.partition_columns and timestamps:
+            raise ValueError("unpartitioned_data_must_not_use_timestamp_key")
+        if self.partition_columns and len(timestamps) != 1:
+            raise ValueError("invalid_timestamp_primary_key")
         object.__setattr__(self, "frequency", frequency)
         object.__setattr__(self, "grain", grain)
         object.__setattr__(self, "column_roles", MappingProxyType(column_roles))
@@ -179,10 +197,7 @@ class ProcessedDataSpec(DataSpec):
         super().__post_init__()
         object.__setattr__(self, "market_id", validate_market_id(self.market_id))
         object.__setattr__(self, "kind", normalize_processed_data_kind(self.kind))
-        if (
-            type(self.parameters_json) is not str
-            or len(self.parameters_json.encode("utf-8")) > 65536
-        ):
+        if type(self.parameters_json) is not str:
             raise ValueError("processed_parameters_invalid")
         object.__setattr__(
             self,

@@ -126,7 +126,9 @@ def test_market_beta_matches_centered_ols_for_nearly_constant_returns():
         market = 0.01 + 1e-10 * ((index % 11) - 5)
         values = [1.2 * market, 0.8 * market]
         if index:
-            markets.append((100.0 * values[0] + 100.0 * values[1]) / 200.0)
+            with localcontext() as context:
+                context.prec = 80
+                markets.append(float(sum(Decimal.from_float(v) for v in values) / 2))
             returns.append(values[0])
         result = state.observe(
             pd.DataFrame(
@@ -204,8 +206,10 @@ def test_decimal_metadata_rejects_exponents_without_expansion():
     raw = json.dumps(payload).encode()
     with pytest.raises(ValueError):
         parse_logical_dtype_metadata(raw)
-    with pytest.raises(ValueError):
-        _typed_category_value_payload(Decimal("1e2000000"))
+    encoded = _typed_category_value_payload(Decimal("1e2000000"))
+    assert encoded == {"type": "decimal", "value": "1" + "0" * 2_000_000}
+    payload["columns"][0]["categories"] = [encoded]
+    assert parse_logical_dtype_metadata(json.dumps(payload).encode()) == payload
     assert _typed_category_value_payload(Decimal("1.2300")) == {
         "type": "decimal",
         "value": "1.2300",
@@ -334,7 +338,9 @@ def test_group_spread_aggregates_before_float_conversion(
         label_columns=("label",),
         n_groups=2,
     )
-    state = _EvaluationStreamingState(spec=spec, n_groups=2)
+    state = _EvaluationStreamingState(
+        spec=spec,
+    )
     for top, bottom in zip(tops, bottoms, strict=True):
         _add_group_spread_observation(
             state._spread, "signal", "label", top, bottom, float(top > bottom), None
@@ -406,9 +412,6 @@ def test_evaluation_mixed_timestamp_strings_follow_chronological_order():
     with build_evaluation_result_from_frames(
         [frame],
         spec=spec,
-        signal_columns=("signal",),
-        label_columns=("label",),
-        n_groups=2,
         asset_column="asset_id",
         source_columns_by_kind={"feature": ("feature",)},
     ) as result:
@@ -508,7 +511,7 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
     )
-    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.research.evaluations.engine import (
         build_evaluation_result_from_frames,
     )
@@ -572,9 +575,6 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
         with build_evaluation_result_from_frames(
             (frame.iloc[:1], frame.iloc[1:]),
             spec=spec,
-            signal_columns=("x",),
-            label_columns=("label",),
-            n_groups=2,
             asset_column="asset_id",
         ) as result:
             bundle = write_evaluation_outputs_from_chunks(
@@ -586,11 +586,8 @@ def test_pearson_rounding_counterexamples_reach_published_consumers(
                     output_definition_id="evaluation_outputs",
                     run_id="test_run",
                     market_id=spec.market_id,
-                    run_type="evaluation",
-                    scope=OutputScope.LOCAL_ONLY,
                 ),
                 layout=StorageLayout(tmp_path),
-                n_groups=2,
             )
         validate_output_bundle(bundle)
         assert pd.read_parquet(

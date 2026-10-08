@@ -30,11 +30,10 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
 )
 from quant_research_platform.storage.manifests import (
-    read_bounded_qrp_json,
+    read_qrp_json_file,
     write_internal_artifact_manifest,
 )
 from quant_research_platform.storage.parquet import (
-    _opened_parquet,
     iter_dataset_part_batches,
     parquet_table_writer,
 )
@@ -80,6 +79,7 @@ _SCHEMAS = {
 
 @dataclass(frozen=True, slots=True)
 class PortfolioLedgerArtifact:
+    envelope: dict
     root: Path
     identity: str
     capital: PortfolioCapital
@@ -232,7 +232,7 @@ def read_portfolio_ledger_artifact(
     if {member["path"] for member in members} != required:
         raise ValueError("portfolio_ledger_member_invalid")
     calibration = (
-        read_bounded_qrp_json(
+        read_qrp_json_file(
             Path(instance_root) / "final_alpha_calibration.json",
             expected_identity=identities["final_alpha_calibration.json"],
         )[1]
@@ -264,6 +264,7 @@ def read_portfolio_ledger_artifact(
     ):
         raise ValueError("portfolio_final_calibration_binding_invalid")
     artifact = PortfolioLedgerArtifact(
+        envelope,
         Path(instance_root),
         expected_identity,
         _capital(envelope),
@@ -342,13 +343,14 @@ def summarize_portfolio_ledger(
 def _table_records(
     root: Path, name: str, expected_identity: DatasetFileIdentity | None
 ) -> Iterator[dict[str, object]]:
-    with _opened_parquet(
-        root / f"{name}.parquet", expected_identity=expected_identity
-    ) as (parquet, identity, _handle):
-        if not parquet.schema_arrow.remove_metadata().equals(_SCHEMAS[name]):
+    def validate_schema(metadata):
+        if not metadata.schema.equals(_SCHEMAS[name]):
             raise ValueError("portfolio_ledger_schema_invalid")
+
     chunks = iter_dataset_part_batches(
-        root / f"{name}.parquet", expected_identity=identity
+        root / f"{name}.parquet",
+        expected_identity=expected_identity,
+        metadata_observer=validate_schema,
     )
     with closing_iterator(chunks):
         for chunk in chunks:

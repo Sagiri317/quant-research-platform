@@ -44,7 +44,6 @@ from quant_research_platform.storage.datasets.schema import (
     physical_schema_from_schema,
     validate_dataset_manifest_consumable,
     validate_dataset_manifest_payload,
-    validate_dataset_spec_payload,
     validate_persisted_logical_schema,
 )
 from quant_research_platform.storage.datasets.types import DatasetReadMode
@@ -57,7 +56,7 @@ from quant_research_platform.storage.identity import (
     require_artifact_root,
     require_unaliased_path,
 )
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
+from quant_research_platform.storage.manifests import read_qrp_json_file
 from quant_research_platform.storage.parquet import (
     DatasetPartMetadata,
     PreparedMembershipValues,
@@ -110,7 +109,7 @@ class DatasetSession:
         spec_identity = dataset_file_identity(self.root / "spec.json")
         if _file_identity_bytes(spec_identity) != self.spec_identity_bytes:
             raise ValueError("dataset_spec_identity_changed")
-        spec_bytes, _ = read_bounded_qrp_json(
+        spec_bytes, _ = read_qrp_json_file(
             self.root / "spec.json", expected_identity=spec_identity
         )
         if spec_bytes != self.spec_bytes:
@@ -120,7 +119,7 @@ class DatasetSession:
         )
         if _file_identity_bytes(manifest_identity) != self.manifest_identity_bytes:
             raise ValueError("dataset_manifest_identity_changed")
-        manifest_bytes, _ = read_bounded_qrp_json(
+        manifest_bytes, _ = read_qrp_json_file(
             self.root / "_manifest" / "manifest.json",
             expected_identity=manifest_identity,
         )
@@ -225,20 +224,21 @@ def open_dataset_session(
         manifest_identity = dataset_file_identity(manifest_path)
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
-    spec_bytes, spec_payload = read_bounded_qrp_json(
+    spec_bytes, spec_payload = read_qrp_json_file(
         spec_path, expected_identity=spec_identity
     )
     if spec_payload.get("schema_id") != "qrp-dataset-spec":
         raise ValueError("dataset_spec_schema_id_invalid")
-    validate_dataset_spec_payload(spec_payload)
-    manifest_bytes, manifest = read_bounded_qrp_json(
+    manifest_bytes, manifest = read_qrp_json_file(
         manifest_path, expected_identity=manifest_identity
     )
     if manifest.get("schema_id") != "qrp-dataset-manifest":
         raise ValueError("dataset_manifest_schema_id_invalid")
     validate_dataset_manifest_payload(manifest, spec=spec_payload)
     if require_consumable:
-        validate_dataset_manifest_consumable(manifest)
+        validate_dataset_manifest_consumable(
+            manifest, primary_key=spec_payload["primary_key"]
+        )
     inventory = DatasetSessionInventory(data_root=data_root)
     inventory.discover(spec_payload)
     paths = inventory.paths
@@ -287,15 +287,16 @@ def dataset_session_from_inventory(
         manifest_identity = dataset_file_identity(manifest_path)
     except (FileNotFoundError, NotADirectoryError, ValueError) as exc:
         raise ValueError("dataset_metadata_file_invalid") from exc
-    spec_bytes, spec_payload = read_bounded_qrp_json(
+    spec_bytes, spec_payload = read_qrp_json_file(
         spec_path, expected_identity=spec_identity
     )
-    manifest_bytes, manifest = read_bounded_qrp_json(
+    manifest_bytes, manifest = read_qrp_json_file(
         manifest_path, expected_identity=manifest_identity
     )
-    validate_dataset_spec_payload(spec_payload)
     validate_dataset_manifest_payload(manifest, spec=spec_payload)
-    validate_dataset_manifest_consumable(manifest)
+    validate_dataset_manifest_consumable(
+        manifest, primary_key=spec_payload["primary_key"]
+    )
     inventory.verify_filesystem(spec_payload)
     return _build_dataset_session(
         root=root,
@@ -917,3 +918,21 @@ def read_columns_for_time_window(
     if timestamp_column is None:
         raise ValueError("time_window_not_supported")
     return tuple(dict.fromkeys((*columns, timestamp_column)))
+
+
+def _iter_dataset_session_frames(session, columns):
+    from quant_research_platform.runtime.dataframes import iter_complete_session_frames
+
+    with closing_iterator(
+        iter_dataset_file_batches(session, columns=columns)
+    ) as batches:
+        source = (frame for _, frame in batches)
+        with closing_iterator(
+            iter_complete_session_frames(source, timestamp_column="timestamp")
+        ) as frames:
+            for frame in frames:
+                if not frame.empty:
+                    try:
+                        yield frame
+                    except GeneratorExit:
+                        return

@@ -44,7 +44,7 @@ from quant_research_platform.sources.tardis.raw import (
     _stream_suffix,
     iter_native_slice,
 )
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
+from quant_research_platform.storage.manifests import read_qrp_json_file
 
 _MANIFEST_KEYS = {
     "schema_id",
@@ -519,9 +519,7 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
             manifest_path, missing_is_file_not_found=False
         )
         _raw = manifest = members = identities = _after_raw = after = run = None
-        _raw, manifest = read_bounded_qrp_json(
-            manifest_path, expected_identity=identity, max_bytes=identity.size
-        )
+        _raw, manifest = read_qrp_json_file(manifest_path, expected_identity=identity)
         _validate_manifest(manifest)
         manifest_hash = canonical_json_hash(manifest)
         if manifest_hash != expected_manifest_hash:
@@ -585,10 +583,8 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
             finally:
                 try:
                     verify_files()
-                    _after_raw, after = read_bounded_qrp_json(
-                        manifest_path,
-                        expected_identity=identity,
-                        max_bytes=identity.size,
+                    _after_raw, after = read_qrp_json_file(
+                        manifest_path, expected_identity=identity
                     )
                     if canonical_json_hash(after) != manifest_hash:
                         raise ValueError("tardis_manifest_identity_changed")
@@ -726,10 +722,8 @@ def open_tardis_archive(root, *, archive_paths=None, time_window=None):
         for path in paths:
             identity = _capture_raw_file_identity(path / "manifest.json")
             _raw = manifest = None
-            _raw, manifest = read_bounded_qrp_json(
-                path / "manifest.json",
-                expected_identity=identity,
-                max_bytes=identity.size,
+            _raw, manifest = read_qrp_json_file(
+                path / "manifest.json", expected_identity=identity
             )
             _validate_manifest(manifest)
             if _archive_intersects(manifest, time_window):

@@ -563,7 +563,7 @@ def test_unpartitioned_non_primary_timestamp_round_trips_without_date_range(
         )
 
 
-def test_session_metadata_reader_rejects_oversize_before_buffering(
+def test_session_metadata_reader_rejects_invalid_json_above_former_capacity(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "bounded_metadata")
@@ -575,7 +575,7 @@ def test_session_metadata_reader_rejects_oversize_before_buffering(
     filesystem_write_bytes(
         root / "_manifest" / "manifest.json", b" " * (1024 * 1024 + 1)
     )
-    with pytest.raises(ValueError, match="dataset_metadata_file_too_large"):
+    with pytest.raises(ValueError, match="qrp_json_invalid"):
         dataset_reading.open_dataset_session(root, columns=None, time_window=None)
         pass
 

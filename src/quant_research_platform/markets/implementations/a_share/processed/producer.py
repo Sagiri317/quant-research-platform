@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import json
 from bisect import bisect_left, bisect_right
-from contextlib import contextmanager
-from dataclasses import replace
+from contextlib import ExitStack, contextmanager
+from dataclasses import dataclass, replace
 from itertools import chain
 from statistics import mean
 
@@ -17,6 +17,10 @@ from quant_research_platform.catalog.processed import (
     ProcessedDataCatalog,
 )
 from quant_research_platform.contracts.data import ProcessedDataKind, ProcessedDataSpec
+from quant_research_platform.contracts.portfolios import (
+    _EXECUTION_COLUMNS,
+    _portfolio_session_frame,
+)
 from quant_research_platform.contracts.time import (
     TimeWindow,
     time_window_timestamp_interval,
@@ -44,6 +48,7 @@ from quant_research_platform.markets.implementations.a_share.fundamentals import
     construct_ttm_events,
     financial_events_from_interim,
 )
+from quant_research_platform.markets.implementations.a_share.processed import panels
 from quant_research_platform.markets.implementations.a_share.processed.catalog import (
     processed_catalog as a_share_processed_catalog,
 )
@@ -62,6 +67,7 @@ from quant_research_platform.research.labels import engine as label_engine
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.datasets.reading import (
+    _iter_dataset_session_frames,
     _prepare_in_filter,
     iter_dataset_chunks,
     materialize_dataset_session,
@@ -711,8 +717,6 @@ def _compute_processed_frame(
             output_window=None
             if panel_sessions is None
             else TimeWindow(panel_sessions[0], panel_sessions[-1]),
-            trading_calendar=source.get("trading_calendar"),
-            market_history=market_history,
         )
         if "has_legal_fundamental_pit" in spec.required_columns:
             calculated = calculated.merge(
@@ -876,3 +880,246 @@ def _fundamental_pit_frame(
         if column not in output:
             output[column] = np.nan
     return output.loc[:, list(spec.required_columns)]
+
+
+_MARKET_FACT_COLUMNS = ("source_asset_id", "timestamp", "market_type", "filling_flag")
+_STOCK_FACT_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
+    "listing_date",
+    "delisting_date",
+    "company_status",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PortfolioSession:
+    timestamp: pd.Timestamp
+    panel: pd.DataFrame
+    valuation: pd.DataFrame
+    closed_assets: frozenset[str]
+    execution: pd.DataFrame
+
+
+def _portfolio_session_evidence(
+    layout, panel_root, calendar, *, include_asset_sessions
+):
+    bars = open_dataset_session(
+        layout.target_root("market_bars_1d", None),
+        columns=_MARKET_FACT_COLUMNS,
+        time_window=None,
+    )
+    _, _, membership, _, _ = _processed_axis(bars, panel_source=True, calendar=calendar)
+    panel = open_dataset_session(panel_root, columns=None, time_window=None)
+    asset_sessions = {}
+    if include_asset_sessions:
+        _, _, _, asset_sessions, _ = _processed_axis(
+            panel, panel_source=False, include_asset_sessions=True
+        )
+    stocks = panels._canonical_stock_master(
+        materialize_dataset_session(
+            open_dataset_session(
+                layout.target_root("stock_master", None),
+                columns=_STOCK_FACT_COLUMNS,
+                time_window=None,
+            )
+        )
+    )
+    return bars, panel, membership, asset_sessions, stocks
+
+
+def iter_portfolio_sessions(
+    *, layout, panel_root, panel_columns, calendar, time_window, execution_root=None
+):
+    """Project proved closed-market marks without changing materialized inputs."""
+    bars, panel, membership, asset_sessions, stocks = _portfolio_session_evidence(
+        layout, panel_root, calendar, include_asset_sessions=execution_root is not None
+    )
+    sessions = unified_trading_sessions(calendar)
+    calendar = calendar.set_index(["calendar_date", "source_market_type"])[
+        "is_trading_day"
+    ]
+    if calendar.index.has_duplicates:
+        raise ValueError("duplicate_trading_calendar_key")
+    market_events = iter(membership.sort_values("timestamp").groupby("timestamp"))
+    pending_membership = next(market_events, None)
+    market_types = pd.Series(dtype="Int64")
+    unknown_membership: set[str] = set()
+    blocked: set[str] = set()
+    last = pd.DataFrame(columns=panel_columns).set_index("asset_id", drop=False)
+    masks = pd.DataFrame(columns=(*_EXECUTION_COLUMNS, "execution_at")).set_index(
+        "asset_id", drop=False
+    )
+    with closing_iterator(ExitStack()) as channels:
+        bar_frames = channels.enter_context(
+            closing_iterator(_iter_dataset_session_frames(bars, _MARKET_FACT_COLUMNS))
+        )
+        panel_frames = channels.enter_context(
+            closing_iterator(_iter_dataset_session_frames(panel, panel_columns))
+        )
+        execution_frames = (
+            channels.enter_context(
+                closing_iterator(
+                    _iter_dataset_session_frames(
+                        open_dataset_session(
+                            execution_root, columns=_EXECUTION_COLUMNS, time_window=None
+                        ),
+                        _EXECUTION_COLUMNS,
+                    )
+                )
+            )
+            if execution_root is not None
+            else iter(())
+        )
+        pending_bar = next(bar_frames, None)
+        pending_panel = next(panel_frames, None)
+        pending_execution = next(execution_frames, None)
+        dates = pd.date_range(
+            calendar.index.get_level_values("calendar_date").min(),
+            pd.Timestamp(time_window.end),
+            freq="D",
+        ).as_unit("ns")
+        for timestamp in dates:
+            day_bars = pd.DataFrame(columns=_MARKET_FACT_COLUMNS)
+            while (
+                pending_bar is not None
+                and pd.Timestamp(pending_bar.timestamp.iloc[0]) <= timestamp
+            ):
+                current = pending_bar
+                unknown = ~current.market_type.isin(CURRENT_MARKET_TYPES)
+                unknown_membership.update(
+                    current.loc[unknown, "source_asset_id"].astype(str)
+                )
+                unknown_membership.difference_update(
+                    current.loc[~unknown, "source_asset_id"].astype(str)
+                )
+                blocked.update(
+                    current.loc[
+                        unknown | ~current.filling_flag.isin((0, 1, 2)),
+                        "source_asset_id",
+                    ].astype(str)
+                )
+                if pd.Timestamp(current.timestamp.iloc[0]) == timestamp:
+                    day_bars = current.set_index("source_asset_id", drop=False)
+                pending_bar = next(bar_frames, None)
+            while pending_membership is not None and pending_membership[0] <= timestamp:
+                event = pending_membership[1].set_index("asset_id").market_type
+                market_types = pd.concat(
+                    (market_types.drop(event.index, errors="ignore"), event)
+                )
+                pending_membership = next(market_events, None)
+            status = calendar.reindex(
+                pd.MultiIndex.from_arrays(
+                    ([timestamp] * len(market_types), market_types),
+                    names=("calendar_date", "source_market_type"),
+                )
+            )
+            status.index = market_types.index
+            blocked.update(status.index[status.isna()].astype(str))
+            closed = frozenset(
+                str(asset)
+                for asset in status.index[status.eq(False).fillna(False)]
+                if str(asset) not in unknown_membership
+            )
+            raw = pd.DataFrame(columns=panel_columns)
+            while (
+                pending_panel is not None
+                and pd.Timestamp(pending_panel.timestamp.iloc[0]) <= timestamp
+            ):
+                if pd.Timestamp(pending_panel.timestamp.iloc[0]) == timestamp:
+                    raw = _portfolio_session_frame(pending_panel, panel_columns)
+                pending_panel = next(panel_frames, None)
+            if not raw.empty:
+                indexed = raw.set_index("asset_id", drop=False)
+                if set(indexed.index.astype(str)) & closed:
+                    raise ValueError("portfolio_market_panel_calendar_conflict")
+                prices = indexed.loc[:, ["adj_open", "adj_close"]]
+                valid = np.isfinite(prices).all(axis=1) & prices.gt(0).all(axis=1)
+                flags = day_bars.filling_flag.reindex(indexed.index)
+                known = flags.isin((0, 1)) & ~indexed.index.isin(unknown_membership)
+                blocked.update(indexed.index[~valid | ~known].astype(str))
+                real = valid & known & flags.eq(0)
+                blocked.difference_update(indexed.index[real].astype(str))
+                previous = indexed.loc[real]
+                if not previous.empty:
+                    last = (
+                        previous.copy()
+                        if last.empty
+                        else pd.concat(
+                            (last.drop(previous.index, errors="ignore"), previous)
+                        )
+                    )
+            blocked.update(
+                status.index[
+                    status.eq(True).fillna(False) & ~status.index.isin(raw.asset_id)
+                ].astype(str)
+            )
+            execution = pd.DataFrame(columns=_EXECUTION_COLUMNS)
+            while (
+                pending_execution is not None
+                and pd.Timestamp(pending_execution.timestamp.iloc[0]) <= timestamp
+            ):
+                if pd.Timestamp(pending_execution.timestamp.iloc[0]) == timestamp:
+                    execution = _portfolio_session_frame(
+                        pending_execution, _EXECUTION_COLUMNS
+                    )
+                pending_execution = next(execution_frames, None)
+            if not raw.empty:
+                masks = masks.drop(raw.asset_id, errors="ignore")
+            if not execution.empty:
+                execution = execution.copy()
+                endpoints = []
+                for asset in execution.asset_id.astype(str):
+                    axis = asset_sessions.get(asset, ())
+                    position = bisect_right(axis, timestamp)
+                    endpoints.append(axis[position] if position < len(axis) else pd.NaT)
+                execution["execution_at"] = endpoints
+                masks = pd.concat((masks, execution.set_index("asset_id", drop=False)))
+                masks[["can_enter", "can_exit"]] = masks[
+                    ["can_enter", "can_exit"]
+                ].astype("boolean")
+            if timestamp not in sessions or timestamp < pd.Timestamp(time_window.start):
+                continue
+            carried = last.loc[last.index.isin(closed)].copy()
+            if not carried.empty:
+                facts = panels._asof_join_stock_master(
+                    pd.DataFrame(
+                        {
+                            "asset_id": carried.index.astype(stocks.asset_id.dtype),
+                            "timestamp": timestamp,
+                        }
+                    ),
+                    stocks,
+                ).set_index("asset_id")
+                alive = (
+                    facts.listing_date.notna()
+                    & facts.listing_date.le(timestamp)
+                    & facts.delisting_date.ge(timestamp)
+                    & facts.listing_date.le(carried.timestamp)
+                )
+                carried = carried.loc[alive.reindex(carried.index).fillna(False)]
+                carried["timestamp"] = timestamp
+                carried["market_type"] = market_types.reindex(carried.index)
+                carried["adj_open"] = carried["adj_close"]
+                carried.loc[carried.index.isin(blocked), ["adj_open", "adj_close"]] = (
+                    np.nan
+                )
+            valuation = raw.copy()
+            valuation.loc[
+                valuation.asset_id.isin(blocked), ["adj_open", "adj_close"]
+            ] = np.nan
+            if not carried.empty:
+                valuation = (
+                    carried.reset_index(drop=True)
+                    if valuation.empty
+                    else pd.concat(
+                        (valuation, carried.reset_index(drop=True)), ignore_index=True
+                    )
+                )
+            result = _PortfolioSession(
+                timestamp, raw, valuation, closed, masks.reset_index(drop=True).copy()
+            )
+            try:
+                yield result
+            except GeneratorExit:
+                return

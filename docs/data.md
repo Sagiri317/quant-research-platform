@@ -20,6 +20,8 @@ CSMAR 提供 A 股市场、指数、行业和分析师事实；其财务只作�
 不能将某字段的 `-9666` 定义推广到其他列。`index_info.base_point` 的既有特殊值
 规则属于项目明确的适配约定，不能据此宣称供应商全部字段使用同一缺失值。
 财务验证输入不能替代正式来源的首次披露或历史版本证明。
+CSMAR 固定投影所需研究字段，不提供可选列 override；合法额外列及长 CSV 记录不受人为额度限制，
+必需字段、重复列、严格 CSV 语法、源内容身份与读取期间变更校验仍保留。
 
 CSMAR `index_membership` 是供应商指数成分事件，包含不同市场及证券类型，不能将所有
 成分强制解释为六位 A 股股票代码。`constituent_stock_code` 保留供应商代码字符串；
@@ -35,6 +37,8 @@ CSMAR `index_weights.Weight` 与 `index_market.Idxtrd08` 的原始缺失值在�
 ### Choice
 
 Choice 是现有正式财务 PIT 的来源绑定；原生响应先不可变保存，再由已有 owner 离线处理。
+Raw 响应状态以 `status` 为唯一事实，不再持久化重复布尔状态；原始请求、响应字节及哈希保留。
+资产负债表、利润表和现金流量表分别接纳，只阻塞实际依赖缺失表的因子。
 [官方接口与指标资料](https://quantapi.eastmoney.com/AIGuide/Install?from=client)
 对沪深一般企业财务 CSS 指标明确使用 `Type`：1 为合并报表，2 为母公司报表，
 3 为调整后的合并报表，4 为调整后的母公司报表。现有正式消费者只接受 `Type=1/3`。
@@ -151,6 +155,8 @@ PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资�
 
 数据层分为 raw、interim、processed、research、artifacts、runs，由 storage 布局派生路径。
 每个 QRP 数据集有 spec.json 和 _manifest/manifest.json，
+`spec.json` 是列、角色、主键、分区、特征配方等静态合同的唯一持久化来源；
+manifest 只保存运行事实和 `spec_identity`，读取投影从规格派生静态字段。
 schema_id 分别为 qrp-dataset-spec 与 qrp-dataset-manifest；研究运行记录使用 `data/runs/research/<run_id>.json`，Binance 录制清单使用录制根目录下的 `run.json`。
 数据集 manifest 的 `content_hash` 按规范物理顺序绑定全部成员路径与原始字节摘要；
 新会话在暴露数据前有界核对全部成员，不能把同大小、同统计的替换文件当作旧实例。

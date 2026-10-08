@@ -208,31 +208,21 @@ def test_typed_canonical_identity_does_not_normalize_unicode() -> None:
     assert canonical_json_hash("\u00e9") != canonical_json_hash("e\u0301")
 
 
-def test_strict_json_rejects_huge_integers_with_stable_errors() -> None:
-    raw = b'{"schema_id":"x","value":' + (b"1" * 4097) + b"}"
-    huge = 1 << 14_000
-    boundary = (10**4096) - 1
-    decimal_overflow = 10**4096
+def test_strict_json_uses_native_integer_conversion_limits() -> None:
+    import sys
 
-    assert (
-        parse_qrp_json_object(
-            b'{"schema_id":"x","value":' + str(boundary).encode("ascii") + b"}"
-        )["value"]
-        == boundary
-    )
-    render_qrp_json_object({"schema_id": "x", "value": boundary})
-    canonical_identity_bytes(boundary)
-
-    with pytest.raises(ValueError, match="qrp_json_integer_too_large"):
-        parse_qrp_json_object(raw)
-    with pytest.raises(ValueError, match="qrp_json_integer_too_large"):
-        render_qrp_json_object({"schema_id": "x", "value": decimal_overflow})
-    with pytest.raises(ValueError, match="canonical_json_integer_too_large"):
-        canonical_identity_bytes(decimal_overflow)
-    with pytest.raises(ValueError, match="qrp_json_integer_too_large"):
-        render_qrp_json_object({"schema_id": "x", "value": huge})
-    with pytest.raises(ValueError, match="canonical_json_integer_too_large"):
-        canonical_identity_bytes(huge)
+    limit = sys.get_int_max_str_digits()
+    value = 10**4096
+    payload = {"value": value}
+    assert parse_qrp_json_object(render_qrp_json_object(payload).encode()) == payload
+    assert canonical_identity_bytes(value)
+    if limit:
+        huge = 10**limit
+        with pytest.raises(ValueError, match="integer string conversion"):
+            render_qrp_json_object({"value": huge})
+        with pytest.raises(ValueError, match="integer string conversion"):
+            canonical_identity_bytes(huge)
+    assert sys.get_int_max_str_digits() == limit
 
 
 def test_strict_json_rejects_cycles_and_excessive_recursion() -> None:
@@ -244,7 +234,13 @@ def test_strict_json_rejects_cycles_and_excessive_recursion() -> None:
         canonical_identity_bytes(cyclic)
 
     nested: object = None
-    for _ in range(300):
+    for _ in range(100):
+        nested = [nested]
+    assert parse_qrp_json_object(
+        render_qrp_json_object({"nested": nested}).encode()
+    ) == {"nested": nested}
+    assert canonical_identity_bytes(nested)
+    for _ in range(2000):
         nested = [nested]
     with pytest.raises(ValueError, match="qrp_json_recursion_limit"):
         render_qrp_json_object({"schema_id": "x", "nested": nested})

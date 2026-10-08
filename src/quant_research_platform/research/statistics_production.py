@@ -58,6 +58,104 @@ _FAMA_MACBETH_PERIOD_COLUMNS = (
 )
 
 
+def build_a_share_factor_statistics_tables(
+    *,
+    layout: StorageLayout,
+    dataset_catalog: ResearchDatasetCatalog,
+    dataset_id: str,
+    protocol_manifest: Mapping[str, object],
+    time_window: TimeWindow,
+) -> dict[str, pd.DataFrame]:
+    """Publish factor inference once, independently of fitted model artifacts."""
+    spec = dataset_catalog.get(dataset_id)
+    evaluation = protocol_manifest["research_configuration"]["evaluation"]
+    primary_label = evaluation["primary_label"]
+    availability = label_catalog().get(primary_label).available_at_column
+    factors = tuple(evaluation["factors"])
+    statistics = protocol_manifest["statistics"]
+    families = _factor_families(statistics["factor_fdr_families"], factors)
+    core = tuple(statistics["fama_macbeth_core_factors"])
+    if any(factor not in factors for factor in core):
+        raise ValueError("statistics_core_factors_missing")
+    max_lags = statistics["hac_lag"]
+    methods = (
+        _fdr_method(statistics["fdr_primary"], expected="BH"),
+        _fdr_method(statistics["fdr_robustness"], expected="BY"),
+    )
+    window, _ = analysis_windows(protocol_manifest, time_window)
+    columns = tuple(
+        dict.fromkeys(
+            (
+                *spec.primary_key,
+                "eligible",
+                primary_label,
+                availability,
+                *factors,
+                "total_market_cap",
+            )
+        )
+    )
+    ranks, periods = [], []
+    chunks = iter_complete_session_frames(
+        iter_research_dataset_chunks(
+            layout,
+            market_id=spec.market_id,
+            dataset_id=dataset_id,
+            time_window=window,
+            columns=columns,
+            access_window=protocol_manifest["access_window"],
+        ),
+        timestamp_column="timestamp",
+    )
+    with closing_iterator(chunks):
+        for session in chunks:
+            mature = legal_training_rows(
+                session,
+                fitting_cutoff=window.end,
+                availability_column=availability,
+                target_column=primary_label,
+            )
+            if mature.empty:
+                continue
+            ranks.extend(
+                cross_sectional_rank_ic(
+                    mature,
+                    value_columns=factors,
+                    label_column=primary_label,
+                ).to_dict("records")
+            )
+            periods.extend(
+                _fama_macbeth_period_records(
+                    mature,
+                    return_column=primary_label,
+                    factors=factors,
+                    core_factors=core,
+                )
+            )
+    period_frame = pd.DataFrame.from_records(
+        periods, columns=_FAMA_MACBETH_PERIOD_COLUMNS
+    )
+    return {
+        "factor_diagnostics": _factor_summary(
+            pd.DataFrame.from_records(ranks, columns=["timestamp", *factors]),
+            factors=factors,
+            families=families,
+            methods=methods
+            if protocol_manifest["access_window"] == "development"
+            and _inference_blocker(protocol_manifest) is None
+            else (None,),
+            max_lags=max_lags,
+        ),
+        "fama_macbeth": _fama_macbeth_summary(
+            period_frame,
+            factors=factors,
+            core_factors=core,
+            max_lags=max_lags,
+        ),
+        "fama_macbeth_periods": period_frame,
+    }
+
+
 def build_a_share_statistics_tables(
     *,
     layout: StorageLayout,
@@ -93,32 +191,13 @@ def build_a_share_statistics_tables(
     max_lags = statistics.get("hac_lag")
     block_size = statistics.get("bootstrap_block")
     repetitions = statistics.get("bootstrap_repetitions")
-    family_specs = statistics.get("factor_fdr_families")
-    core_factors = statistics.get("fama_macbeth_core_factors")
     if (
         type(max_lags) is not int
-        or max_lags < 0
         or type(block_size) is not int
-        or (block_size <= 0)
-        or (type(repetitions) is not int)
-        or (repetitions <= 0)
-        or (type(family_specs) is not dict)
-        or (type(core_factors) is not list)
-        or any(type(value) is not str for value in core_factors)
+        or type(repetitions) is not int
     ):
         raise ValueError("statistics_protocol_invalid")
-    fdr_methods = (
-        _fdr_method(statistics.get("fdr_primary"), expected="BH"),
-        _fdr_method(statistics.get("fdr_robustness"), expected="BY"),
-    )
-    factors = tuple(
-        protocol_manifest["research_configuration"]["evaluation"]["factors"]
-    )
-    families = _factor_families(family_specs, factors)
-    core = tuple(core_factors)
-    if any(factor not in factors for factor in core):
-        raise ValueError("statistics_core_factors_missing")
-    factor_window, model_window = analysis_windows(protocol_manifest, time_window)
+    _factor_window, model_window = analysis_windows(protocol_manifest, time_window)
     model_entries = {
         (item["quarter_id"], item["family_id"]): item
         for item in persisted_model.prediction_models(
@@ -142,7 +221,6 @@ def build_a_share_statistics_tables(
                 "eligible",
                 primary_label,
                 availability,
-                *factors,
                 *(
                     column
                     for item in model_entries.values()
@@ -157,13 +235,12 @@ def build_a_share_statistics_tables(
     rank_records: list[dict[str, object]] = []
     comparison_records: list[dict[str, object]] = []
     loss_records: list[dict[str, object]] = []
-    fmb_period_records: list[dict[str, object]] = []
     chunks = iter_complete_session_frames(
         iter_research_dataset_chunks(
             layout,
             market_id=dataset_spec.market_id,
             dataset_id=dataset_id,
-            time_window=factor_window,
+            time_window=model_window,
             columns=read_columns,
             access_window=protocol_manifest["access_window"],
         ),
@@ -173,7 +250,7 @@ def build_a_share_statistics_tables(
         for session in chunks:
             mature = legal_training_rows(
                 session,
-                fitting_cutoff=factor_window.end,
+                fitting_cutoff=model_window.end,
                 availability_column=availability,
                 target_column=primary_label,
             )
@@ -217,7 +294,6 @@ def build_a_share_statistics_tables(
                 rank = cross_sectional_rank_ic(
                     mature,
                     value_columns=(
-                        *factors,
                         _PREDICTION_COLUMN,
                         *prediction_columns,
                     ),
@@ -272,34 +348,10 @@ def build_a_share_statistics_tables(
                             "common_observation_count": paired_count,
                         }
                     )
-            else:
-                if mature.empty:
-                    continue
-                rank = cross_sectional_rank_ic(
-                    mature, value_columns=factors, label_column=primary_label
-                )
-                rank_records.extend(rank.to_dict("records"))
-            fmb_period_records.extend(
-                _fama_macbeth_period_records(
-                    mature,
-                    return_column=primary_label,
-                    factors=factors,
-                    core_factors=core,
-                )
-            )
     if prediction_lookup.coverage_counts() != (0, 0):
         raise ValueError("prediction_dataset_coverage_mismatch")
     rank_by_date = pd.DataFrame.from_records(
-        rank_records, columns=["timestamp", *factors, _PREDICTION_COLUMN]
-    )
-    factor_summary = _factor_summary(
-        rank_by_date,
-        factors=factors,
-        families=families,
-        methods=fdr_methods
-        if protocol_manifest["access_window"] == "development" and joint_blocker is None
-        else (None,),
-        max_lags=max_lags,
+        rank_records, columns=["timestamp", _PREDICTION_COLUMN]
     )
     prediction_summary = _prediction_summary(
         rank_by_date,
@@ -360,20 +412,10 @@ def build_a_share_statistics_tables(
         family_ids=family_ids,
         protocol_manifest=protocol_manifest,
     )
-    fmb_periods = pd.DataFrame.from_records(
-        fmb_period_records, columns=_FAMA_MACBETH_PERIOD_COLUMNS
-    )
-
-    fmb_summary = _fama_macbeth_summary(
-        fmb_periods, factors=factors, core_factors=core, max_lags=max_lags
-    )
     tables = {
-        "factor_diagnostics": factor_summary,
         "prediction_diagnostics": prediction_summary,
         "model_trials": model_trials,
         "robustness": robustness,
-        "fama_macbeth": fmb_summary,
-        "fama_macbeth_periods": fmb_periods,
         "model_losses": model_losses,
         "model_comparison": comparison,
         "model_group_comparison": group_comparison,
@@ -686,29 +728,48 @@ def _model_trials(persisted_model, selection_group) -> pd.DataFrame:
             family_id = family["family_id"]
             for metrics in family["trial_metrics"]:
                 config_id = metrics["model_id"]
-                value = metrics["validation_rankic"]
-                defined = type(value) in {int, float} and np.isfinite(value)
-                rows.append(
-                    {
-                        "selection_group": selection_group,
-                        "decision_id": decision_id,
-                        "family_id": family_id,
-                        "config_id": config_id,
-                        "metric_id": "validation_rankic",
-                        "value": float(value) if defined else np.nan,
-                        "observation_count": metrics["validation_rows"],
-                        "status": "DEFINED" if defined else "UNDEFINED",
-                        "reason": None
-                        if defined
-                        else metrics["validation_rankic_reason"],
-                        "selection_status": "CHAMPION"
-                        if family_id == selection["selected_family_id"]
-                        and config_id == family["selected_config_id"]
-                        else "FAMILY_WINNER"
-                        if config_id == family["selected_config_id"]
-                        else "TRIAL",
-                    }
-                )
+                for metric_id, reason_key in (
+                    ("validation_ic", "validation_ic_reason"),
+                    ("validation_rankic", "validation_rankic_reason"),
+                    ("validation_mse", None),
+                    *(
+                        (f"validation_{suffix}", f"validation_{prefix}ir_reason")
+                        for prefix in ("ic", "rankic")
+                        for suffix in (
+                            f"std_{prefix}",
+                            f"{prefix}ir",
+                            f"positive_{prefix}_rate",
+                            f"valid_{prefix}_count",
+                        )
+                    ),
+                ):
+                    value = metrics[metric_id]
+                    defined = type(value) in {int, float} and np.isfinite(value)
+                    rows.append(
+                        {
+                            "selection_group": selection_group,
+                            "decision_id": decision_id,
+                            "family_id": family_id,
+                            "config_id": config_id,
+                            "metric_id": metric_id,
+                            "value": float(value) if defined else np.nan,
+                            "observation_count": (
+                                metrics["validation_rows"]
+                                if metric_id == "validation_mse"
+                                else metrics["validation_valid_rankic_count"]
+                                if "rankic" in metric_id
+                                else metrics["validation_valid_ic_count"]
+                            ),
+                            "status": "DEFINED" if defined else "UNDEFINED",
+                            "reason": None if defined else metrics[reason_key],
+                            "selection_status": "CHAMPION"
+                            if family_id == selection["selected_family_id"]
+                            and config_id == family["selected_config_id"]
+                            else "FAMILY_WINNER"
+                            if config_id == family["selected_config_id"]
+                            else "TRIAL",
+                        }
+                    )
     if not rows:
         raise ValueError("statistics_model_trials_empty")
     return pd.DataFrame.from_records(rows)
@@ -899,10 +960,15 @@ def _model_comparison(
 
 def _fama_macbeth_definitions(factors, core_factors):
     definitions = tuple((f"single:{factor}", (factor,)) for factor in factors)
-    return (
-        definitions + (("core_multifactor", core_factors),)
-        if core_factors
-        else definitions
+    if core_factors:
+        definitions += (("core_multifactor", core_factors),)
+    return tuple(
+        (f"{weighting}:{regression}", columns, weight_column)
+        for weighting, weight_column in (
+            ("equal", None),
+            ("total_market_cap", "total_market_cap"),
+        )
+        for regression, columns in definitions
     )
 
 
@@ -915,16 +981,26 @@ def _fama_macbeth_period_records(
 ) -> list[dict[str, object]]:
     timestamp = pd.Timestamp(frame["timestamp"].iloc[0])
     rows: list[dict[str, object]] = []
-    for regression_id, regression_factors in _fama_macbeth_definitions(
+    for regression_id, regression_factors, weight_column in _fama_macbeth_definitions(
         factors, core_factors
     ):
         coefficient_ids = ("intercept", *regression_factors)
         complete_count = len(
-            frame.loc[:, [return_column, *regression_factors]].dropna()
+            frame.loc[
+                :,
+                [
+                    return_column,
+                    *regression_factors,
+                    *(() if weight_column is None else (weight_column,)),
+                ],
+            ].dropna()
         )
         try:
             result = fama_macbeth_period(
-                frame, return_column=return_column, factor_columns=regression_factors
+                frame,
+                return_column=return_column,
+                factor_columns=regression_factors,
+                weight_column=weight_column,
             )
         except ValueError as exc:
             if str(exc) != "fama_macbeth_period_insufficient":
@@ -974,7 +1050,9 @@ def _fama_macbeth_summary(
     rows: list[dict[str, object]] = []
     definitions = [
         (regression, coefficient)
-        for regression, columns in _fama_macbeth_definitions(factors, core_factors)
+        for regression, columns, _weight in _fama_macbeth_definitions(
+            factors, core_factors
+        )
         for coefficient in ("intercept", *columns)
     ]
     groups = dict(

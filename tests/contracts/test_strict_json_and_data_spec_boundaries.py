@@ -27,67 +27,34 @@ def _deep_pretty_payload() -> dict[str, object]:
     return {"schema_id": "x", "value": value}
 
 
-def test_bounded_json_exact_pretty_max_boundary_matches_renderer() -> None:
+def test_json_snapshot_matches_pretty_renderer():
     payload = _deep_pretty_payload()
-    exact_size = len(json_owner.render_qrp_json_object(payload).encode("utf-8"))
-
-    assert (
-        json_owner.bounded_rendered_qrp_json_object_size(
-            payload,
-            max_bytes=exact_size,
-        )
-        == exact_size
-    )
-    with pytest.raises(ValueError, match="qrp_json_render_exceeds_max_bytes"):
-        json_owner.bounded_rendered_qrp_json_object_size(
-            payload,
-            max_bytes=exact_size - 1,
-        )
+    assert json_owner.render_qrp_json_object(
+        json_owner.qrp_json_object_snapshot(payload)
+    ) == json_owner.render_qrp_json_object(payload)
 
 
 @pytest.mark.parametrize(
-    "writer_name",
-    ("write_manifest", "write_internal_artifact_manifest"),
+    "writer_name", ("write_manifest", "write_internal_artifact_manifest")
 )
-def test_manifest_writers_match_reader_size_cap(
-    writer_name: str,
-    tmp_path: Path,
-) -> None:
-    writer = getattr(manifests, writer_name)
+def test_manifest_writers_roundtrip_above_former_capacity(writer_name, tmp_path):
+    payload = {"schema_id": "qrp-test", "value": "x" * (1024 * 1024 + 1)}
     path = tmp_path / writer_name / "manifest.json"
-
-    with pytest.raises(ValueError, match="qrp_json_render_exceeds_max_bytes"):
-        writer(
-            path,
-            {"schema_id": "qrp-test", "value": "x" * (1024 * 1024)},
-        )
-
-    assert not path.exists()
+    getattr(manifests, writer_name)(path, payload)
+    assert manifests.read_manifest(path) == payload
 
 
 @pytest.mark.parametrize(
-    "writer_name",
-    ("write_manifest", "write_internal_artifact_manifest"),
+    "writer_name", ("write_manifest", "write_internal_artifact_manifest")
 )
-def test_manifest_writers_share_exact_pretty_render_boundary(
-    writer_name: str,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_manifest_writers_preserve_pretty_rendering(writer_name, tmp_path):
     payload = _deep_pretty_payload()
-    rendered = json_owner.render_qrp_json_object(payload)
-    writer = getattr(manifests, writer_name)
-    accepted = tmp_path / "accepted" / f"{writer_name}.json"
-    rejected = tmp_path / "rejected" / f"{writer_name}.json"
-
-    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", len(rendered.encode()) + 1)
-    writer(accepted, payload)
-    assert accepted.read_text(encoding="utf-8") == rendered + "\n"
-
-    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", len(rendered.encode()))
-    with pytest.raises(ValueError, match="qrp_json_render_exceeds_max_bytes"):
-        writer(rejected, payload)
-    assert not rejected.exists()
+    path = tmp_path / (writer_name + ".json")
+    getattr(manifests, writer_name)(path, payload)
+    assert (
+        path.read_text(encoding="utf-8")
+        == json_owner.render_qrp_json_object(payload) + "\n"
+    )
 
 
 @pytest.mark.parametrize(
@@ -140,27 +107,29 @@ def test_bounded_snapshot_accepts_only_exact_frozen_containers():
 
     native = {"nested": [{"names": ["a", "b"]}]}
     frozen = MappingProxyType({"nested": (MappingProxyType({"names": ("a", "b")}),)})
-    result = json_owner.bounded_qrp_json_object_snapshot(frozen, max_bytes=1024)
+    result = json_owner.qrp_json_object_snapshot(frozen)
     assert result == native
     result["nested"][0]["names"].append("c")
     assert frozen["nested"][0]["names"] == ("a", "b")
     for invalid in (UserDict({"x": 1}), {1, 2}, range(3), object()):
         with pytest.raises(ValueError, match="qrp_json_unsupported_value"):
-            json_owner.bounded_qrp_json_object_snapshot(
-                {"value": invalid}, max_bytes=1024
-            )
+            json_owner.qrp_json_object_snapshot({"value": invalid})
     cycle = []
     cyclic = MappingProxyType({"cycle": (cycle,)})
     cycle.append(cyclic)
     with pytest.raises(ValueError, match="qrp_json_cycle"):
-        json_owner.bounded_qrp_json_object_snapshot(cyclic, max_bytes=4096)
+        json_owner.qrp_json_object_snapshot(cyclic)
     deep = "leaf"
     for _ in range(65):
         deep = (deep,)
-    with pytest.raises(ValueError, match="qrp_json_recursion_limit"):
-        json_owner.bounded_qrp_json_object_snapshot({"deep": deep}, max_bytes=100_000)
-    with pytest.raises(ValueError, match="qrp_json_render_exceeds_max_bytes"):
-        json_owner.bounded_qrp_json_object_snapshot(
-            MappingProxyType({"large": ("x" * 10_000,)}), max_bytes=64
+    snapshot = json_owner.qrp_json_object_snapshot({"deep": deep})
+    assert (
+        json_owner.parse_qrp_json_object(
+            json_owner.render_qrp_json_object(snapshot).encode()
         )
+        == snapshot
+    )
+    assert json_owner.qrp_json_object_snapshot(
+        MappingProxyType({"large": ("x" * 10_000,)})
+    ) == {"large": ["x" * 10_000]}
     assert json_owner.canonical_json_hash([1]) != json_owner.canonical_json_hash((1,))

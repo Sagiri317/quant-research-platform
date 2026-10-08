@@ -50,6 +50,8 @@ spot-l2:
   -> 独立现货 L2 深度采集；完整 Spot PANEL 另需成交归档
 ```
 
+录制清单以 `status` 为唯一状态字段；reader 不使用旧清单的重复字段
+`market_data_status`，但来源身份仍绑定完整原清单，不改写旧文件。
 两个范围使用独立的根目录、清单和汇总状态。现货中断不能使完整的期货 HFT 运行降级或被拒绝。
 现货与期货录制的回放保持独立。
 研究 profile 的执行主线为 100ms BTC/ETH 永续，Spot、SOL 和外部场所可按配置提供研究信息；
@@ -278,7 +280,7 @@ SOL→BTC、BTC/ETH→SOL 的迁移选择。只有训练或评估需要 SOL 行�
 
 `configs/research/crypto/external_context.json` 显式选择 Bybit 与 OKX 信息因子。
 两个 venue 分别拥有 processed target；未配置或缺失其中一个来源只阻塞依赖它的分支。
-来源使用已有 Tardis normalized owner 的 quotes、trades、derivative_ticker，
+来源使用已有 Tardis normalized owner 的 quotes、trades，
 由 producer 按 `local_timestamp <= decision_time` 对齐到 Binance BTC/ETH 100ms 主键，
 随后使用现有 exact-key assembler。SOL 研究行对这些 BTC/ETH 专属信息保持 NULL。
 
@@ -294,9 +296,10 @@ SOL→BTC、BTC/ETH→SOL 的迁移选择。只有训练或评估需要 SOL 行�
 每个 venue 输出 mid/spread（USDT）、100/500ms 简单收益、500ms observed signed
 base/USDT 流量与 TFI、相对 Binance mid 的差值、两市场 mid 的相对标准差
 `abs(external_mid-binance_mid)/(external_mid+binance_mid)`。
-quote 的 observed/event 时间和 age，以及 trade/ticker 的对应时钟均保留为 context。
+quote 的 observed/event 时间和 age，以及 trade 的对应时钟均保留为 context。
 收益需要连续且未过期的完整窗口；流量需要完整 500ms 决策窗口，没有观察到成交时为 NULL。
-这些是供应商观察样本，不声称完整交易流或共址延迟；ticker 不参与执行账本或费用。
+这些是供应商观察样本，不声称完整交易流或共址延迟。九个价格发现因子不消费 ticker，
+因此不要求该归档；已有 ticker 原件与 normalized 通用读取能力保留。
 执行仍仅 Binance BTC/ETH perpetual。
 
 ### 标签与成熟时点
@@ -328,7 +331,7 @@ derivatives_state.json 加入衍生品状态因子；不做块或参数的笛卡
 | [spot_context.json](../configs/research/crypto/spot_context.json) | 微观结构与现货/永续上下文 | Spot 深度、快照及成交归档 |
 | [cross_btc_eth.json](../configs/research/crypto/cross_btc_eth.json) | BTC/ETH 跨资产上下文 | 不依赖 SOL |
 | [cross_asset.json](../configs/research/crypto/cross_asset.json) | BTC/ETH/SOL 跨资产上下文及显式迁移选择 | SOL native 归档 |
-| [external_context.json](../configs/research/crypto/external_context.json) | Bybit/OKX 外部价格发现 | 各场所 quotes、trades、derivative_ticker 归档 |
+| [external_context.json](../configs/research/crypto/external_context.json) | Bybit/OKX 外部价格发现 | 各场所 quotes、trades 归档 |
 
 研究计划必须显式给定各 fold 的 train/validation、唯一锁定 test、初始资金、估值币种和暴露上限；
 不为适应短录制而缩窗，不随机打乱事件行，不用排序掩盖同时间戳顺序歧义。

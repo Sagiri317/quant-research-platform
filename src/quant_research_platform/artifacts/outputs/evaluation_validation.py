@@ -226,7 +226,6 @@ def validate_evaluation_diagnostics_consistency(
     skipped_timestamp_count: int,
     filter_columns_used: tuple[str, ...],
     filter_definition_value: str,
-    n_groups: int,
 ) -> None:
     if not (
         0 <= rows_after_filter_mode <= rows_input
@@ -256,7 +255,7 @@ def validate_evaluation_diagnostics_consistency(
         "min_timestamp": min_timestamp,
         "max_timestamp": max_timestamp,
         "skipped_timestamp_count": skipped_timestamp_count,
-        "n_groups": n_groups,
+        "n_groups": spec.n_groups,
     }
     for key, value in expected.items():
         if getattr(evaluation_diagnostics, key) != value:
@@ -270,7 +269,6 @@ def validate_evaluation_artifact_structure(
     ic_summary: pd.DataFrame,
     group_spread_summary: pd.DataFrame,
     spec: EvaluationSpec,
-    n_groups: int,
 ) -> None:
     for frame in (metrics, grouped_label_values, ic_summary, group_spread_summary):
         _validate_signal_label_membership(frame, spec=spec)
@@ -299,7 +297,7 @@ def validate_evaluation_artifact_structure(
     strict_non_negative_count_series(metrics["n_obs"])
     strict_non_negative_count_series(grouped_label_values["n_obs"])
     groups = strict_positive_group_series(grouped_label_values["group"])
-    if bool(groups.gt(n_groups).any()):
+    if bool(groups.gt(spec.n_groups).any()):
         raise ValueError("evaluation_group_out_of_range")
     for frame, columns in (
         (metrics, ("ic", "rankic", "n_obs")),

@@ -52,11 +52,7 @@ def test_manifest_writers_render_the_snapshot_checked_for_safety(
 @pytest.mark.parametrize(
     ("payload", "reason"),
     [
-        ({"path": "data/raw/vendor/file.csv"}, "local_only_path"),
-        ({"path": "data/research/a_share/demo"}, "local_only_path"),
-        ({"path": "/workspace/qrp/data/research/a_share/demo"}, "local_only_path"),
-        ({"file": "daily__vendor__export-20240101.csv"}, "raw_export_filename"),
-        ({"row_sample": [{"a": 1}]}, "row_sample"),
+        ({"path": "/workspace/qrp/data/research/a_share/demo"}, "absolute_path"),
         ({"api_key": "SYNTHETIC_SECRET"}, "credential"),
         ({"nested": {"Authorization": "Bearer SYNTHETIC_SECRET"}}, "credential"),
         ({"message": '{"password": "SYNTHETIC_SECRET"}'}, "credential"),
@@ -74,7 +70,7 @@ def test_manifest_writers_render_the_snapshot_checked_for_safety(
         ({"nested": [{"C:\\": {"value": 1}}]}, "absolute_path"),
     ],
 )
-def test_internal_manifest_rejects_private_or_row_level_metadata(
+def test_internal_manifest_rejects_credentials_and_absolute_paths(
     payload: dict[str, object], reason: str, tmp_path: Path
 ) -> None:
     with pytest.raises(
@@ -127,7 +123,7 @@ def test_json_directory_rechecks_members_with_constant_directory_identity(
     (tmp_path / "a.json").write_text('{"schema_id":"synthetic"}', encoding="utf-8")
     stable = manifests._directory_identity(tmp_path.stat())
     monkeypatch.setattr(manifests, "_directory_identity", lambda _stat: stable)
-    original = manifests.read_bounded_qrp_json
+    original = manifests.read_qrp_json_file
     reads = []
 
     def read(path, **kwargs):
@@ -135,7 +131,7 @@ def test_json_directory_rechecks_members_with_constant_directory_identity(
         (tmp_path / "b.json").write_text('{"schema_id":"synthetic"}', encoding="utf-8")
         return original(path, **kwargs)
 
-    monkeypatch.setattr(manifests, "read_bounded_qrp_json", read)
+    monkeypatch.setattr(manifests, "read_qrp_json_file", read)
     with pytest.raises(
         ValueError,
         match="dataset_metadata_(directory_identity_changed|member_limit_exceeded)",
@@ -153,7 +149,7 @@ def test_json_directory_limit_precedes_content_reads(tmp_path: Path, monkeypatch
     def forbidden(*_args, **_kwargs):
         raise AssertionError("content_read_before_member_limit")
 
-    monkeypatch.setattr(manifests, "read_bounded_qrp_json", forbidden)
+    monkeypatch.setattr(manifests, "read_qrp_json_file", forbidden)
     with pytest.raises(ValueError, match="dataset_metadata_member_limit_exceeded"):
         manifests.read_bounded_qrp_json_directory(tmp_path, max_members=1)
 
@@ -161,23 +157,18 @@ def test_json_directory_limit_precedes_content_reads(tmp_path: Path, monkeypatch
 @pytest.mark.parametrize(
     "writer_name", ("write_manifest", "write_internal_artifact_manifest")
 )
-def test_manifest_single_text_keeps_utf8_newline_and_error_order(
-    tmp_path, monkeypatch, writer_name
+def test_manifest_single_text_keeps_utf8_newline_and_invalid_schema(
+    tmp_path, writer_name
 ):
     from quant_research_platform.contracts.json_codec import render_qrp_json_object
 
     writer = getattr(manifests, writer_name)
     payload = {"schema_id": "qrp-test", "label": "分类😀"}
     expected = (render_qrp_json_object(payload) + "\n").encode("utf-8")
-    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", len(expected))
     path = tmp_path / "exact.json"
     writer(path, payload)
     assert path.read_bytes() == expected
     assert manifests.read_manifest(path) == payload
-    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", len(expected) - 1)
-    with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
-        writer(tmp_path / "oversize.json", payload)
-    assert not (tmp_path / "oversize.json").exists()
-    monkeypatch.setattr(manifests, "MAX_QRP_JSON_BYTES", 1)
-    with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
+    with pytest.raises(ValueError, match="^manifest_json_identity_invalid$"):
         writer(tmp_path / "invalid-schema.json", {"schema_id": "invalid/schema"})
+    assert not (tmp_path / "invalid-schema.json").exists()

@@ -25,6 +25,7 @@ from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.experiments import TrialRecorder
+from quant_research_platform.research.models.production import _prepare_training
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
@@ -195,11 +196,12 @@ def test_prediction_runner_fails_closed_on_candidate_label_mismatch(
     def unexpected_fit(*_args, **_kwargs):
         pytest.fail("label mismatch reached fitting")
 
-    monkeypatch.setattr(model_fitting, "_fit_model_result_from_frames", unexpected_fit)
+    monkeypatch.setattr(model_fitting, "_fit_model_result", unexpected_fit)
     with pytest.raises(ValueError, match="^model_selection_label_column_mismatch$"):
         model_selection_owner.fit_validation_candidates(
             fold=_selection_fold(),
             candidate_specs=specs,
+            training_by_candidate={},
             dataset_spec=_selection_dataset(),
             chunks=lambda *args, **kwargs: (),
             trial_recorder=None,
@@ -331,6 +333,12 @@ def _fit_validation_trials(
     model_selection_owner.fit_validation_candidates(
         fold=fold,
         candidate_specs=specs,
+        training_by_candidate={
+            spec.model_id: _prepare_training(
+                dataset, spec, chunks=chunks, train_end=fold.train.end
+            )
+            for spec in specs
+        },
         dataset_spec=dataset,
         chunks=chunks,
         trial_recorder=recorder,
@@ -409,11 +417,12 @@ def test_real_rank_validation_predictions_and_winner_preserve_split_sessions(
         validation=TimeWindow("2023-01-03", "2023-01-04"),
     )
     for spec in specs:
-        fitted = model_fitting._fit_model_result_from_frames(
-            (frame,),
+        fitted = model_fitting._fit_model_result(
+            model_fitting._collect_training_frame(
+                (frame,), spec, fitting_cutoff=fold.train.end
+            ),
             spec,
             estimator=build_estimator_from_model_spec(spec),
-            fitting_cutoff=fold.train.end,
         )
         outputs = []
         for step in (len(frame), 2):
@@ -527,13 +536,16 @@ def test_dataset_training_preserves_label_maturity(
             frame,
             spec=dataset,
         )
-        owned = model_fitting._fit_model_result_from_frames(
-            iter_research_dataset_chunks(
-                layout, market_id=MarketId("a_share"), dataset_id=dataset.data_id
+        owned = model_fitting._fit_model_result(
+            model_fitting._collect_training_frame(
+                iter_research_dataset_chunks(
+                    layout, market_id=MarketId("a_share"), dataset_id=dataset.data_id
+                ),
+                model,
+                fitting_cutoff=prediction.train_end,
             ),
             model,
             estimator=build_estimator_from_model_spec(model),
-            fitting_cutoff=prediction.train_end,
         )
         assert owned.metadata["rows_after_input_label_dropna"] == 2
         predict = model_fitting.prediction_callable(
@@ -556,11 +568,12 @@ def test_training_requires_its_explicit_availability(label_column: str) -> None:
         frame = frame.drop(columns="label_available_at")
     model = _model("model", ("factor_a",), label_column=label_column)
     with pytest.raises(ValueError, match="label_availability_column_required"):
-        model_fitting._fit_model_result_from_frames(
-            (frame,),
+        model_fitting._fit_model_result(
+            model_fitting._collect_training_frame(
+                (frame,), model, fitting_cutoff="2023-01-03"
+            ),
             model,
             estimator=build_estimator_from_model_spec(model),
-            fitting_cutoff="2023-01-03",
         )
 
 

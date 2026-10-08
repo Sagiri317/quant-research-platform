@@ -153,7 +153,7 @@ def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
             protocol.terminal_targets("research run"),
         )
         bindings.extend(
-            profile.producer_bindings[target.producer_id] for target in targets
+            profile.producer_bindings[target.target_id] for target in targets
         )
         bindings.append(
             profile.producer_bindings[config["scenario_id"] + "_report_artifact"]
@@ -606,7 +606,17 @@ def test_portfolio_identity_binds_only_consumed_episode_owner(tmp_path):
     report.write_bytes(report.read_bytes() + b"\n# Crypto episode report change.\n")
     after_crypto = identities()
     assert after_crypto[0] == original[0]
-    assert after_crypto[-1] != original[-1]
+    assert after_crypto == original
+    evidence = package / "artifacts/research.py"
+    evidence.write_bytes(
+        evidence.read_bytes() + b"\n# Report evidence assembly change.\n"
+    )
+    assert identities() == original
+    episode = package / "artifacts/crypto_hft.py"
+    episode.write_bytes(episode.read_bytes() + b"\n# Episode persistence change.\n")
+    after_episode = identities()
+    assert after_episode[:2] == original[:2]
+    assert after_episode[-1] != original[-1]
     ledger = package / "artifacts/portfolio_ledger.py"
     ledger.write_bytes(ledger.read_bytes() + b"\n# Consumed ledger owner change.\n")
     after_ledger = identities()

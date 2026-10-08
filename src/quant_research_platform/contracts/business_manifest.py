@@ -8,12 +8,11 @@ from dataclasses import dataclass
 from types import MappingProxyType
 
 from quant_research_platform.contracts.json_codec import (
-    bounded_qrp_json_object_snapshot,
     canonical_json_hash,
+    qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
 
-_MAX_ENVELOPE_BYTES = 1024 * 1024
 _LOWER_HEX = frozenset("0123456789abcdef")
 _IDENTIFIER_RE = re.compile(r"^[a-z0-9][a-z0-9._-]{0,127}$")
 _ENVELOPE_FIELDS = frozenset(
@@ -123,7 +122,7 @@ def validate_business_manifest_envelope(value: object) -> dict[str, object]:
         value = value.payload()
     if type(value) is not dict or set(value) != _ENVELOPE_FIELDS:
         raise ValueError("business_manifest_envelope_fields_invalid")
-    payload = bounded_qrp_json_object_snapshot(value, max_bytes=_MAX_ENVELOPE_BYTES)
+    payload = qrp_json_object_snapshot(value)
     _require_identifier(payload["logical_artifact_id"], "logical_artifact_id_invalid")
     _require_hash(payload["instance_identity"], "instance_identity_invalid")
     _require_hash(payload["schema_identity"], "schema_identity_invalid")
@@ -183,10 +182,7 @@ def _freeze_json_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
     native = _json_value(value)
     if type(native) is not dict:
         raise ValueError("business_manifest_json_mapping_invalid")
-    bounded = bounded_qrp_json_object_snapshot(
-        native,
-        max_bytes=_MAX_ENVELOPE_BYTES,
-    )
+    bounded = qrp_json_object_snapshot(native)
     return MappingProxyType(
         {key: _freeze_json_value(child) for key, child in bounded.items()}
     )

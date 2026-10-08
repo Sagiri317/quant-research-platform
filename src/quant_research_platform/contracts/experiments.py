@@ -16,9 +16,9 @@ import pandas as pd
 from quant_research_platform.contracts.business_manifest import _freeze_json_value
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.json_codec import (
-    bounded_qrp_json_object_snapshot,
     canonical_identity_bytes,
     canonical_json_hash,
+    qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
@@ -26,9 +26,6 @@ from quant_research_platform.contracts.validation import (
     _validate_non_empty_string,
     strict_finite_numeric_series,
     strict_timestamp_series,
-)
-from quant_research_platform.policy.share_safety import (
-    evidence_json_value_unsafe_reason,
 )
 
 SelectionDirection = Literal["maximize", "minimize"]
@@ -97,7 +94,7 @@ class ExperimentPlan:
     selection_ledger_semantic_identities: tuple[str, ...] = ()
     fit_windows: tuple[TimeWindow, ...] = ()
     fit_cutoff: date | datetime | None = None
-    selection_group: Literal["global", "quarterly"] | None = None
+    selection_groups: tuple[Literal["global", "quarterly"], ...] = ()
     research_protocol_identity: str = ""
     holdout_status: Literal["LOCKED"] = "LOCKED"
 
@@ -158,12 +155,15 @@ class ExperimentPlan:
         ):
             raise ValueError("experiment_test_overlap")
         if self.market_id == "a_share" and self.stage == "refit":
-            if type(self.selection_group) is not str or self.selection_group not in {
-                "global",
-                "quarterly",
-            }:
+            if type(
+                self.selection_groups
+            ) is not tuple or self.selection_groups not in (
+                ("global",),
+                ("quarterly",),
+                ("global", "quarterly"),
+            ):
                 raise ValueError("experiment_selection_group_required")
-        elif self.selection_group is not None:
+        elif type(self.selection_groups) is not tuple or self.selection_groups:
             raise ValueError("experiment_selection_group_invalid")
         if self.stage == "selection":
             _validate_non_empty_string(
@@ -219,9 +219,7 @@ class ExperimentPlan:
             and re.fullmatch(r"[0-9a-f]{64}", self.research_protocol_identity) is None
         ):
             raise ValueError("experiment_research_protocol_identity_invalid")
-        parameters = bounded_qrp_json_object_snapshot(
-            _thaw_json(self.candidate_parameters), max_bytes=256 * 1024
-        )
+        parameters = qrp_json_object_snapshot(_thaw_json(self.candidate_parameters))
         if parameters and set(parameters) != set(self.candidate_ids):
             raise ValueError("experiment_candidate_parameters_mismatch")
         if self.stage == "refit" and (
@@ -260,7 +258,7 @@ class ExperimentPlan:
         return {
             "experiment_id": self.experiment_id,
             "stage": self.stage,
-            "selection_group": self.selection_group,
+            "selection_groups": list(self.selection_groups),
             "selection_ledger_semantic_identities": list(
                 self.selection_ledger_semantic_identities
             ),
@@ -301,6 +299,7 @@ class ExperimentPlan:
             or any(
                 type(value.get(key)) is not list
                 for key in (
+                    "selection_groups",
                     "folds",
                     "fit_windows",
                     "selection_ledger_semantic_identities",
@@ -343,6 +342,7 @@ class ExperimentPlan:
             None if cutoff is None else TimeWindow(cutoff, cutoff).start
         )
         for key in (
+            "selection_groups",
             "input_lineage",
             "candidate_ids",
             "tie_break_order",
@@ -521,7 +521,6 @@ def _fold_payload(fold: ExperimentFold) -> dict[str, object]:
 
 TrialStatus = Literal["attempted", "completed", "failed", "abandoned", "invalid"]
 _PROTOCOL_HASH = re.compile(r"^[0-9a-f]{64}$")
-_MAX_TRIAL_RECORD_BYTES = 256 * 1024
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -623,12 +622,8 @@ class TrialRecord:
             value = getattr(self, field_name)
             if not isinstance(value, Mapping):
                 raise ValueError("trial_mapping_invalid")
-            snapshot = bounded_qrp_json_object_snapshot(
-                _thaw_json(value), max_bytes=_MAX_TRIAL_RECORD_BYTES
-            )
+            snapshot = qrp_json_object_snapshot(_thaw_json(value))
             object.__setattr__(self, field_name, _freeze_json_value(snapshot))
-        if evidence_json_value_unsafe_reason(self.payload()) is not None:
-            raise ValueError("trial_evidence_unsafe")
 
     def payload(self) -> dict[str, object]:
         return {

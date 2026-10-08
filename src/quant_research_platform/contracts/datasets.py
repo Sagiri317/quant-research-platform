@@ -203,9 +203,8 @@ def _validate_feature_transforms(
     context_columns: tuple[str, ...],
     feature_columns: tuple[str, ...],
 ) -> None:
-    transform_ids = [transform.transform_id for transform in feature_transforms]
-    if len(set(transform_ids)) != len(transform_ids):
-        raise ValueError("feature_transform_ids_must_not_contain_duplicates")
+    if len(feature_transforms) > 1:
+        raise ValueError("feature_recipe_must_be_exclusive")
     source_columns = {
         column
         for transform in feature_transforms

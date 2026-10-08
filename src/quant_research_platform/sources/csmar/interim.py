@@ -5,9 +5,8 @@ from __future__ import annotations
 import stat
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
-from itertools import chain, groupby, islice
+from itertools import chain, groupby
 from pathlib import Path
-from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -56,7 +55,6 @@ from quant_research_platform.storage.identity import (
     require_unaliased_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
 
 MARKET_BARS_DATA_ID = market_bars_data_id(DataFrequency.DAILY)
 DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
@@ -331,35 +329,6 @@ INTERIM_COLUMNS_BY_DATA_ID: dict[str, tuple[str, ...]] = {
     "equity_changes": EQUITY_CHANGE_COLUMNS,
     "analyst_forecast": ANALYST_FORECAST_COLUMNS,
 }
-AUTO_DROPPED_COLUMNS: dict[str, dict[str, str]] = {
-    MARKET_BARS_DATA_ID: {
-        "return_with_dividend": "derived as period_return",
-        "comparable_close_with_dividend": "derived as adj_close",
-        "float_market_cap_thousand": "converted to float_market_cap",
-        "total_market_cap_thousand": "converted to total_market_cap",
-        "after_hours_volume": "included in canonical volume",
-        "after_hours_amount": "included in canonical amount",
-    }
-}
-OPTIONAL_COLUMNS: dict[str, dict[str, str]] = {
-    MARKET_BARS_DATA_ID: {
-        "return_without_dividend": "not retained in the source interim contract",
-        "comparable_close_without_dividend": (
-            "not retained in the source interim contract"
-        ),
-        "change_ratio": "period_return and price fields are used instead",
-        "limit_down": "limit_status is used instead",
-        "limit_up": "limit_status is used instead",
-    },
-    "stock_master": {
-        "market_type": "not retained in source reference output",
-        "status_change_date": "retained when present for reference timing",
-    },
-    "market_cap": {
-        "b_float_shares": "not retained in source market-cap output",
-        "h_float_shares": "not retained in source market-cap output",
-    },
-}
 
 
 @dataclass(frozen=True)
@@ -368,212 +337,6 @@ class InterimImportResult:
 
     artifact_roots: dict[str, Path]
     skipped: tuple[str, ...]
-    pruning_report_text: str
-
-
-def default_override_payload() -> dict[str, dict[str, object]]:
-    data_ids = sorted(set(INTERIM_COLUMNS_BY_DATA_ID) | set(OPTIONAL_COLUMNS))
-    return {
-        data_id: {
-            "keep": [],
-            "drop": [],
-            "_available_optional_columns": OPTIONAL_COLUMNS.get(data_id, {}),
-        }
-        for data_id in data_ids
-    }
-
-
-def load_column_overrides(path: Path) -> Mapping[str, Mapping[str, object]]:
-    candidate = require_unaliased_path(
-        Path(path), error="csmar_column_overrides_identity_changed"
-    )
-    if not filesystem_exists(candidate):
-        return _validated_column_overrides(default_override_payload())
-    try:
-        _raw, payload = read_bounded_qrp_json(candidate)
-    except ValueError as exc:
-        if str(exc) == "dataset_metadata_file_too_large":
-            raise ValueError("csmar_column_overrides_exceed_max_bytes") from exc
-        raise
-    return _validated_column_overrides(payload)
-
-
-def _validated_column_overrides(
-    payload: Mapping[str, object],
-) -> Mapping[str, Mapping[str, object]]:
-    if not isinstance(payload, Mapping):
-        raise ValueError("invalid_csmar_column_override")
-    payload_snapshot = _bounded_mapping_snapshot(
-        payload,
-        max_items=len(INTERIM_COLUMNS_BY_DATA_ID),
-    )
-    unknown = set(payload_snapshot).difference(INTERIM_COLUMNS_BY_DATA_ID)
-    if unknown:
-        raise ValueError("unknown_csmar_column_override_data_id")
-    result: dict[str, dict[str, object]] = {}
-    for data_id, raw_override in payload_snapshot.items():
-        if not isinstance(raw_override, Mapping):
-            raise ValueError("invalid_csmar_column_override")
-        override = _bounded_mapping_snapshot(raw_override, max_items=3)
-        if set(override).difference({"keep", "drop", "_available_optional_columns"}):
-            raise ValueError("invalid_csmar_column_override")
-        allowed = set(INTERIM_COLUMNS_BY_DATA_ID[data_id])
-        allowed.update(OPTIONAL_COLUMNS.get(data_id, {}))
-        allowed.update(AUTO_DROPPED_COLUMNS.get(data_id, {}))
-        normalized: dict[str, object] = {}
-        for key in ("keep", "drop"):
-            values = override.get(key, [])
-            if type(values) not in (list, tuple):
-                raise ValueError("invalid_csmar_column_override")
-            if len(values) > len(allowed):
-                raise ValueError("invalid_csmar_column_override")
-            value_snapshot = tuple(values)
-            if any(type(value) is not str for value in value_snapshot):
-                raise ValueError("invalid_csmar_column_override")
-            if len(value_snapshot) != len(set(value_snapshot)) or set(
-                value_snapshot
-            ).difference(allowed):
-                raise ValueError("invalid_csmar_column_override")
-            normalized[key] = value_snapshot
-        if set(normalized["keep"]).intersection(normalized["drop"]):
-            raise ValueError("conflicting_csmar_column_override")
-        if "_available_optional_columns" in override:
-            available_optional = override["_available_optional_columns"]
-            expected_optional = OPTIONAL_COLUMNS.get(data_id, {})
-            if (
-                not isinstance(available_optional, Mapping)
-                or _bounded_mapping_snapshot(
-                    available_optional,
-                    max_items=len(expected_optional),
-                )
-                != expected_optional
-            ):
-                raise ValueError("invalid_csmar_column_override")
-        normalized["_available_optional_columns"] = MappingProxyType(
-            dict(OPTIONAL_COLUMNS.get(data_id, {}))
-        )
-        result[data_id] = MappingProxyType(normalized)
-    return MappingProxyType(result)
-
-
-def _bounded_mapping_snapshot(
-    mapping: Mapping[str, object],
-    *,
-    max_items: int,
-) -> dict[str, object]:
-    items = tuple(islice(mapping.items(), max_items + 1))
-    if len(items) > max_items:
-        raise ValueError("invalid_csmar_column_override")
-    snapshot: dict[str, object] = {}
-    for key, value in items:
-        if type(key) is not str or key in snapshot:
-            raise ValueError("invalid_csmar_column_override")
-        snapshot[key] = value
-    return snapshot
-
-
-def _apply_output_column_rules_validated(
-    frame: pd.DataFrame,
-    data_id: str,
-    *,
-    overrides: Mapping[str, Mapping[str, object]],
-) -> tuple[pd.DataFrame, dict[str, object]]:
-    override = overrides.get(data_id, {})
-    manual_keep = list(override.get("keep", []))
-    manual_drop = list(override.get("drop", []))
-
-    missing_keep = [column for column in manual_keep if column not in frame.columns]
-    if missing_keep:
-        raise ValueError("csmar_kept_columns_missing: " + ", ".join(missing_keep))
-    final_columns = [
-        column
-        for column in _output_columns(data_id, overrides)
-        if column in frame.columns
-    ]
-
-    dropped = [column for column in frame.columns if column not in final_columns]
-    auto_dropped = {
-        column: reason
-        for column, reason in AUTO_DROPPED_COLUMNS.get(data_id, {}).items()
-        if column in dropped
-    }
-    optional_available = {
-        column: reason
-        for column, reason in OPTIONAL_COLUMNS.get(data_id, {}).items()
-        if column in frame.columns
-    }
-    report = {
-        "data_id": data_id,
-        "input_columns": list(frame.columns),
-        "kept_columns": final_columns,
-        "dropped_columns": dropped,
-        "auto_dropped_columns": auto_dropped,
-        "optional_available_columns": optional_available,
-        "manual_keep": manual_keep,
-        "manual_drop": manual_drop,
-    }
-    return frame[final_columns].copy(), report
-
-
-def _output_columns(data_id, overrides):
-    override = overrides.get(data_id, {})
-    return tuple(
-        column
-        for column in dict.fromkeys(
-            (*INTERIM_COLUMNS_BY_DATA_ID[data_id], *override.get("keep", ()))
-        )
-        if column not in override.get("drop", ())
-    )
-
-
-def render_column_pruning_report(reports: list[dict[str, object]]) -> str:
-    lines = [
-        "# CSMAR interim column pruning report",
-        "",
-        "This private audit report summarizes aggregate column pruning metadata.",
-        "",
-    ]
-    for report in reports:
-        if report.get("report_type") == "source_duplicate_summary":
-            lines.extend(
-                [
-                    f"## {report['data_id']} source duplicate summary",
-                    "",
-                    "- exact duplicate primary-key rows deduped: "
-                    f"{report['exact_duplicate_count']}",
-                    "",
-                ]
-            )
-            continue
-        lines.extend(
-            [
-                f"## {report['data_id']}",
-                "",
-                f"- input columns: {len(report['input_columns'])}",
-                f"- kept columns: {len(report['kept_columns'])}",
-                f"- dropped columns: {len(report['dropped_columns'])}",
-                f"- manual keep: {', '.join(report['manual_keep']) or 'none'}",
-                f"- manual drop: {', '.join(report['manual_drop']) or 'none'}",
-                "",
-                "### Kept columns",
-                "",
-                ", ".join(report["kept_columns"]),
-                "",
-            ]
-        )
-        auto_dropped = report["auto_dropped_columns"]
-        if auto_dropped:
-            lines.extend(["### Auto-dropped columns", ""])
-            for column, reason in auto_dropped.items():
-                lines.append(f"- `{column}`: {reason}")
-            lines.append("")
-        optional = report["optional_available_columns"]
-        if optional:
-            lines.extend(["### Available optional columns", ""])
-            for column, reason in optional.items():
-                lines.append(f"- `{column}`: {reason}")
-            lines.append("")
-    return "\n".join(lines) + "\n"
 
 
 def interim_specs() -> tuple[InterimDataSpec, ...]:
@@ -619,8 +382,6 @@ def source_content_identity(raw_root: Path, data_id: str) -> str | None:
 def normalize_raw_frame(
     frame: pd.DataFrame,
     data_id: str,
-    *,
-    keep_columns: tuple[str, ...] = (),
 ) -> pd.DataFrame:
     mapped = map_columns(frame, data_id)
     if "stock_code" in mapped.columns:
@@ -818,21 +579,7 @@ def normalize_raw_frame(
         result["turnover"] = pd.Series(
             float("nan"), index=result.index, dtype="float64"
         )
-        result = result.loc[
-            :,
-            list(
-                dict.fromkeys(
-                    (
-                        *MARKET_BARS_INTERIM_COLUMNS,
-                        *(
-                            column
-                            for column in keep_columns
-                            if column in result.columns
-                        ),
-                    )
-                )
-            ),
-        ]
+        result = result.loc[:, list(MARKET_BARS_INTERIM_COLUMNS)]
         result = result.sort_values(["source_asset_id", "timestamp"], kind="mergesort")
         result.reset_index(drop=True, inplace=True)
         return result
@@ -1203,27 +950,17 @@ def _iter_interim_frames(
     input_files: Iterable[Path | tuple[Path, DatasetFileIdentity]],
     start_date: str | None,
     end_date: str | None,
-    overrides: dict[str, dict[str, object]] | None,
     chunksize: int,
-    pruning_reports: list[dict[str, object]] | None,
     verify_members: Callable[[], None] | None = None,
     source_row_counts: dict[str, int] | None = None,
     producer_diagnostics: dict[str, object] | None = None,
 ) -> Iterator[object]:
-    validated_overrides = {} if overrides is None else overrides
-
     def activate() -> Iterator[object]:
-        operation_reports: list[dict[str, object]] = []
         inputs = iter(input_files)
         with closing_iterator(inputs):
             try:
                 first_input = next(inputs)
             except StopIteration:
-                _append_duplicate_summary(
-                    operation_reports,
-                    data_id,
-                    0,
-                )
                 first_input = None
             if first_input is not None:
                 prepared_inputs = _iter_source_inputs(first_input, inputs)
@@ -1231,14 +968,12 @@ def _iter_interim_frames(
                 index = ExactPrimaryKeyIndex(
                     primary_key=spec.primary_key,
                 )
-                frames = _iter_pruned_interim_frames(
+                frames = _iter_normalized_interim_frames(
                     data_id=data_id,
                     input_files=prepared_inputs,
                     start_date=start_date,
                     end_date=end_date,
-                    overrides=validated_overrides,
                     chunksize=chunksize,
-                    pruning_reports=operation_reports,
                     source_row_counts=source_row_counts,
                     duplicate_index=index,
                     producer_diagnostics=producer_diagnostics,
@@ -1251,9 +986,6 @@ def _iter_interim_frames(
                             return
             if verify_members is not None:
                 verify_members()
-        if pruning_reports is not None:
-            for report in operation_reports:
-                _merge_pruning_report(pruning_reports, report)
 
     return activate()
 
@@ -1265,21 +997,14 @@ def materialize_interim_data(
     data_ids: tuple[str, ...] = DEFAULT_INTERIM_DATA_IDS,
     start_date: str | None = "2014-01-01",
     end_date: str | None = "2025-12-31",
-    override_path: Path | None = None,
     chunksize: int = 500000,
     instance_metadata: Mapping[str, object] | None = None,
 ) -> InterimImportResult:
     if type(chunksize) is not int or chunksize <= 0:
         raise ValueError("invalid_csmar_chunksize")
     source_raw_root = raw_root or layout.raw_source_root(SourceId(SOURCE_ID))
-    overrides = (
-        load_column_overrides(override_path)
-        if override_path
-        else _validated_column_overrides({})
-    )
     written: dict[str, Path] = {}
     skipped: set[str] = set()
-    pruning_reports: list[dict[str, object]] = []
     pending = set(data_ids)
     require_unaliased_path(
         source_raw_root,
@@ -1331,7 +1056,7 @@ def materialize_interim_data(
             )
             input_files = ((item[1], item[2]) for item in input_records)
             pending.discard(data_id)
-            spec = _interim_spec(data_id, _output_columns(data_id, overrides))
+            spec = interim_catalog().get(data_id)
             artifact_root = require_artifact_root(
                 layout.target_root(
                     spec.data_id, layout.interim_data_root(spec.source_id, spec.data_id)
@@ -1350,9 +1075,7 @@ def materialize_interim_data(
                 input_files=input_files,
                 start_date=start_date,
                 end_date=end_date,
-                overrides=overrides,
                 chunksize=chunksize,
-                pruning_reports=pruning_reports,
                 verify_members=verify_members,
                 source_row_counts=source_row_counts,
                 producer_diagnostics=diagnostics,
@@ -1377,24 +1100,20 @@ def materialize_interim_data(
     return InterimImportResult(
         artifact_roots=written,
         skipped=tuple(data_id for data_id in data_ids if data_id in skipped),
-        pruning_report_text=render_column_pruning_report(pruning_reports),
     )
 
 
-def _iter_pruned_interim_frames(
+def _iter_normalized_interim_frames(
     *,
     data_id: str,
     input_files: Iterable[Path | tuple[Path, DatasetFileIdentity]],
     start_date: str | None,
     end_date: str | None,
-    overrides: Mapping[str, Mapping[str, object]],
     chunksize: int,
-    pruning_reports: list[dict[str, object]] | None,
     duplicate_index: ExactPrimaryKeyIndex,
     producer_diagnostics: dict[str, object] | None,
     source_row_counts: dict[str, int] | None = None,
 ) -> Iterator[object]:
-    local_reports: list[dict[str, object]] = []
     primary_key = interim_catalog().get(data_id).primary_key
     exact_duplicate_count = 0
     for input in input_files:
@@ -1409,12 +1128,11 @@ def _iter_pruned_interim_frames(
         )
         with closing_iterator(chunks):
             for chunk in chunks:
-                pruned, report = _transform_interim_chunk(
+                pruned, counts = _transform_interim_chunk(
                     chunk,
                     data_id=data_id,
                     start_date=start_date,
                     end_date=end_date,
-                    overrides=overrides,
                 )
                 skip_duplicate = False
                 if not pruned.empty:
@@ -1449,25 +1167,18 @@ def _iter_pruned_interim_frames(
                     elif len(positions) != len(pruned):
                         pruned = pruned.iloc[positions].reset_index(drop=True)
                     del positions
-                if data_id == "analyst_forecast":
-                    counts = report.pop("source_row_counts")
+                if counts is not None:
                     if source_row_counts is not None:
                         for key, count in counts.items():
                             source_row_counts[key] = (
                                 source_row_counts.get(key, 0) + count
                             )
-                if report:
-                    _merge_pruning_report(local_reports, report)
                 if skip_duplicate or pruned.empty and data_id != "analyst_forecast":
                     continue
                 try:
                     yield pruned
                 except GeneratorExit:
                     return
-    if pruning_reports is not None:
-        _append_duplicate_summary(pruning_reports, data_id, exact_duplicate_count)
-        for report in local_reports:
-            _merge_pruning_report(pruning_reports, report)
 
 
 def _transform_interim_chunk(
@@ -1476,11 +1187,8 @@ def _transform_interim_chunk(
     data_id: str,
     start_date: str | None,
     end_date: str | None,
-    overrides: Mapping[str, Mapping[str, object]],
-) -> tuple[pd.DataFrame, dict[str, object]]:
-    normalized = normalize_raw_frame(
-        chunk, data_id, keep_columns=tuple(overrides.get(data_id, {}).get("keep", ()))
-    )
+) -> tuple[pd.DataFrame, dict[str, int] | None]:
+    normalized = normalize_raw_frame(chunk, data_id)
     source_row_counts = normalized.attrs.pop("source_row_counts", None)
     filtered = _filter_normalized_frame(
         normalized,
@@ -1494,32 +1202,9 @@ def _transform_interim_chunk(
         source_row_counts["excluded_date_range_rows"] = source_row_counts[
             "retained_before_date_filter_rows"
         ] - len(filtered)
-    pruned, report = _apply_output_column_rules_validated(
-        filtered,
-        data_id,
-        overrides=overrides,
-    )
-    del filtered
-    if source_row_counts is not None:
-        report["source_row_counts"] = source_row_counts
-    return pruned, report
-
-
-def _merge_pruning_report(
-    reports: list[dict[str, object]], report: dict[str, object]
-) -> None:
-    for current in reports:
-        if current.get("data_id") != report.get("data_id") or current.get(
-            "report_type"
-        ) != report.get("report_type"):
-            continue
-        for key, value in report.items():
-            if isinstance(value, list) and isinstance(current.get(key), list):
-                current[key] = list(dict.fromkeys([*current[key], *value]))
-            elif isinstance(value, dict) and isinstance(current.get(key), dict):
-                current[key] = {**current[key], **value}
-        return
-    reports.append(report)
+    return filtered.loc[
+        :, list(INTERIM_COLUMNS_BY_DATA_ID[data_id])
+    ].copy(), source_row_counts
 
 
 def _iter_source_inputs(
@@ -1538,20 +1223,6 @@ def _iter_source_inputs(
         if not stat.S_ISDIR(metadata.st_mode):
             raise ValueError("csmar_interim_source_parent_invalid")
         yield value
-
-
-def _append_duplicate_summary(
-    reports: list[dict[str, object]],
-    data_id: str,
-    exact_duplicate_count: int,
-) -> None:
-    reports.append(
-        {
-            "data_id": data_id,
-            "report_type": "source_duplicate_summary",
-            "exact_duplicate_count": int(exact_duplicate_count),
-        }
-    )
 
 
 def _interim_spec(data_id: str, columns: tuple[str, ...]) -> InterimDataSpec:

@@ -72,7 +72,6 @@ def assemble_research_dataset(
     return _assemble_research_dataset_from_sessions(
         layout=layout,
         spec=spec,
-        processed_catalog=processed_catalog,
         time_window=time_window,
         input_sessions=input_sessions,
         instance_metadata=instance_metadata,
@@ -83,7 +82,6 @@ def _assemble_research_dataset_from_sessions(
     *,
     layout: StorageLayout,
     spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
     time_window: TimeWindow,
     input_sessions: Mapping[str, DatasetSession],
     instance_metadata: Mapping[str, object] | None,
@@ -95,7 +93,7 @@ def _assemble_research_dataset_from_sessions(
     )
     metadata = dict(instance_metadata or {})
     diagnostics = None
-    if any(t.transform == "a_share_canonical" for t in spec.feature_transforms):
+    if spec.feature_transforms:
         metadata["producer_diagnostics"] = dict(
             metadata.get("producer_diagnostics", {})
         )
@@ -103,7 +101,6 @@ def _assemble_research_dataset_from_sessions(
         metadata["producer_diagnostics"]["canonical_features"] = diagnostics
     chunks = _iter_joined_processed_chunks(
         dataset_spec=spec,
-        processed_catalog=processed_catalog,
         sessions=input_sessions,
         time_window=time_window,
         diagnostics=diagnostics,
@@ -135,7 +132,6 @@ def _assemble_research_dataset_from_sessions(
 def _iter_joined_processed_chunks(
     *,
     dataset_spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     diagnostics: dict | None = None,
@@ -157,7 +153,6 @@ def _iter_joined_processed_chunks(
         for chunk_window in active_chunk_windows:
             chunk = _join_processed_inputs(
                 dataset_spec=dataset_spec,
-                processed_catalog=processed_catalog,
                 sessions=sessions,
                 time_window=chunk_window,
                 base_data_id=base_data_id,
@@ -176,7 +171,6 @@ def _iter_joined_processed_chunks(
 def _join_processed_inputs(
     *,
     dataset_spec: ResearchDatasetSpec,
-    processed_catalog: ProcessedDataCatalog,
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
     base_data_id: str | None = None,
@@ -187,12 +181,8 @@ def _join_processed_inputs(
     for input_data_id in _ordered_input_data_ids(
         dataset_spec, base_data_id=base_data_id
     ):
-        input_frame = _read_processed_input(
-            dataset_spec=dataset_spec,
-            processed_spec=processed_catalog.get(input_data_id),
-            session=sessions[input_data_id],
-            existing_columns=tuple(assembled.columns) if assembled is not None else (),
-            time_window=time_window,
+        input_frame = materialize_dataset_session(
+            sessions[input_data_id].filtered_view(time_window)
         )
         if assembled is None:
             assembled = input_frame
@@ -316,23 +306,6 @@ def _validate_input_key_coverage(
         raise ValueError(
             f"missing_research_input_keys: {input_data_id}: {int(missing.sum())}"
         )
-
-
-def _read_processed_input(
-    *,
-    dataset_spec: ResearchDatasetSpec,
-    processed_spec: ProcessedDataSpec,
-    session: DatasetSession,
-    existing_columns: tuple[str, ...],
-    time_window: TimeWindow,
-) -> pd.DataFrame:
-    columns = _processed_input_columns(
-        dataset_spec, processed_spec, existing_columns=existing_columns
-    )
-    if tuple(columns) != session.logical_columns:
-        raise ValueError("research_input_session_columns_mismatch")
-    view = session.filtered_view(time_window)
-    return materialize_dataset_session(view)
 
 
 def _processed_input_columns(

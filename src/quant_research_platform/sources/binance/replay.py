@@ -60,7 +60,7 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
     require_unaliased_path,
 )
-from quant_research_platform.storage.manifests import read_bounded_qrp_json
+from quant_research_platform.storage.manifests import read_qrp_json_file
 
 _FILE_MANIFEST_KEYS = frozenset(
     {
@@ -100,7 +100,6 @@ _CONNECTION_INTERVAL_KEYS = frozenset(
 _CONNECTION_CLOSE_REASONS = frozenset(
     {"stop", "connection_problem", "depth_resync", "failure"}
 )
-_CONNECTION_INTERVAL_MAX_RECORD_BYTES = 64 * 1024
 
 
 @dataclass
@@ -209,11 +208,9 @@ class ObservationCoverageIndex:
                 line: bytes | None = None
                 interval: dict[str, Any] | None = None
                 row = None
-                line = gzip_handle.readline(_CONNECTION_INTERVAL_MAX_RECORD_BYTES + 1)
+                line = gzip_handle.readline()
                 if not line:
                     break
-                if len(line) > _CONNECTION_INTERVAL_MAX_RECORD_BYTES:
-                    raise ValueError("binance_replay_connection_intervals_invalid")
                 try:
                     interval = parse_qrp_json_object(line)
                 except (UnicodeError, ValueError) as exc:
@@ -380,7 +377,7 @@ class RecorderRun:
         return (self.root.parent / "funding" / symbol,)
 
     def hft_source_info(self):
-        if self.manifest["market_data_status"] == "FAIL":
+        if self.manifest["status"] == "FAIL":
             raise ValueError("hft_recorder_run_failed")
         if (
             self.manifest["recording_scope"] != FUTURES_HFT_RECORDING_SCOPE
@@ -671,9 +668,7 @@ def _read_run_manifest(
         raise ValueError("binance_replay_run_manifest_invalid")
     manifest: dict[str, Any] | None = None
     try:
-        manifest = read_bounded_qrp_json(
-            path, expected_identity=identity, max_bytes=identity.size
-        )[1]
+        manifest = read_qrp_json_file(path, expected_identity=identity)[1]
     except (
         FileNotFoundError,
         NotADirectoryError,
@@ -701,7 +696,6 @@ def _validate_run_manifest(value: object) -> None:
         "recording_scope",
         "venue",
         "status",
-        "market_data_status",
     ):
         if not isinstance(value.get(key), str) or not value[key]:
             raise ValueError("binance_replay_run_manifest_invalid")
@@ -716,11 +710,7 @@ def _validate_run_manifest(value: object) -> None:
     ):
         raise ValueError("binance_replay_run_manifest_identity_invalid")
     statuses = {"PASS", "PARTIAL", "FAIL"}
-    if (
-        value["status"] not in statuses
-        or value["market_data_status"] not in statuses
-        or value["status"] != value["market_data_status"]
-    ):
+    if value["status"] not in statuses:
         raise ValueError("binance_replay_run_manifest_invalid")
     market_types = value.get("market_types")
     recording_scope = value["recording_scope"]

@@ -76,15 +76,11 @@ def test_historical_frequency_binds_actual_member_date(
         with pytest.raises(ValueError, match=error):
             list(raw.iter_native_slice(source, **options))
         with pytest.raises(ValueError, match=error):
-            raw.import_slices(
-                destination, slices=(source,), byte_budget=1024**2, **options
-            )
+            raw.import_slices(destination, slices=(source,), **options)
         assert not destination.exists()
         assert source.read_bytes() == original
         return
-    manifest = raw.import_slices(
-        destination, slices=(source,), byte_budget=1024**2, **options
-    )
+    manifest = raw.import_slices(destination, slices=(source,), **options)
     member = manifest["files"][0]
     assert member["record_counts"][depth["stream"]] == 1
     assert (destination / member["path"]).read_bytes() == original
@@ -118,14 +114,21 @@ def test_transition_empty_depth_members_are_rejected_before_publication(
             offset_minutes=offset,
             slices=(source,) * count,
             channels=("depth",),
-            byte_budget=1024**2,
         )
     assert sorted(path.name for path in tmp_path.iterdir()) == ["empty.gz"]
 
 
 @pytest.mark.parametrize("backend", ("raw", "normalized"))
-@pytest.mark.parametrize("boundary", ("none", "read", "write"))
-@pytest.mark.parametrize("cancel", (False, True))
+@pytest.mark.parametrize(
+    "boundary,cancel",
+    [
+        ("none", False),
+        ("read", False),
+        ("read", True),
+        ("write", False),
+        ("write", True),
+    ],
+)
 @pytest.mark.parametrize("close_error", ("none", "response", "output", "both"))
 def test_copy_closes_real_files_and_preserves_primary_identity(
     tmp_path, monkeypatch, backend, boundary, cancel, close_error
@@ -205,16 +208,13 @@ def test_copy_closes_real_files_and_preserves_primary_identity(
 
     def publish():
         if backend == "raw":
-            return raw.download_slices(
-                destination, date="2026-08-01", slice_count=1, byte_budget=1024**2
-            )
+            return raw.download_slices(destination, date="2026-08-01", slice_count=1)
         return normalized.download_dataset(
             destination,
             exchange="bybit",
             dataset_type="trades",
             symbol="BTCUSDT",
             date="2026-08-01",
-            byte_budget=1024**2,
         )
 
     expected = (
@@ -370,14 +370,10 @@ def test_historical_markprice_defaults_and_funding_binds_member_date(
         with pytest.raises(ValueError, match=error):
             list(raw.iter_native_slice(source, **options))
         with pytest.raises(ValueError, match=error):
-            raw.import_slices(
-                destination, slices=(source,), byte_budget=1024**2, **options
-            )
+            raw.import_slices(destination, slices=(source,), **options)
         assert not destination.exists()
         return
-    manifest = raw.import_slices(
-        destination, slices=(source,), byte_budget=1024**2, **options
-    )
+    manifest = raw.import_slices(destination, slices=(source,), **options)
     assert manifest["requested_channels"] == list(raw.CHANNELS)
     member = manifest["files"][0]
     assert member["record_counts"] == {stream: 1}
@@ -409,7 +405,6 @@ def test_historical_markprice_defaults_and_funding_binds_member_date(
             http_status=200,
             start_ms=start_ms,
             end_ms=start_ms + 600000 - 1,
-            byte_budget=1024**2,
         )
         roots = archive.funding_roots(
             "BTCUSDT",
@@ -435,6 +430,5 @@ def test_markprice_transition_empty_default_members_are_not_published(
             date="2020-02-12",
             offset_minutes=offset,
             slices=(source,) * count,
-            byte_budget=1024**2,
         )
     assert sorted(path.name for path in tmp_path.iterdir()) == ["empty.gz"]

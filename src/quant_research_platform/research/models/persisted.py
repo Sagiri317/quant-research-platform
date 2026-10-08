@@ -43,10 +43,12 @@ from quant_research_platform.research.models.trial_selection import (
     model_validation_coverage_scope,
     select_best_validation_trial,
 )
-from quant_research_platform.research.protocols.a_share import quarter_id_for_fold
+from quant_research_platform.research.protocols.a_share import (
+    model_selection_windows,
+    quarter_id_for_fold,
+)
 from quant_research_platform.research.randomness import ROOT_SEED, derive_seed
 from quant_research_platform.runtime.execution_metrics import record_run_observations
-from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.storage.datasets.reading import (
     iter_declared_parquet_member_batches,
 )
@@ -59,7 +61,7 @@ from quant_research_platform.storage.identity import (
     verified_file_handle,
 )
 from quant_research_platform.storage.manifests import (
-    read_bounded_qrp_json,
+    read_qrp_json_file,
     write_internal_artifact_manifest,
 )
 from quant_research_platform.storage.parquet import (
@@ -349,7 +351,7 @@ def write_quarterly_model_artifact(
             record_observation(
                 {
                     "phase": "group_scoring",
-                    "selection_group": group,
+                    "selection_groups": [group],
                     "family_id": None,
                     "quarter_id": decision_id,
                     "fit_count": 0,
@@ -373,9 +375,7 @@ def write_quarterly_model_artifact(
             ) as source:
                 for member_value in source:
                     member = member_value
-                    path = (
-                        f"models/final/{member.selection_group}/{member.family_id}.pkl"
-                    )
+                    path = f"models/final/{member.family_id}/{member.spec.model_id}.pkl"
                     filesystem_mkdir(
                         (staging / path).parent, parents=True, exist_ok=True
                     )
@@ -388,7 +388,7 @@ def write_quarterly_model_artifact(
                         staging / path, member.model_result.prediction_model
                     )
                     entry = {
-                        "selection_group": member.selection_group,
+                        "model_member": path,
                         "family_id": member.family_id,
                         "model_id": member.spec.model_id,
                         "fit_windows": [
@@ -403,7 +403,10 @@ def write_quarterly_model_artifact(
                         ],
                     }
                     entry["model_metadata"] = metadata
-                    final_models.append(entry)
+                    final_models.extend(
+                        dict(entry, selection_group=group)
+                        for group in member.selection_groups
+                    )
                     operational["model_trial_ledgers"].append(
                         dict(member.refit_trial_reference)
                     )
@@ -470,6 +473,7 @@ def write_quarterly_model_artifact(
             members,
             operational["model_trial_ledgers"],
             trial_layout,
+            verify_science=True,
         )
         verify_source()
 
@@ -545,6 +549,23 @@ def _a_share_validation_chunks(root, entry, *, member_identities, development_en
                 return
 
 
+def _eligible_a_share_predictions(candidate_models, cutoff, scoring_window):
+    eligible = [
+        entry
+        for entry in candidate_models
+        if pd.Timestamp(entry["validation_window"]["end"]) <= pd.Timestamp(cutoff)
+        and pd.Timestamp(entry["validation_window"]["end"])
+        >= pd.Timestamp(scoring_window.start)
+        and (
+            pd.Timestamp(entry["validation_window"]["start"])
+            <= pd.Timestamp(scoring_window.end)
+        )
+    ]
+    if not eligible:
+        raise ValueError("a_share_selection_predictions_missing")
+    return eligible
+
+
 def _select_a_share_models(
     root,
     candidate_models,
@@ -559,19 +580,7 @@ def _select_a_share_models(
 ):
     protocol = contract["protocol"]
     family_ids = tuple(value["model_id"] for value in contract["model_specs"])
-    eligible = [
-        entry
-        for entry in candidate_models
-        if pd.Timestamp(entry["validation_window"]["end"]) <= pd.Timestamp(cutoff)
-        and pd.Timestamp(entry["validation_window"]["end"])
-        >= pd.Timestamp(scoring_window.start)
-        and (
-            pd.Timestamp(entry["validation_window"]["start"])
-            <= pd.Timestamp(scoring_window.end)
-        )
-    ]
-    if not eligible:
-        raise ValueError("a_share_selection_predictions_missing")
+    eligible = _eligible_a_share_predictions(candidate_models, cutoff, scoring_window)
     quarters = tuple(sorted({entry["quarter_id"] for entry in eligible}))
     source_predictions = sorted(
         (entry["validation_prediction"] for entry in eligible),
@@ -743,12 +752,20 @@ def read_quarterly_model_artifact(
         members,
         operational.get("model_trial_ledgers"),
         trial_layout,
+        verify_science=False,
         member_identities=member_identities,
     )
 
 
 def _validate_a_share_model_payload(
-    root, envelope, members, references, trial_layout, *, member_identities=None
+    root,
+    envelope,
+    members,
+    references,
+    trial_layout,
+    *,
+    verify_science,
+    member_identities=None,
 ):
     if trial_layout is None:
         raise ValueError("model_trial_layout_required")
@@ -760,7 +777,7 @@ def _validate_a_share_model_payload(
             for member in members
         }
     member_records = {member["path"]: member for member in members}
-    payload = read_bounded_qrp_json(
+    payload = read_qrp_json_file(
         root / "model.json", expected_identity=member_identities["model.json"]
     )[1]
     if (
@@ -834,7 +851,7 @@ def _validate_a_share_model_payload(
         if path not in member_identities:
             raise ValueError("model_artifact_members_invalid")
         required.add(path)
-        return read_bounded_qrp_json(
+        return read_qrp_json_file(
             root / path, expected_identity=member_identities[path]
         )[1]
 
@@ -1013,130 +1030,125 @@ def _validate_a_share_model_payload(
                 if member.get("path") != path or member != member_records.get(path):
                     raise ValueError("model_validation_member_invalid")
                 required.add(path)
-                expected_coverage = ModelSampleCoverage(
-                    model_validation_coverage_scope(
-                        dataset_identity, fold, tuple(specs.values())
-                    )
-                )
-
-                def scoring_frames(entry=entry, fold=fold, coverage=expected_coverage):
-                    with closing_iterator(
-                        _a_share_validation_chunks(
-                            root,
-                            entry,
-                            member_identities=member_identities,
-                            development_end=protocol["development_window"]["end"],
+                if verify_science:
+                    expected_coverage = ModelSampleCoverage(
+                        model_validation_coverage_scope(
+                            dataset_identity, fold, tuple(specs.values())
                         )
-                    ) as frames:
-                        for frame in frames:
-                            mature = frame.loc[
-                                label_maturity_mask(
-                                    frame,
-                                    fitting_cutoff=fold.validation.end,
-                                    availability_column="label_available_at",
-                                    target_column="label",
-                                )
-                                & frame["score_eligible"]
-                            ]
-                            coverage.add(mature)
-                            try:
-                                yield mature
-                            except GeneratorExit:
-                                return
+                    )
 
-                metrics = evaluate_model_trial_metrics_from_chunks(
-                    scoring_frames(),
-                    model_id=entry["model_id"],
-                    label_column="label",
-                    prediction_column="prediction_score",
-                    expected_coverage=None,
-                )
-                terminal = {
-                    key: None
-                    if isinstance(value, float) and np.isnan(value)
-                    else value.item()
-                    if isinstance(value, np.generic)
-                    else value
-                    for key, value in metrics.items()
-                    if key != "model_id"
-                }
-                terminal["n_train"] = metadata["rows_after_input_label_dropna"]
-                if (
-                    dict(record.metrics) != terminal
-                    or record.common_coverage_id != expected_coverage.semantic_identity
-                ):
-                    raise ValueError("model_validation_trial_mismatch")
+                    def scoring_frames(
+                        entry=entry, fold=fold, coverage=expected_coverage
+                    ):
+                        with closing_iterator(
+                            _a_share_validation_chunks(
+                                root,
+                                entry,
+                                member_identities=member_identities,
+                                development_end=protocol["development_window"]["end"],
+                            )
+                        ) as frames:
+                            for frame in frames:
+                                mature = frame.loc[
+                                    label_maturity_mask(
+                                        frame,
+                                        fitting_cutoff=fold.validation.end,
+                                        availability_column="label_available_at",
+                                        target_column="label",
+                                    )
+                                    & frame["score_eligible"]
+                                ]
+                                coverage.add(mature)
+                                try:
+                                    yield mature
+                                except GeneratorExit:
+                                    return
+
+                    metrics = evaluate_model_trial_metrics_from_chunks(
+                        scoring_frames(),
+                        model_id=entry["model_id"],
+                        label_column="label",
+                        prediction_column="prediction_score",
+                        expected_coverage=None,
+                    )
+                    terminal = {
+                        key: None
+                        if isinstance(value, float) and np.isnan(value)
+                        else value.item()
+                        if isinstance(value, np.generic)
+                        else value
+                        for key, value in metrics.items()
+                        if key != "model_id"
+                    }
+                    terminal["n_train"] = metadata["rows_after_input_label_dropna"]
+                    if (
+                        dict(record.metrics) != terminal
+                        or record.common_coverage_id
+                        != expected_coverage.semantic_identity
+                    ):
+                        raise ValueError("model_validation_trial_mismatch")
     cutoff = pd.Timestamp(protocol["development_window"]["end"])
     complete = pd.Timestamp(envelope["research_window"]["end"]) >= cutoff
-    expected_decisions = []
-    for quarter, entry in folds.items():
-        if pd.Timestamp(entry["validation_window"]["start"]) >= pd.Timestamp(
-            protocol["development_window"]["start"]
-        ):
-            expected_decisions.append(
-                (
-                    "quarterly",
-                    quarter,
-                    pd.Timestamp(entry["training_window"]["end"]),
-                    TimeWindow(
-                        pd.Timestamp(entry["validation_window"]["start"])
-                        .to_period("Q")
-                        .start_time
-                        - pd.DateOffset(
-                            months=protocol["model_chronology"][
-                                "scoring_lookback_months"
-                            ]
-                        ),
-                        pd.Timestamp(entry["training_window"]["end"]),
-                    ),
-                )
-            )
-    if complete:
-        expected_decisions.extend(
+    expected_decisions = model_selection_windows(
+        (
             (
-                (
-                    "global",
-                    "final",
-                    cutoff,
-                    TimeWindow(
-                        pd.Timestamp(protocol["development_window"]["start"]), cutoff
-                    ),
-                ),
-                (
-                    "quarterly",
-                    "final",
-                    cutoff,
-                    TimeWindow(
-                        cutoff
-                        + pd.Timedelta(days=1)
-                        - pd.DateOffset(
-                            months=protocol["model_chronology"][
-                                "scoring_lookback_months"
-                            ]
-                        ),
-                        cutoff,
-                    ),
-                ),
+                quarter,
+                entry["training_window"]["end"],
+                entry["validation_window"]["start"],
             )
-        )
+            for quarter, entry in folds.items()
+        ),
+        chronology=protocol["model_chronology"],
+        development_window=protocol["development_window"],
+        complete=complete,
+    )
     if any(type(value) is not dict for value in selections.values()) or {
         (group, key) for group, values in selections.items() for key in values
     } != {(group, key) for group, key, _cutoff, _window in expected_decisions}:
         raise ValueError("model_selection_decisions_incomplete")
     for group, key, decision_cutoff, window in expected_decisions:
-        expected = _select_a_share_models(
-            root,
-            candidates,
-            contract,
-            group=group,
-            decision_id=key,
-            cutoff=decision_cutoff,
-            scoring_window=window,
-            member_identities=member_identities,
-            dataset_identity=dataset_identity,
-        )
-        if selections[group][key] != expected:
+        decision = selections[group][key]
+        validate_a_share_model_selection_metadata(decision)
+        eligible = _eligible_a_share_predictions(candidates, decision_cutoff, window)
+        if (
+            decision["selection_group"] != group
+            or decision["decision_id"] != key
+            or decision["cutoff"]
+            != time_value_isoformat(pd.Timestamp(decision_cutoff), date_only=True)
+            or decision["validation_start"]
+            != time_value_isoformat(window.start, date_only=True)
+            or decision["validation_end"]
+            != time_value_isoformat(window.end, date_only=True)
+            or decision["candidate_family_ids"] != list(family_ids)
+            or decision["label_dataset_identity"] != dataset_identity
+            or decision["prediction_members"]
+            != sorted(
+                (entry["validation_prediction"] for entry in eligible),
+                key=lambda item: item["path"],
+            )
+            or decision["selection_ledger_semantic_identities"]
+            != sorted({entry["trial_semantic_identity"] for entry in eligible})
+            or any(
+                family["config_tie_break_order"]
+                != list(candidate_orders[family["family_id"]])
+                for family in decision["families"]
+            )
+        ):
             raise ValueError("model_selection_decision_mismatch")
+        if verify_science:
+            expected = _select_a_share_models(
+                root,
+                candidates,
+                contract,
+                group=group,
+                decision_id=key,
+                cutoff=decision_cutoff,
+                scoring_window=window,
+                member_identities=member_identities,
+                dataset_identity=dataset_identity,
+            )
+            if selections[group][key] != expected:
+                raise ValueError("model_selection_decision_mismatch")
     expected_final = (
         tuple(
             (group, family)
@@ -1157,6 +1169,8 @@ def _validate_a_share_model_payload(
     fit_windows = (
         TimeWindow(pd.Timestamp(protocol["formal_dataset_window"]["start"]), cutoff),
     )
+    final_references = {}
+    validated_models = set()
     for entry in final_models:
         if set(entry) != {
             "selection_group",
@@ -1166,6 +1180,7 @@ def _validate_a_share_model_payload(
             "fit_cutoff",
             "model_metadata",
             "refit_trial_semantic_identity",
+            "model_member",
         }:
             raise ValueError("model_final_metadata_invalid")
         group, family_id = (entry["selection_group"], entry["family_id"])
@@ -1184,9 +1199,32 @@ def _validate_a_share_model_payload(
             quarter_id="final",
             root_seed=protocol["root_seed"],
         )
+        groups = tuple(
+            selected_group
+            for selected_group in ("global", "quarterly")
+            if any(
+                item["family_id"] == family_id
+                and item["selected_config_id"] == family["selected_config_id"]
+                for item in selections[selected_group]["final"]["families"]
+            )
+        )
+        parents = tuple(
+            sorted(
+                {
+                    parent
+                    for selected_group in groups
+                    for parent in selections[selected_group]["final"][
+                        "selection_ledger_semantic_identities"
+                    ]
+                }
+            )
+        )
         normalized = model_spec_payload(expected_spec)
         identity = entry["refit_trial_semantic_identity"]
-        if identity not in by_identity or identity in used_references:
+        key = (family_id, expected_spec.model_id)
+        if final_references.setdefault(key, identity) != identity:
+            raise ValueError("model_trial_refit_misaligned")
+        if identity not in by_identity:
             raise ValueError("model_trial_references_missing")
         used_references.add(identity)
         plan, records = read_model_trial_ledger_reference(
@@ -1194,9 +1232,8 @@ def _validate_a_share_model_payload(
         )
         if (
             plan.stage != "refit"
-            or plan.selection_group != group
-            or plan.selection_ledger_semantic_identities
-            != tuple(decision["selection_ledger_semantic_identities"])
+            or plan.selection_groups != groups
+            or plan.selection_ledger_semantic_identities != parents
             or (plan.market_id != "a_share")
             or (plan.research_dataset_id != protocol["scenario_id"])
             or (plan.data_snapshot_id != dataset_identity)
@@ -1240,12 +1277,16 @@ def _validate_a_share_model_payload(
         _validate_model_parameters(
             metadata, normalized, error="model_trial_parameters_misaligned"
         )
-        relative = f"models/final/{group}/{family_id}.pkl"
+        relative = f"models/final/{family_id}/{expected_spec.model_id}.pkl"
+        if entry["model_member"] != relative:
+            raise ValueError("model_final_metadata_invalid")
         required.add(relative)
-        member_value = _read_model_member(
-            root, members, relative, expected_identity=member_identities[relative]
-        )
-        validate_model_state(member_value, metadata)
+        if verify_science and relative not in validated_models:
+            member_value = _read_model_member(
+                root, members, relative, expected_identity=member_identities[relative]
+            )
+            validate_model_state(member_value, metadata)
+            validated_models.add(relative)
     if used_references != set(by_identity) or required != set(member_records):
         raise ValueError("model_artifact_members_invalid")
     return PersistedQuarterlyModelArtifact(
@@ -1285,7 +1326,7 @@ def read_quarterly_predictor(artifact, selection_group, family_id):
         for item in artifact.final_models
         if item["selection_group"] == selection_group and item["family_id"] == family_id
     )
-    relative = f"models/final/{selection_group}/{family_id}.pkl"
+    relative = entry["model_member"]
     member_value = _read_model_member(
         artifact.instance_root,
         artifact.member_records,
@@ -1298,7 +1339,6 @@ def read_quarterly_predictor(artifact, selection_group, family_id):
 
 
 def _write_model_member(path, value):
-    require_free_disk_headroom(path.parent, reserve_bytes=67108864)
     with closing_iterator(open_filesystem_file(path, "wb")) as handle:
         pickle.dump(value, handle, protocol=pickle.HIGHEST_PROTOCOL)
         handle.flush()
@@ -1632,7 +1672,7 @@ def _validate_crypto_model_payload(
     test = TimeWindow(**protocol["research_plan"]["test"])
     final_fold_id = protocol["research_plan"]["folds"][-1]["fold_id"]
     final_fold = next((fold for fold in folds if fold.fold_id == final_fold_id), None)
-    payload = read_bounded_qrp_json(
+    payload = read_qrp_json_file(
         root / "model.json", expected_identity=member_identities["model.json"]
     )[1]
     if (
@@ -1690,7 +1730,7 @@ def _validate_crypto_model_payload(
     for fold in folds:
         relative = f"models/{fold.fold_id}/metadata.json"
         required.add(relative)
-        record = read_bounded_qrp_json(
+        record = read_qrp_json_file(
             root / relative, expected_identity=member_identities[relative]
         )[1]
         entries = record.get("models")

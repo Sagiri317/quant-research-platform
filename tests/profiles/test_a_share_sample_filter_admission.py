@@ -152,11 +152,12 @@ def test_raw_rank_filter_domains_explain_formal_unfiltered_rejection(algorithm):
             "label_available_at": pd.Timestamp("2020-01-03"),
         }
     )
-    fit = fitting._fit_model_result_from_frames(
-        (training,),
+    fit = fitting._fit_model_result(
+        fitting._collect_training_frame(
+            (training,), spec, fitting_cutoff=pd.Timestamp("2020-01-04")
+        ),
         spec,
         estimator=build_estimator_from_model_spec(spec),
-        fitting_cutoff=pd.Timestamp("2020-01-04"),
     )
     frame = pd.DataFrame(
         {

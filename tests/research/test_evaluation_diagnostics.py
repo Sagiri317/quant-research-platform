@@ -20,7 +20,7 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
     )
-    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.storage.layout import StorageLayout
 
     spec = EvaluationSpec(
@@ -37,8 +37,6 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
         output_definition_id="evaluation_outputs",
         run_id="test_run",
         market_id=spec.market_id,
-        run_type="evaluation",
-        scope=OutputScope.LOCAL_ONLY,
     )
     frame = pd.DataFrame(
         {
@@ -54,9 +52,6 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
     with evaluation_engine.build_evaluation_result_from_frames(
         (frame,),
         spec=spec,
-        signal_columns=("signal",),
-        label_columns=("label",),
-        n_groups=2,
         asset_column="asset_id",
         source_columns_by_kind={"feature": ("feature",)},
     ) as result:
@@ -66,7 +61,6 @@ def test_single_asset_insufficient_pairs_publish_with_rankic_not_applicable(
             spec=spec,
             output_spec=output,
             layout=StorageLayout(tmp_path),
-            n_groups=2,
         )
     metrics = pd.read_parquet(root / "metrics.parquet")
     assert metrics.n_obs.tolist() == ([] if valid_pairs is None else [valid_pairs])
@@ -88,7 +82,7 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
     )
-    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.storage.layout import StorageLayout
 
     times = pd.Timestamp("2020-01-01") + pd.to_timedelta([1, 2], unit="ns")
@@ -115,15 +109,10 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
         output_definition_id="evaluation_outputs",
         run_id="test_run",
         market_id=spec.market_id,
-        run_type="evaluation",
-        scope=OutputScope.LOCAL_ONLY,
     )
     with evaluation_engine.build_evaluation_result_from_frames(
         (frame,),
         spec=spec,
-        signal_columns=("signal",),
-        label_columns=("label",),
-        n_groups=2,
         asset_column="asset_id",
         source_columns_by_kind={"feature": ("feature",)},
     ) as result:
@@ -133,7 +122,6 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
             spec=spec,
             output_spec=output,
             layout=StorageLayout(tmp_path),
-            n_groups=2,
         )
     validate_output_bundle(root)
     diagnostics = json.loads((root / "manifest.json").read_text(encoding="utf-8"))[
@@ -164,9 +152,6 @@ def test_evaluation_chunk_producer_does_not_terminal_concat(
     chunks = evaluation_engine._iter_evaluation_output_chunks(
         (_evaluation_frame(),),
         spec=spec,
-        signal_columns=("signal",),
-        label_columns=("label",),
-        n_groups=2,
         asset_column="asset_id",
     )
     owned = next(chunks)
@@ -216,9 +201,6 @@ def test_single_asset_time_series_evaluation_is_exact_across_chunks() -> None:
         with evaluation_engine.build_evaluation_result_from_frames(
             frames,
             spec=spec,
-            signal_columns=("signal",),
-            label_columns=("label",),
-            n_groups=2,
             asset_column="asset_id",
             source_columns_by_kind={"feature": ("feature",)},
         ) as result:
@@ -276,9 +258,6 @@ def test_single_asset_time_series_values_are_chunk_exact(case: str) -> None:
         with evaluation_engine.build_evaluation_result_from_frames(
             frames,
             spec=spec,
-            signal_columns=("signal",),
-            label_columns=("label",),
-            n_groups=2,
             asset_column="asset_id",
             source_columns_by_kind={"feature": ("feature",)},
         ) as result:
@@ -319,7 +298,9 @@ def test_streaming_ic_summary_matches_stable_canonical_values(epsilon: float) ->
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
     )
-    state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
+    state = evaluation_engine._EvaluationStreamingState(
+        spec=spec,
+    )
     state.consume(
         metrics,
         pd.DataFrame(),
@@ -374,7 +355,9 @@ def test_streaming_group_spread_reducer_avoids_chunk_materialization() -> None:
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
     )
-    state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
+    state = evaluation_engine._EvaluationStreamingState(
+        spec=spec,
+    )
     references = []
 
     def chunks():
@@ -428,7 +411,7 @@ def test_evaluation_writer_roundtrips_long_windows_path(tmp_path):
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
     )
-    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.storage.identity import native_filesystem_path
     from quant_research_platform.storage.layout import StorageLayout
 
@@ -446,15 +429,10 @@ def test_evaluation_writer_roundtrips_long_windows_path(tmp_path):
         output_definition_id="evaluation_outputs",
         run_id="test_run",
         market_id=spec.market_id,
-        run_type="evaluation",
-        scope=OutputScope.LOCAL_ONLY,
     )
     with evaluation_engine.build_evaluation_result_from_frames(
         (_evaluation_frame(),),
         spec=spec,
-        signal_columns=("signal",),
-        label_columns=("label",),
-        n_groups=2,
         asset_column="asset_id",
         source_columns_by_kind={"feature": ("feature",)},
     ) as result:
@@ -464,7 +442,6 @@ def test_evaluation_writer_roundtrips_long_windows_path(tmp_path):
             spec=spec,
             output_spec=output,
             layout=layout,
-            n_groups=2,
         )
     assert len(str(root / "grouped_label_values.parquet")) > 260
     with pytest.raises(ValueError, match="output_already_exists"):
@@ -474,7 +451,6 @@ def test_evaluation_writer_roundtrips_long_windows_path(tmp_path):
             spec=spec,
             output_spec=output,
             layout=layout,
-            n_groups=2,
         )
     metrics = pd.read_parquet(native_filesystem_path(root / "metrics.parquet"))
     assert metrics.n_obs.tolist() == [2]
@@ -557,7 +533,9 @@ def test_ic_summary_nonzero_variance_survives_rounding_and_persistence(
         signals=(make_artifact_signal_spec(),),
         label_columns=("label",),
     )
-    state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
+    state = evaluation_engine._EvaluationStreamingState(
+        spec=spec,
+    )
     for start in range(0, len(metrics), chunk_size):
         state.consume(
             metrics.iloc[start : start + chunk_size],
@@ -603,7 +581,7 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
     from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
     from quant_research_platform.catalog.evaluations import EvaluationCatalog
     from quant_research_platform.contracts.columns import ColumnRole
-    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.contracts.signals import SignalSpec
     from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.research.evaluations.runner import (
@@ -669,11 +647,8 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
                     output_definition_id="evaluation_outputs",
                     run_id="test_run",
                     market_id=dataset.market_id,
-                    run_type="evaluation",
-                    scope=OutputScope.LOCAL_ONLY,
                 ),
                 layout=layout,
-                n_groups=2,
             )
         validate_output_bundle(
             output, expected_output_id=mode, expected_run_id="test_run"
@@ -689,14 +664,14 @@ def test_persisted_unfiltered_evaluation_keeps_ineligible_mature_labels(tmp_path
         ('{"token":\n"SYNTHETIC_SECRET"}', "credential"),
         ('{"token"\n \n:\n"SYNTHETIC_SECRET"}', "credential"),
         ('{"_token":"SYNTHETIC_SECRET"}', "credential"),
-        ("MARKET_ID=synthetic\nordinary\nASSET_ID=synthetic", "row_sample"),
-        ("market_id\n=synthetic\nordinary\nasset_id=synthetic", "row_sample"),
-        ("asset_id\n=synthetic\nordinary\ntimestamp\n=synthetic", "row_sample"),
-        ("6" + "00000", "stock_sample"),
+        ("MARKET_ID=synthetic\nordinary\nASSET_ID=synthetic", None),
+        ("market_id\n=synthetic\nordinary\nasset_id=synthetic", None),
+        ("asset_id\n=synthetic\nordinary\ntimestamp\n=synthetic", None),
+        ("6" + "00000", None),
         ("/private/synthetic/source.csv", "absolute_path"),
     ],
 )
-def test_evaluation_writer_rejects_unsafe_signal_before_publication(
+def test_evaluation_writer_applies_credential_and_path_boundary(
     tmp_path: Path, signal_id: str, reason: str
 ) -> None:
     from dataclasses import replace
@@ -704,7 +679,7 @@ def test_evaluation_writer_rejects_unsafe_signal_before_publication(
     from quant_research_platform.artifacts.outputs.evaluation import (
         write_evaluation_outputs_from_chunks,
     )
-    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.storage.layout import StorageLayout
 
     spec = EvaluationSpec(
@@ -721,8 +696,6 @@ def test_evaluation_writer_rejects_unsafe_signal_before_publication(
         output_definition_id="evaluation_outputs",
         run_id="test_run",
         market_id=spec.market_id,
-        run_type="evaluation",
-        scope=OutputScope.LOCAL_ONLY,
     )
     frame = pd.DataFrame(
         {
@@ -733,13 +706,16 @@ def test_evaluation_writer_rejects_unsafe_signal_before_publication(
             "eligible": True,
         }
     )
-    with pytest.raises(ValueError, match=f"evaluation_summary_share_unsafe: {reason}"):
+    from contextlib import nullcontext
+
+    with (
+        pytest.raises(ValueError, match=f"evaluation_summary_share_unsafe: {reason}")
+        if reason is not None
+        else nullcontext()
+    ):
         with evaluation_engine.build_evaluation_result_from_frames(
             (frame,),
             spec=spec,
-            signal_columns=(signal_id,),
-            label_columns=("label",),
-            n_groups=2,
             asset_column="asset_id",
             source_columns_by_kind={"feature": ("feature",)},
         ) as result:
@@ -749,10 +725,9 @@ def test_evaluation_writer_rejects_unsafe_signal_before_publication(
                 spec=spec,
                 output_spec=output,
                 layout=StorageLayout(tmp_path),
-                n_groups=2,
             )
-    assert not list(tmp_path.rglob("summary.md"))
-    assert not list(tmp_path.rglob("manifest.json"))
+    assert bool(list(tmp_path.rglob("summary.md"))) == (reason is None)
+    assert bool(list(tmp_path.rglob("manifest.json"))) == (reason is None)
 
 
 def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
@@ -763,7 +738,7 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
         write_evaluation_outputs_from_chunks,
     )
     from quant_research_platform.catalog.evaluations import EvaluationCatalog
-    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.profiles.research import (
         bind_research_configuration,
         research_profile,
@@ -847,9 +822,6 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
             with evaluation_engine.build_evaluation_result_from_frames(
                 (frame,),
                 spec=current,
-                signal_columns=tuple(factors),
-                label_columns=(label,),
-                n_groups=current.n_groups,
                 asset_column="asset_id",
                 source_columns_by_kind={"factor": tuple(factors)},
             ) as result:
@@ -862,11 +834,8 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
                         output_definition_id="evaluation_outputs",
                         run_id="test_run",
                         market_id=current.market_id,
-                        run_type="evaluation",
-                        scope=OutputScope.LOCAL_ONLY,
                     ),
                     layout=StorageLayout(staging),
-                    n_groups=current.n_groups,
                 )
 
         root = write_semantic_artifact(
@@ -921,7 +890,7 @@ def test_bound_crypto_direction_reaches_identity_parquet_and_report(tmp_path):
 
 
 @pytest.mark.parametrize("count", [99999, 100000, 303767, 400000, 500000, 600000])
-def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
+def test_evaluation_writer_preserves_counts_without_text_workarounds(
     tmp_path, monkeypatch, count
 ):
     from dataclasses import replace
@@ -934,7 +903,7 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
         EVALUATION_GROUPED_LABEL_VALUE_COLUMNS,
         EVALUATION_METRICS_COLUMNS,
     )
-    from quant_research_platform.contracts.outputs import OutputScope, OutputSpec
+    from quant_research_platform.contracts.outputs import OutputSpec
     from quant_research_platform.reports import evaluation as report
     from quant_research_platform.storage.layout import StorageLayout
 
@@ -952,8 +921,6 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
         output_definition_id="evaluation_outputs",
         run_id="test_run",
         market_id=spec.market_id,
-        run_type="evaluation",
-        scope=OutputScope.LOCAL_ONLY,
     )
     metrics = pd.DataFrame(
         [
@@ -982,7 +949,9 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
         "skipped_timestamp_count": 0,
     }
     layout = StorageLayout(tmp_path)
-    state = evaluation_engine._EvaluationStreamingState(spec=spec, n_groups=2)
+    state = evaluation_engine._EvaluationStreamingState(
+        spec=spec,
+    )
     state.consume(metrics, grouped, metadata)
 
     def summaries():
@@ -999,7 +968,6 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
         spec=spec,
         output_spec=output,
         layout=layout,
-        n_groups=2,
     )
     manifest, _ = validate_output_bundle(root)
     diagnostics = manifest["metadata"]["evaluation_diagnostics"]
@@ -1008,8 +976,8 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
     assert pd.read_parquet(root / "metrics.parquet").n_obs.tolist() == [count]
     summary = (root / "summary.md").read_text()
     for field in ("rows_input", "rows_after_filter", "timestamp_count"):
-        assert f"- {field}: " + chr(96) + f"{count:,}" + chr(96) in summary
-    assert f"| signal | label | {float(count):,} | {count:,} | 1 |" in summary
+        assert f"- {field}: " + chr(96) + f"{count}" + chr(96) in summary
+    assert f"| signal | label | {float(count)} | {count} | 1 |" in summary
     old_bytes = {p.name: p.read_bytes() for p in root.iterdir()}
     primary = RuntimeError("injected_report_failure")
 
@@ -1024,7 +992,6 @@ def test_evaluation_writer_groups_counts_without_changing_numeric_evidence(
             spec=spec,
             output_spec=replace(output, output_id="failed_summary"),
             layout=layout,
-            n_groups=2,
         )
     assert caught.value is primary
     assert {p.name: p.read_bytes() for p in root.iterdir()} == old_bytes

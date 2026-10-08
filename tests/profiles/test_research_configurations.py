@@ -147,7 +147,10 @@ def test_factor_only_selection_has_no_model_or_financial_dependency():
     assert dataset.feature_columns == ()
     assert dataset.feature_transforms == ()
     protocol = selected.protocol("pv_expanded")
-    assert protocol.terminal_targets("research run") == ("pv_expanded_evaluation",)
+    assert protocol.terminal_targets("research run") == (
+        "pv_expanded_evaluation",
+        "pv_expanded_factor_statistics",
+    )
     config["evaluation"]["factors"].append("beta_252d")
     assert protocol.manifest()["research_configuration"]["evaluation"]["factors"] == [
         "share_price"
@@ -1551,3 +1554,113 @@ def test_configuration_stage_types_reject_at_binding_and_research_plan_boundary(
         )
     assert not (tmp_path / "project").exists()
     assert config == before
+
+
+def test_a_share_factor_statistics_are_a_separate_model_free_target():
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration()
+    selected = bind_research_configuration(research_profile(), config)
+    protocol = selected.protocol(
+        scenario_id=config["scenario_id"], access_window="development"
+    )
+    targets = {
+        target.target_id: target for target in protocol.target_specs("research run")
+    }
+    factor_target = protocol.factor_statistics_target_id
+    assert targets[factor_target].dependencies == (protocol.scenario_id,)
+    assert factor_target in protocol.terminal_targets("research run")
+    assert (
+        targets[protocol.statistics_target_ids[1]].dependencies[-1]
+        == protocol.statistics_target_ids[0]
+    )
+    factor_manifest = protocol.target_manifest(factor_target, "STATISTIC")
+    assert "selection_group" not in factor_manifest
+    assert set(factor_manifest["research_configuration"]) == {"evaluation"}
+    assert factor_manifest["training_weighting"]["role"] == "primary"
+
+
+def test_named_feature_recipe_is_bound_to_dataset_and_inference_qualification():
+    from quant_research_platform.research.protocols.a_share import _inference_blocker
+    from quant_research_platform.storage.datasets.schema import data_spec_payload
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration(name="core6")
+    primary = bind_research_configuration(research_profile(), config)
+    config["feature_recipe"] = "a_share_quantile_1_99"
+    robust = bind_research_configuration(research_profile(), config)
+    first = primary.research_datasets.get(config["scenario_id"])
+    second = robust.research_datasets.get(config["scenario_id"])
+    assert first.feature_columns == second.feature_columns
+    assert first.feature_columns
+    assert first.feature_transforms[0].recipe_id == "a_share_canonical"
+    assert second.feature_transforms[0].recipe_id == "a_share_quantile_1_99"
+    assert data_spec_payload(first) != data_spec_payload(second)
+    protocol = robust.protocol(
+        scenario_id=config["scenario_id"], access_window="development"
+    )
+    manifest = protocol.target_manifest(protocol.statistics_target_ids[0], "STATISTIC")
+    assert _inference_blocker(manifest) == "feature_recipe_robustness_excluded"
+    assert (
+        _inference_blocker(
+            primary.protocol(
+                scenario_id=config["scenario_id"], access_window="development"
+            ).manifest()
+        )
+        is None
+    )
+    config["feature_recipe"] = "custom_winsorization"
+    with pytest.raises(ValueError, match="unsupported_feature_recipe"):
+        bind_research_configuration(research_profile(), config)
+
+
+@pytest.mark.parametrize("market", ["a_share", "crypto"])
+@pytest.mark.parametrize("stage", ["dataset", "evaluation", "models"])
+def test_stage_terminals_stop_at_requested_boundary(market, stage):
+    from quant_research_platform.workflows.research import (
+        _target_specs,
+        resolve_target_graph,
+    )
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration(
+        market, "core6" if market == "a_share" else "baseline"
+    )
+    config["stage"] = stage
+    config["portfolios"] = []
+    if market == "a_share":
+        config["primary_portfolio_id"] = None
+    if stage in {"dataset", "evaluation"}:
+        config["models"] = []
+        config["comparison_model_id"] = None
+    profile = bind_research_configuration(
+        research_profile(config["profile_id"]), config
+    )
+    protocol = profile.protocol(
+        scenario_id=config["scenario_id"], access_window="development"
+    )
+    terminals = protocol.terminal_targets("research run")
+    if stage == "dataset":
+        assert terminals == (config["scenario_id"],)
+    else:
+        targets = resolve_target_graph(
+            _target_specs(profile, action="research run", protocol=protocol), terminals
+        )
+        names = {target.target_id for target in targets}
+        assert not any(
+            name.endswith(("_ledger", "_portfolio_statistics", "_maker_calibration"))
+            for name in names
+        )
+        assert any("model" in name for name in names) == (stage == "models")
+        if market == "a_share":
+            assert protocol.factor_statistics_target_id in names
+
+
+def test_model_stage_rejects_portfolio_execution():
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration()
+    config["stage"] = "models"
+    assert config["portfolios"]
+    with pytest.raises(ValueError, match="model_stage_has_portfolios"):
+        bind_research_configuration(research_profile(config["profile_id"]), config)

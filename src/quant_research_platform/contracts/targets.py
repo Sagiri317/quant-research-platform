@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -18,13 +17,11 @@ from quant_research_platform.contracts.experiments import (
     validate_trial_ledger_reference,
 )
 from quant_research_platform.contracts.json_codec import (
-    bounded_qrp_json_object_snapshot,
     canonical_json_hash,
+    qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow
-
-_MAX_RESEARCH_RUN_RECORD_BYTES = 1024 * 1024
 
 
 def unmeasured_operation_evidence(reason):
@@ -40,7 +37,7 @@ def unmeasured_operation_evidence(reason):
 
 
 def _operation_evidence(value):
-    result = bounded_qrp_json_object_snapshot(dict(value), max_bytes=65536)
+    result = qrp_json_object_snapshot(dict(value))
     if (
         set(result)
         != {
@@ -213,22 +210,18 @@ class TargetSpec:
 
     target_id: str
     dependencies: tuple[str, ...] = ()
-    producer_id: str | None = None
 
     def __post_init__(self) -> None:
         _require_identifier(self.target_id, "target_id_required")
         _require_identifier_tuple(self.dependencies, "target_dependencies_invalid")
         if self.target_id in self.dependencies:
             raise ValueError("target_self_dependency")
-        if self.producer_id is not None:
-            _require_identifier(self.producer_id, "target_producer_id_invalid")
 
 
 @dataclass(frozen=True, slots=True)
 class TargetPlan:
     target_id: str
     upstream_target_ids: tuple[str, ...]
-    producer_id: str | None
     decision: PlanDecision
     blocker: str | None = None
     requested_identity: str | None = None
@@ -245,8 +238,6 @@ class TargetPlan:
             self.upstream_target_ids,
             "target_dependencies_invalid",
         )
-        if self.producer_id is not None:
-            _require_identifier(self.producer_id, "target_producer_id_invalid")
         if self.producer_kind is not None:
             object.__setattr__(self, "producer_kind", ProducerKind(self.producer_kind))
         if self.schema_identity is not None:
@@ -303,7 +294,6 @@ class TargetPlan:
             "requested_identity": self.requested_identity,
             "matching_instance_identity": self.matching_instance_identity,
             "upstream_identities": dict(self.upstream_identities),
-            "producer_binding": self.producer_id,
             "decision": self.decision.value,
             "blocker": self.blocker,
             "rebuild": self.rebuild,
@@ -453,15 +443,11 @@ class ResearchRunRecord:
             validate_run_id(self.scenario_id)
         except ValueError as exc:
             raise ValueError("research_run_scenario_id_invalid") from exc
-        protocol = bounded_qrp_json_object_snapshot(
-            dict(self.protocol), max_bytes=_MAX_RESEARCH_RUN_RECORD_BYTES
-        )
+        protocol = qrp_json_object_snapshot(dict(self.protocol))
         _require_hash(self.protocol_identity, "research_run_protocol_identity_invalid")
         if canonical_json_hash(protocol) != self.protocol_identity:
             raise ValueError("research_run_protocol_identity_mismatch")
-        window = bounded_qrp_json_object_snapshot(
-            dict(self.research_window), max_bytes=_MAX_RESEARCH_RUN_RECORD_BYTES
-        )
+        window = qrp_json_object_snapshot(dict(self.research_window))
         if set(window) != {"start", "end", "access"} or window["access"] not in {
             "development",
             "holdout",
@@ -512,9 +498,7 @@ class ResearchRunRecord:
             raise ValueError("research_run_protocol_request_mismatch")
         object.__setattr__(self, "protocol", _freeze_json_value(protocol))
         object.__setattr__(self, "research_window", MappingProxyType(window))
-        evidence = bounded_qrp_json_object_snapshot(
-            dict(self.holdout_evidence), max_bytes=sys.maxsize
-        )
+        evidence = qrp_json_object_snapshot(dict(self.holdout_evidence))
         if window["access"] == "holdout" and not evidence:
             raise ValueError("research_run_holdout_evidence_invalid")
         if evidence:

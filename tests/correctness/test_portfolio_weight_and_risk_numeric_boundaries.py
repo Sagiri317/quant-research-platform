@@ -24,6 +24,9 @@ from quant_research_platform.markets.implementations.a_share.calendar import (
 from quant_research_platform.markets.implementations.a_share.execution import (
     prepare_trade_cost,
 )
+from quant_research_platform.markets.implementations.a_share.processed import (
+    producer as market_sessions,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.construction import (
@@ -39,7 +42,11 @@ from quant_research_platform.research.portfolios.risk import (
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from tests.helpers.portfolio_ledger import write_market_evidence, write_test_sessions
+from tests.helpers.portfolio_ledger import (
+    ledger_frame,
+    write_market_evidence,
+    write_test_sessions,
+)
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.test_portfolio_ledger import _real_fee_schedule
 from tests.workflows.test_portfolio_workflow_integration import _processed_specs
@@ -319,6 +326,7 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
         {"calendar_date": dates, "source_market_type": 1, "is_trading_day": True}
     )
     stream = iter_holding_factor_inputs(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         layout=layout.with_target_roots(
             {"market_panel_1d": root, **write_market_evidence(layout, panel)}
         ),
@@ -406,7 +414,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         fee_schedule_target_id="fee",
     )
     alpha = dataset.set_index("asset_id").signal
-    account, returns, adv, optimized, delta = production._build_session(
+    account, returns, adv, optimized, delta, _snapshot = production._build_session(
         candidate=candidate,
         decision_timestamp=dates[0],
         next_timestamp=dates[1],
@@ -434,7 +442,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
     assert optimized is None
     expected = float(Fraction(3e-16) / (Fraction(1e308) + Fraction(3e-16)))
     assert expected > 0 and delta.loc["small"] == expected
-    frame = production._ledger_frame(
+    frame = ledger_frame(
         account=account,
         decision_timestamp=dates[0],
         returns=returns,

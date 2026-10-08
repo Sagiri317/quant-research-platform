@@ -38,7 +38,6 @@ from quant_research_platform.contracts.predictions import (
 from quant_research_platform.contracts.time import is_datetime_value
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
-from quant_research_platform.runtime.resources import require_free_disk_headroom
 from quant_research_platform.storage._scratch_ownership import (
     owned_scratch_name,
     remove_owned_scratch,
@@ -46,7 +45,6 @@ from quant_research_platform.storage._scratch_ownership import (
 from quant_research_platform.storage.atomic import atomic_write_directory
 from quant_research_platform.storage.identity import (
     dataset_file_identity,
-    filesystem_stat,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import write_manifest
@@ -81,16 +79,6 @@ def write_prediction_outputs(
             if spec.prediction_mode == "a_share_oos":
                 paths = _stage_family_predictions(
                     output_chunks, temp_root, required, spec, model_metadata_payload
-                )
-                require_free_disk_headroom(
-                    temp_root,
-                    reserve_bytes=2
-                    * sum(
-                        (
-                            filesystem_stat(path).st_size
-                            for _quarter, _family, path in paths
-                        )
-                    ),
                 )
                 active_frames = _merge_family_predictions(paths, required)
             write_summary = write_parquet_chunks(

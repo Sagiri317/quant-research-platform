@@ -35,6 +35,7 @@ from quant_research_platform.storage.datasets.paths import (
     partition_frames,
     partition_part_path,
     relative_partition_label,
+    timestamp_column_from_spec_payload,
     timestamp_primary_key_column_from_spec,
     validate_dataset_artifact_root,
 )
@@ -57,7 +58,6 @@ from quant_research_platform.storage.datasets.schema import (
     parse_logical_dtype_metadata,
     physical_schema_columns,
     physical_schema_from_schema,
-    validate_dataset_spec,
     validate_frame_objects,
     validate_persisted_logical_schema,
 )
@@ -287,7 +287,7 @@ class _WriteStats:
             raise ValueError("dataset_schema_missing")
         self.logical_dtypes = self.materialized_logical_dtypes()
         self.logical_dtype_hash = canonical_json_hash(self.logical_dtypes)
-        payload = dict(spec_payload)
+        payload = {"spec_identity": canonical_json_hash(spec_payload)}
         summary = self._summary_observer.summary_payload()
         payload.update(
             {
@@ -334,7 +334,7 @@ def write_dataset(
     instance_metadata: Mapping[str, Any] | None = None,
     staged_validator: Callable[[DatasetWriteReceipt], None] | None = None,
 ) -> DatasetInspection:
-    validate_dataset_spec(spec)
+    spec_payload = data_spec_payload(spec)
     final_root = Path(dataset_root)
     validate_dataset_artifact_root(final_root, spec)
     final_root = require_artifact_root(final_root)
@@ -352,11 +352,11 @@ def write_dataset(
                 chunks,
                 temp_root / "data",
                 spec=spec,
+                timestamp_column=timestamp_column_from_spec_payload(spec_payload),
                 batch_rows=DEFAULT_BATCH_ROWS,
                 key_tracker=key_tracker,
                 inventory=inventory,
             )
-            spec_payload = data_spec_payload(spec)
             write_internal_artifact_manifest(temp_root / "spec.json", spec_payload)
             payload = accumulator.payload(spec_payload=spec_payload)
             payload["schema_id"] = "qrp-dataset-manifest"
@@ -391,11 +391,11 @@ def _write_contents(
     root: Path,
     *,
     spec: DataSpec,
+    timestamp_column: str | None,
     batch_rows: int = DEFAULT_BATCH_ROWS,
     key_tracker: ExactPrimaryKeyIndex,
     inventory: DatasetSessionInventory,
 ) -> _WriteStats:
-    timestamp_column = validate_dataset_spec(spec)
     accumulator = _WriteStats(
         spec=spec, data_root=root, key_tracker=key_tracker, inventory=inventory
     )

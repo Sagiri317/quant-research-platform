@@ -6,6 +6,7 @@ import csv
 import io
 import os
 import re
+import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -19,13 +20,6 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
     require_unaliased_path,
 )
-
-MAX_LOGICAL_RECORD_BYTES = 1024 * 1024
-# Provider financial exports include optional columns beyond the normalized owner
-# mapping; keep a bounded header limit without rejecting the observed 154-column
-# balance export.
-_MAX_PROVIDER_HEADER_FIELDS = 160
-LOGICAL_RECORD_LIMIT_ERROR = "csmar_logical_record_exceeds_source_limit"
 
 
 @dataclass(frozen=True)
@@ -108,10 +102,10 @@ def _infer_dataset_from_header(columns: tuple[str, ...]) -> str:
     return matches[0]
 
 
-class _BoundedCsvRecords:
-    """Use the native CSV parser with the provider's logical source-record limit."""
+class _CsvRecords:
+    """Parse strict provider CSV records while tracking consumed bytes."""
 
-    def __init__(self, path, *, limit_bytes, expected_identity=None):
+    def __init__(self, path, *, expected_identity=None):
         try:
             identity = dataset_file_identity(path)
         except ValueError as exc:
@@ -131,10 +125,9 @@ class _BoundedCsvRecords:
             self._text = io.TextIOWrapper(
                 self._handle, encoding="utf-8-sig", newline=""
             )
-            self._limit_bytes = limit_bytes
             self._record_bytes = 0
             # The provider format permits fields above Python's default limit.
-            csv.field_size_limit(MAX_LOGICAL_RECORD_BYTES)
+            csv.field_size_limit(sys.maxsize)
             self._reader = csv.reader(self._lines(), strict=True)
         except BaseException as primary:
             try:
@@ -146,11 +139,9 @@ class _BoundedCsvRecords:
             raise
 
     def _lines(self):
-        while line := self._text.readline(self._limit_bytes + 1):
+        while line := self._text.readline():
             self._record_bytes += len(line.encode("utf-8")) + self._bom_bytes
             self._bom_bytes = 0
-            if self._record_bytes > self._limit_bytes:
-                raise ValueError(LOGICAL_RECORD_LIMIT_ERROR)
             yield line
 
     def __iter__(self):
@@ -192,12 +183,11 @@ def iter_export_csv_records(
 ) -> Iterator[tuple[list[str], int]]:
 
     def activate() -> Iterator[tuple[list[str], int]]:
-        records: _BoundedCsvRecords | None = None
+        records: _CsvRecords | None = None
         primary = None
         try:
-            records = _BoundedCsvRecords(
+            records = _CsvRecords(
                 Path(path),
-                limit_bytes=MAX_LOGICAL_RECORD_BYTES,
                 expected_identity=expected_identity,
             )
             for record in records:
@@ -261,8 +251,6 @@ def read_export_header(
 def materialize_header_record(record: list[str]) -> list[str]:
     """Materialize a legal header while preserving duplicate-header errors."""
 
-    if len(record) > _MAX_PROVIDER_HEADER_FIELDS:
-        raise ValueError("csmar_raw_export_schema_invalid")
     columns = record
     if len(columns) != len(set(columns)):
         raise ValueError("duplicate_csmar_provider_column")

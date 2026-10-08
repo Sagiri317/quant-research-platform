@@ -106,7 +106,7 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
     class FakeGzip:
         close_calls = 0
 
-        def readline(self, _size: int) -> bytes:
+        def readline(self, _size: int = -1) -> bytes:
             return b""
 
         def close(self) -> None:
@@ -359,7 +359,6 @@ def _write_run(
         "run_id": run_id,
         "recording_scope": recording_scope,
         "status": "PARTIAL",
-        "market_data_status": "PARTIAL",
         "venue": "binance",
         "symbols": list(RESEARCH_SYMBOLS),
         "market_types": market_types,
@@ -431,31 +430,24 @@ def test_replay_merge_closes_all_streams_without_collecting_retained_error(
         assert handles and all(handle.closed for handle in handles)
 
 
-@pytest.mark.parametrize(
-    ("status", "market_data_status"),
-    (("UNKNOWN", "PASS"), ("PASS", "UNKNOWN"), ("PASS", "FAIL")),
-)
-def test_run_manifest_requires_equal_known_statuses(
-    tmp_path: Path, status: str, market_data_status: str
-) -> None:
+@pytest.mark.parametrize("status", ("UNKNOWN", None, 1))
+def test_run_manifest_requires_known_status(tmp_path: Path, status) -> None:
     manifest = _write_run(
         tmp_path / "run",
         [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
     )
     manifest["status"] = status
-    manifest["market_data_status"] = market_data_status
     with pytest.raises(ValueError, match="binance_replay_run_manifest_invalid"):
         replay._validate_run_manifest(manifest)
 
 
 @pytest.mark.parametrize("status", ("PARTIAL", "FAIL"))
-def test_run_manifest_accepts_equal_known_statuses(tmp_path: Path, status: str) -> None:
+def test_run_manifest_accepts_known_status(tmp_path: Path, status: str) -> None:
     manifest = _write_run(
         tmp_path / "run",
         [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
     )
     manifest["status"] = status
-    manifest["market_data_status"] = status
     replay._validate_run_manifest(manifest)
 
 
@@ -465,7 +457,6 @@ def test_pass_manifest_requires_every_btc_eth_stream_tuple(tmp_path: Path) -> No
         [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
     )
     manifest["status"] = "PASS"
-    manifest["market_data_status"] = "PASS"
     with pytest.raises(ValueError, match="^binance_replay_run_completeness_invalid$"):
         replay._validate_run_manifest(manifest)
 
@@ -2047,16 +2038,16 @@ def test_manifest_growth_blocks_materialization_and_preserves_old_good(
     assert old_good
     manifest_path = raw_root / "run.json"
     original = filesystem_read_bytes(manifest_path)
-    read_manifest = replay.read_bounded_qrp_json
+    read_manifest = replay.read_qrp_json_file
     attempts = []
 
     def grow_after_admission(path, **options):
         if path == manifest_path:
-            attempts.append(options["max_bytes"])
+            attempts.append(options["expected_identity"].size)
             filesystem_write_bytes(path, filesystem_read_bytes(path) + b" ")
         return read_manifest(path, **options)
 
-    monkeypatch.setattr(replay, "read_bounded_qrp_json", grow_after_admission)
+    monkeypatch.setattr(replay, "read_qrp_json_file", grow_after_admission)
     rejected = research.data_materialize(**kwargs, rebuild=True)
     assert rejected["status"] == "BLOCKED"
     assert rejected["target_results"][0]["reason"] == "source_identity_invalid"
@@ -2197,5 +2188,23 @@ def test_coverage_index_rejects_invalid_complete_source(tmp_path, corruption):
             descriptor,
             markets={FUTURES_MARKET_TYPE},
             decode_interval=replay._decode_recorder_interval,
+        )
+    assert path.read_bytes() == before
+
+
+def test_obsolete_status_field_does_not_change_status_authority_or_raw(tmp_path):
+    root = tmp_path / "run"
+    manifest = _write_run(
+        root,
+        [(FUTURES_MARKET_TYPE, "agg_trades", "btcusdt@aggTrade", [_agg_trade(1)])],
+    )
+    manifest["market_data_status"] = "FAIL"
+    path = root / "run.json"
+    path.write_text(json.dumps(manifest), encoding="utf-8")
+    before = path.read_bytes()
+    with replay.open_recorder_run(root) as run:
+        assert run.manifest["status"] == "PARTIAL"
+        assert run.source_identity["manifest_hash"] == replay.canonical_json_hash(
+            manifest
         )
     assert path.read_bytes() == before

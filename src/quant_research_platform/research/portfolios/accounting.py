@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal, localcontext
 from fractions import Fraction
@@ -14,7 +14,6 @@ from scipy.stats import t as student_t
 
 from quant_research_platform.compute.dataframe.cross_section import _CorrelationMoments
 from quant_research_platform.contracts.portfolios import (
-    CONTINUOUS_EXECUTION_COLUMNS,
     PORTFOLIO_BLOCK_REASONS,
     PORTFOLIO_CASH_ASSET_ID,
     PORTFOLIO_LEDGER_COST_COLUMNS,
@@ -51,130 +50,6 @@ _LEDGER_COLUMNS = (
     "slippage_cost",
     "impact_cost",
 )
-
-
-def continuous_ledger_batch(
-    frame: pd.DataFrame, sequence: int, *, end_timestamp: pd.Timestamp
-) -> PortfolioLedgerBatch:
-    """Project the continuous execution transition into canonical economic facts."""
-    if tuple(frame.columns) != CONTINUOUS_EXECUTION_COLUMNS:
-        raise ValueError("portfolio_ledger_schema_invalid")
-    if frame.map(lambda value: isinstance(value, (bool, np.bool_))).any().any():
-        raise ValueError("portfolio_ledger_numeric_invalid")
-    trades: list[ExecutedTrade] = []
-    cashflows: list[PortfolioCashFlow] = []
-    valuations: list[PortfolioValuation] = []
-    diagnostics: list[PortfolioDiagnostic] = []
-    economic_columns = {
-        "decision_timestamp",
-        "execution_date",
-        "asset_id",
-        "pre_trade_notional",
-        "executed_delta_notional",
-        "post_trade_notional",
-        "end_notional",
-        "holding_return",
-        *PORTFOLIO_LEDGER_COST_COLUMNS,
-    }
-    for row in frame.to_dict("records"):
-        asset = str(row["asset_id"])
-        timestamp = int(pd.Timestamp(row["execution_date"]).value)
-        fill_id = None
-        delta = strict_finite_float(
-            row["executed_delta_notional"], error="portfolio_ledger_numeric_invalid"
-        )
-        if asset != PORTFOLIO_CASH_ASSET_ID and delta:
-            fill_id = f"{sequence}:{asset}"
-            trades.append(
-                ExecutedTrade(fill_id, fill_id, timestamp, asset, delta, delta)
-            )
-            cashflows.append(
-                PortfolioCashFlow(
-                    f"{fill_id}:principal",
-                    timestamp,
-                    asset,
-                    fill_id,
-                    "principal",
-                    -delta,
-                )
-            )
-        for cost in PORTFOLIO_LEDGER_COST_COLUMNS:
-            amount = strict_finite_float(
-                row[cost], error="portfolio_ledger_numeric_invalid"
-            )
-            if amount:
-                if fill_id is None:
-                    raise ValueError("portfolio_ledger_phantom_cost_invalid")
-                cashflows.append(
-                    PortfolioCashFlow(
-                        f"{fill_id}:{cost}",
-                        timestamp,
-                        asset,
-                        fill_id,
-                        cost,
-                        -amount,
-                    )
-                )
-        for phase, column in (
-            ("before", "pre_trade_notional"),
-            ("after", "post_trade_notional"),
-            ("end", "end_notional"),
-        ):
-            value = strict_finite_float(
-                row[column], error="portfolio_ledger_numeric_invalid"
-            )
-            quantity = (
-                strict_finite_float(
-                    row["post_trade_notional"], error="portfolio_ledger_numeric_invalid"
-                )
-                if phase == "end"
-                else value
-            )
-            mark = (
-                1.0
-                + strict_finite_float(
-                    row["holding_return"], error="portfolio_ledger_numeric_invalid"
-                )
-                if phase == "end"
-                else 1.0
-            )
-            valuations.append(
-                PortfolioValuation(
-                    int(end_timestamp.value) if phase == "end" else timestamp,
-                    asset,
-                    phase,
-                    quantity,
-                    value,
-                    mark,
-                )
-            )
-        diagnostics.append(
-            PortfolioDiagnostic(
-                asset,
-                fill_id,
-                "decision_timestamp",
-                text=pd.Timestamp(row["decision_timestamp"]).isoformat(),
-            )
-        )
-        for name, value in row.items():
-            if name in economic_columns or pd.isna(value):
-                continue
-            diagnostics.append(
-                PortfolioDiagnostic(
-                    asset,
-                    fill_id,
-                    name,
-                    number=strict_finite_float(
-                        value, error="portfolio_ledger_numeric_invalid"
-                    )
-                    if not isinstance(value, str)
-                    else None,
-                    text=value if isinstance(value, str) else None,
-                )
-            )
-    return PortfolioLedgerBatch(
-        sequence, tuple(trades), tuple(cashflows), tuple(valuations), tuple(diagnostics)
-    )
 
 
 class PortfolioEconomics:
@@ -520,44 +395,6 @@ class ExecutionAccounting:
     @property
     def post_trade_cash(self) -> float:
         return float(self._post_trade_cash)
-
-    @property
-    def cash_weight(self) -> float:
-        return float(self._post_trade_cash / self.nav_after)
-
-    @property
-    def target_weights(self) -> pd.Series:
-        return (
-            self._asset_ledger.set_index("asset_id")["target_notional"]
-            .div(self.nav_before)
-            .rename("target_weight")
-            .copy(deep=True)
-        )
-
-    @property
-    def total_cost(self) -> float:
-        return float(
-            self._asset_ledger.loc[:, list(PORTFOLIO_LEDGER_COST_COLUMNS)].sum().sum()
-        )
-
-    @property
-    def target_turnover(self) -> float:
-        target = self._asset_ledger["target_notional"]
-        current = self._asset_ledger["pre_trade_notional"]
-        target_cash = self.nav_before - float(target.sum())
-        current_cash = self.nav_before - float(current.sum())
-        return float(
-            0.5
-            * ((target - current).abs().sum() + abs(target_cash - current_cash))
-            / self.nav_before
-        )
-
-    @property
-    def realized_turnover(self) -> float:
-        deltas = self._asset_ledger["executed_delta_notional"]
-        return float(
-            0.5 * (deltas.abs().sum() + abs(float(deltas.sum()))) / self.nav_before
-        )
 
 
 @dataclass(frozen=True)
@@ -1263,3 +1100,77 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         / b,
         "realized_turnover": actual_turnover,
     }
+
+
+def frozen_alpha_calibration(payload, *, cutoff, selection_group):
+    """Validate the final development calibration bound to its actual group inputs."""
+    if (
+        type(payload) is not dict
+        or set(payload)
+        != {
+            "schema_id",
+            "selection_group",
+            "cutoff",
+            "upstream_identities",
+            "calibration",
+        }
+        or (
+            payload["schema_id"] != "qrp-final-alpha-calibration"
+            or payload["selection_group"] != selection_group
+            or pd.Timestamp(payload["cutoff"]) != pd.Timestamp(cutoff)
+            or (type(payload["calibration"]) is not dict)
+            or (
+                set(payload["calibration"])
+                != {field.name for field in fields(AlphaCalibration)}
+            )
+        )
+    ):
+        raise ValueError("holdout_alpha_calibration_binding_invalid")
+    values = payload["calibration"]
+    calibration = AlphaCalibration(**values)
+    if calibration.status != "DEFINED":
+        raise PortfolioTargetBlocked("holdout_alpha_calibration_undefined")
+    if calibration.valid_rebalance_dates < 6 or calibration.coverage < 0.8:
+        raise PortfolioTargetBlocked("holdout_alpha_calibration_insufficient")
+    required = ("slope", "intercept", "slope_standard_error", "coverage")
+    if any(
+        type(values[name]) not in {int, float} or not np.isfinite(values[name])
+        for name in required
+    ):
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    if (
+        calibration.slope_standard_error < 0
+        or not 0 <= calibration.coverage <= 1
+        or type(calibration.valid_rebalance_dates) is not int
+        or (type(calibration.scheduled_rebalance_dates) is not int)
+        or (calibration.scheduled_rebalance_dates < calibration.valid_rebalance_dates)
+    ):
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    optional = (
+        "slope_t_statistic",
+        "slope_pvalue",
+        "slope_ci_low",
+        "slope_ci_high",
+        "weighted_r2",
+    )
+    if any(
+        values[name] is not None
+        and (type(values[name]) not in {int, float} or not np.isfinite(values[name]))
+        for name in optional
+    ):
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    if (
+        (calibration.slope_standard_error == 0)
+        != (calibration.slope_t_statistic is None)
+        or len({values[name] is None for name in optional[:4]}) != 1
+        or (
+            calibration.slope_pvalue is not None
+            and (not 0 <= calibration.slope_pvalue <= 1)
+        )
+        or (
+            calibration.slope_ci_low is not None
+            and calibration.slope_ci_low > calibration.slope_ci_high
+        )
+    ):
+        raise ValueError("holdout_alpha_calibration_statistics_invalid")
+    return (calibration, payload["cutoff"])

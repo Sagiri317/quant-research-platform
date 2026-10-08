@@ -126,7 +126,8 @@ def test_fama_macbeth_unrepresentable_slope_stays_explicit():
 def test_linear_training_large_target_retains_representable_coefficients():
     from quant_research_platform.contracts.models import ModelSpec
     from quant_research_platform.research.models.fitting import (
-        _fit_linear_model_result_from_frames,
+        _collect_training_frame,
+        _fit_linear_model_result,
         validate_model_state,
     )
 
@@ -147,8 +148,8 @@ def test_linear_training_large_target_retains_representable_coefficients():
         input_factor_columns=("x",),
         label_column="y",
     )
-    result = _fit_linear_model_result_from_frames(
-        (frame,), spec, fitting_cutoff="2020-01-03"
+    result = _fit_linear_model_result(
+        _collect_training_frame((frame,), spec, fitting_cutoff="2020-01-03"), spec
     )
     validate_model_state(result.prediction_model, result.metadata)
     assert np.isfinite(result.prediction_model.coefficients).all()

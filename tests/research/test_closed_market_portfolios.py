@@ -25,6 +25,9 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     prepare_trade_cost,
     require_fee_coverage,
 )
+from quant_research_platform.markets.implementations.a_share.processed import (
+    producer as market_sessions,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.portfolios import production
 from quant_research_platform.research.portfolios.diagnostics import (
@@ -313,6 +316,7 @@ def _ledger(layout, roots):
         ),
     )
     return production.build_portfolio_ledger(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         candidate=candidate,
         layout=layout,
         upstream_identities={**dict.fromkeys(roots, "a" * 64), "prediction": "b" * 64},
@@ -442,6 +446,7 @@ def test_closed_market_ledger_reopens_on_current_target_and_keeps_native_endpoin
     }
     assert list(saved.iter_chunks()) == chunks
     inputs = iter_holding_factor_inputs(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         layout=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
@@ -498,7 +503,7 @@ def test_closed_calendar_rejects_real_activity_even_in_future_source(tmp_path):
     layout, _roots, calendar, _panel = _native_inputs(
         tmp_path, fault="actual_activity_on_closed"
     )
-    source = production._iter_portfolio_sessions(
+    source = market_sessions.iter_portfolio_sessions(
         layout=layout,
         panel_root=layout.target_root("market_panel_1d", None),
         panel_columns=production._PANEL_COLUMNS,
@@ -514,6 +519,7 @@ def test_identified_open_factor_domain_does_not_invent_closed_exposures(tmp_path
 
     layout, _roots, calendar, _panel = _native_inputs(tmp_path, open_assets=24)
     source = iter_holding_factor_inputs(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         layout=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
@@ -573,6 +579,7 @@ def test_union_session_keeps_closed_holdings_without_any_raw_asset_rows(tmp_path
         for trade in chunks[3].trades
     )
     stream = iter_holding_factor_inputs(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         layout=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
@@ -593,6 +600,7 @@ def test_closed_endpoints_do_not_hide_missing_decision_risk_facts(tmp_path):
         tmp_path, fault="missing_decision_industry", open_assets=24
     )
     source = iter_holding_factor_inputs(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         layout=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),
@@ -642,6 +650,7 @@ def test_confirmed_suspension_rows_remain_in_real_factor_pair_domain(tmp_path):
         ]
         assert len(suspended) == 2 and suspended[value_column].eq(expected).all()
     source = iter_holding_factor_inputs(
+        iter_portfolio_sessions=market_sessions.iter_portfolio_sessions,
         layout=layout,
         calendar=calendar,
         time_window=TimeWindow("2022-12-30", "2023-01-06"),

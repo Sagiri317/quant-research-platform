@@ -16,18 +16,18 @@ from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
 from quant_research_platform.contracts.models import ModelSpec
+from quant_research_platform.contracts.portfolios import _portfolio_session_frame
 from quant_research_platform.contracts.predictions import PredictionSpec
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research import statistics_production
 from quant_research_platform.research.features.transforms import (
     apply_feature_transforms,
-    canonical_feature_transforms,
+    feature_transforms,
     model_input_validity_columns,
 )
 from quant_research_platform.research.portfolios.production import (
     _DATASET_COLUMNS,
     _prediction_alpha,
-    _session_frame,
 )
 from quant_research_platform.research.predictions import runner
 from quant_research_platform.research.protocols import a_share
@@ -69,11 +69,7 @@ def test_transform_prediction_publication_and_consumers_share_exact_validity(
     )
     raw.loc[count - 2, "x"] = np.nan
     raw.loc[count - 1, "log_float_market_cap"] = np.nan
-    frame = (
-        apply_feature_transforms(raw, canonical_feature_transforms(("x",)))
-        .iloc[-4:]
-        .copy()
-    )
+    frame = apply_feature_transforms(raw, feature_transforms(("x",))).iloc[-4:].copy()
     assert frame.feature_x.notna().sum() == 3
     expected = (
         frame.asset_id.tolist()
@@ -93,7 +89,7 @@ def test_transform_prediction_publication_and_consumers_share_exact_validity(
         data_id="fixture",
         factor_columns=("x",),
         feature_columns=("feature_x", "feature_missing_x", "feature_observed_x"),
-        feature_transforms=canonical_feature_transforms(("x",)),
+        feature_transforms=feature_transforms(("x",)),
         label_columns=("forward_return_20d", "forward_return_20d_available_at"),
         filter_columns=("eligible",),
         context_columns=("float_market_cap",),
@@ -161,7 +157,7 @@ def test_transform_prediction_publication_and_consumers_share_exact_validity(
     )
     assert lookup.row_count == len(expected) - int(missing_required)
     validity = model_input_validity_columns(spec.input_columns, algorithm)
-    session = _session_frame(
+    session = _portfolio_session_frame(
         frame, tuple(dict.fromkeys((*_DATASET_COLUMNS, *validity)))
     )
     if missing_required:

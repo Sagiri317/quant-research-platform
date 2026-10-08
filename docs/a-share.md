@@ -1194,9 +1194,13 @@ fit、持久化、reload、transform 和 predict 共用 ModelMatrixScaler。
 
 缩放器的加权均值/标准差使用精确的最终训练样本权重。
 
-ResearchDataset只有一个可执行feature-pipeline真值：持久化的 `a_share_canonical` transform。
-它执行 `eligible → MAD winsor → industry+size neutralize → population zscore → missing/observed encoding`；
-assembler不根据scenario绕过此合同。Crypto不接入该横截面流程。
+ResearchDataset 的特征处理只接受一个具名配方，持久化 `recipe_id` 与 `source_columns`，
+输出字段由同一合同派生，不保留自由组合 DSL。A 股配置 `feature_recipe` 默认为 `a_share_canonical`，
+执行 `eligible → MAD winsor → industry+size neutralize → population zscore → missing/observed encoding`。
+独立稳健性配置 `a_share_quantile_1_99` 只将缩尾替换为固定 1%/99% 分位点，后续处理一致；
+它保留单项诊断，但排除正式联合推断，原因 `feature_recipe_robustness_excluded`。
+两个配方均按完整截面执行，原始因子不改写；assembler 不根据 scenario 绕过合同。
+Crypto 不接入该横截面流程。
 
 EWMA先扣除当前有效观测的共同最小年龄再归一化；缺失最新session不抹掉有效历史。极小半衰期下，尾部质量保留到乘上收益或残差平方之后，只对最终风险值做float64舍入；真实不可表示风险明确失败。
 FactorRiskConfig唯一拥有风险窗口、半衰期、最小观测、diagonal shrinkage、annualization与weighting；
@@ -1327,8 +1331,16 @@ RF / XGB -> 更浅 / 更保守的配置
 每个候选的原始预测成员同时保存真实键、label、label_available_at 和 score_eligible。
 score_eligible 只表示共同评分资格；成员保留该候选自身合法的经济预测行，不能将其裁成共同域。
 选择元数据绑定精确预测成员、标签数据集身份、cutoff、共同域 semantic_identity 和 row_count。
-生产评分逐日期核对 PK；读回重新执行成熟过滤、覆盖和得分核对，行数相同不代表覆盖相同。
-季度候选元数据、各组各次选择和最终模型元数据分别持久化，顶层仅保存唯一索引；不扩大 JSON 上限。
+生产评分和发布验收逐日期核对 PK、成熟域、得分与选择结论；行数相同不代表覆盖相同。
+普通 reader 核对全部成员内容身份、冻结引用、候选顺序、预测成员、截止和 trial 父引用，
+不重算已由可信发布者验证的选择成绩，也不预加载每个模型；实际预测加载仍验证模型状态。
+此合同不声称识别恶意发布者同时改写结果并重新计算全部哈希的伪造。
+季度候选元数据、各组各次选择和最终模型元数据分别持久化，顶层仅保存唯一索引。
+每个候选同时输出每日 RankIC 的总体标准差（ddof=0）、ICIR、正值率、有效日期数及共同样本数；
+ICIR 为每日均值除以该标准差，不年化；零方差和不可表示结果保留未定义。
+同 family/fold 只准备一次真实训练域，各候选拟合使用隔离副本。G/Q 选择同一配置、
+训练窗、权重、种子与后端事实时，只实际 refit 一次，两个选择引用共享模型成员及 trial；
+不同选择分别拟合，不伪造第二次 attempted 或训练成本。
 共同域只约束比较，不裁剪完整预测或经济账本；无法解释的预测漏行不得用于缩小比较域。
 
 RankIC 为负的优胜模型仍是有效协议结果；不得因结果差而重新调参。
@@ -1981,7 +1993,9 @@ Hansen SPA 与 StepM 是正式诊断；MCS 仅用于稳健性。
 
 单因子回归分别运行；多因子回归仅使用 CORE。
 
-每日带截距等权 OLS；系数时间序列使用 HAC lag19。
+每日分别执行带截距等权 OLS 与总市值加权 WLS；权重为 `total_market_cap`，不是流通市值。
+缺市值只退出加权回归，非法非正权重明确失败。回归 ID 以 `equal:` / `total_market_cap:`
+区分两套结果；单因子与 CORE 多因子均保留。系数时间序列使用 HAC lag19。
 HAC lag19 为协议固定统计参数，不随主标签期限自动缩短。
 
 开发和留出区间保持分离。

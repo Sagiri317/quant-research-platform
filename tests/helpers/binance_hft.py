@@ -130,7 +130,6 @@ def write_hft_funding_fixture(
             for _row in iter_csv_snapshot(
                 root,
                 expected_manifest=manifest,
-                max_bytes=1024 * 1024,
             ):
                 pass
 
@@ -139,7 +138,6 @@ def write_hft_funding_fixture(
             columns=FUNDING_COLUMNS,
             rows=rows,
             metadata=metadata,
-            max_bytes=1024 * 1024,
             validate=validate,
         )
 
@@ -454,7 +452,6 @@ def write_binance_hft_run(
         "run_id": "workflow-run",
         "recording_scope": FUTURES_HFT_RECORDING_SCOPE,
         "status": "PASS",
-        "market_data_status": "PASS",
         "venue": "binance",
         "symbols": list(RESEARCH_SYMBOLS),
         "market_types": [FUTURES_MARKET_TYPE],

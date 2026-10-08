@@ -115,9 +115,9 @@ def test_derivative_independent_state_survives_execution_boundary(
     )
 
 
-@pytest.mark.parametrize(
-    "factor",
-    [
+@pytest.mark.parametrize("batch", [3, 53])
+def test_finite_final_ratios_from_persisted_extreme_panel(tmp_path, batch):
+    factors = (
         "top10_depth_per_spread",
         "near_depth_share_1_10",
         "trade_flow_imbalance_100ms",
@@ -129,10 +129,7 @@ def test_derivative_independent_state_survives_execution_boundary(
         "depth_normalized_ofi_5s",
         "taker_buy_pressure_500ms",
         "taker_sell_pressure_500ms",
-    ],
-)
-@pytest.mark.parametrize("batch", [3, 53])
-def test_finite_final_ratios_from_persisted_extreme_panel(tmp_path, factor, batch):
+    )
     frames = _panel(end=5100, batch=batch, extreme=True)
     for frame in frames:
         # Persisted absolute inputs are finite; only their sums exceed float range.
@@ -142,28 +139,29 @@ def test_finite_final_ratios_from_persisted_extreme_panel(tmp_path, factor, batc
         frame["observed_signed_trade_volume_100ms"] = 4e307
         frame["trade_volume_100ms"] = 1.2e308
     panel = _persist(tmp_path / "panel", "binance_futures_l2_panel_100ms", frames)
-    result = pd.concat(
-        iter_factor_frames(
-            (panel.iloc[i : i + batch] for i in range(0, len(panel), batch)),
-            columns=(factor,),
-        ),
-        ignore_index=True,
-    )
-    if factor == "top10_depth_per_spread":
-        expected = 2e307
-    elif factor == "near_depth_share_1_10":
-        expected = 1.0
-    elif factor.startswith("trade_flow"):
-        expected = float(Fraction(4e307) / (Fraction(8e307) + Fraction(4e307)))
-    elif factor.startswith("depth_normalized"):
-        n = {"500ms": 5, "1s": 10, "5s": 50}[factor.rsplit("_", 1)[1]]
-        expected = float(n * Fraction(8e307) / (2 * Fraction(1e308)))
-    elif factor == "taker_buy_pressure_500ms":
-        expected = float(5 * Fraction(8e307) / Fraction(1e308))
-    else:
-        expected = float(5 * Fraction(4e307) / Fraction(1e308))
-    assert np.isfinite(result[factor].iloc[-1])
-    assert result[factor].iloc[-1] == expected
+    for factor in factors:
+        result = pd.concat(
+            iter_factor_frames(
+                (panel.iloc[i : i + batch] for i in range(0, len(panel), batch)),
+                columns=(factor,),
+            ),
+            ignore_index=True,
+        )
+        if factor == "top10_depth_per_spread":
+            expected = 2e307
+        elif factor == "near_depth_share_1_10":
+            expected = 1.0
+        elif factor.startswith("trade_flow"):
+            expected = float(Fraction(4e307) / (Fraction(8e307) + Fraction(4e307)))
+        elif factor.startswith("depth_normalized"):
+            n = {"500ms": 5, "1s": 10, "5s": 50}[factor.rsplit("_", 1)[1]]
+            expected = float(n * Fraction(8e307) / (2 * Fraction(1e308)))
+        elif factor == "taker_buy_pressure_500ms":
+            expected = float(5 * Fraction(8e307) / Fraction(1e308))
+        else:
+            expected = float(5 * Fraction(4e307) / Fraction(1e308))
+        assert np.isfinite(result[factor].iloc[-1])
+        assert result[factor].iloc[-1] == expected
 
 
 @pytest.mark.parametrize("half_life", [0.0005, 0.001])

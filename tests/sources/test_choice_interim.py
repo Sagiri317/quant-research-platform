@@ -111,7 +111,6 @@ def test_financial_css_rejects_ctr_report_type_without_remapping(tmp_path, extra
             ),
             "synthetic-official-shape",
             date(2025, 12, 31),
-            1024 * 1024,
         )
         session.fetch(layout, request)
     before = _file_hashes(layout.raw_source_root("choice"))
@@ -337,7 +336,7 @@ def test_unfetched_field_is_blocked_and_other_coordinates_cannot_fill_it(
     tmp_path, financial, foreign
 ):
     layout = StorageLayout(tmp_path)
-    fields = FIELDS if financial else DATE_FIELDS
+    fields = tuple(FINANCIAL_FIELDS["financial_balance"]) if financial else DATE_FIELDS
     values = [None] * len(fields) if financial else ["2020/1/30", None, None]
     data_id = "financial_balance" if financial else "financial_first_disclosure"
     day = "2020-01-30" if financial else "2025-12-31"
@@ -817,7 +816,7 @@ def test_raw_mutation_before_publish_preserves_old_good(
     assert before == _file_hashes(good_root)
 
 
-def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identity(
+def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
     tmp_path, monkeypatch
 ):
     layout = StorageLayout(tmp_path)
@@ -833,7 +832,7 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
 
     monkeypatch.setattr(interim, "_raw_index", observed_index)
     good = interim.materialize_interim_data(layout=layout)
-    assert opened == [True, False]
+    assert opened == [*FINANCIAL_FIELDS, "financial_first_disclosure"]
     before = {
         root / relative: digest
         for root in good.artifact_roots.values()
@@ -860,12 +859,17 @@ def test_bulk_import_reuses_only_adjacent_mode_index_and_keeps_published_identit
         return result
 
     monkeypatch.setattr(interim, "write_dataset", mutate_after_first_publication)
-    with pytest.raises(ValueError, match="choice_raw_identity_changed"):
+    with pytest.raises(ValueError, match="raw_csv_content_invalid"):
         interim.materialize_interim_data(
             layout=candidate, raw_root=layout.raw_source_root("choice")
         )
     assert published == ["financial_balance"]
-    assert opened == [True, False, True]
+    assert opened == [
+        *FINANCIAL_FIELDS,
+        "financial_first_disclosure",
+        "financial_balance",
+        "financial_income",
+    ]
     assert not filesystem_exists(
         candidate.interim_data_root("choice", "financial_income")
     )
@@ -967,7 +971,7 @@ def test_choice_fatal_io_is_not_source_blocked(tmp_path, monkeypatch, error, bou
         raise error
 
     if boundary == "metadata":
-        monkeypatch.setattr(interim, "read_bounded_qrp_json", fail)
+        monkeypatch.setattr(interim, "read_qrp_json_file", fail)
     else:
         original = interim.filesystem_scandir
 
@@ -1049,3 +1053,29 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
     assert frame.total_assets.tolist() == [100.0, 200.0]
     assert frame.correction_disclosure_date.iloc[1] == pd.Timestamp("2020-02-01")
     assert all((_file_hashes(root) == old_hashes[name] for name, root in roots.items()))
+
+
+def test_financial_tables_only_require_their_own_fields(tmp_path):
+    layout = StorageLayout(tmp_path)
+    balance_fields = tuple(FINANCIAL_FIELDS["financial_balance"])
+    with choice_session(SDK(response())) as session:
+        _disclosure(session, layout)
+        _snapshot(
+            session,
+            layout,
+            "2020-01-30",
+            [100.0] * len(balance_fields),
+            fields=balance_fields,
+        )
+    before = _file_hashes(layout.raw_source_root("choice"))
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=("financial_balance",)
+    )
+    frame = _read(result)["financial_balance"]
+    assert len(frame) == 1 and frame.total_assets.iloc[0] == 100.0
+    for data_id in ("financial_income", "financial_cashflow"):
+        with pytest.raises(
+            PortfolioTargetBlocked, match="choice_first_disclosure_snapshot_missing"
+        ):
+            interim.materialize_interim_data(layout=layout, data_ids=(data_id,))
+    assert _file_hashes(layout.raw_source_root("choice")) == before

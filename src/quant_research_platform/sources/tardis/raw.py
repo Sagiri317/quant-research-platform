@@ -23,9 +23,6 @@ from quant_research_platform.contracts.order_book import (
     validate_price_unit,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.runtime.resources import (
-    require_free_disk_headroom,
-)
 from quant_research_platform.sources.binance.ids import (
     FUTURES_MARKET_TYPE,
     SPOT_MARKET_TYPE,
@@ -51,7 +48,6 @@ from quant_research_platform.storage.identity import (
     open_filesystem_file,
     require_unaliased_path,
 )
-from quant_research_platform.storage.raw_snapshots import MAX_RECORD_BYTES
 
 SCHEMA_ID = "qrp-tardis-native-archive"
 EXCHANGE = "binance-futures"
@@ -270,11 +266,11 @@ def iter_native_slice(
         number = 0
         while True:
             line = value = payload = native = parts = timestamp = None
-            line = stream.readline(MAX_RECORD_BYTES + 1)
+            line = stream.readline()
             if not line:
                 return
             number += 1
-            if len(line) > MAX_RECORD_BYTES or not line.endswith(b"\n"):
+            if not line.endswith(b"\n"):
                 raise ValueError("tardis_native_record_invalid")
             if line in (b"\n", b"\r\n"):
                 _yield_value = (number, None, None)
@@ -451,7 +447,6 @@ def _publish_slices(
     *,
     offset_minutes,
     slice_count,
-    byte_budget,
     exchange,
     symbols,
     channels,
@@ -466,8 +461,6 @@ def _publish_slices(
         or slice_count <= 0
     ):
         raise ValueError("tardis_slice_range_invalid")
-    if type(byte_budget) is not int or byte_budget <= 0:
-        raise ValueError("tardis_download_budget_invalid")
     for offset in range(
         offset_minutes, offset_minutes + slice_count * SLICE_MINUTES, SLICE_MINUTES
     ):
@@ -477,9 +470,7 @@ def _publish_slices(
             )
 
     def write(root):
-        require_free_disk_headroom(root, reserve_bytes=byte_budget)
         members = []
-        remaining = byte_budget
         decimal_places = {}
         snapshot_limits = {}
         gap_count = interval_count = 0
@@ -487,7 +478,6 @@ def _publish_slices(
         interval_path = root / "observation_intervals.jsonl.gz"
 
         def write_row(handle, row):
-            require_free_disk_headroom(root, reserve_bytes=4096)
             handle.write(json.dumps(row, separators=(",", ":")) + "\n")
 
         observe_trade = native_trade_identities()
@@ -513,14 +503,10 @@ def _publish_slices(
                     open_slice(offset) as response,
                     closing_iterator(open_filesystem_file(target, "xb")) as output,
                 ):
-                    while block := response.read(min(_COPY_BYTES, remaining + 1)):
-                        if len(block) > remaining:
-                            raise ValueError("tardis_download_budget_exceeded")
-                        require_free_disk_headroom(root, reserve_bytes=len(block))
+                    while block := response.read(_COPY_BYTES):
                         output.write(block)
                         digest.update(block)
                         size += len(block)
-                        remaining -= len(block)
                     block = None
                     output.flush()
                     os.fsync(output.fileno())
@@ -658,7 +644,6 @@ def import_slices(
     date: str,
     slices: Sequence[Path],
     offset_minutes: int = 0,
-    byte_budget: int,
     exchange=EXCHANGE,
     symbols=SYMBOLS,
     channels=CHANNELS,
@@ -674,7 +659,6 @@ def import_slices(
         open_slice,
         offset_minutes=offset_minutes,
         slice_count=len(slices),
-        byte_budget=byte_budget,
         exchange=exchange,
         symbols=symbols,
         channels=channels,
@@ -687,7 +671,6 @@ def download_slices(
     date: str,
     slice_count: int,
     offset_minutes: int = 0,
-    byte_budget: int,
     api_key: str | None = None,
     exchange=EXCHANGE,
     symbols=SYMBOLS,
@@ -735,7 +718,6 @@ def download_slices(
         open_slice,
         offset_minutes=offset_minutes,
         slice_count=slice_count,
-        byte_budget=byte_budget,
         exchange=exchange,
         symbols=symbols,
         channels=channels,

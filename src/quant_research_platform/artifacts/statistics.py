@@ -507,13 +507,15 @@ _ARROW_SCHEMAS = {
     ),
 }
 STATISTICS_TABLE_GROUPS = {
-    "research": (
+    "factor": (
         "factor_diagnostics.parquet",
+        "fama_macbeth.parquet",
+        "fama_macbeth_periods.parquet",
+    ),
+    "research": (
         "prediction_diagnostics.parquet",
         "model_trials.parquet",
         "robustness.parquet",
-        "fama_macbeth.parquet",
-        "fama_macbeth_periods.parquet",
         "model_losses.parquet",
         "model_comparison.parquet",
         "model_group_comparison.parquet",
@@ -578,6 +580,7 @@ STATISTICS_TABLE_COLUMNS = _TABLE_COLUMNS
 
 @dataclass(frozen=True, slots=True)
 class StatisticsArtifact:
+    envelope: dict
     root: Path
     identity: str
     _members: Mapping[str, object]
@@ -715,7 +718,7 @@ def write_statistics_artifact(
                 )
 
     def validate(staging, members):
-        artifact = _statistics_artifact(staging, envelope.instance_identity, members)
+        artifact = _statistics_artifact(staging, envelope.payload(), members)
         validate_tables(artifact, envelope.payload())
 
     return write_semantic_artifact(
@@ -726,7 +729,7 @@ def write_statistics_artifact(
     )
 
 
-def _statistics_artifact(root, identity, members, member_identities=None):
+def _statistics_artifact(root, envelope, members, member_identities=None):
     by_path = {str(member.get("path")): member for member in members}
     if not any(
         set(by_path) == set(group) for group in STATISTICS_TABLE_GROUPS.values()
@@ -751,8 +754,9 @@ def _statistics_artifact(root, identity, members, member_identities=None):
             identities[member] = physical
             row_counts[member] = count
     return StatisticsArtifact(
+        envelope=envelope,
         root=root,
-        identity=identity,
+        identity=envelope["instance_identity"],
         _members=MappingProxyType(by_path),
         _identities=MappingProxyType(identities),
         _row_counts=MappingProxyType(row_counts),
@@ -773,9 +777,7 @@ def read_statistics_artifact(
         member_identities=identities,
         expected_member_identities=expected_member_identities,
     )
-    artifact = _statistics_artifact(
-        Path(instance_root), expected_identity, members, identities
-    )
+    artifact = _statistics_artifact(Path(instance_root), envelope, members, identities)
     if set(artifact._members) == set(
         STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]
     ):
@@ -826,7 +828,8 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
     if result.empty and member not in _EMPTY_TABLE_MEMBERS:
         raise ValueError("statistics_table_empty")
     if (
-        member in STATISTICS_TABLE_GROUPS["research"]
+        member
+        in (*STATISTICS_TABLE_GROUPS["research"], *STATISTICS_TABLE_GROUPS["factor"])
         and member != "model_group_comparison.parquet"
     ):
         if not result.status.isin(("DEFINED", "UNDEFINED")).all():

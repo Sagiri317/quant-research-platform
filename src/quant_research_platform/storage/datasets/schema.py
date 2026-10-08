@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
+from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
 from types import MappingProxyType
@@ -27,18 +28,14 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.features import (
-    FEATURE_TRANSFORMS,
-    FILLNA_POLICIES,
     FeatureTransformSpec,
-    validated_winsorize_quantiles,
 )
 from quant_research_platform.contracts.ids import MarketId, SourceId
 from quant_research_platform.contracts.json_codec import (
-    _MAX_NESTING_DEPTH,
-    bounded_qrp_json_object_snapshot,
     canonical_identity_bytes,
     canonical_json_hash,
     parse_qrp_json_object,
+    qrp_json_object_snapshot,
     render_qrp_json_object,
 )
 from quant_research_platform.storage.datasets.paths import (
@@ -53,52 +50,6 @@ _DATASET_INSTANCE_METADATA_ALLOWED_KEYS = frozenset(
         "source_artifact_identity",
         "producer_diagnostics",
         COMMON_MANIFEST_METADATA_KEY,
-    }
-)
-_DATASET_MANIFEST_RESERVED_KEYS = frozenset(
-    {
-        "data_id",
-        "frequency",
-        "grain",
-        "primary_key",
-        "partition_columns",
-        "required_columns",
-        "column_roles",
-        "source_id",
-        "market_id",
-        "kind",
-        "source_input_data_ids",
-        "processed_input_data_ids",
-        "parameters",
-        "input_data_ids",
-        "base_input_data_id",
-        "factor_columns",
-        "feature_columns",
-        "feature_transforms",
-        "label_columns",
-        "filter_columns",
-        "context_columns",
-        "key_coverage",
-        "row_count",
-        "file_count",
-        "file_size_bytes",
-        "content_hash",
-        "columns",
-        "physical_schema",
-        "schema_hash",
-        "logical_dtypes",
-        "logical_dtype_hash",
-        "partition_row_counts",
-        "partition_count",
-        "partitions",
-        "date_min",
-        "date_max",
-        "null_count_summary",
-        "non_finite_count_summary",
-        "duplicate_primary_key_count",
-        "factor_nan_profile",
-        "label_nan_profile",
-        "validation_status",
     }
 )
 _DATASET_INPUT_IDENTITY_KEYS = frozenset({"data_id", "manifest_hash", "spec_hash"})
@@ -168,6 +119,9 @@ _DATASET_MANIFEST_RUNTIME_KEYS = frozenset(
         "validation_status",
     }
 )
+_DATASET_MANIFEST_RESERVED_KEYS = frozenset.union(
+    _DATASET_MANIFEST_RUNTIME_KEYS, *_DATASET_SPEC_VARIANT_KEYS, {"spec_identity"}
+)
 _LOWER_HEX = frozenset("0123456789abcdef")
 
 
@@ -195,9 +149,7 @@ def merge_dataset_instance_metadata(
         elif key == "source_artifact_identity":
             metadata[key] = _validate_source_artifact_identity(value)
         elif key == "producer_diagnostics":
-            metadata[key] = bounded_qrp_json_object_snapshot(
-                value, max_bytes=1024 * 1024
-            )
+            metadata[key] = qrp_json_object_snapshot(value)
         elif key == COMMON_MANIFEST_METADATA_KEY:
             metadata[key] = validate_business_manifest_envelope(value)
     result.update(metadata)
@@ -334,9 +286,7 @@ def validate_dataset_manifest_instance_metadata(
     if "source_artifact_identity" in manifest:
         _validate_source_artifact_identity(manifest["source_artifact_identity"])
     if "producer_diagnostics" in manifest:
-        bounded_qrp_json_object_snapshot(
-            manifest["producer_diagnostics"], max_bytes=1024 * 1024
-        )
+        qrp_json_object_snapshot(manifest["producer_diagnostics"])
     if COMMON_MANIFEST_METADATA_KEY in manifest:
         envelope = validate_business_manifest_envelope(
             manifest[COMMON_MANIFEST_METADATA_KEY]
@@ -392,25 +342,20 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
     if spec.partition_columns not in {("year",), ()}:
         raise ValueError("unsupported_partitioning")
     _validate_dataset_spec_variant(spec)
-    invalid_key_roles = [
-        column
-        for column in primary_key
-        if spec.column_roles.get(column) not in {ColumnRole.KEY, ColumnRole.TIMESTAMP}
-    ]
-    if invalid_key_roles:
-        raise ValueError(f"invalid_primary_key_roles: {', '.join(invalid_key_roles)}")
-    timestamp_columns = [
-        column
-        for column in primary_key
-        if spec.column_roles[column] is ColumnRole.TIMESTAMP
-    ]
-    if spec.partition_columns == ():
-        if timestamp_columns:
-            raise ValueError("unpartitioned_data_must_not_use_timestamp_key")
-        return None
-    if len(timestamp_columns) != 1:
-        raise ValueError("invalid_timestamp_primary_key")
-    return timestamp_columns[0]
+    try:
+        replace(spec)
+    except (TypeError, ValueError) as exc:
+        if type(spec) is ResearchDatasetSpec:
+            raise ValueError("dataset_research_spec_invalid") from exc
+        raise
+    return next(
+        (
+            column
+            for column in spec.primary_key
+            if spec.column_roles[column] is ColumnRole.TIMESTAMP
+        ),
+        None,
+    )
 
 
 def _validate_dataset_spec_variant(spec: DataSpec) -> None:
@@ -467,60 +412,13 @@ def _validate_dataset_spec_variant(spec: DataSpec) -> None:
         )
     ):
         raise ValueError("dataset_key_coverage_invalid")
-    try:
-        ResearchDatasetSpec(
-            data_id=spec.data_id,
-            frequency=spec.frequency,
-            grain=spec.grain,
-            column_roles=dict(spec.column_roles),
-            primary_key=tuple(spec.primary_key),
-            partition_columns=tuple(spec.partition_columns),
-            market_id=spec.market_id,
-            input_data_ids=tuple(spec.input_data_ids),
-            base_input_data_id=spec.base_input_data_id,
-            factor_columns=tuple(spec.factor_columns),
-            feature_columns=tuple(spec.feature_columns),
-            feature_transforms=tuple(spec.feature_transforms),
-            label_columns=tuple(spec.label_columns),
-            filter_columns=tuple(spec.filter_columns),
-            context_columns=tuple(spec.context_columns),
-            key_coverage=dict(spec.key_coverage),
-        )
-    except (TypeError, ValueError) as exc:
-        raise ValueError("dataset_research_spec_invalid") from exc
 
 
 def _validate_runtime_feature_transform(value: object) -> None:
     if type(value) is not FeatureTransformSpec:
         raise ValueError("dataset_feature_transforms_invalid")
-    _require_runtime_string(value.transform_id, "dataset_feature_transforms_invalid")
-    _require_runtime_string_tuple(
-        value.source_columns, "dataset_feature_transforms_invalid", allow_empty=False
-    )
-    _require_runtime_string_tuple(
-        value.output_columns, "dataset_feature_transforms_invalid", allow_empty=False
-    )
-    if type(value.transform) is not str or value.transform not in FEATURE_TRANSFORMS:
-        raise ValueError("dataset_feature_transforms_invalid")
-    if (
-        type(value.fillna_policy) is not str
-        or value.fillna_policy not in FILLNA_POLICIES
-    ):
-        raise ValueError("dataset_feature_transforms_invalid")
     try:
-        quantiles = (
-            None
-            if value.winsorize_quantiles is None
-            else validated_winsorize_quantiles(value.winsorize_quantiles)
-        )
-        FeatureTransformSpec(
-            transform_id=value.transform_id,
-            source_columns=tuple(value.source_columns),
-            transform=value.transform,
-            output_columns=tuple(value.output_columns),
-            winsorize_quantiles=quantiles,
-            fillna_policy=value.fillna_policy,
-        )
+        FeatureTransformSpec(value.recipe_id, value.source_columns)
     except (TypeError, ValueError) as exc:
         raise ValueError("dataset_feature_transforms_invalid") from exc
 
@@ -916,16 +814,6 @@ def _typed_category_value_payload(value: object) -> dict[str, Any]:
             raise ValueError("dataset_categorical_value_invalid")
         if value.is_zero():
             value = Decimal(0)
-        from quant_research_platform.contracts.json_codec import MAX_QRP_JSON_BYTES
-
-        sign, digits, exponent = value.as_tuple()
-        size = sign + (
-            len(digits) + exponent
-            if exponent >= 0
-            else max(len(digits), 1 - exponent) + 1
-        )
-        if size > MAX_QRP_JSON_BYTES:
-            raise ValueError("dataset_logical_dtype_metadata_exceeds_payload_target")
         return {"type": "decimal", "value": format(value, "f")}
     if type(value) is date and type(value) is not datetime:
         return {"type": "date", "value": value.isoformat()}
@@ -1133,14 +1021,8 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
 
 def _feature_transform_payload(transform: FeatureTransformSpec) -> dict[str, Any]:
     return {
-        "transform_id": transform.transform_id,
+        "recipe_id": transform.recipe_id,
         "source_columns": list(transform.source_columns),
-        "transform": transform.transform,
-        "output_columns": list(transform.output_columns),
-        "winsorize_quantiles": None
-        if transform.winsorize_quantiles is None
-        else list(transform.winsorize_quantiles),
-        "fillna_policy": transform.fillna_policy,
     }
 
 
@@ -1205,15 +1087,13 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
         "partition_columns": tuple(partition_columns),
     }
     if keys == _DATASET_SPEC_BASE_KEYS:
-        validate_dataset_spec(DataSpec(**common_kwargs))
+        DataSpec(**common_kwargs)
         return
     if keys == _DATASET_SPEC_INTERIM_KEYS:
         source_id = _require_nonempty_string(
             spec.get("source_id"), "dataset_source_id_invalid"
         )
-        validate_dataset_spec(
-            InterimDataSpec(**common_kwargs, source_id=SourceId(source_id))
-        )
+        InterimDataSpec(**common_kwargs, source_id=SourceId(source_id))
         return
     if keys == _DATASET_SPEC_PROCESSED_KEYS:
         market_id = _require_nonempty_string(
@@ -1234,15 +1114,13 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
             "dataset_processed_input_data_ids_invalid",
             allow_empty=True,
         )
-        validate_dataset_spec(
-            ProcessedDataSpec(
-                **common_kwargs,
-                market_id=MarketId(market_id),
-                kind=ProcessedDataKind(kind),
-                source_input_data_ids=tuple(source_input_data_ids),
-                processed_input_data_ids=tuple(processed_input_data_ids),
-                parameters_json=render_qrp_json_object(spec["parameters"]),
-            )
+        ProcessedDataSpec(
+            **common_kwargs,
+            market_id=MarketId(market_id),
+            kind=ProcessedDataKind(kind),
+            source_input_data_ids=tuple(source_input_data_ids),
+            processed_input_data_ids=tuple(processed_input_data_ids),
+            parameters_json=render_qrp_json_object(spec["parameters"]),
         )
         return
     market_id = _require_nonempty_string(
@@ -1280,7 +1158,7 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
             value, {"strict", "sparse"}, "dataset_key_coverage_invalid"
         )
     try:
-        research_spec = ResearchDatasetSpec(
+        ResearchDatasetSpec(
             **common_kwargs,
             market_id=market_id,
             input_data_ids=tuple(input_data_ids),
@@ -1293,7 +1171,7 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
             context_columns=tuple(context_columns),
             key_coverage=dict(key_coverage),
         )
-        validate_dataset_spec(research_spec)
+
     except (TypeError, ValueError) as exc:
         raise ValueError("dataset_research_spec_invalid") from exc
 
@@ -1307,23 +1185,14 @@ def validate_dataset_manifest_payload(
         or manifest.get("schema_id") != "qrp-dataset-manifest"
     ):
         raise ValueError("dataset_manifest_schema_id_invalid")
-    expected_keys = (
-        set(spec) - {"schema_id"} | _DATASET_MANIFEST_RUNTIME_KEYS | {"schema_id"}
-    )
+    expected_keys = _DATASET_MANIFEST_RUNTIME_KEYS | {"schema_id", "spec_identity"}
     actual_keys = set(manifest)
     if not expected_keys.issubset(actual_keys) or not (
         actual_keys - expected_keys
     ).issubset(_DATASET_INSTANCE_METADATA_ALLOWED_KEYS):
         raise ValueError("dataset_manifest_fields_invalid")
-    for key in set(spec) - {"schema_id"}:
-        try:
-            matches_spec = canonical_identity_bytes(
-                manifest.get(key)
-            ) == canonical_identity_bytes(spec[key])
-        except (TypeError, ValueError):
-            matches_spec = False
-        if not matches_spec:
-            raise ValueError(f"dataset_manifest_spec_mismatch: {key}")
+    if manifest["spec_identity"] != canonical_json_hash(spec):
+        raise ValueError("dataset_manifest_spec_mismatch")
     for key in (
         "row_count",
         "file_count",
@@ -1467,9 +1336,10 @@ def validate_dataset_manifest_payload(
     validate_dataset_manifest_instance_metadata(manifest, spec=spec)
 
 
-def validate_dataset_primary_key_null_summary(manifest: Mapping[str, Any]) -> None:
+def validate_dataset_primary_key_null_summary(
+    manifest: Mapping[str, Any], *, primary_key
+) -> None:
     """Require an observed zero null count for every declared primary-key column."""
-    primary_key = manifest.get("primary_key")
     null_counts = manifest.get("null_count_summary")
     if (
         not isinstance(primary_key, list)
@@ -1486,7 +1356,9 @@ def validate_dataset_primary_key_null_summary(manifest: Mapping[str, Any]) -> No
         raise ValueError("dataset_manifest_not_consumable")
 
 
-def validate_dataset_manifest_consumable(manifest: Mapping[str, Any]) -> None:
+def validate_dataset_manifest_consumable(
+    manifest: Mapping[str, Any], *, primary_key
+) -> None:
     """Reject structurally readable manifests that normal consumers cannot use."""
     non_finite_counts = manifest.get("non_finite_count_summary")
     if (
@@ -1499,7 +1371,7 @@ def validate_dataset_manifest_consumable(manifest: Mapping[str, Any]) -> None:
         )
     ):
         raise ValueError("dataset_manifest_not_consumable")
-    validate_dataset_primary_key_null_summary(manifest)
+    validate_dataset_primary_key_null_summary(manifest, primary_key=primary_key)
 
 
 def validate_physical_schema_payload(value: object) -> None:
@@ -1636,61 +1508,19 @@ def _validate_physical_type_payload(value: object) -> None:
 
 
 def _validate_feature_transform_payloads(value: object) -> list[FeatureTransformSpec]:
-    if not isinstance(value, list):
+    if type(value) is not list:
         raise ValueError("dataset_feature_transforms_invalid")
-    transforms: list[FeatureTransformSpec] = []
+    transforms = []
     for item in value:
-        if not isinstance(item, dict) or set(item) != {
-            "transform_id",
-            "source_columns",
-            "transform",
-            "output_columns",
-            "winsorize_quantiles",
-            "fillna_policy",
-        }:
+        if type(item) is not dict or set(item) != {"recipe_id", "source_columns"}:
             raise ValueError("dataset_feature_transforms_invalid")
-        transform = _require_enum_string(
-            item["transform"], FEATURE_TRANSFORMS, "dataset_feature_transforms_invalid"
-        )
-        fillna_policy = _require_enum_string(
-            item["fillna_policy"], FILLNA_POLICIES, "dataset_feature_transforms_invalid"
-        )
-        source_columns = _require_string_list(
+        sources = _require_string_list(
             item["source_columns"],
             "dataset_feature_transforms_invalid",
             allow_empty=False,
         )
-        output_columns = _require_string_list(
-            item["output_columns"],
-            "dataset_feature_transforms_invalid",
-            allow_empty=False,
-        )
-        transform_id = _require_nonempty_string(
-            item["transform_id"], "dataset_feature_transforms_invalid"
-        )
-        quantiles = item["winsorize_quantiles"]
-        if quantiles is not None:
-            if type(quantiles) is not list:
-                raise ValueError("dataset_feature_transforms_invalid")
-            try:
-                quantile_tuple: tuple[float, float] | None = (
-                    validated_winsorize_quantiles(tuple(quantiles))
-                )
-            except (TypeError, ValueError) as exc:
-                raise ValueError("dataset_feature_transforms_invalid") from exc
-        else:
-            quantile_tuple = None
         try:
-            transforms.append(
-                FeatureTransformSpec(
-                    transform_id=transform_id,
-                    source_columns=tuple(source_columns),
-                    transform=transform,
-                    output_columns=tuple(output_columns),
-                    winsorize_quantiles=quantile_tuple,
-                    fillna_policy=fillna_policy,
-                )
-            )
+            transforms.append(FeatureTransformSpec(item["recipe_id"], tuple(sources)))
         except (TypeError, ValueError) as exc:
             raise ValueError("dataset_feature_transforms_invalid") from exc
     return transforms
@@ -1772,8 +1602,6 @@ def validate_frame_objects(frame: pd.DataFrame) -> tuple[str, ...]:
     def visit(value: object, active: list[object]) -> None:
         if not isinstance(value, (dict, list, tuple, np.ndarray)):
             return
-        if len(active) >= _MAX_NESTING_DEPTH:
-            raise ValueError("qrp_json_recursion_limit")
         if any(value is parent for parent in active):
             raise ValueError("qrp_json_cycle")
         if isinstance(value, np.ndarray) and value.dtype.kind != "O":
