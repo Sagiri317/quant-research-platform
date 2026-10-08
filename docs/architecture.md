@@ -38,7 +38,7 @@ research/protocols 持有配置选择校验、窗口、冻结及统计研究语�
 factor 是信号来源，feature 是模型输入，label 是监督目标，prediction 是模型输出，
 signal 是评估/组合使用的排序、权重或交易意图，evaluation 是研究表现，portfolio 是构建与收益路径。
 多资产同一时点采用 cross_sectional；单资产 HFT 跨时间采用 single_asset_time_series。
-后者以有界在线矩计算 Pearson；尚未有精确有界实现的 RankIC/分组价差明确不适用。
+后者以有界在线矩计算 Pearson；RankIC/分组价差在此评估域明确不适用。
 评估 signal ID 和来源列不得覆盖 `timestamp`、`asset_id`、`market_id` 结构列；
 配置绑定时由 EvaluationSpec 拒绝该命名冲突。
 

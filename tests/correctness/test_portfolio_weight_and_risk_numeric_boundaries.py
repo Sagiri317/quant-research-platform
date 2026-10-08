@@ -222,7 +222,7 @@ def test_weighted_style_and_residuals_match_independent_full_normal_system(
     pd.testing.assert_frame_equal(frame, original, check_exact=True)
 
 
-def test_existing_sample_and_rank_admission_still_reject_unidentified_designs():
+def test_risk_fit_rejects_insufficient_samples_and_rank_deficient_designs():
     assert (
         FactorRiskState(
             style_columns=(), config=FactorRiskConfig(minimum_cross_section=10)
@@ -370,7 +370,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         }
     )
     dataset_spec = make_demo_research_dataset_spec(
-        data_id="round6_caps",
+        data_id="extreme_capitalization",
         factor_columns=("signal",),
         label_columns=("label",),
         filter_columns=("eligible",),
@@ -388,7 +388,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
     write_dataset(execution_root, execution, spec=specs.get("execution_mask"))
     schedule = _real_fee_schedule(tmp_path / "fees")
     candidate = PortfolioCandidateSpec(
-        candidate_id="round6_caps",
+        candidate_id="extreme_capitalization",
         selection_group="global",
         construction="top20_float_cap",
         prediction_target_id="prediction",
@@ -444,7 +444,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         decision_delta=delta,
     )
     envelope = build_business_manifest_envelope(
-        logical_artifact_id="round6_caps",
+        logical_artifact_id="extreme_capitalization",
         schema_identity="a" * 64,
         protocol_or_spec_identity="b" * 64,
         software_identity="c" * 64,
@@ -456,7 +456,7 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         upstream_identities={},
         semantic_metadata={
             "portfolio_capital": {
-                "candidate_id": "round6_caps",
+                "candidate_id": "extreme_capitalization",
                 "initial_capital": 1.0,
                 "valuation_currency": "CNY",
                 "valuation_method": "adjusted_notional",

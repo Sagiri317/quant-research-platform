@@ -66,10 +66,10 @@ Tardis native continuity 保留原字节，包括 depth 重复/过期更新。
 断连关闭观察区间，后续更新使用新的观察身份；前向 sequence gap 仍形成 gap。
 aggTrade ID 非单调仍明确失败，并保存频道、slice offset、行号和前后 ID 的诊断注记，
 不输出原始价格、数量或完整 payload。
-前向 ID 跳号的供应商保证尚未核实：Tardis 原生导入按现有规则记录 gap，官方录制 reader
+前向 ID 跳号按来源 adapter 合同处理：Tardis 原生导入记录 gap，官方录制 reader
 仅验证单调性。[Binance 聚合成交流说明](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/market#aggregate-trade-streams)
-定义聚合 ID，但未明确保证订阅消息逐 ID 加一；[Tardis 来源说明](https://docs.tardis.dev/historical-data-details/binance-futures)
-也不能替代该保证。当前不把 adapter 严格度差异当作已证实漏消息或自动放宽现有 gap。
+定义聚合 ID；该定义本身不证明订阅消息逐 ID 加一；[Tardis 来源说明](https://docs.tardis.dev/historical-data-details/binance-futures)
+也不能替代该保证。adapter 严格度差异不构成已证实漏消息，也不授权自动放宽 gap 合同。
 
 Binance Spot 和期货辅助状态的原生归档由配置显式选择，格式和消费边界见 [Crypto](crypto.md)。
 Bybit 与 OKX normalized 来源在 `data/raw/tardis/<exchange>/` 下按配置选择归档，

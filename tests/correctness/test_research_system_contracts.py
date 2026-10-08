@@ -1,4 +1,4 @@
-"""Adversarial contracts and exact kernel comparisons against pre-repair algorithms."""
+"""Adversarial contracts and exact kernel comparisons against independent references."""
 
 import json
 from collections.abc import Sequence
