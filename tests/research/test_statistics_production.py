@@ -627,7 +627,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     with factor_artifact.table("factor_diagnostics.parquet") as factors:
         assert factors.observation_count.eq(65 if full_factor_history else 64).all()
     with artifact.table("model_losses.parquet") as table:
-        assert len(table) == 64 * 8
+        assert len(table) == len(dates) * len(families)
         assert table.common_date.eq(1).all()
         assert table.asset_coverage_id.eq(canonical_json_hash(sorted(assets))).all()
         losses = (
@@ -792,7 +792,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                     ]
                 ) == set(native.included)
     with artifact.table("model_comparison.parquet") as table:
-        assert len(table) == 7
+        assert len(table) == len(families) - 1
         assert table.observation_count.eq(64).all()
         for row in table.itertuples():
             assert row.mean == pytest.approx(
@@ -1033,7 +1033,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     assert unavailable["report_status"] == "BLOCKED"
     assert unavailable["source_run_status"] == "COMPLETE"
     actual = report["sections"]["OOS prediction"]["global"]["reality_checks"]
-    assert len(actual) == 26 and all(
+    assert len(actual) == 3 * len(families) + 2 and all(
         row["status"] == "UNDEFINED"
         and row["reason"] == blocked_reason
         and (row["observation_count"] == 64)

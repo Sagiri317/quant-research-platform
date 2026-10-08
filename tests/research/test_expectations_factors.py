@@ -527,6 +527,14 @@ def test_bound_freshness_drives_native_source_window_and_processed_identity(
             for i, age in enumerate((120, 120, 120, 1))
         ]
     )
+    calendar_spec = profile.interim.get("trading_calendar")
+    write_dataset(
+        layout.interim_data_root(calendar_spec.source_id, calendar_spec.data_id),
+        _synthetic_interim_frames(
+            pd.bdate_range(dates[0] - pd.Timedelta(days=180), dates[-1]).as_unit("ns")
+        )["trading_calendar"],
+        spec=calendar_spec,
+    )
     source_spec = profile.interim.get("analyst_forecast")
     write_dataset(
         layout.interim_data_root(source_spec.source_id, source_spec.data_id),
@@ -654,4 +662,32 @@ def test_expectation_queries_keep_position_with_duplicate_index_and_nullable_clo
     )
     np.testing.assert_array_equal(
         actual.forward_earnings_yield_fy2, [2, 2, np.nan, 4, np.nan, 8]
+    )
+
+
+def test_same_value_report_updates_age_and_new_institution_share():
+    records = pd.DataFrame(
+        {
+            "asset_id": ["asset"] * 4,
+            "declare_date": pd.to_datetime(["2025-01-02"] * 3 + ["2025-01-06"]),
+            "forecast_end_date": pd.Timestamp("2025-12-31"),
+            "institution_id": ["A", "B", "C", "A"],
+            "forecast_eps": [1.0, 2.0, 3.0, 1.0],
+        }
+    )
+    sessions = pd.bdate_range("2025-01-02", "2025-01-08")
+    observations = pd.DataFrame(
+        {"asset_id": "asset", "timestamp": sessions, "close": 10.0}
+    )
+    actual = _prepare_expectations(records, trading_sessions=sessions)(observations)
+    assert actual.loc[2, "newly_updated_institution_fraction_fy1"] == 0.0
+    assert actual.loc[3, "newly_updated_institution_fraction_fy1"] == pytest.approx(
+        1 / 3
+    )
+    assert actual.loc[3, "median_forecast_age_days_fy1"] == 5.0
+    assert actual.loc[3, "forecast_dispersion_fy1"] == 1.0
+    assert actual.loc[3, "forecast_dispersion_price_scaled_fy1"] == 0.1
+    pd.testing.assert_series_equal(
+        actual.forward_earnings_yield_fy1.iloc[1:],
+        pd.Series([0.2] * 4, index=range(1, 5), name="forward_earnings_yield_fy1"),
     )

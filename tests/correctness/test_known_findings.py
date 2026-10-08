@@ -65,6 +65,7 @@ def test_unknown_execution_survives_persistence_and_blocks_portfolio(
     panel = _panel().astype({"is_trading": "boolean"})
     panel.loc[1, column] = value
     mask = derive_execution_mask(panel)
+    mask["execution_at"] = panel.timestamp.shift(-1)
     assert pd.isna(mask.loc[0, "can_enter"])
     assert pd.isna(mask.loc[0, "can_exit"])
     path = tmp_path / "execution.parquet"
@@ -74,7 +75,9 @@ def test_unknown_execution_survives_persistence_and_blocks_portfolio(
     with pytest.raises(
         PortfolioTargetBlocked, match="^portfolio_execution_fact_unknown$"
     ):
-        _mask_values(loaded.iloc[:1], pd.Index(["a"]))
+        _mask_values(
+            loaded.iloc[:1], pd.Index(["a"]), panel.timestamp.iloc[1], frozenset()
+        )
     labeled = calculate_labels_for_panel(
         panel.merge(mask),
         definitions=label_definitions(),

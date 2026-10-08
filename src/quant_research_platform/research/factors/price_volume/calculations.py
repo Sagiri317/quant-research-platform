@@ -375,6 +375,27 @@ def _calculate_values(
             out=np.full(len(current), np.nan),
             where=denominator != 0,
         )
+    elif factor == "positive_return_fraction_20d":
+        result = np.mean(current > 0.0, axis=1)
+    elif factor in {"largest_daily_contribution_20d", "path_roughness_20d"}:
+        scale = np.max(np.abs(current), axis=1, keepdims=True)
+        normalized = np.divide(
+            current, scale, out=np.zeros_like(current), where=scale > 0
+        )
+        denominator = np.sum(np.abs(normalized), axis=1)
+        numerator = (
+            np.max(np.abs(normalized), axis=1)
+            if factor == "largest_daily_contribution_20d"
+            else np.abs(np.sum(normalized, axis=1))
+        )
+        result = np.divide(
+            numerator,
+            denominator,
+            out=np.full(len(current), np.nan),
+            where=denominator > 0,
+        )
+        if factor == "path_roughness_20d":
+            result = 1.0 - result
     elif factor == "zero_amount_ratio_20d":
         result = np.mean(current <= 0.0, axis=1)
     else:

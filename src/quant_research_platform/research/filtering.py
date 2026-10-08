@@ -115,8 +115,13 @@ def a_share_eligibility(frame: pd.DataFrame, dataset_id: str) -> pd.Series:
         & numeric_facts["amount"].gt(0.0)
         & numeric_facts["turnover"].gt(0.0)
     ).fillna(False)
-    if dataset_id in {"fusion_nf_core", "fusion_nf_expectations"}:
-        for column in _A_SHARE_FUSION_ELIGIBILITY_FACTS:
+    if dataset_id in {"pv_nf_expectations", "fusion_nf_core", "fusion_nf_expectations"}:
+        required = (
+            ("is_nonfinancial_industry",)
+            if dataset_id == "pv_nf_expectations"
+            else _A_SHARE_FUSION_ELIGIBILITY_FACTS
+        )
+        for column in required:
             if column not in frame:
                 raise ValueError(f"a_share_eligibility_facts_missing: {column}")
             bool_facts[column] = strict_bool_series(

@@ -290,3 +290,32 @@ def test_scalar_saved_metadata_preserves_primary_error_at_read_and_reuse(
             session.fetch(layout, request)
         assert sdk.calls == 1
         assert filesystem_read_bytes(path) == corrupt
+
+
+def test_documented_index_weight_request_preserves_index_and_date(tmp_path):
+    request = ChoiceRequest(
+        "ctr",
+        (
+            "INDEXTODAYWEIGHT",
+            "INDEXCODE,SECUCODE,TRADEDATE,WEIGHT",
+            "IndexCode=000905.SH,EndDate=2023-12-29",
+        ),
+        "official-sdk-test",
+        date(2025, 12, 31),
+    )
+    response = _response(
+        Indicators=["INDEXCODE", "SECUCODE", "TRADEDATE", "WEIGHT"],
+        Data={"0": ["000905.SH", "600000.SH", "2023-12-29", 0.5]},
+    )
+    with choice_session(SDK(response)) as session:
+        root = session.fetch(StorageLayout(tmp_path), request)
+        assert read_choice_response(root, request) == vars(response)
+    with pytest.raises(ValueError, match="choice_request_after_cutoff"):
+        replace(
+            request,
+            arguments=(
+                request.arguments[0],
+                request.arguments[1],
+                "IndexCode=000905.SH,EndDate=2026-01-01",
+            ),
+        ).payload()

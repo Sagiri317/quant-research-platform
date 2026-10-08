@@ -157,7 +157,7 @@ def check_crypto_fold_boundaries(*, layout, dataset_root, profile, saved, monkey
         frame.loc[excluded, labels] = 100.0
         mutated = True
         after = fit("run_crypto_boundaries_after")
-        assert len(before) == len(after) == 9
+        assert len(before) == len(after) == len(ids)
         for model_id in ids:
             np.testing.assert_array_equal(before[model_id][0], after[model_id][0])
             assert before[model_id][1] == after[model_id][1]
@@ -755,7 +755,7 @@ def check_crypto_wide_fold_artifact(
     from quant_research_platform.research.models.supervised import preflight_model_specs
 
     preflight_model_specs(profile.models.list())
-    ids = tuple(spec.model_id for spec in profile.models.list())
+    ids = tuple(model["model_id"] for model in configuration["models"])
     frame = read_dataset(dataset_root, mode=DatasetReadMode.MATERIALIZED)
     frame = frame.loc[
         frame.timestamp.between(
@@ -827,9 +827,11 @@ def check_crypto_wide_fold_artifact(
     loaded = persisted.read_crypto_model_artifact(
         root, expected_identity=envelope.instance_identity, trial_layout=layout
     )
-    assert len(loaded.models) == 22 * 9
-    assert len(loaded.final_models) == 9
-    assert len(loaded.member_records) == 1 + 22 * (1 + 9) + 9
+    assert len(loaded.models) == len(plan["folds"]) * len(ids)
+    assert len(loaded.final_models) == len(ids)
+    assert len(loaded.member_records) == 1 + len(plan["folds"]) * (1 + len(ids)) + len(
+        ids
+    )
     for entry in loaded.final_models:
         model = persisted.read_crypto_model_member(loaded, entry)
         assert model is not None

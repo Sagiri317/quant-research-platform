@@ -336,6 +336,58 @@
         "btc_usdt",
         "eth_usdt"
       ]
+    },
+    {
+      "model_id": "crypto_hft_decision_tree_regressor",
+      "model_algorithm": "decision_tree_regressor",
+      "input_factor_columns": [
+        "spread",
+        "relative_spread",
+        "imbalance_1",
+        "imbalance_5",
+        "imbalance_10",
+        "microprice",
+        "microprice_deviation",
+        "ofi_100ms",
+        "signed_trade_flow_100ms",
+        "taker_buy_volume_100ms",
+        "taker_sell_volume_100ms",
+        "return_100ms",
+        "realized_volatility_1s",
+        "top10_depth_per_spread",
+        "trade_flow_imbalance_100ms",
+        "trade_flow_imbalance_500ms",
+        "trade_flow_imbalance_1s",
+        "trade_flow_imbalance_5s",
+        "ofi_500ms",
+        "ofi_1s",
+        "ofi_5s",
+        "depth_normalized_ofi_500ms",
+        "depth_normalized_ofi_1s",
+        "depth_normalized_ofi_5s",
+        "imbalance_1_minus_10",
+        "imbalance_5_minus_10",
+        "near_depth_share_1_10",
+        "taker_sell_pressure_500ms",
+        "taker_buy_pressure_500ms"
+      ],
+      "input_feature_columns": [],
+      "label_column": "future_mid_return_500ms",
+      "sample_filter_mode": "eligible",
+      "hyperparameters": {
+        "max_depth": 3,
+        "min_samples_leaf": 0.001
+      },
+      "random_seed": 42,
+      "max_train_rows": null,
+      "training_asset_ids": [
+        "btc_usdt",
+        "eth_usdt"
+      ],
+      "evaluation_asset_ids": [
+        "btc_usdt",
+        "eth_usdt"
+      ]
     }
   ],
   "portfolios": [
@@ -400,12 +452,6 @@
       "latency_ms": 0
     },
     {
-      "candidate_id": "crypto_hft_latency_100",
-      "asset_id": "btc_usdt",
-      "model_id": "crypto_hft_linear_regression",
-      "latency_ms": 100
-    },
-    {
       "candidate_id": "crypto_hft_latency_200",
       "asset_id": "btc_usdt",
       "model_id": "crypto_hft_linear_regression",
@@ -422,6 +468,18 @@
       "asset_id": "btc_usdt",
       "price_model_id": "crypto_hft_linear_regression",
       "proxy_model_id": "crypto_hft_maker_bid_sell_pressure_proxy"
+    },
+    {
+      "candidate_id": "crypto_hft_decision_tree_regressor_btc_usdt",
+      "asset_id": "btc_usdt",
+      "model_id": "crypto_hft_decision_tree_regressor",
+      "latency_ms": null
+    },
+    {
+      "candidate_id": "crypto_hft_decision_tree_regressor_eth_usdt",
+      "asset_id": "eth_usdt",
+      "model_id": "crypto_hft_decision_tree_regressor",
+      "latency_ms": null
     }
   ],
   "research_plan": {

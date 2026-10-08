@@ -68,6 +68,14 @@ _PRICE_VOLUME_INPUT_WINDOWS: dict[str, tuple[tuple[str, ...], tuple[int, ...]]] 
 }
 
 PRICE_VOLUME_LIBRARY = tuple(_PRICE_VOLUME_INPUT_WINDOWS)
+PRICE_VOLUME_PATH_FACTORS = (
+    "positive_return_fraction_20d",
+    "largest_daily_contribution_20d",
+    "path_roughness_20d",
+)
+_PRICE_VOLUME_INPUT_WINDOWS.update(
+    {column: (("period_return",), (20,)) for column in PRICE_VOLUME_PATH_FACTORS}
+)
 
 
 def price_volume_factor_definitions(

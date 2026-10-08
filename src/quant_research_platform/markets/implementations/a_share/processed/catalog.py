@@ -23,13 +23,14 @@ from quant_research_platform.markets.implementations.a_share.ids import (
     PRICE_VOLUME_DATA_ID,
 )
 from quant_research_platform.research.factors.expectations.definitions import (
-    EXPECTATIONS_FACTORS,
+    ALL_EXPECTATIONS_FACTORS,
 )
 from quant_research_platform.research.factors.fundamental.definitions import (
     FUNDAMENTAL_FACTORS,
 )
 from quant_research_platform.research.factors.price_volume.definitions import (
     PRICE_VOLUME_LIBRARY,
+    PRICE_VOLUME_PATH_FACTORS,
 )
 from quant_research_platform.research.labels.forward_returns import (
     forward_return_available_at_column,
@@ -121,7 +122,7 @@ LABEL_COLUMNS = tuple(
         forward_return_available_at_column(horizon),
     )
 )
-FACTOR_COLUMNS = tuple(PRICE_VOLUME_LIBRARY)
+FACTOR_COLUMNS = (*PRICE_VOLUME_LIBRARY, *PRICE_VOLUME_PATH_FACTORS)
 BENCHMARK_WEIGHTS_ID = "benchmark_weights"
 BENCHMARK_WEIGHTS_COLUMNS = (
     "market_id",
@@ -201,10 +202,10 @@ def processed_catalog() -> ProcessedDataCatalog:
             _spec(
                 "expectations_factors",
                 ProcessedDataKind.FACTOR,
-                (*PLATFORM_ASSET_TIME_KEY, *EXPECTATIONS_FACTORS),
+                (*PLATFORM_ASSET_TIME_KEY, *ALL_EXPECTATIONS_FACTORS),
                 processed_input_data_ids=(MARKET_PANEL_ID,),
-                source_input_data_ids=("analyst_forecast",),
-                factor_columns=EXPECTATIONS_FACTORS,
+                source_input_data_ids=("analyst_forecast", "trading_calendar"),
+                factor_columns=ALL_EXPECTATIONS_FACTORS,
             ),
             _spec(
                 FORWARD_RETURNS_DATA_ID,

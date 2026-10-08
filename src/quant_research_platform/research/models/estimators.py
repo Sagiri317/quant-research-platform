@@ -38,6 +38,13 @@ def huber_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> ob
     return HuberRegressor(**params)
 
 
+def decision_tree_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
+    from sklearn.tree import DecisionTreeRegressor
+
+    _set_random_state(params, spec)
+    return DecisionTreeRegressor(**params)
+
+
 def random_forest_regressor(spec: ModelSpec, params: dict[str, object]) -> object:
     from sklearn.ensemble import RandomForestRegressor
 
@@ -89,6 +96,7 @@ _MODEL_ESTIMATOR_FACTORIES: dict[
     "ridge_regression": ridge_regression_estimator,
     "lasso_regression": lasso_regression_estimator,
     "huber_regression": huber_regression_estimator,
+    "decision_tree_regressor": decision_tree_regressor,
     "random_forest_regressor": random_forest_regressor,
     "gradient_boosting_regressor": gradient_boosting_regressor,
     "xgboost_regressor": xgboost_regressor,

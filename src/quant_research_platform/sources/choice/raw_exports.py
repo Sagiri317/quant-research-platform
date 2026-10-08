@@ -60,6 +60,7 @@ _OPTIONS = frozenset(
         "enddate",
         "type",
         "secucode",
+        "indexcode",
         "recvtimeout",
         "ispandas",
     }

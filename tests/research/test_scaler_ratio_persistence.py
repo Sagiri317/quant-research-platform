@@ -111,6 +111,11 @@ def test_native_models_reject_old_float_scaler_offsets(tmp_path, market, old_mem
         )
         if market == "crypto":
             persisted.read_crypto_model_member(fresh, fresh.final_models[0])
+        else:
+            entry = fresh.final_models[0]
+            persisted.read_quarterly_predictor(
+                fresh, entry["selection_group"], entry["family_id"]
+            )
 
 
 def test_native_quarterly_refit_preserves_nonbinary_center(tmp_path):

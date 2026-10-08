@@ -852,7 +852,9 @@ def test_last_session_revision_preserves_processed_pit_ttm_and_factor_prefix():
                 "is_trading_day": True,
             }
         )
-        events = producer._financial_pit_events(source)
+        events = producer._financial_pit_events(
+            source, required_sources=spec.source_input_data_ids
+        )
         facts = producer._fundamental_pit_frame(
             spec,
             panel=panel.loc[panel.timestamp.isin(sessions)],
@@ -1042,3 +1044,72 @@ def test_pit_preparation_preserves_full_source_error_priority(damage):
         error = "pit_financial_schema_invalid"
     with pytest.raises(ValueError, match=error):
         materialize_pit_fundamentals(observations, events)
+
+
+def test_balance_only_pit_calculates_book_to_market_and_rejects_missing_income():
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        producer,
+    )
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.research.factors.fundamental.calculations import (
+        calculate_fundamental_factors,
+    )
+    from tests.profiles.test_research_configurations import configuration
+
+    config = configuration("a_share_csmar_choice", "fusion_nf_core")
+    config["evaluation"]["factors"] = ["book_to_market"]
+    selected = bind_research_configuration(research_profile(), config)
+    spec = selected.processed.get("fundamental_pit")
+    sessions = pd.to_datetime(["2020-01-31", "2020-02-03"])
+    source = {
+        "financial_balance": _financial_frame(
+            "financial_balance",
+            (
+                {
+                    "asset": "asset",
+                    "period": "2019-12-31",
+                    "corrected": False,
+                    "correction_date": pd.NaT,
+                    "version": "original",
+                    "value": 100.0,
+                },
+            ),
+        ),
+        "financial_first_disclosure": pd.DataFrame(
+            {
+                "asset_id": ["asset"],
+                "report_period": pd.to_datetime(["2019-12-31"]),
+                "first_disclosure_date": pd.to_datetime(["2020-01-30"]),
+            }
+        ),
+        "trading_calendar": pd.DataFrame(
+            {"calendar_date": sessions, "source_market_type": 4, "is_trading_day": True}
+        ),
+    }
+    panel = pd.DataFrame(
+        {"market_id": "a_share", "asset_id": "asset", "timestamp": sessions}
+    )
+    events = producer._financial_pit_events(
+        source, required_sources=spec.source_input_data_ids
+    )
+    facts = producer._fundamental_pit_frame(
+        spec, panel=panel, pit=materialize_pit_fundamentals(panel, events)
+    )
+    actual = calculate_fundamental_factors(
+        facts.assign(total_market_cap=1000.0), factor_columns=("book_to_market",)
+    )
+    assert actual.book_to_market.tolist() == [0.1, 0.1]
+    for factor in ("earnings_yield", "roe", "accruals"):
+        config["evaluation"]["factors"] = [factor]
+        needed = bind_research_configuration(research_profile(), config).processed.get(
+            "fundamental_pit"
+        )
+        with pytest.raises(
+            ValueError, match="BLOCKED_EXTERNAL_DATA: .*financial_income"
+        ):
+            producer._financial_pit_events(
+                source, required_sources=needed.source_input_data_ids
+            )

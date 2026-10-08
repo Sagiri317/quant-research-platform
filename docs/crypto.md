@@ -316,7 +316,7 @@ maker报价期限由CryptoMakerPlan拥有；它与模型预测期限和markout�
 
 ### 配置与数据角色
 
-baseline.json 保存九个模型选择作为可编辑示例；运行不强制保留这九项或基础 14 项输入。
+baseline.json 保存十个模型选择作为可编辑示例，包含普通决策树；运行按研究 JSON 的明确选择执行。
 评估因子、各模型输入、训练和评估资产分别显式选择。multiscale.json 选择多尺度微观结构因子，
 derivatives_state.json 加入衍生品状态因子；不做块或参数的笛卡尔搜索。
 示例中的费用、延迟和资金为研究假设，不能当成已验证的历史账户费率。
@@ -325,7 +325,7 @@ derivatives_state.json 加入衍生品状态因子；不做块或参数的笛卡
 
 | 配置示例 | 选择的研究信息 | 附加来源条件 |
 |---|---|---|
-| [baseline.json](../configs/research/crypto/baseline.json) | 基础微观结构因子及九个示例模型 | Binance BTC/ETH 主来源 |
+| [baseline.json](../configs/research/crypto/baseline.json) | 基础微观结构因子及十个示例模型 | Binance BTC/ETH 主来源 |
 | [multiscale.json](../configs/research/crypto/multiscale.json) | 多尺度微观结构因子 | 同一主来源 |
 | [derivatives_state.json](../configs/research/crypto/derivatives_state.json) | 微观结构与衍生品状态 | 独立 native state 归档 |
 | [spot_context.json](../configs/research/crypto/spot_context.json) | 微观结构与现货/永续上下文 | Spot 深度、快照及成交归档 |
@@ -615,3 +615,23 @@ Crypto 的日频统计为经济描述，不发布 SPA、StepM、MCS、PSR、DSR 
 Survival/Hawkes/DeepLOB 及注意力模型属于高级研究候选，不属于正式模型合同。
 需要对应真实数据和相对简单基线的增量OOS经济证据，仍复用现有DAG、试验、账本和报告，
 不预留第二套平台，也不从价格变化虚构精确清算量或L3事实。
+
+## 同输入模型与延迟实验约定
+
+BTC、ETH分别训练和评价；完整输入上的 OLS、Huber、Ridge、Lasso、普通决策树、
+随机森林、GBRT、XGBoost、LightGBM 使用相同输入及学习协议，OFI单变量锚点单列。
+原配置的跨币/pooled及Maker候选保留；排名集成不作为单币横截面比较。
+14项基础到29项多尺度，再逐个信息块增量；Bybit、OKX分别对照后才解释联合结果。
+Maker只作公开L2假设敏感性附录；Taker为主结果。
+
+辅助来源可配置非负整数 `input_delay_ms`（默认0），可用于跨币、现货、衍生状态及外部场所。
+信息截止时刻为决策时刻减输入延迟；不改原始观察/事件时间、目标标签或执行时钟。
+信息年龄仍相对真实决策时刻计算，继续受既有 `max_age_ms` 限制；
+完整流量窗口在首段及真实断段后必须等待延迟后的历史成熟。
+输入延迟100/200ms与执行延迟0/100/200ms分开解释。
+费用敏感性区分固定成交事后核算与改变费用后经既有边际收益决策重新执行。
+默认执行延迟100ms与同资产同模型的显式100ms候选重复时只保留一份配置；历史产物身份不改写。
+
+500ms为主目标，100/1000/5000ms为预定衰减诊断。
+免费日期按数据资格选择，独立日期数、缺口与资金费资格必须随结果报告。
+长成交整刻钟研究独立于L2回放，不用成交或K线替代盘口。

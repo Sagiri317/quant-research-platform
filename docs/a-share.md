@@ -22,9 +22,9 @@ CSMAR 市场/指数/行业/分析师事实及 Choice 财务事件版本 → 因�
 | 能力 | 支持内容 | 证明边界 |
 |---|---|---|
 | 数据与 PIT | CSMAR 市场事实、Choice 原生请求归档及事件版本适配、合法可用时点与修订传播 | 适配能力不表示全 A 股原始或修订历史齐备 |
-| 场景与因子 | 配置选择 pv_all、pv_expanded、fusion_nf_core、fusion_nf_expectations；价量库50项，另有共享 beta/残差波动率、Fundamental19、预期4，保留 PV25/CORE6 选择 | 因子定义存在不表示真实数据齐备、正式实验完成或发现有效 alpha |
+| 场景与因子 | 配置选择 pv_all、pv_expanded、pv_nf_expectations、fusion_nf_core、fusion_nf_expectations；价量库50项与3项路径机制，另有共享 beta/残差波动率、Fundamental19、预期4与3项预期机制，保留 PV25/CORE6 选择 | 因子定义存在不表示真实数据齐备、正式实验完成或发现有效 alpha |
 | 特征与标签 | 横截面资格、MAD/中性化/zscore、缺失指示、成熟标签、20日模型目标与辅助期限 | 缺少必要事实的真实样本仍不可用 |
-| 模型与预测 | 等权/IC 排名集成及 OLS/Huber/Ridge/Lasso/RF/GBRT/XGBoost/LightGBM；研究 JSON 显式选择模型，共享季度候选预测、G/Q 选择与最终冻结预测 | 算法可配置不表示已纳入某项研究或完成真实留出验证 |
+| 模型与预测 | 等权/IC 排名集成及 OLS/Huber/Ridge/Lasso/决策树/RF/GBRT/XGBoost/LightGBM；研究 JSON 显式选择模型，共享季度候选预测、G/Q 选择与最终冻结预测 | 算法可配置不表示已纳入某项研究或完成真实留出验证 |
 | 组合与推断 | 配置简单分位数组合或 CSI500/CSI1000 增强，选择日/周/月再平衡；复用自融资账本、成本/风险/容量/归因及预注册统计 | 配置合法不表示所有市场环境均可成交或优化可行 |
 | 报告与展示 | 唯一目标 DAG、按 run_id 的报告、CLI/API 和只读 Notebook | 入口存在与合成运行不证明 Notebook 环境就绪或真实经济有效性 |
 
@@ -34,7 +34,7 @@ CSMAR 市场/指数/行业/分析师事实及 Choice 财务事件版本 → 因�
 
 | 顺序 | 工作 | 完成标准 |
 |---|---|---|
-| 1 | 完成 Choice 原始获取计划和缺口定位 | 证券/报告期/首次披露/修订事件及对应历史报表值有可核对的完整请求范围；额度与权限明确 |
+| 1 | 按消费者盘点原始输入与缺口 | 量价、独立预期、财务版本和指数增强分别列资格；缺版本只阻塞实际依赖消费者，额度与权限明确 |
 | 2 | 完成真实原始输入验收 | 字段、单位、键、生命周期、历史行业、费率和全收益基准齐备；区别范围内 PIT 适用与全量覆盖 |
 | 3 | 运行开发区间的真实完整链 | 保持已冻结研究配置的窗口、模型与组合集合，报告所有阻塞和未定义项；先验证正确性，不做大规模调参 |
 | 4 | 固定一份可讲解的研究报告 | 因子→预测→执行→净收益与风险/容量/归因勾稽，说明合成与真实证据的区别 |
@@ -494,11 +494,15 @@ NULL、非正权重、重复键、精确身份不符或总和非有限／超界�
 ```text
 pv_all
 pv_expanded
+pv_nf_expectations
 fusion_nf_core
 fusion_nf_expectations
 ```
 
 不跨场景选择优胜模型；各场景分别形成独立评估、模型和组合结论。
+
+`pv_nf_expectations` 要求完整历史行业及非金融身份，但不要求财务 PIT；融合场景继续要求合法财务 PIT。
+所选财务因子及组合风险暴露共同决定必要报表依赖；未选因子的缺失表不阻塞独立消费者。
 
 #### 配置、场景与执行阶段
 
@@ -509,13 +513,14 @@ fusion_nf_expectations
 
 | 配置 | 场景 | 评估因子 | 模型 | 组合定义 |
 |---|---|---:|---:|---:|
-| [core6.json](../configs/research/a_share/core6.json) | pv_all | 6 | 8 | 5 |
-| [pv25.json](../configs/research/a_share/pv25.json) | pv_all | 25 | 8 | 5 |
-| [fusion_nf_core.json](../configs/research/a_share/fusion_nf_core.json) | fusion_nf_core | 44 | 8 | 5 |
-| [fusion_nf_expectations.json](../configs/research/a_share/fusion_nf_expectations.json) | fusion_nf_expectations | 48 | 8 | 5 |
-| [pv_expanded.json](../configs/research/a_share/pv_expanded.json) | pv_expanded | 52（50价量+2暴露） | 9 | 3 |
+| [core6.json](../configs/research/a_share/core6.json) | pv_all | 6 | 11 | 5 |
+| [pv25.json](../configs/research/a_share/pv25.json) | pv_all | 25 | 11 | 5 |
+| [fusion_nf_core.json](../configs/research/a_share/fusion_nf_core.json) | fusion_nf_core | 44 | 11 | 5 |
+| [fusion_nf_expectations.json](../configs/research/a_share/fusion_nf_expectations.json) | fusion_nf_expectations | 48 | 11 | 5 |
+| [pv_expanded.json](../configs/research/a_share/pv_expanded.json) | pv_expanded | 52（50价量+2暴露） | 11 | 3 |
+| [pv_nf_expectations.json](../configs/research/a_share/pv_nf_expectations.json) | pv_nf_expectations | 29（PV25+预期4） | 11 | 3 |
 
-模型列统计两种排名集成及所选监督模型；`pv_expanded.json` 的第九种模型是 LightGBM。
+模型列统计两种排名集成及九种监督模型；六份配置均保留完整模型集合。
 组合列统计 JSON 中的定义数量，每条定义分别生成 G/Q 两组候选；它不是账本产物总数。
 未绑定研究配置的 profile 不隐式生成组合或账本目标。
 
@@ -1140,14 +1145,14 @@ refit 不伪造重叠 train/validation，也不建立假的第四角色。
 |---|---|
 | 排名集成 | 等权排名集成、IC 加权排名集成 |
 | 线性与稳健回归 | OLS、Huber、Ridge、Lasso |
-| 树模型 | 随机森林、sklearn GradientBoostingRegressor（GBRT）、XGBoost、LightGBM |
+| 树模型 | 普通决策树、随机森林、sklearn GradientBoostingRegressor（GBRT）、XGBoost、LightGBM |
 
 研究 JSON 的 `models`、输入列、`hyperparameters` 和 `parameter_candidates` 冻结实际候选，
 不由算法能力表隐式补齐。声明`parameter_candidates`时，季度预检、拟合、refit与reader均消费该候选序列；
 被覆盖的基础`hyperparameters`只保留在完整运行provenance，不影响MODEL科学合同或开发冻结复用。
 实际候选、输入、标签、种子与权重等其他冻结事实仍须完全匹配。
-随仓配置的模型数量见 §5.7：普通配置选择8种，
-`pv_expanded.json` 选择9种；GBRT 是通用可配置能力，随仓 A 股配置未将其列入试验集合。
+随仓配置的模型数量见 §5.7，六份配置均选择11种模型。普通决策树使用既有 sklearn 拟合路径，
+默认预定深度3、叶子最少样本比例0.001、种子42，不根据研究收益追加搜索。
 这一区分不代表任何模型已经通过真实研究验收。
 
 单因子仅作诊断，不参与优胜模型选择。
@@ -2106,3 +2111,27 @@ ADV 范围/参与率
 字段或覆盖缺失不构成永久备用语义、虚假值、当前状态历史回填、缩短窗口或隐藏模型变化的理由。
 
 数据获取、延期和验收进度属于操作事实，不改变本研究合同；真实运行状态从对应持久化证据读取。
+
+### 5.22 预定机制增量与研究准备
+
+三个路径变量单独注册，不改变 CORE6、PV25、PV52 原选择。使用完整20个日收益：
+`positive_return_fraction_20d = mean(r > 0)`；
+`largest_daily_contribution_20d = max(abs(r)) / sum(abs(r))`；
+`path_roughness_20d = 1 - abs(sum(r)) / sum(abs(r))`。
+缺失窗口不输出；绝对收益和为零时后两项保持 NULL。
+
+预期机制沿用同一 FY1、机构日最新事件、新鲜度及至少3机构门槛。
+`forecast_dispersion_price_scaled_fy1` 是机构 EPS 的 MAD 除当日正收盘价；
+`median_forecast_age_days_fy1` 是当前机构状态报告年龄中位数；
+`newly_updated_institution_fraction_fy1` 是本可用日更新机构占当前机构的比例。
+同 EPS 的新报告仍更新事件状态。原4项预期因子不改名、不替换。
+
+主规格为90天，一次180天对照；完整模型、非金融共同样本与各自覆盖须同时报告。
+固定财年修订、滚动 FY1 跳转、ON/ID分解及报告事件研究先核对原始语义和单位；
+能力或配置绑定通过不代表这些机制已完成真实研究。缺少版本仅阻塞对应版本消费者。
+
+固定预测的持仓对照可选择 `top20_equal_weight_half_step`：换仓日先由原简单组合 owner
+生成完整等权目标，再与仍合格且有有效预测的当前持仓权重各取一半。首次从现金开始只建半仓；
+剩余现金不重归一化。失去资格或预测的旧仓目标归零，实际卖出仍遵守原交易限制。
+该构造进入组合语义身份，不改变模型或预测身份；报告同时比较毛/净收益、风险、现金和换手，
+不能把敞口差异导致的收益变化只归因为交易成本。该固定规则不根据回测收益调节。

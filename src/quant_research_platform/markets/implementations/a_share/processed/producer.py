@@ -270,7 +270,9 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     if spec.data_id == "execution_mask":
         lookahead = EXECUTION_LOOKAHEAD_SESSIONS
     if spec.data_id == "fundamental_pit":
-        events = _financial_pit_events(source)
+        events = _financial_pit_events(
+            source, required_sources=spec.source_input_data_ids
+        )
     asset_count = max(1, len(asset_types))
     block_sessions = max(1, DEFAULT_BATCH_ROWS // asset_count)
     if any(definition.family == "market_model" for definition in definitions):
@@ -372,7 +374,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
                 raise ValueError("BLOCKED_EXTERNAL_DATA: analyst_forecast")
             expectations = _prepare_expectations(
                 analyst.rename(columns={"source_asset_id": "asset_id"}),
-                trading_sessions=sessions,
+                trading_sessions=unified_trading_sessions(source["trading_calendar"]),
                 freshness_days=json.loads(spec.parameters_json).get(
                     "freshness_days", FORECAST_FRESHNESS_DAYS
                 ),
@@ -751,15 +753,12 @@ def _compute_processed_frame(
     raise ValueError(f"unsupported_a_share_processed_kind: {spec.kind}")
 
 
-def _financial_pit_events(source):
-    required = {
-        "financial_balance",
-        "financial_income",
-        "financial_cashflow",
-        "financial_first_disclosure",
-    }
+def _financial_pit_events(source, *, required_sources):
+    required = set(required_sources)
     if not required.issubset(source):
-        raise ValueError("BLOCKED_EXTERNAL_DATA: financial_first_disclosure")
+        raise ValueError(
+            "BLOCKED_EXTERNAL_DATA: " + ", ".join(sorted(required.difference(source)))
+        )
     calendar = source.get("trading_calendar")
     if calendar is None:
         raise ValueError("fundamental_pit_calendar_required")
@@ -767,11 +766,8 @@ def _financial_pit_events(source):
     events = financial_events_from_interim(
         {
             data_id: source[data_id]
-            for data_id in (
-                "financial_balance",
-                "financial_income",
-                "financial_cashflow",
-            )
+            for data_id in FINANCIAL_VALUE_COLUMNS
+            if data_id in required
         },
         source["financial_first_disclosure"],
         trading_sessions=sessions,
@@ -950,10 +946,22 @@ def iter_portfolio_sessions(
     masks = pd.DataFrame(columns=(*_EXECUTION_COLUMNS, "execution_at")).set_index(
         "asset_id", drop=False
     )
-    with closing_iterator(ExitStack()) as channels:
-        bar_frames = channels.enter_context(
-            closing_iterator(_iter_dataset_session_frames(bars, _MARKET_FACT_COLUMNS))
+
+    def ordered_bars():
+        dates, assets, _, _, _ = _processed_axis(
+            bars, panel_source=False, asset_column="source_asset_id"
         )
+        block_size = max(1, DEFAULT_BATCH_ROWS // max(1, len(assets)))
+        for start in range(0, len(dates), block_size):
+            core = dates[start : start + block_size]
+            frame = materialize_dataset_session(
+                bars.filtered_view(TimeWindow(core[0], core[-1]))
+            ).sort_values("timestamp", kind="mergesort")
+            for _, day in frame.groupby("timestamp", sort=False):
+                yield day
+
+    with closing_iterator(ExitStack()) as channels:
+        bar_frames = channels.enter_context(closing_iterator(ordered_bars()))
         panel_frames = channels.enter_context(
             closing_iterator(_iter_dataset_session_frames(panel, panel_columns))
         )

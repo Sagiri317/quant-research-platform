@@ -610,7 +610,6 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
 
 def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
     from quant_research_platform.compute.market_model import MarketModelRiskState
-    from quant_research_platform.research.protocols.a_share import factor_catalog
 
     dates = pd.bdate_range("2020-01-01", periods=400)
     rows = [
@@ -636,10 +635,12 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
         for asset, multiplier in (("a", 1), ("b", 3))
     ]
     panel = pd.DataFrame(rows)
-    definitions = tuple(
-        d for d in factor_catalog().list() if d.family == "market_model"
+    from quant_research_platform.research.factors.engine import _market_model_frames
+
+    result = pd.concat(
+        _market_model_frames((panel,), trading_calendar=None, market_history=None),
+        ignore_index=True,
     )
-    result = calculate_factors_for_panel(panel, definitions=definitions)
     assert result.loc[result.timestamp < dates[252], "beta_252d"].isna().all()
     assert (
         result.loc[result.timestamp < dates[311], "residual_volatility_60d"]
@@ -656,11 +657,15 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
     last = result.loc[result.timestamp == dates[-1]].set_index("asset_id")
     assert np.array_equal(last.beta_252d, expected.beta)
     assert np.array_equal(last.residual_volatility_60d, expected.residual_volatility)
-    bounded = calculate_factors_for_panel(
-        panel.loc[panel.timestamp >= dates[350 - 312]],
-        definitions=definitions,
-        output_window=TimeWindow(dates[350], dates[-1]),
+    bounded = pd.concat(
+        _market_model_frames(
+            (panel.loc[panel.timestamp >= dates[350 - 312]],),
+            trading_calendar=None,
+            market_history=None,
+        ),
+        ignore_index=True,
     )
+    bounded = bounded.loc[bounded.timestamp >= dates[350]].reset_index(drop=True)
     pd.testing.assert_frame_equal(
         bounded.reset_index(drop=True),
         result.loc[result.timestamp >= dates[350]].reset_index(drop=True),
@@ -1036,7 +1041,6 @@ def test_amplitude_extreme_representable_mean_persists(tmp_path, single_extreme)
 def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_path):
     from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.research.portfolios.risk import FactorRiskState
-    from quant_research_platform.research.protocols.a_share import factor_catalog
     from quant_research_platform.storage.datasets import read_dataset, write_dataset
     from quant_research_platform.storage.layout import StorageLayout
 
@@ -1071,10 +1075,12 @@ def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_pat
             for asset in ("a", "b")
         ]
     )
-    definitions = tuple(
-        item for item in factor_catalog().list() if item.family == "market_model"
+    from quant_research_platform.research.factors.engine import _market_model_frames
+
+    output = pd.concat(
+        _market_model_frames((panel,), trading_calendar=None, market_history=None),
+        ignore_index=True,
     )
-    output = calculate_factors_for_panel(panel, definitions=definitions)
     spec = research_profile().processed.get("market_model_factors")
     root = StorageLayout(tmp_path).processed_data_root(
         spec.market_id, spec.kind, spec.data_id
@@ -1200,3 +1206,47 @@ def test_coefficient_of_variation_keeps_exact_center_and_ratio(
     )
     write_dataset(root, result, spec=spec)
     assert read_dataset(root)[factor].iloc[-1] == expected
+
+
+def test_path_factors_complete_windows_zero_path_and_future_isolation():
+    from quant_research_platform.research.factors.price_volume.definitions import (
+        PRICE_VOLUME_PATH_FACTORS,
+    )
+
+    returns = [0.1, -0.1] * 10 + [1.0]
+    panel = pd.DataFrame(
+        {
+            "asset_id": ["sample"] * 21,
+            "timestamp": pd.date_range("2020-01-01", periods=21),
+            "period_return": returns,
+        }
+    )
+    result = calculate_price_volume_factors(
+        panel, factor_columns=PRICE_VOLUME_PATH_FACTORS
+    )
+    assert result.loc[:18, list(PRICE_VOLUME_PATH_FACTORS)].isna().all().all()
+    np.testing.assert_allclose(
+        result.loc[19, list(PRICE_VOLUME_PATH_FACTORS)].to_numpy(dtype=float),
+        [0.5, 0.05, 1.0],
+    )
+    changed = panel.copy()
+    changed.loc[20, "period_return"] = -100.0
+    pd.testing.assert_frame_equal(
+        result.iloc[:20],
+        calculate_price_volume_factors(
+            changed, factor_columns=PRICE_VOLUME_PATH_FACTORS
+        ).iloc[:20],
+    )
+    panel["period_return"] = 0.0
+    zero = calculate_price_volume_factors(
+        panel, factor_columns=PRICE_VOLUME_PATH_FACTORS
+    )
+    assert zero.loc[19, "positive_return_fraction_20d"] == 0.0
+    assert zero.loc[19, list(PRICE_VOLUME_PATH_FACTORS[1:])].isna().all()
+    panel.loc[10, "period_return"] = np.nan
+    assert (
+        calculate_price_volume_factors(panel, factor_columns=PRICE_VOLUME_PATH_FACTORS)
+        .loc[19, list(PRICE_VOLUME_PATH_FACTORS)]
+        .isna()
+        .all()
+    )

@@ -15,7 +15,7 @@ from quant_research_platform.contracts.validation import (
     strict_timestamp_series,
 )
 
-from .definitions import EXPECTATIONS_FACTORS
+from .definitions import ALL_EXPECTATIONS_FACTORS
 
 FORECAST_FRESHNESS_DAYS = 90
 
@@ -146,7 +146,7 @@ def _expectations_for_observations(
             )
     return pd.DataFrame.from_records(
         rows,
-        columns=("asset_id", "timestamp", *EXPECTATIONS_FACTORS),
+        columns=("asset_id", "timestamp", *ALL_EXPECTATIONS_FACTORS),
     )
 
 
@@ -161,20 +161,20 @@ def _features_for_observation(
     base: dict[str, object] = {
         "asset_id": asset_id,
         "timestamp": timestamp,
-        **{factor: float("nan") for factor in EXPECTATIONS_FACTORS},
+        **{factor: float("nan") for factor in ALL_EXPECTATIONS_FACTORS},
     }
     if pd.isna(close) or close <= 0.0:
         return base
     by_period = {}
     for event in forecast:
-        by_period.setdefault(event.forecast_end_date, []).append(event.forecast_eps)
+        by_period.setdefault(event.forecast_end_date, []).append(event)
     if not by_period:
         return base
     end_dates = sorted(by_period)
     selected = [by_period[end_dates[0]]]
     if len(end_dates) > 1 and end_dates[1].year == end_dates[0].year + 1:
         selected.append(by_period[end_dates[1]])
-    eps_values = selected[0]
+    eps_values = [event.forecast_eps for event in selected[0]]
     if len(eps_values) >= minimum_institutions:
         exact = eps_values
         center = median(exact)
@@ -182,8 +182,17 @@ def _features_for_observation(
         base["forward_earnings_yield_fy1"] = float(center / Fraction(float(close)))
         base["forecast_dispersion_fy1"] = mad
         base["log_analyst_coverage"] = float(np.log(len(eps_values)))
+        base["forecast_dispersion_price_scaled_fy1"] = float(
+            median(abs(value - center) for value in exact) / Fraction(float(close))
+        )
+        base["median_forecast_age_days_fy1"] = float(
+            median((timestamp - event.declare_date).days for event in selected[0])
+        )
+        base["newly_updated_institution_fraction_fy1"] = sum(
+            event.available_at == timestamp for event in selected[0]
+        ) / len(selected[0])
     if len(selected) > 1:
-        fy2 = selected[1]
+        fy2 = [event.forecast_eps for event in selected[1]]
         if len(fy2) >= minimum_institutions:
             base["forward_earnings_yield_fy2"] = float(
                 _finite_median(fy2) / Fraction(float(close))

@@ -465,7 +465,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         ]
         assert prediction_manifest["metadata"]["prediction_metadata"][
             "prediction_rows"
-        ] == 8 * len(keys)
+        ] == len(model_catalog.list()) * len(keys)
     layout = StorageLayout(tmp_path)
     first_record = read_research_run_record(layout.research_run_path(result["run_id"]))
     assert first_record.trial_ledgers
@@ -864,7 +864,7 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
     }
     execution_targets = crypto.execution_targets()
     ledger_ids = tuple(target.target_id for target in execution_targets)
-    assert len(ledger_ids) == 30
+    assert len(ledger_ids) == 35
     assert sorted(ledger_ids) == sorted(
         target_id
         for target_id in crypto_specs

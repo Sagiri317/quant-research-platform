@@ -241,7 +241,7 @@ def test_crypto_valid_selected_windows_reach_training(tmp_path, selected_folds):
     assert not tuple(filesystem_glob(tmp_path / "models" / "instances", "*"))
 
 
-def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
+def test_crypto_explicit_folds_publish_selected_models_and_reload_predictions(
     tmp_path, monkeypatch
 ):
     from quant_research_platform.markets.implementations.crypto.ids import (
@@ -393,8 +393,8 @@ def test_crypto_explicit_folds_publish_nine_models_and_reload_predictions(
             )
             assert parquet.metadata.num_row_groups == expected_groups > 1
         assert sum(member["path"] == relative for member in saved.member_records) == 1
-    assert len(validation_rows) == len(saved.models) == 18
-    assert len(saved.final_models) == 9
+    assert len(validation_rows) == len(saved.models) == 2 * len(profile.models.list())
+    assert len(saved.final_models) == len(profile.models.list())
     validation_rows.clear()
 
     import numpy as np

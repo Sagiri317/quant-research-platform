@@ -79,7 +79,7 @@ def test_ridge_asset_scopes_share_dimensionless_inputs_and_new_spec_identity():
             model_spec_payload(old)
         )
         assert model.label_column == "future_mid_return_500ms"
-    assert len(models) == 9
+    assert len(models) == 10
     for model in models:
         if model.model_algorithm != "ridge_regression":
             assert model.input_columns == (

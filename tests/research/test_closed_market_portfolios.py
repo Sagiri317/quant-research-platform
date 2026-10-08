@@ -667,3 +667,49 @@ def test_confirmed_suspension_rows_remain_in_real_factor_pair_domain(tmp_path):
     assert inputs.fitted is not None and len(inputs.fitted.exposures) == 30
     assert inputs.fitted.asset_returns.loc["a0"] == 0.0
     assert "a0" not in inputs.closed_assets
+
+
+def test_asset_ordered_source_parts_preserve_portfolio_sessions(tmp_path):
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets.reading import (
+        materialize_dataset_session,
+        open_dataset_session,
+    )
+
+    layout, roots, calendar, _panel = _native_inputs(tmp_path)
+
+    def sessions(selected_layout):
+        with closing_iterator(
+            market_sessions.iter_portfolio_sessions(
+                layout=selected_layout,
+                panel_root=roots["market_panel_1d"],
+                panel_columns=production._PANEL_COLUMNS,
+                calendar=calendar,
+                time_window=TimeWindow("2022-12-30", "2023-01-06"),
+                execution_root=roots["execution_mask"],
+            )
+        ) as frames:
+            return list(frames)
+
+    expected = sessions(layout)
+    bars = materialize_dataset_session(
+        open_dataset_session(roots["market_bars_1d"], columns=None, time_window=None)
+    )
+    reordered = roots["market_bars_1d"].parent / ("b" * 64)
+    write_dataset(
+        reordered,
+        (
+            group
+            for _, group in bars.sort_values(["source_asset_id", "timestamp"]).groupby(
+                "source_asset_id", sort=False
+            )
+        ),
+        spec=research_profile().interim.get("market_bars_1d"),
+    )
+    actual = sessions(layout.with_target_roots({"market_bars_1d": reordered}))
+    assert len(actual) == len(expected)
+    for left, right in zip(actual, expected, strict=True):
+        assert left.timestamp == right.timestamp
+        assert left.closed_assets == right.closed_assets
+        for name in ("panel", "valuation", "execution"):
+            pd.testing.assert_frame_equal(getattr(left, name), getattr(right, name))

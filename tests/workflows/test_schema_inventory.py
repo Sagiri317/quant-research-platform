@@ -59,7 +59,7 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
     from tests.storage.low_level_fixtures import make_processed_dataset_spec
 
     partitions = ("year",) if layout_kind == "year" else ()
-    spec = make_processed_dataset_spec("statistics", partition_columns=partitions)
+    spec = make_processed_dataset_spec("statistics")
     spec = replace(spec, column_roles={**spec.column_roles, "note": ColumnRole.CONTEXT})
     root = StorageLayout(tmp_path).processed_data_root(
         "a_share", "factor", "statistics"
@@ -77,6 +77,7 @@ def test_inventory_reuses_verified_null_profiles_and_reads_remaining_facts(
         spec = replace(
             spec,
             grain=DataGrain.ASSET_REFERENCE,
+            partition_columns=partitions,
             primary_key=("market_id", "asset_id"),
             column_roles={
                 key: value

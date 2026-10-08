@@ -12,6 +12,12 @@ EXPECTATIONS_FACTORS = (
     "forecast_dispersion_fy1",
     "log_analyst_coverage",
 )
+EXPECTATIONS_MECHANISM_FACTORS = (
+    "forecast_dispersion_price_scaled_fy1",
+    "median_forecast_age_days_fy1",
+    "newly_updated_institution_fraction_fy1",
+)
+ALL_EXPECTATIONS_FACTORS = (*EXPECTATIONS_FACTORS, *EXPECTATIONS_MECHANISM_FACTORS)
 EXPECTATIONS_INPUT_COLUMNS = (
     "close",
     "forecast_eps",
@@ -41,5 +47,5 @@ def expectations_factor_definitions(
             source_layer="processed",
             required_input_data_id=required_input_data_id,
         )
-        for name in EXPECTATIONS_FACTORS
+        for name in ALL_EXPECTATIONS_FACTORS
     )

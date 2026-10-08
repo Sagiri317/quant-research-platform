@@ -323,7 +323,7 @@ def run_crypto_acceptance(project_root: Path):
     assert targets[model_id]["status"] == "REUSED"
     assert targets[prediction_id]["status"] == "BUILT"
     evaluations = profile.evaluations.list()
-    assert len(evaluations) == 17
+    assert len(evaluations) == 2 * len(configuration["models"]) - 1
     assert all(targets[item.evaluation_id]["status"] == "BUILT" for item in evaluations)
     protocol = profile.protocol(HFT_RESEARCH_DATASET_ID)
     candidates = protocol.portfolio_candidates()
@@ -359,10 +359,15 @@ def run_crypto_acceptance(project_root: Path):
         (target.candidate.candidate_id, target.execution_mode, target.target_id)
         for target in execution_targets.values()
     )
-    assert len(sections["models and validation"]["fold_models"]) == 18
-    assert len(sections["OOS prediction"]["outputs"]) == 9
-    assert len(sections["factor diagnostics"]["evaluations"]) == 10
-    assert len(sections["model comparison"]["evaluations"]) == 7
+    assert len(sections["models and validation"]["fold_models"]) == 2 * len(
+        configuration["models"]
+    )
+    assert len(sections["OOS prediction"]["outputs"]) == len(configuration["models"])
+    assert (
+        len(sections["factor diagnostics"]["evaluations"])
+        == len(configuration["models"]) + 1
+    )
+    assert len(sections["model comparison"]["evaluations"]) == 8
     for comparison in sections["model comparison"]["evaluations"]:
         evaluation_id = comparison["evaluation_id"]
         target = targets[evaluation_id]
@@ -391,7 +396,7 @@ def run_crypto_acceptance(project_root: Path):
         for row in sections["daily statistics"]["results"]
         if row["metric_id"] == "sharpe"
     )
-    assert len(candidates) == 38 and len(takers) == 36 and len(makers) == 2
+    assert len(candidates) == 46 and len(takers) == 44 and len(makers) == 2
     for candidate in (*takers, *makers):
         target = targets[execution_targets[candidate.candidate_id].target_id]
         assert target["status"] == "BUILT"
@@ -435,7 +440,7 @@ def run_crypto_acceptance(project_root: Path):
     saved = read_crypto_model_artifact(
         root, expected_identity=model["instance_identity"], trial_layout=layout
     )
-    assert len(saved.models) == 18
-    assert len(saved.final_models) == 9
+    assert len(saved.models) == 2 * len(configuration["models"])
+    assert len(saved.final_models) == len(configuration["models"])
     assert {entry["fold_id"] for entry in saved.final_models} == {"fold_2"}
     return result, report

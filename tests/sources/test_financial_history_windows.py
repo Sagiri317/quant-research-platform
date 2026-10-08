@@ -107,7 +107,7 @@ def test_public_financial_windows_keep_choice_history_and_output_identity(
             spec=spec,
             instance_metadata=kwargs["instance_metadata"],
         )
-        return InterimImportResult({data_id: root}, (), "synthetic market source")
+        return InterimImportResult({data_id: root}, ())
 
     bindings = {
         data_id: ProducerBinding(

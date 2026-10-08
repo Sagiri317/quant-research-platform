@@ -236,6 +236,7 @@ def test_resolved_parameters_preserve_only_legal_thread_resolution_and_float_zer
         "ridge_regression",
         "lasso_regression",
         "huber_regression",
+        "decision_tree_regressor",
         "random_forest_regressor",
         "gradient_boosting_regressor",
         "xgboost_regressor",
@@ -411,11 +412,15 @@ def test_model_reader_rejects_rehashed_typed_native_state_drift(tmp_path):
         operational_metadata=read_semantic_artifact_operational_metadata(good.root),
     )
     assert len(changed) == 1
+    fresh = persisted.read_quarterly_model_artifact(
+        bad,
+        expected_identity=good.envelope.instance_identity,
+        trial_layout=good.layout,
+    )
     with pytest.raises(ValueError, match="^model_state_metadata_mismatch$"):
-        persisted.read_quarterly_model_artifact(
-            bad,
-            expected_identity=good.envelope.instance_identity,
-            trial_layout=good.layout,
+        entry = fresh.final_models[0]
+        persisted.read_quarterly_predictor(
+            fresh, entry["selection_group"], entry["family_id"]
         )
     assert {
         path.relative_to(good.root): path.read_bytes()

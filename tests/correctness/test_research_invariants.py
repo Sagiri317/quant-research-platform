@@ -61,6 +61,7 @@ def test_research_protocol_identity_and_surfaces_are_explicit() -> None:
     assert SCENARIO_IDS == (
         "pv_all",
         "pv_expanded",
+        "pv_nf_expectations",
         "fusion_nf_core",
         "fusion_nf_expectations",
     )

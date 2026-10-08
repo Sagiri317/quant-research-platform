@@ -58,6 +58,7 @@ def test_profile_selector_rejects_derived_identity() -> None:
 def test_expanded_pv_uses_existing_owners_and_keeps_formal_selections():
     from quant_research_platform.research.factors.price_volume.definitions import (
         PRICE_VOLUME_LIBRARY,
+        PRICE_VOLUME_PATH_FACTORS,
     )
 
     profile = research_profile(A_SHARE_PROFILE_ID)
@@ -65,6 +66,7 @@ def test_expanded_pv_uses_existing_owners_and_keeps_formal_selections():
     assert len(PRICE_VOLUME_LIBRARY) == 50
     assert expanded.factor_columns == (
         *PRICE_VOLUME_LIBRARY,
+        *PRICE_VOLUME_PATH_FACTORS,
         "beta_252d",
         "residual_volatility_60d",
     )
@@ -100,7 +102,8 @@ def test_expanded_pv_uses_existing_owners_and_keeps_formal_selections():
         candidate.candidate_id for candidate in expanded.portfolio_candidates()
     ]
     spec = profile.research_datasets.get("pv_expanded")
-    assert spec.factor_columns == expanded.factor_columns
+    assert spec.factor_columns == profile.protocol("pv_expanded").factor_columns
+    assert len(expanded.factor_columns) == 52
     assert "fundamental_factors" not in spec.input_data_ids
     assert "fundamental" not in expanded.factor_fdr_families
     catalog_columns = {

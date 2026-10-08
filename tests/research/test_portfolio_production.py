@@ -267,6 +267,7 @@ def _build_producer(
     access_window: str = "development",
     frozen_calibration: production.AlphaCalibration | None = None,
     typed_batches: bool = False,
+    construction: str = "top20_equal_weight",
 ):
     final_calibrations = [] if final_calibrations is None else final_calibrations
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
@@ -286,7 +287,7 @@ def _build_producer(
             selection_group="global",
             prediction_selector="champion",
             candidate_id="synthetic_top20_equal_weight",
-            construction="top20_equal_weight",
+            construction=construction,
             prediction_target_id="prediction",
             rebalance_schedule="daily",
             top_quantile=0.5,
@@ -379,6 +380,9 @@ def _build_producer(
             root=root,
             time_window=time_window,
             arrow_schema=SimpleNamespace(names=tuple(frames[target].columns)),
+            filtered_view=lambda window: input_session(
+                root, columns=columns, time_window=window
+            ),
         )
 
     def file_batches(session, *, columns):
@@ -416,6 +420,33 @@ def _build_producer(
             panels._canonical_stock_master(stocks),
         )
 
+    def source_axis(session, *, panel_source, asset_column):
+        assert not panel_source and asset_column == "source_asset_id"
+        assert session.root == roots["market_bars_1d"]
+        frame = frames["market_bars_1d"]
+        return (
+            tuple(sorted(frame.timestamp.unique())),
+            pd.Series(0, index=frame.source_asset_id.unique()),
+            None,
+            {},
+            {},
+        )
+
+    def materialize_source(session):
+        return pd.concat(
+            (
+                frame
+                for _, frame in file_batches(
+                    session, columns=market_sessions._MARKET_FACT_COLUMNS
+                )
+            ),
+            ignore_index=True,
+        )
+
+    monkeypatch.setattr(market_sessions, "_processed_axis", source_axis)
+    monkeypatch.setattr(
+        market_sessions, "materialize_dataset_session", materialize_source
+    )
     monkeypatch.setattr(market_sessions, "_portfolio_session_evidence", source_evidence)
     monkeypatch.setattr(market_sessions, "open_dataset_session", input_session)
     monkeypatch.setattr(production, "open_dataset_session", input_session)
@@ -2449,3 +2480,64 @@ def test_simple_producer_blocks_when_required_adv_contains_unknown_session(
         PortfolioTargetBlocked, match="portfolio_adv_warmup_insufficient"
     ):
         list(output)
+
+
+def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
+    tmp_path, monkeypatch
+):
+    frames, fee_frame, output_window = _inputs()
+    output, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=output_window,
+        construction="top20_equal_weight_half_step",
+        typed_batches=True,
+    )
+    batches = list(output)
+    first = session_frame(batches[0]).set_index("asset_id")
+    assert first.loc[
+        first.index != "__cash__", "decision_delta_weight"
+    ].sum() == pytest.approx(0.5)
+    assert first.loc["__cash__", "decision_delta_weight"] == pytest.approx(-0.5)
+    second = session_frame(batches[1]).set_index("asset_id")
+    assert (
+        0 < second.loc[second.index != "__cash__", "decision_delta_weight"].sum() < 0.5
+    )
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="half_step",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "2023-01-03",
+            "end": "2023-01-06",
+            "access": "development",
+        },
+        upstream_identities={"prediction": "b" * 64},
+        semantic_metadata={
+            "portfolio_capital": {
+                "candidate_id": "half_step",
+                "initial_capital": 100.0,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
+        },
+    )
+
+    def produce(emit):
+        for batch in batches:
+            emit(batch)
+
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "half-step", envelope=envelope, produce=produce
+    )
+    assert (
+        list(
+            read_portfolio_ledger_artifact(
+                root, expected_identity=root.name
+            ).iter_chunks()
+        )
+        == batches
+    )

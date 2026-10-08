@@ -268,6 +268,7 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
                     "return": 0.1 + slope * x + 0.01 * (asset % 2),
                     "factor": x,
                     "weight": float(asset),
+                    "total_market_cap": float(asset),
                 }
             )
     from quant_research_platform.research.statistics_production import (
@@ -404,6 +405,7 @@ def test_white_lm_preserves_exact_auxiliary_fit_without_unused_f_warning():
                 "x": x,
                 "z": z,
                 "return": 2 + day * x + 3 * z,
+                "total_market_cap": 1.0,
             }
         )
         result = fama_macbeth_period(
@@ -717,6 +719,7 @@ def test_fama_macbeth_preserves_small_factor_units_and_rejects_collinearity():
         {
             "timestamp": pd.Timestamp("2020-01-01"),
             "asset_id": [f"s{i}" for i in range(len(x))],
+            "total_market_cap": 1.0,
             "x": x,
             "y": y,
         }

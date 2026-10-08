@@ -521,14 +521,16 @@ def test_known_missing_coordinates_are_blocked_in_the_real_run_and_report(
     result = research.research_run(
         profile=profile,
         layout=layout,
-        research_plan=research_configuration(development=("2019-03-04", "2019-03-15")),
+        research_plan=research_configuration(
+            name="fusion_nf_core", development=("2019-03-04", "2019-03-15")
+        ),
     )
     record = read_research_run_record(layout.research_run_path(result["run_id"]))
     targets = {row.target_id: row for row in record.target_results}
     assert targets["financial_balance"].status.value == "BLOCKED"
     assert targets["financial_balance"].reason == reason
     for group in ("global", "quarterly"):
-        ledger = targets[f"pv_all_{group}_champion_csi500_enhanced_ledger"]
+        ledger = targets[f"fusion_nf_core_{group}_champion_csi500_enhanced_ledger"]
         assert ledger.status.value == "BLOCKED"
     report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
     assert report["status"] != "COMPLETE"

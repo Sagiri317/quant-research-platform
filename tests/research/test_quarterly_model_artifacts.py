@@ -290,6 +290,7 @@ def test_a_share_evaluation_catalog_contains_all_formal_scenarios() -> None:
     assert {
         "pv_all_evaluation",
         "pv_expanded_evaluation",
+        "pv_nf_expectations_evaluation",
         "fusion_nf_core_evaluation",
         "fusion_nf_expectations_evaluation",
     } == {spec.evaluation_id for spec in research_profile().evaluations.list()}
@@ -1514,13 +1515,13 @@ def test_full_scope_family_metadata_fits_quarter_shards_and_protocol_member_limi
         dataset=dataset,
         development_end="2019-03-31",
     )
-    assert len(case.artifact.candidate_models) == 5 * 8
-    assert len(case.artifact.final_models) == 2 * 8
+    assert len(case.artifact.candidate_models) == 5 * len(specs)
+    assert len(case.artifact.final_models) == 2 * len(specs)
     for member in case.artifact.member_records:
         if member["path"].endswith(".json"):
             assert filesystem_stat(case.root / member["path"]).st_size < 1024**2
     shard = json.loads(filesystem_read_bytes(case.root / "models/2019Q1/metadata.json"))
-    assert len(shard["candidate_models"]) == 8
+    assert len(shard["candidate_models"]) == len(specs)
     assert any(
         item["model_metadata"]["scaler"] is not None
         for item in shard["candidate_models"]

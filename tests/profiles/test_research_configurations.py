@@ -1664,3 +1664,139 @@ def test_model_stage_rejects_portfolio_execution():
     assert config["portfolios"]
     with pytest.raises(ValueError, match="model_stage_has_portfolios"):
         bind_research_configuration(research_profile(config["profile_id"]), config)
+
+
+def test_nonfinancial_expectations_has_no_financial_pit_dependency():
+    import pandas as pd
+
+    from quant_research_platform.research.filtering import a_share_eligibility
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("a_share", "pv_nf_expectations")
+    selected = bind_research_configuration(research_profile(), config)
+    dataset = selected.research_datasets.get("pv_nf_expectations")
+    assert "expectations_factors" in dataset.input_data_ids
+    assert "fundamental_factors" not in dataset.input_data_ids
+    assert "has_legal_fundamental_pit" not in dataset.context_columns
+    assert "is_nonfinancial_industry" in dataset.context_columns
+    frame = pd.DataFrame(
+        {
+            "is_a_share_scope": [True] * 4,
+            "is_trading": [True] * 4,
+            "is_st": [False] * 4,
+            "is_pt": [False] * 4,
+            "has_252_trading_sessions": [True] * 4,
+            "close": [10.0] * 4,
+            "adj_close": [10.0] * 4,
+            "volume": [100.0] * 4,
+            "amount": [1000.0] * 4,
+            "turnover": [0.01] * 4,
+            "is_nonfinancial_industry": [True, False, True, None],
+            "industry_standard_id": ["csrc"] * 4,
+            "industry_level1_code": ["C", "J", "", "C"],
+            "industry_level1_name": ["manufacturing", "finance", "", "manufacturing"],
+        }
+    )
+    assert a_share_eligibility(frame, "pv_nf_expectations").tolist() == [
+        True,
+        False,
+        False,
+        False,
+    ]
+    with pytest.raises(ValueError, match="has_legal_fundamental_pit"):
+        a_share_eligibility(frame, "fusion_nf_expectations")
+
+
+@pytest.mark.parametrize(
+    "factor,sources",
+    [
+        ("book_to_market", {"financial_balance"}),
+        ("earnings_yield", {"financial_income"}),
+        ("roe", {"financial_balance", "financial_income"}),
+        ("accruals", {"financial_balance", "financial_income", "financial_cashflow"}),
+    ],
+)
+def test_financial_factor_selection_requires_only_consumed_statements(factor, sources):
+    config = configuration("a_share_csmar_choice", "fusion_nf_core")
+    config["evaluation"]["factors"] = [factor]
+    selected = bind_research_configuration(research_profile(), config)
+    assert set(
+        selected.processed.get("fundamental_pit").source_input_data_ids
+    ) == sources | {"trading_calendar", "financial_first_disclosure"}
+    columns = selected.processed.get("fundamental_factors").required_columns
+    assert set(columns) == {
+        "market_id",
+        "asset_id",
+        "timestamp",
+        "has_legal_fundamental_pit",
+        factor,
+    }
+
+
+def test_financial_pruning_keeps_enhanced_portfolio_risk_inputs():
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("a_share", "core6")
+    selected = bind_research_configuration(research_profile(), config)
+    assert (
+        "earnings_yield"
+        in selected.processed.get("fundamental_factors").required_columns
+    )
+    assert (
+        "financial_income"
+        in selected.processed.get("fundamental_pit").source_input_data_ids
+    )
+
+
+@pytest.mark.parametrize("delay", (-1, True, 0.5))
+def test_auxiliary_input_delay_rejects_invalid_values(delay):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", "cross_btc_eth")
+    config["auxiliary_sources"]["cross_asset"]["input_delay_ms"] = delay
+    with pytest.raises(ValueError, match="research_input_delay_invalid"):
+        bind_research_configuration(research_profile("crypto_binance_hft"), config)
+
+
+@pytest.mark.parametrize(
+    "name", ("cross_btc_eth", "spot_context", "external_context", "derivatives_state")
+)
+def test_auxiliary_input_delay_is_bound_into_producer_identity(tmp_path, name):
+    import json
+
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", name)
+    sources = [
+        source for key, source in config["auxiliary_sources"].items() if key != "sol"
+    ]
+    for source in sources:
+        source["input_delay_ms"] = 100
+    selected = bind_research_configuration(
+        research_profile("crypto_binance_hft"), config, tardis_root=tmp_path
+    )
+    delayed = [
+        spec
+        for spec in selected.processed.list()
+        if json.loads(spec.parameters_json).get("input_delay_ms") == 100
+    ]
+    assert len(delayed) == len(sources)
+
+
+def test_a_share_binding_preserves_supplied_processed_dependencies():
+    from dataclasses import replace
+
+    from quant_research_platform.catalog.processed import ProcessedDataCatalog
+    from tests.helpers.research_configuration import research_configuration
+
+    base = research_profile()
+    selected = replace(base.processed.get("market_panel_1d"), source_input_data_ids=())
+    profile = replace(
+        base,
+        processed=ProcessedDataCatalog(
+            selected if spec.data_id == selected.data_id else spec
+            for spec in base.processed.list()
+        ),
+    )
+    bound = bind_research_configuration(profile, research_configuration(name="pv25"))
+    assert bound.processed.get(selected.data_id) == selected

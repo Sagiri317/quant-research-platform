@@ -9,6 +9,7 @@ import pytest
 
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.research.datasets.assembler import (
     assemble_research_dataset,
@@ -364,13 +365,14 @@ def test_research_dataset_semantic_snapshots_are_persisted_for_all_inputs(
         "context": "strict",
     }
     assert spec_payload["key_coverage"] == expected
-    assert manifest_payload["key_coverage"] == expected
+    assert "key_coverage" not in manifest_payload
+    assert manifest_payload["spec_identity"] == canonical_json_hash(spec_payload)
     expected_roles = {
         column: role.value
         for column, role in dataset_catalog.get("dummy_dataset").column_roles.items()
     }
     assert spec_payload["column_roles"] == expected_roles
-    assert manifest_payload["column_roles"] == expected_roles
+    assert "column_roles" not in manifest_payload
 
 
 def test_strict_research_input_value_nan_does_not_count_as_missing_key(

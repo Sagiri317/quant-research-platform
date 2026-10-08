@@ -353,3 +353,239 @@ def test_information_union_persists_complete_ordered_panel_for_research_windows(
     assert windows[0].start == window.start
     assert windows[-1].end == window.end
     restored = expected = None
+
+
+def test_input_delay_postpones_visibility_without_shifting_target_or_source_clock():
+    from quant_research_platform.markets.implementations.crypto.hft import (
+        iter_derivative_factor_frames,
+        iter_external_context_frames,
+        iter_spot_perp_factor_frames,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_DERIVATIVE_CHANNELS,
+    )
+
+    target, information = panel(), panel(spot=True)
+    state = next(iter_factor_frames([information]))
+    cross = pd.concat(
+        iter_cross_asset_factor_frames(
+            [target],
+            information_frames={"btc_usdt": [state]},
+            max_age_ms=150,
+            batch_rows=7,
+            input_delay_ms=100,
+        ),
+        ignore_index=True,
+    )
+    assert cross.timestamp.equals(target.timestamp.dt.as_unit("ns"))
+    assert pd.isna(cross.btc_grid_at.iloc[0])
+    assert cross.btc_grid_at.iloc[1] == target.timestamp.iloc[0]
+    assert cross.btc_grid_age_ms.iloc[1] == 100
+    assert cross.btc_return_500ms.iloc[6] == state.return_500ms.iloc[5]
+    spot = pd.concat(
+        iter_spot_perp_factor_frames(
+            [target],
+            spot_frames=[information],
+            max_age_ms=150,
+            batch_rows=7,
+            input_delay_ms=100,
+        ),
+        ignore_index=True,
+    )
+    assert pd.isna(spot.spot_perp_basis.iloc[0])
+    assert spot.spot_perp_basis.iloc[1] == 1.0
+    assert spot.spot_book_age_ms.iloc[1] == 101
+    origin = target.timestamp.iloc[0].value
+    derivative = pd.concat(
+        iter_derivative_factor_frames(
+            [target],
+            observations=[
+                (
+                    origin,
+                    "openInterest",
+                    {"openInterest": "10", "time": origin // 1_000_000},
+                    0,
+                )
+            ],
+            max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 150),
+            input_delay_ms=100,
+        ),
+        ignore_index=True,
+    )
+    assert pd.isna(derivative.log_open_interest.iloc[0])
+    assert derivative.log_open_interest.iloc[1] == pytest.approx(np.log(10))
+    assert derivative.openInterest_observed_at.iloc[1] == target.timestamp.iloc[0]
+    assert pd.isna(derivative.log_open_interest.iloc[2])
+    quotes = [
+        {
+            "local_timestamp": origin // 1000,
+            "timestamp": origin // 1000 - 1000,
+            "bid_price": 199.0,
+            "ask_price": 201.0,
+        }
+    ]
+    trades = [
+        {
+            "local_timestamp": origin // 1000,
+            "timestamp": origin // 1000,
+            "side": "buy",
+            "price": 200.0,
+            "amount": 3.0,
+        }
+    ]
+    external = pd.concat(
+        iter_external_context_frames(
+            [target],
+            quotes=quotes,
+            trades=trades,
+            venue="bybit",
+            base_units_per_amount=1.0,
+            max_age_ms=1000,
+            input_delay_ms=100,
+        ),
+        ignore_index=True,
+    )
+    assert pd.isna(external.bybit_mid_usdt.iloc[0])
+    assert external.bybit_mid_usdt.iloc[1] == 200.0
+    assert external.bybit_quote_age_ms.iloc[1] == 100
+    assert external.bybit_quote_observed_at.iloc[1] == target.timestamp.iloc[0]
+    assert pd.isna(external.bybit_observed_signed_base_flow_500ms.iloc[5])
+    assert pd.isna(external.bybit_observed_signed_base_flow_500ms.iloc[6])
+
+
+@pytest.mark.parametrize("delay", (0, 50, 100, 150, 199, 200, 201, 250))
+def test_delayed_flow_windows_wait_for_complete_history_after_each_reset(delay):
+    from quant_research_platform.markets.implementations.crypto.hft import (
+        iter_derivative_factor_frames,
+        iter_external_context_frames,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_DERIVATIVE_CHANNELS,
+    )
+
+    frame = pd.concat([panel()] * 6, ignore_index=True)
+    frame["timestamp"] = pd.date_range(
+        "2026-08-01T00:00:00.100", periods=120, freq="100ms"
+    )
+    frame.loc[60:, "segment_id"] = "b"
+    stamps = frame.timestamp.dt.as_unit("ns").astype("int64").tolist()
+    trades = [
+        {
+            "local_timestamp": stamp // 1000,
+            "timestamp": stamp // 1000,
+            "side": "buy",
+            "price": 100.0,
+            "amount": 1.0,
+        }
+        for stamp in stamps
+    ]
+    external = pd.concat(
+        iter_external_context_frames(
+            [frame.iloc[:13], frame.iloc[13:74], frame.iloc[74:]],
+            quotes=[],
+            trades=trades,
+            venue="bybit",
+            base_units_per_amount=1.0,
+            max_age_ms=1000,
+            input_delay_ms=delay,
+        ),
+        ignore_index=True,
+    )
+    events = [
+        (stamp, "forceOrder", {"E": stamp // 1_000_000, "o": {"z": "1", "S": "BUY"}}, 0)
+        for stamp in stamps
+    ]
+    derivative = pd.concat(
+        iter_derivative_factor_frames(
+            [frame.iloc[:13], frame.iloc[13:74], frame.iloc[74:]],
+            observations=events,
+            max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 1000),
+            input_delay_ms=delay,
+        ),
+        ignore_index=True,
+    )
+    lag = (delay + 99) // 100
+    for offset in (0, 60):
+        flow = external.bybit_observed_signed_base_flow_500ms.iloc[offset : offset + 60]
+        force = derivative.observed_force_order_imbalance_5s.iloc[offset : offset + 60]
+        assert flow.iloc[: 5 + lag].isna().all()
+        assert flow.iloc[5 + lag] == 5.0
+        assert force.iloc[: 49 + lag].isna().all()
+        assert force.iloc[49 + lag] == 1.0
+
+
+def test_delayed_force_order_epoch_reset_does_not_restart_delay_twice():
+    from quant_research_platform.markets.implementations.crypto.hft import (
+        iter_derivative_factor_frames,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_DERIVATIVE_CHANNELS,
+    )
+
+    frame = pd.concat([panel()] * 4, ignore_index=True)
+    frame["timestamp"] = pd.date_range(
+        "2026-08-01T00:00:00.100", periods=80, freq="100ms"
+    )
+    origin = pd.Timestamp("2026-08-01").value
+    events = [
+        (origin, None, None, 0),
+        (origin + 1_000_000_000, None, None, 1),
+        (
+            origin + 1_100_000_000,
+            "forceOrder",
+            {"E": (origin + 1_100_000_000) // 1_000_000, "o": {"z": "1", "S": "BUY"}},
+            1,
+        ),
+    ]
+
+    def compute(delay):
+        return pd.concat(
+            iter_derivative_factor_frames(
+                [frame],
+                observations=events,
+                max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 10000),
+                input_delay_ms=delay,
+            ),
+            ignore_index=True,
+        )
+
+    baseline, delayed = compute(0), compute(200)
+    assert baseline.observed_force_order_imbalance_5s.iloc[58] == 1.0
+    assert delayed.observed_force_order_imbalance_5s.iloc[60] == 1.0
+    assert delayed.observed_force_order_imbalance_5s.iloc[:60].isna().all()
+
+
+def test_delayed_source_epoch_cannot_move_panel_flow_boundary_backwards():
+    from quant_research_platform.markets.implementations.crypto.hft import (
+        iter_derivative_factor_frames,
+    )
+    from quant_research_platform.research.protocols.crypto_hft import (
+        HFT_DERIVATIVE_CHANNELS,
+    )
+
+    frame = pd.concat([panel()] * 5, ignore_index=True)
+    frame["timestamp"] = pd.date_range(
+        "2026-08-01T00:00:00.100", periods=100, freq="100ms"
+    )
+    frame.loc[40:, "segment_id"] = "b"
+    origin = pd.Timestamp("2026-08-01").value
+    events = [
+        (origin, None, None, 0),
+        (origin + 3_900_000_000, None, None, 1),
+        (
+            origin + 4_000_000_000,
+            "forceOrder",
+            {"E": (origin + 4_000_000_000) // 1_000_000, "o": {"z": "1", "S": "BUY"}},
+            1,
+        ),
+    ]
+    result = pd.concat(
+        iter_derivative_factor_frames(
+            [frame],
+            observations=events,
+            max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 10000),
+            input_delay_ms=200,
+        ),
+        ignore_index=True,
+    )
+    assert result.observed_force_order_imbalance_5s.isna().all()

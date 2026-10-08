@@ -435,7 +435,7 @@ def test_a_share_persisted_selection_and_lineage_reject_wrong_enum_types(tmp_pat
             payload["selection"]["selection_group"] = bad
 
     root = _republish(case, tmp_path / "candidate", mutate=mutate)
-    with pytest.raises(ValueError, match="^model_selection_decision_mismatch$"):
+    with pytest.raises(ValueError, match="^invalid_model_metadata$"):
         read_quarterly_model_artifact(root, trial_layout=case.layout)
     lineage = case.artifact.prediction_lineage(
         TimeWindow("2019-01-01", "2019-03-31"),

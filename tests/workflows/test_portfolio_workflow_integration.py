@@ -1029,7 +1029,11 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         layout=layout,
         research_plan=configuration,
     )
-    assert development["status"] == "COMPLETE", development
+    assert development["status"] == "COMPLETE", [
+        (row["target_id"], row["status"], row["reason"])
+        for row in development["target_results"]
+        if row["status"] not in {"BUILT", "REUSED"}
+    ]
     development_record = read_research_run_record(
         layout.research_run_path(development["run_id"])
     )

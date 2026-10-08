@@ -568,6 +568,7 @@ class PortfolioCandidateSpec:
     selection_group: Literal["global", "quarterly"]
     construction: Literal[
         "top20_equal_weight",
+        "top20_equal_weight_half_step",
         "top20_float_cap",
         "benchmark_enhanced",
     ]
@@ -605,6 +606,7 @@ class PortfolioCandidateSpec:
                 raise ValueError("portfolio_candidate_dependency_invalid")
         if type(self.construction) is not str or self.construction not in {
             "top20_equal_weight",
+            "top20_equal_weight_half_step",
             "top20_float_cap",
             "benchmark_enhanced",
         }:

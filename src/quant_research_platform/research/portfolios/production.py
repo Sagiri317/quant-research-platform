@@ -1079,6 +1079,10 @@ def _build_session(
                 if candidate.construction == "top20_float_cap"
                 else None,
             )
+            if candidate.construction == "top20_equal_weight_half_step":
+                retained = holdings.div(nav).reindex(target.index, fill_value=0.0)
+                retained = retained.where(prediction_eligible, 0.0)
+                target = (target + retained) / 2.0
     else:
         target = holdings.div(nav).copy(deep=True)
     target = target.loc[target.ne(0.0)]

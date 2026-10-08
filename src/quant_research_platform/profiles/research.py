@@ -425,6 +425,63 @@ def bind_research_configuration(
     processed = library.processed
     bindings = dict(profile.producer_bindings)
     if str(profile.market_id) == "a_share":
+        from quant_research_platform.markets.implementations.a_share import fundamentals
+        from quant_research_platform.research.factors.fundamental.definitions import (
+            FUNDAMENTAL_FACTORS,
+            fundamental_inputs,
+        )
+
+        processed = profile.processed
+        financial_factors = (
+            set(columns)
+            | {
+                style
+                for candidate in candidates
+                for style in candidate.risk_style_columns
+            }
+        ).intersection(FUNDAMENTAL_FACTORS)
+        if financial_factors:
+            inputs = {
+                column
+                for factor in financial_factors
+                for column in fundamental_inputs(factor)
+            }
+            metrics = {
+                column.removeprefix("beginning_")
+                .removeprefix("average_")
+                .removeprefix("prior_year_")
+                .removesuffix("_ttm")
+                for column in inputs
+            }
+            sources = {
+                name
+                for name, fields in fundamentals.FINANCIAL_VALUE_COLUMNS.items()
+                if metrics.intersection(fields)
+            }
+            specs = []
+            for spec in processed.list():
+                if spec.data_id == "fundamental_pit":
+                    spec = replace(
+                        spec,
+                        source_input_data_ids=tuple(
+                            name
+                            for name in spec.source_input_data_ids
+                            if name not in fundamentals.FINANCIAL_VALUE_COLUMNS
+                            or name in sources
+                        ),
+                    )
+                elif spec.data_id == "fundamental_factors":
+                    spec = replace(
+                        spec,
+                        column_roles={
+                            name: role
+                            for name, role in spec.column_roles.items()
+                            if name not in FUNDAMENTAL_FACTORS
+                            or name in financial_factors
+                        },
+                    )
+                specs.append(spec)
+            processed = ProcessedDataCatalog(specs)
         processed = ProcessedDataCatalog(
             replace(
                 spec,
@@ -438,7 +495,7 @@ def bind_research_configuration(
             )
             if spec.data_id == "expectations_factors"
             else spec
-            for spec in profile.processed.list()
+            for spec in processed.list()
         )
         from quant_research_platform.markets.implementations.a_share.calendar import (
             unified_trading_sessions,
@@ -667,6 +724,12 @@ def bind_research_configuration(
         )
 
         for name, source in auxiliary.items():
+            if type(source) is not dict:
+                raise ValueError("research_auxiliary_source_invalid")
+            input_delay_ms = source.get("input_delay_ms", 0)
+            if type(input_delay_ms) is not int or input_delay_ms < 0:
+                raise ValueError("research_input_delay_invalid")
+            optional_fields = {"input_delay_ms"} if name != "sol" else set()
             if name in crypto_ids.HFT_EXTERNAL_DATA_IDS:
                 from quant_research_platform.sources.tardis.normalized import (
                     SCHEMA_ID,
@@ -677,7 +740,7 @@ def bind_research_configuration(
                 instrument = crypto_producer.EXTERNAL_INSTRUMENTS[name]
                 if (
                     type(source) is not dict
-                    or set(source) != {"archives", "max_age_ms"}
+                    or set(source) - optional_fields != {"archives", "max_age_ms"}
                     or type(source["max_age_ms"]) is not int
                     or source["max_age_ms"] <= 0
                     or type(source["archives"]) is not dict
@@ -735,6 +798,7 @@ def bind_research_configuration(
                     "symbols": instrument["symbols"],
                     "base_units_per_amount": instrument["base_units_per_amount"],
                     "max_age_ms": source["max_age_ms"],
+                    "input_delay_ms": input_delay_ms,
                 }
                 processed = ProcessedDataCatalog(
                     replace(spec, parameters_json=json.dumps(parameters))
@@ -746,7 +810,7 @@ def bind_research_configuration(
             if name == "cross_asset":
                 if (
                     type(source) is not dict
-                    or set(source) != {"max_age_ms"}
+                    or set(source) - optional_fields != {"max_age_ms"}
                     or type(source["max_age_ms"]) is not int
                     or source["max_age_ms"] <= 0
                 ):
@@ -755,7 +819,10 @@ def bind_research_configuration(
             expected_fields = (
                 {"archives"} if name == "sol" else {"archives", "max_age_ms"}
             )
-            if type(source) is not dict or set(source) != expected_fields:
+            if (
+                type(source) is not dict
+                or set(source) - optional_fields != expected_fields
+            ):
                 raise ValueError("research_auxiliary_source_invalid")
             exchange = "binance" if name == "spot" else "binance-futures"
             relatives = source["archives"]
@@ -864,7 +931,12 @@ def bind_research_configuration(
                     crypto_producer.produce_spot_perp_context,
                 )
             processed = ProcessedDataCatalog(
-                replace(spec, parameters_json=json.dumps({"max_age_ms": ages}))
+                replace(
+                    spec,
+                    parameters_json=json.dumps(
+                        {"max_age_ms": ages, "input_delay_ms": input_delay_ms}
+                    ),
+                )
                 if spec.data_id == data_id
                 else spec
                 for spec in processed.list()
@@ -915,6 +987,9 @@ def bind_research_configuration(
                         "information_assets": cross_assets,
                         "target_assets": read_assets,
                         "max_age_ms": auxiliary["cross_asset"]["max_age_ms"],
+                        "input_delay_ms": auxiliary["cross_asset"].get(
+                            "input_delay_ms", 0
+                        ),
                     }
                 ),
             }

@@ -692,9 +692,12 @@ def iter_factor_frames(
         previous_mid = float(mid[-1])
 
 
-def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
+def iter_derivative_factor_frames(
+    frames, *, observations, max_age_ms, input_delay_ms=0
+):
     """Align native perpetual states to one asset's causal, complete 100ms grid."""
     active_segment = previous_time = active_epoch = None
+    flow_start_ns = None
     states = {}
     liquidations = deque()
     oi_values = [np.nan] * 3001
@@ -741,15 +744,18 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
             }
             for row, stamp in enumerate(timestamps):
                 decision_ns = int(stamp) * 1_000_000
+                information_ns = decision_ns - input_delay_ms * 1_000_000
                 if boundaries[row]:
                     liquidations.clear()
                     count = invalid = 0
-                while event is not None and event[0] <= decision_ns:
+                    flow_start_ns = decision_ns - 100_000_000
+                while event is not None and event[0] <= information_ns:
                     observed_ns, channel, payload, epoch = event
                     if active_epoch is not None and epoch != active_epoch:
                         states.clear()
                         liquidations.clear()
                         count = invalid = 0
+                        flow_start_ns = max(flow_start_ns, information_ns - 100_000_000)
                     active_epoch = epoch
                     if channel is None:
                         event = next(events, None)
@@ -759,8 +765,8 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
                         # z is observed cumulative filled base quantity, not order q.
                         order = payload["o"]
                         quantity = float(order["z"])
-                        if observed_ns > decision_ns - 30_000_000_000 and (
-                            count or observed_ns > decision_ns - 100_000_000
+                        if observed_ns > information_ns - 30_000_000_000 and (
+                            count or observed_ns > information_ns - 100_000_000
                         ):
                             liquidations.append(
                                 (
@@ -829,15 +835,19 @@ def iter_derivative_factor_frames(frames, *, observations, max_age_ms):
                             oi / oi_values[old] - 1
                         )
                 while (
-                    liquidations and liquidations[0][0] <= decision_ns - 30_000_000_000
+                    liquidations
+                    and liquidations[0][0] <= information_ns - 30_000_000_000
                 ):
                     liquidations.popleft()
                 for seconds, suffix in ((5, "5s"), (30, "30s")):
-                    if "forceOrder" in fresh and count + 1 >= seconds * 10:
+                    if (
+                        "forceOrder" in fresh
+                        and information_ns - flow_start_ns >= seconds * 1_000_000_000
+                    ):
                         window = [
                             quantity
                             for observed, quantity in liquidations
-                            if observed > decision_ns - seconds * 1_000_000_000
+                            if observed > information_ns - seconds * 1_000_000_000
                         ]
                         total = sum(abs(quantity) for quantity in window)
                         if total > 0:
@@ -924,7 +934,7 @@ def _microstructure_context_rows(frames):
 
 
 def iter_spot_perp_factor_frames(
-    perpetual_frames, *, spot_frames, max_age_ms, batch_rows
+    perpetual_frames, *, spot_frames, max_age_ms, batch_rows, input_delay_ms=0
 ):
     """Causally align one information asset without changing the execution grid."""
     last = previous = None
@@ -936,7 +946,10 @@ def iter_spot_perp_factor_frames(
         upcoming = next(spot, None)
         for point in perpetual:
             stamp = point["timestamp"]
-            while upcoming is not None and upcoming["timestamp"] <= stamp:
+            while (
+                upcoming is not None
+                and upcoming["timestamp"] <= stamp - input_delay_ms * 1_000_000
+            ):
                 previous, last = last, upcoming
                 upcoming = next(spot, None)
             row = {key: np.nan for key in HFT_SPOT_FACTOR_COLUMNS}
@@ -1003,7 +1016,7 @@ def iter_spot_perp_factor_frames(
 
 
 def iter_cross_asset_factor_frames(
-    target_frames, *, information_frames, max_age_ms, batch_rows
+    target_frames, *, information_frames, max_age_ms, batch_rows, input_delay_ms=0
 ):
     """Align matured, dimensionless asset states to one target asset's grid."""
 
@@ -1045,7 +1058,10 @@ def iter_cross_asset_factor_frames(
                 row["timestamp"] = pd.Timestamp(stamp)
                 for asset, stream in sources.items():
                     point = upcoming[asset]
-                    while point is not None and point[0] <= stamp:
+                    while (
+                        point is not None
+                        and point[0] <= stamp - input_delay_ms * 1_000_000
+                    ):
                         previous[asset] = current.get(asset)
                         current[asset] = point
                         point = next(stream, None)
@@ -1096,7 +1112,14 @@ def iter_cross_asset_factor_frames(
 
 
 def iter_external_context_frames(
-    frames, *, quotes, trades, venue, base_units_per_amount, max_age_ms
+    frames,
+    *,
+    quotes,
+    trades,
+    venue,
+    base_units_per_amount,
+    max_age_ms,
+    input_delay_ms=0,
 ):
     """Align observed external quotes and base/notional trade flow to Binance time."""
     active_segment = previous_time = None
@@ -1133,17 +1156,18 @@ def iter_external_context_frames(
             records = []
             for index, stamp in enumerate(timestamps):
                 decision_us = int(stamp) * 1000
+                information_us = decision_us - input_delay_ms * 1000
                 if boundaries[index]:
                     mids.clear()
                     bins.clear()
                     count = 0
-                while quote is not None and quote["local_timestamp"] <= decision_us:
+                while quote is not None and quote["local_timestamp"] <= information_us:
                     latest_quote = quote
                     quote = next(quote_rows, None)
                 buy = sell = buy_notional = sell_notional = Fraction()
-                while trade is not None and trade["local_timestamp"] <= decision_us:
+                while trade is not None and trade["local_timestamp"] <= information_us:
                     latest_trade = trade
-                    if trade["local_timestamp"] > decision_us - 100_000:
+                    if trade["local_timestamp"] > information_us - 100_000:
                         if venue == "okx":
                             event_time = trade["timestamp"]
                             if transition_start <= event_time < transition_end:
@@ -1209,7 +1233,7 @@ def iter_external_context_frames(
                         row["return_500ms"] = mid / mids[0] - 1
                 else:
                     mids.clear()
-                if count >= 6:
+                if (count - 1) * 100 >= 500 + input_delay_ms:
                     total_buy = sum((value[0] for value in bins), Fraction())
                     total_sell = sum((value[1] for value in bins), Fraction())
                     total = total_buy + total_sell

@@ -38,7 +38,7 @@ from quant_research_platform.research.factors.expectations.calculations import (
     FORECAST_FRESHNESS_DAYS,
 )
 from quant_research_platform.research.factors.expectations.definitions import (
-    EXPECTATIONS_FACTORS,
+    ALL_EXPECTATIONS_FACTORS,
     expectations_factor_definitions,
 )
 from quant_research_platform.research.factors.fundamental.definitions import (
@@ -47,6 +47,7 @@ from quant_research_platform.research.factors.fundamental.definitions import (
 )
 from quant_research_platform.research.factors.price_volume.definitions import (
     PRICE_VOLUME_LIBRARY,
+    PRICE_VOLUME_PATH_FACTORS,
     price_volume_factor_definitions,
 )
 from quant_research_platform.research.features.transforms import (
@@ -68,6 +69,7 @@ BENCHMARK_TOTAL_RETURN_INDICES = {"csi500": "H00905", "csi1000": "H00852"}
 RESEARCH_DATASET_IDS = {
     "pv_all": "pv_all",
     "pv_expanded": "pv_expanded",
+    "pv_nf_expectations": "pv_nf_expectations",
     "fusion_nf_core": "fusion_nf_core",
     "fusion_nf_expectations": "fusion_nf_expectations",
 }
@@ -194,11 +196,15 @@ class AShareProtocol:
     def factor_columns(self) -> tuple[str, ...]:
         if self.configuration_json is not None:
             return tuple(self.configuration()["evaluation"]["factors"])
-        columns = (*PRICE_VOLUME_LIBRARY, *MARKET_MODEL_FACTORS)
+        columns = (
+            *PRICE_VOLUME_LIBRARY,
+            *PRICE_VOLUME_PATH_FACTORS,
+            *MARKET_MODEL_FACTORS,
+        )
         if self.scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}:
             columns += FUNDAMENTAL_FACTORS
-        if self.scenario_id == "fusion_nf_expectations":
-            columns += EXPECTATIONS_FACTORS
+        if self.scenario_id in {"pv_nf_expectations", "fusion_nf_expectations"}:
+            columns += ALL_EXPECTATIONS_FACTORS
         return columns
 
     @property
@@ -479,7 +485,7 @@ class AShareProtocol:
                         )
                         if column.startswith(prefix)
                     )
-            if consumed.intersection(EXPECTATIONS_FACTORS):
+            if consumed.intersection(ALL_EXPECTATIONS_FACTORS):
                 base["expectations"] = full["expectations"]
         return base
 
@@ -999,7 +1005,7 @@ def factor_catalog() -> FactorCatalog:
             *price_volume_factor_definitions(
                 market_id=market_ids.MARKET_ID,
                 required_input_data_id=market_ids.PRICE_VOLUME_DATA_ID,
-                factor_columns=PRICE_VOLUME_LIBRARY,
+                factor_columns=(*PRICE_VOLUME_LIBRARY, *PRICE_VOLUME_PATH_FACTORS),
             ),
             *(
                 FactorDefinition(
@@ -1126,8 +1132,14 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
             "float_market_cap",
             "total_market_cap",
         )
+        if scenario_id in {
+            "pv_nf_expectations",
+            "fusion_nf_core",
+            "fusion_nf_expectations",
+        }:
+            context += ("is_nonfinancial_industry",)
         if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}:
-            context += ("is_nonfinancial_industry", "has_legal_fundamental_pit")
+            context += ("has_legal_fundamental_pit",)
         all_columns = (
             "market_id",
             "asset_id",
@@ -1158,7 +1170,7 @@ def research_dataset_specs() -> tuple[ResearchDatasetSpec, ...]:
             input_data_ids.append("market_model_factors")
         if scenario_id in {"fusion_nf_core", "fusion_nf_expectations"}:
             input_data_ids.insert(3, "fundamental_factors")
-        if scenario_id == "fusion_nf_expectations":
+        if scenario_id in {"pv_nf_expectations", "fusion_nf_expectations"}:
             input_data_ids.insert(-1, "expectations_factors")
         specs.append(
             ResearchDatasetSpec(

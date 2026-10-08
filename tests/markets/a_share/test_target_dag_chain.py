@@ -662,11 +662,29 @@ def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(tmp_
         actual = read_dataset(
             layout.instance_root(root, result[target]["instance_identity"])
         )
-        expected = producer._compute_processed_frame(
-            spec,
-            source={},
-            dependencies={"market_panel_1d": history_panel},
-            trading_sessions=tuple(dates[:420]),
+        expected = (
+            pd.concat(
+                producer.factor_engine._market_model_frames(
+                    [history_panel],
+                    trading_calendar=read_dataset(
+                        layout.instance_root(
+                            layout.interim_data_root("csmar", "trading_calendar"),
+                            planned["market_model_factors"]["upstream_identities"][
+                                "trading_calendar"
+                            ],
+                        )
+                    ),
+                    market_history=None,
+                ),
+                ignore_index=True,
+            ).loc[:, list(spec.required_columns)]
+            if target == "market_model_factors"
+            else producer._compute_processed_frame(
+                spec,
+                source={},
+                dependencies={"market_panel_1d": history_panel},
+                trading_sessions=tuple(dates[:420]),
+            )
         )
         expected = (
             expected.loc[expected.timestamp.isin(requested)]

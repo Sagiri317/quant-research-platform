@@ -466,6 +466,9 @@ def produce_derivative_processed_data(
                 chain((first,), frames),
                 observations=archive.iter_state_observations(symbol=symbol),
                 max_age_ms=max_age_ms,
+                input_delay_ms=json.loads(spec.parameters_json).get(
+                    "input_delay_ms", 0
+                ),
             )
 
         data = _panel_frame_producer(
@@ -543,6 +546,9 @@ def produce_spot_perp_context(
                             perpetual,
                             spot_frames=spot,
                             max_age_ms=max_age_ms,
+                            input_delay_ms=json.loads(spec.parameters_json).get(
+                                "input_delay_ms", 0
+                            ),
                             batch_rows=batch_rows,
                         )
                     ) as aligned:
@@ -705,6 +711,7 @@ def produce_cross_asset_context(
                         for key in parameters["information_assets"]
                     },
                     max_age_ms=parameters["max_age_ms"],
+                    input_delay_ms=parameters.get("input_delay_ms", 0),
                     batch_rows=batch_rows,
                 )
             ) as aligned:
@@ -793,6 +800,7 @@ def produce_normalized_context(
             venue=parameters["venue"],
             base_units_per_amount=parameters["base_units_per_amount"][asset],
             max_age_ms=parameters["max_age_ms"],
+            input_delay_ms=parameters.get("input_delay_ms", 0),
         )
 
     data = _panel_frame_producer(

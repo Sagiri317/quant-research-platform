@@ -46,6 +46,7 @@ _MODEL_ALGORITHM_FACTS = {
     "ridge_regression": _ModelAlgorithmFacts("sklearn"),
     "lasso_regression": _ModelAlgorithmFacts("sklearn"),
     "huber_regression": _ModelAlgorithmFacts("sklearn"),
+    "decision_tree_regressor": _ModelAlgorithmFacts("sklearn"),
     "random_forest_regressor": _ModelAlgorithmFacts(
         "sklearn",
         parallel=True,

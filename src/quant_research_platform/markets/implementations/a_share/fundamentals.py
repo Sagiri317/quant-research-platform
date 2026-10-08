@@ -57,7 +57,9 @@ def financial_events_from_interim(
 ) -> pd.DataFrame:
     """Build PIT events from report facts and the separate Choice disclosure owner."""
 
-    if set(interim_by_data_id) != set(FINANCIAL_VALUE_COLUMNS):
+    if not interim_by_data_id or not set(interim_by_data_id).issubset(
+        FINANCIAL_VALUE_COLUMNS
+    ):
         raise ValueError("financial_interim_set_invalid")
     if tuple(disclosures.columns) != DISCLOSURE_COLUMNS:
         raise ValueError("financial_disclosure_schema_invalid")
@@ -79,8 +81,9 @@ def financial_events_from_interim(
         raise ValueError("financial_sessions_invalid")
 
     records: list[pd.DataFrame] = []
-    for data_id, value_columns in FINANCIAL_VALUE_COLUMNS.items():
-        frame = interim_by_data_id[data_id].copy()
+    for data_id, original in interim_by_data_id.items():
+        value_columns = FINANCIAL_VALUE_COLUMNS[data_id]
+        frame = original.copy()
         required = {
             "source_asset_id",
             "report_period",

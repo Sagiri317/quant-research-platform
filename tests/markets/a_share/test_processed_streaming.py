@@ -334,7 +334,9 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
                 dependencies={key: eager[key] for key in spec.processed_input_data_ids},
                 trading_sessions=tuple(dates),
                 financial_pit=producer._prepare_pit_fundamentals(
-                    producer._financial_pit_events(source)
+                    producer._financial_pit_events(
+                        source, required_sources=spec.source_input_data_ids
+                    )
                 )(producer._pit_observations(eager["market_panel_1d"]))
                 if data_id == "fundamental_pit"
                 else None,
@@ -734,11 +736,22 @@ def test_processed_narrow_output_uses_existing_panel_history(
         dependencies={},
         trading_sessions=tuple(dates),
     )
-    expected = producer._compute_processed_frame(
-        spec,
-        source={"trading_calendar": source["trading_calendar"]},
-        dependencies={"market_panel_1d": panel},
-        trading_sessions=tuple(dates),
+    expected = (
+        pd.concat(
+            producer.factor_engine._market_model_frames(
+                (panel,),
+                trading_calendar=source["trading_calendar"],
+                market_history=None,
+            ),
+            ignore_index=True,
+        )
+        if target == "market_model_factors"
+        else producer._compute_processed_frame(
+            spec,
+            source={"trading_calendar": source["trading_calendar"]},
+            dependencies={"market_panel_1d": panel},
+            trading_sessions=tuple(dates),
+        )
     )
     core = dates[-20:]
     expected = (
