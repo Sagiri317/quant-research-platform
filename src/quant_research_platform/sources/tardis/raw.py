@@ -618,7 +618,7 @@ def _publish_slices(
             streams.close()
 
             def descriptor(path, count):
-                with open_filesystem_file(path, "rb") as handle:
+                with closing_iterator(open_filesystem_file(path, "rb")) as handle:
                     digest = hashlib.file_digest(handle, "sha256").hexdigest()
                 return {
                     "path": path.name,

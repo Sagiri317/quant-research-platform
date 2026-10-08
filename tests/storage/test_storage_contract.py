@@ -22,13 +22,14 @@ from tests.storage.low_level_fixtures import (
 def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
     tmp_path: Path,
 ) -> None:
-    frame = make_default_dataset_frame(
-        asset_ids=("asset_001",), dates=("2014-01-02",), values=(1.0,)
-    )
+    class ForbiddenChunks:
+        def __iter__(self):
+            raise AssertionError("input_iterated_before_local_only_boundary")
+
     with pytest.raises(ValueError, match="outside_local_only_boundary"):
         write_dataset(
             tmp_path / "outside-local-only" / "x",
-            frame,
+            ForbiddenChunks(),
             spec=make_processed_dataset_spec(),
         )
     assert not (tmp_path / "outside-local-only").exists()

@@ -7,7 +7,6 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from enum import StrEnum
-from math import isfinite
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 
@@ -136,7 +135,6 @@ def _operation_evidence(value):
             if (
                 set(metric) != {"status", "value"}
                 or type(metric["value"]) not in {int, float}
-                or not isfinite(metric["value"])
                 or metric["value"] < 0
             ):
                 raise ValueError("research_run_operation_evidence_invalid")

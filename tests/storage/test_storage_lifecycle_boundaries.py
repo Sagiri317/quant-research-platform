@@ -597,8 +597,13 @@ def test_write_dataset_requires_artifact_root_before_writer_or_data_pull(
         "_write_contents",
         lambda *_args, **_kwargs: pytest.fail("writer_before_artifact_root_gate"),
     )
+
+    class ForbiddenChunks:
+        def __iter__(self):
+            raise AssertionError("input_iterated_before_artifact_root_gate")
+
     with pytest.raises(ValueError, match="^invalid_dataset_part_files$"):
-        dataset_writing.write_dataset(Path("dataset"), (_ for _ in ()), spec=object())
+        dataset_writing.write_dataset(Path("dataset"), ForbiddenChunks(), spec=object())
 
 
 def test_compare_rechecks_artifact_roots_before_each_exists_probe(

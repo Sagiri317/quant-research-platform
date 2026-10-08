@@ -905,7 +905,7 @@ def _markdown_content(lines, value, *, depth):
 
 
 def _read_utf8(path: Path, *, expected_member: Mapping[str, object]) -> str:
-    with open_filesystem_file(path) as handle:
+    with closing_iterator(open_filesystem_file(path)) as handle:
         raw = handle.read(expected_member["size"] + 1)
     if (
         len(raw) != expected_member["size"]

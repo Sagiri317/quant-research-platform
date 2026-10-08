@@ -138,6 +138,11 @@ class AShareProtocol:
         if self.configuration_json is not None:
             models = self.configuration()["models"]
             _validate_a_share_model_family_ids(item["model_id"] for item in models)
+            if any(
+                item.get("sample_filter_mode", "eligible") != "eligible"
+                for item in models
+            ):
+                raise ValueError("a_share_model_sample_filter_mode_not_supported")
             half_lives = {
                 item.get("training_weighting", {}).get("half_life") for item in models
             }

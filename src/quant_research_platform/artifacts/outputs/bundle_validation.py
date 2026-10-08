@@ -26,6 +26,7 @@ from quant_research_platform.contracts.time import (
     is_datetime_value,
     time_value_isoformat,
 )
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.exact_keys import (
     ExactPrimaryKeyIndex,
     _float_value_payload,
@@ -309,107 +310,105 @@ def _validate_prediction_output_bundle(
                 test_end = metadata.get("test_end")
                 effective_test_end = None
                 window_rows = 0
-                batches = iter(
+                with closing_iterator(
                     parquet.iter_batches(batch_size=65536, use_threads=False)
-                )
-                while True:
-                    try:
-                        batch = next(batches)
-                    except StopIteration:
-                        break
-                    table = pa.Table.from_batches([batch])
-                    if prediction_mode == "a_share_oos":
-                        frame = table.to_pandas()
-                        validate_family_prediction_frame(
-                            frame, metadata["model_metadata"]
-                        )
-                    if prediction_mode == "crypto_oos":
-                        frame = table.to_pandas()
-                        validate_crypto_prediction_frame(
-                            frame, metadata["model_metadata"]
-                        )
-                    timestamps = table.column("timestamp")
-                    if bool(
-                        pc.any(
-                            pc.less(
-                                timestamps,
-                                pa.scalar(
-                                    pd.Timestamp(test_start), type=pa.timestamp("ns")
-                                ),
+                ) as batches:
+                    for batch in batches:
+                        table = pa.Table.from_batches([batch])
+                        if prediction_mode == "a_share_oos":
+                            frame = table.to_pandas()
+                            validate_family_prediction_frame(
+                                frame, metadata["model_metadata"]
                             )
-                        ).as_py()
-                    ) or (
-                        test_end is not None
-                        and bool(
+                        if prediction_mode == "crypto_oos":
+                            frame = table.to_pandas()
+                            validate_crypto_prediction_frame(
+                                frame, metadata["model_metadata"]
+                            )
+                        timestamps = table.column("timestamp")
+                        if bool(
                             pc.any(
-                                pc.greater(
+                                pc.less(
                                     timestamps,
                                     pa.scalar(
-                                        pd.Timestamp(test_end), type=pa.timestamp("ns")
+                                        pd.Timestamp(test_start),
+                                        type=pa.timestamp("ns"),
                                     ),
                                 )
                             ).as_py()
-                        )
-                    ):
-                        raise ValueError("persisted_prediction_window_mismatch")
-                    duplicates = key_index.add_float_value_table(
-                        table,
-                        namespace="prediction-bundle-validation",
-                        value_column=prediction_column,
-                    )
-                    if duplicates:
-                        raise ValueError("duplicate_persisted_prediction_keys")
-                    if table.num_rows:
-                        batch_end = pd.Timestamp(pc.max(timestamps).as_py())
-                        effective_test_end = (
-                            batch_end
-                            if effective_test_end is None
-                            else max(effective_test_end, batch_end)
-                        )
-                    family_keep = None
-                    if family_selection is not None:
-                        selected_families = (
-                            frame["quarter_id"].map(
-                                metadata["model_metadata"]["champion_by_quarter"]
+                        ) or (
+                            test_end is not None
+                            and bool(
+                                pc.any(
+                                    pc.greater(
+                                        timestamps,
+                                        pa.scalar(
+                                            pd.Timestamp(test_end),
+                                            type=pa.timestamp("ns"),
+                                        ),
+                                    )
+                                ).as_py()
                             )
-                            if family_selection == "champion"
-                            else family_selection
+                        ):
+                            raise ValueError("persisted_prediction_window_mismatch")
+                        duplicates = key_index.add_float_value_table(
+                            table,
+                            namespace="prediction-bundle-validation",
+                            value_column=prediction_column,
                         )
-                        family_keep = pa.array(
-                            frame["family_id"].eq(selected_families).to_numpy()
-                        )
+                        if duplicates:
+                            raise ValueError("duplicate_persisted_prediction_keys")
+                        if table.num_rows:
+                            batch_end = pd.Timestamp(pc.max(timestamps).as_py())
+                            effective_test_end = (
+                                batch_end
+                                if effective_test_end is None
+                                else max(effective_test_end, batch_end)
+                            )
+                        family_keep = None
+                        if family_selection is not None:
+                            selected_families = (
+                                frame["quarter_id"].map(
+                                    metadata["model_metadata"]["champion_by_quarter"]
+                                )
+                                if family_selection == "champion"
+                                else family_selection
+                            )
+                            family_keep = pa.array(
+                                frame["family_id"].eq(selected_families).to_numpy()
+                            )
 
-                    if time_window is not None:
-                        keep = pc.and_(
-                            pc.greater_equal(
-                                timestamps,
-                                pa.scalar(
-                                    pd.Timestamp(time_window.start),
-                                    type=pa.timestamp("ns"),
+                        if time_window is not None:
+                            keep = pc.and_(
+                                pc.greater_equal(
+                                    timestamps,
+                                    pa.scalar(
+                                        pd.Timestamp(time_window.start),
+                                        type=pa.timestamp("ns"),
+                                    ),
                                 ),
-                            ),
-                            pc.less_equal(
-                                timestamps,
-                                pa.scalar(
-                                    pd.Timestamp(time_window.end),
-                                    type=pa.timestamp("ns"),
+                                pc.less_equal(
+                                    timestamps,
+                                    pa.scalar(
+                                        pd.Timestamp(time_window.end),
+                                        type=pa.timestamp("ns"),
+                                    ),
                                 ),
-                            ),
-                        )
-                        window_rows += int(pc.sum(keep).as_py() or 0)
-                        if family_keep is not None:
-                            keep = pc.and_(keep, family_keep)
-                        table = table.filter(keep)
-                    else:
-                        window_rows += table.num_rows
-                        if family_keep is not None:
-                            table = table.filter(family_keep)
-                    if table.num_rows:
-                        if lookup is not None:
-                            lookup.add_table(table)
-                        elif lookup_column != prediction_column:
-                            for scalar in table.column(lookup_column):
-                                _float_value_payload(scalar)
+                            )
+                            window_rows += int(pc.sum(keep).as_py() or 0)
+                            if family_keep is not None:
+                                keep = pc.and_(keep, family_keep)
+                            table = table.filter(keep)
+                        else:
+                            window_rows += table.num_rows
+                            if family_keep is not None:
+                                table = table.filter(family_keep)
+                        if table.num_rows:
+                            if lookup is not None:
+                                lookup.add_table(table)
+                            elif lookup_column != prediction_column:
+                                for scalar in table.column(lookup_column):
+                                    _float_value_payload(scalar)
                 if window_rows == 0:
                     raise ValueError("empty_prediction_window")
                 if (

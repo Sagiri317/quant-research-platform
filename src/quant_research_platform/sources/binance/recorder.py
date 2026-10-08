@@ -31,6 +31,7 @@ from quant_research_platform.contracts.json_codec import (
     parse_qrp_json_object,
 )
 from quant_research_platform.contracts.order_book import BookBoundary
+from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.resources import (
     require_free_disk_headroom,
 )
@@ -484,7 +485,7 @@ class _RunWriter:
 def _sha256_path(path: Path) -> str:
     digest = hashlib.sha256()
     buffer = bytearray(64 * 1024)
-    with open_filesystem_file(path, "rb") as handle:
+    with closing_iterator(open_filesystem_file(path, "rb")) as handle:
         while count := handle.readinto(buffer):
             digest.update(memoryview(buffer)[:count])
     return digest.hexdigest()

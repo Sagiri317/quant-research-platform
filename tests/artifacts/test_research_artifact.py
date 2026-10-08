@@ -322,3 +322,70 @@ def test_report_status_types_reject_before_publish_and_from_verified_members(
         )
     assert _files(forged) == forged_before
     assert _files(good) == before
+
+
+@pytest.mark.parametrize("failure", ("none", "read", "close", "both"))
+def test_report_markdown_read_preserves_primary_and_closes_native_handle(
+    tmp_path, monkeypatch, failure
+):
+    from quant_research_platform.artifacts import research
+
+    envelope, payload = _report()
+    payload["sections"][REQUIRED_REPORT_SECTIONS[0]]["title"] = "合成报告"
+    root = write_research_report_artifact(
+        tmp_path / "report", envelope=envelope, payload=payload
+    )
+    before = _files(root)
+    original = research.open_filesystem_file
+    primary = OSError("synthetic_markdown_read")
+    secondary = RuntimeError("synthetic_markdown_close")
+    opened = []
+
+    class Handle:
+        def __init__(self, native):
+            self.native = native
+            self.close_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+        def read(self, size):
+            if failure in {"read", "both"}:
+                raise primary
+            return self.native.read(size)
+
+        def close(self):
+            self.close_calls += 1
+            self.native.close()
+            if failure in {"close", "both"}:
+                raise secondary
+
+    def observed_open(*args, **kwargs):
+        handle = Handle(original(*args, **kwargs))
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(research, "open_filesystem_file", observed_open)
+    if failure == "none":
+        result = read_research_report_artifact(
+            root, expected_identity=root.name, include_markdown=True
+        )
+        assert result == {
+            "report": payload,
+            "markdown": before["report.md"].decode("utf-8"),
+        }
+    else:
+        with pytest.raises(BaseException) as caught:
+            read_research_report_artifact(
+                root, expected_identity=root.name, include_markdown=True
+            )
+        assert caught.value is (primary if failure in {"read", "both"} else secondary)
+        if failure == "both":
+            assert primary.__notes__ == ["iterator close also failed: RuntimeError"]
+    assert len(opened) == 1
+    assert opened[0].close_calls == 1
+    assert opened[0].native.closed
+    assert _files(root) == before

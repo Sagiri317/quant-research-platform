@@ -1308,6 +1308,7 @@ GBRT 与 LightGBM 复用上述训练样本权重、仅训练期拟合的缩放�
 
 A 股研究 JSON 的 `models[].model_id` 是具名模型家族身份；精确小写 `champion` 保留给组合预测选择器，不能作为 A 股模型家族名。
 此规则由同一 A 股模型合同约束配置绑定、生产、选择元数据及模型/预测产物读回，冲突原因为 `a_share_model_id_reserved`；预测 bundle reader 保留外层 `output_manifest_metadata_invalid` 及该原因链。
+正式 A 股 `models[].sample_filter_mode` 仅支持 `eligible`；省略字段沿用既有默认。`unfiltered` 在 A 股协议准入时以 `a_share_model_sample_filter_mode_not_supported` 拒绝，开发验证与最终留出使用同一资格合同。该限制不调整既有完整合法截面排名、eligible 输出和共同域投影顺序；通用及 Crypto 模型的合法 `unfiltered` 能力保留。
 `winner` 和其他拼写不被解释为优胜选择器，继续遵循各自原有身份合同；不扩展原有大小写/标识符语法，也不限制 Crypto 或通用 `ModelSpec` 的同名准入。
 
 精确并列时，按研究 JSON 中模型的声明顺序选择；候选清单只在配置中维护。

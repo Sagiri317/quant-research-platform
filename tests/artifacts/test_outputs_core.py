@@ -217,3 +217,254 @@ def test_output_manifest_binds_prediction_metadata_and_exact_files(
         error = "output_manifest_definition_files_mismatch"
     with pytest.raises(ValueError, match=error):
         validate_output_manifest_business_envelope(payload)
+
+
+def _native_prediction_bundle(tmp_path, *, crypto=False):
+    import pandas as pd
+
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+    from quant_research_platform.contracts.models import (
+        CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    frame = make_price_volume_prediction_output_frame()
+    frame = frame.loc[frame.index.repeat(2)].reset_index(drop=True)
+    frame["timestamp"] = pd.to_datetime(["2014-01-03", "2014-01-04"])
+    frame["asset_id"] = ["asset-a", "asset-b"]
+    frame["prediction_score"] = [0.25, 0.5]
+    spec = replace(make_price_volume_prediction_spec(), test_end="2014-01-04")
+    model = dict(frame.attrs["model_metadata"])
+    model.update(test_end=spec.test_end, oos_end=spec.test_end)
+    prediction = dict(frame.attrs["prediction_metadata"])
+    prediction.update(
+        prediction_rows=2,
+        requested_test_end=spec.test_end,
+        effective_test_end=spec.test_end,
+    )
+    output_spec = make_prediction_report_spec()
+    if crypto:
+        spec = replace(spec, train_end=None, prediction_mode="crypto_oos")
+        output_spec = replace(output_spec, market_id="crypto")
+        prediction.update(train_end=None, prediction_mode="crypto_oos")
+        model = {
+            "model_artifact_id": "crypto_models",
+            "model_artifact_identity": "a" * 64,
+            "model_artifact_schema": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
+            "model_id": spec.model_id,
+            "asset_ids": ["asset-a", "asset-b"],
+            "score_to_label": None,
+            "fold_models": [
+                {
+                    "fold_id": "fold_one",
+                    "prediction_window": {
+                        "start": spec.test_start,
+                        "end": spec.test_end,
+                    },
+                    "fit_windows": [
+                        {"start": "2013-12-30", "end": "2014-01-01"},
+                        {"start": "2014-01-02", "end": "2014-01-02"},
+                    ],
+                    "fit_cutoff": "2014-01-02",
+                    "training_asset_ids": [],
+                    "evaluation_asset_ids": ["asset-a", "asset-b"],
+                }
+            ],
+        }
+    root = write_prediction_outputs(
+        spec=spec,
+        output_spec=output_spec,
+        layout=StorageLayout(tmp_path),
+        output_chunks=(frame,),
+        model_metadata=model,
+        prediction_metadata_factory=lambda: prediction,
+    )
+    return root, spec, output_spec, frame, model, prediction
+
+
+@pytest.mark.parametrize("failure", ("none", "reject", "close", "both"))
+@pytest.mark.parametrize("validation_only", (False, True))
+def test_prediction_reader_closes_native_batch_iterator_before_outer_file(
+    tmp_path, monkeypatch, failure, validation_only
+):
+    import sys
+    from contextlib import contextmanager
+
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.artifacts.outputs import bundle_validation
+    from quant_research_platform.contracts.time import TimeWindow
+
+    root, spec, _output, _frame, _model, _prediction = _native_prediction_bundle(
+        tmp_path
+    )
+    path = root / "prediction.parquet"
+    if failure in {"reject", "both"}:
+        table = pq.read_table(path)
+        field = table.schema.field("prediction_score")
+        table = table.set_column(
+            table.schema.get_field_index("prediction_score"),
+            field,
+            pa.array([float("nan"), 0.5], type=field.type),
+        )
+        pq.write_table(table, path)
+    original = bundle_validation._opened_parquet
+    secondary = RuntimeError("synthetic_batch_close")
+    resources = []
+    events = []
+
+    class Parquet:
+        def __init__(self, native):
+            self.native = native
+
+        def __getattr__(self, name):
+            return getattr(self.native, name)
+
+        def iter_batches(self, **_kwargs):
+            native = self.native.iter_batches(batch_size=1, use_threads=False)
+            resources.append(native)
+
+            class Batches:
+                def __iter__(self):
+                    return self
+
+                def __next__(self):
+                    return next(native)
+
+                def close(self):
+                    events.append(("batches_close", sys.exception()))
+                    native.close()
+                    if failure in {"close", "both"}:
+                        raise secondary
+
+            return Batches()
+
+    @contextmanager
+    def observed_open(*args, **kwargs):
+        with original(*args, **kwargs) as (parquet, identity, handle):
+            resources.append(handle)
+            try:
+                yield Parquet(parquet), identity, handle
+            finally:
+                events.append(("outer_exit", None))
+
+    monkeypatch.setattr(bundle_validation, "_opened_parquet", observed_open)
+    reader = (
+        bundle_validation._validate_prediction_output_bundle
+        if validation_only
+        else bundle_validation.read_prediction_output_bundle
+    )
+    if failure == "none":
+        _manifest, lookup = reader(
+            root,
+            expected_output_id=spec.prediction_id,
+            time_window=TimeWindow("2014-01-04", "2014-01-04"),
+        )
+        if validation_only:
+            assert lookup is None
+        else:
+            assert lookup.row_count == 1
+    else:
+        with pytest.raises(BaseException) as caught:
+            reader(
+                root,
+                expected_output_id=spec.prediction_id,
+                time_window=TimeWindow("2014-01-04", "2014-01-04"),
+            )
+        if failure in {"reject", "both"}:
+            assert isinstance(caught.value, ValueError)
+            assert str(caught.value) == "invalid_exact_float_value"
+            assert events[0][1] is caught.value
+            if failure == "both":
+                assert caught.value.__notes__ == [
+                    "iterator close also failed: RuntimeError"
+                ]
+        else:
+            assert caught.value is secondary
+    assert [kind for kind, _primary in events] == ["batches_close", "outer_exit"]
+    assert resources[0].closed
+    assert resources[1].gi_frame is None
+
+
+@pytest.mark.parametrize(
+    "window",
+    (
+        {},
+        {"start": "2014-01-03"},
+        {"end": "2014-01-04"},
+        {"start": "2014-01-03", "end": "2014-01-04", "extra": True},
+        [],
+        None,
+        1,
+        True,
+        "2014-01-03",
+    ),
+    ids=(
+        "empty",
+        "missing_end",
+        "missing_start",
+        "extra",
+        "array",
+        "null",
+        "int",
+        "bool",
+        "string",
+    ),
+)
+def test_crypto_prediction_window_shape_rejects_at_native_write_and_read(
+    tmp_path, window
+):
+    import json
+    from copy import deepcopy
+
+    from quant_research_platform.artifacts.outputs import (
+        read_prediction_output_bundle,
+        write_prediction_outputs,
+    )
+    from quant_research_platform.artifacts.outputs.prediction_validation import (
+        validate_model_metadata_shape,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    root, spec, output, frame, model, prediction = _native_prediction_bundle(
+        tmp_path, crypto=True
+    )
+    before = {path.name: path.read_bytes() for path in root.iterdir()}
+    assert validate_model_metadata_shape(model) is model
+    _metadata, lookup = read_prediction_output_bundle(
+        root, expected_output_id=spec.prediction_id
+    )
+    assert lookup.row_count == 2
+    bad = deepcopy(model)
+    bad["fold_models"][0]["prediction_window"] = window
+    with pytest.raises(ValueError, match="^invalid_model_metadata$"):
+        validate_model_metadata_shape(bad)
+    with pytest.raises(ValueError, match="^invalid_model_metadata$"):
+        write_prediction_outputs(
+            spec=spec,
+            output_spec=output,
+            layout=StorageLayout(tmp_path),
+            output_chunks=(frame,),
+            model_metadata=bad,
+            prediction_metadata_factory=lambda: prediction,
+        )
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+    manifest = root / "manifest.json"
+    mutated = json.loads(before["manifest.json"])
+    mutated["metadata"]["model_metadata"] = bad
+    manifest.write_text(json.dumps(mutated), encoding="utf-8")
+    with pytest.raises(
+        ValueError, match="^output_manifest_metadata_invalid$"
+    ) as caught:
+        read_prediction_output_bundle(root, expected_output_id=spec.prediction_id)
+    assert isinstance(caught.value.__cause__, ValueError)
+    assert str(caught.value.__cause__) == "invalid_model_metadata"
+    manifest.write_bytes(before["manifest.json"])
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == before
+    _metadata, lookup = read_prediction_output_bundle(
+        root, expected_output_id=spec.prediction_id
+    )
+    assert lookup.row_count == 2

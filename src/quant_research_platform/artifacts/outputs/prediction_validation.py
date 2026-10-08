@@ -626,9 +626,10 @@ def _validate_crypto_lineage(metadata):
         if fold["fold_id"] in seen:
             raise ValueError("invalid_model_metadata")
         seen.add(fold["fold_id"])
-        start, end = (
-            pd.Timestamp(fold["prediction_window"][key]) for key in ("start", "end")
-        )
+        window = fold["prediction_window"]
+        if type(window) is not dict or set(window) != {"start", "end"}:
+            raise ValueError("invalid_model_metadata")
+        start, end = (pd.Timestamp(window[key]) for key in ("start", "end"))
         if start > end or (previous is not None and start <= previous):
             raise ValueError("invalid_model_metadata")
         previous = end

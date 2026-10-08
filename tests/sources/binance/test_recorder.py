@@ -1396,3 +1396,105 @@ def test_compressed_close_surfaces_failure_inside_handled_outer():
         assert not getattr(outer, "__notes__", [])
     assert closed == [True, True]
     assert caught.value.__notes__ == ["Binance raw handle close also failed: OSError"]
+
+
+@pytest.mark.parametrize("failure", ("none", "read", "close", "both"))
+def test_hash_path_preserves_read_failure_and_closes_native_handle(
+    tmp_path, monkeypatch, failure
+):
+    data = b"synthetic-digest\x00" * 8192
+    path = tmp_path / "member.bin"
+    path.write_bytes(data)
+    original = recorder.open_filesystem_file
+    primary = OSError("synthetic_read")
+    secondary = RuntimeError("synthetic_close")
+    opened = []
+
+    class Handle:
+        def __init__(self, native):
+            self.native = native
+            self.close_calls = 0
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+        def readinto(self, buffer):
+            if failure in {"read", "both"}:
+                raise primary
+            return self.native.readinto(buffer)
+
+        def close(self):
+            self.close_calls += 1
+            self.native.close()
+            if failure in {"close", "both"}:
+                raise secondary
+
+    def observed_open(*args, **kwargs):
+        handle = Handle(original(*args, **kwargs))
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(recorder, "open_filesystem_file", observed_open)
+    if failure == "none":
+        assert recorder._sha256_path(path) == hashlib.sha256(data).hexdigest()
+    else:
+        with pytest.raises(BaseException) as caught:
+            recorder._sha256_path(path)
+        assert caught.value is (primary if failure in {"read", "both"} else secondary)
+        if failure == "both":
+            assert primary.__notes__ == ["iterator close also failed: RuntimeError"]
+    assert len(opened) == 1
+    assert opened[0].close_calls == 1
+    assert opened[0].native.closed
+    assert path.read_bytes() == data
+
+
+def test_recorder_hash_read_and_close_failure_aborts_native_atomic_publish(
+    tmp_path, monkeypatch
+):
+    original = recorder.open_filesystem_file
+    primary = OSError("synthetic_hash_read")
+    secondary = RuntimeError("synthetic_hash_close")
+    handles = []
+
+    class Handle:
+        def __init__(self, native):
+            self.native = native
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+        def readinto(self, _buffer):
+            raise primary
+
+        def close(self):
+            self.native.close()
+            raise secondary
+
+    def observed_open(path, mode="rb", **kwargs):
+        native = original(path, mode, **kwargs)
+        if mode != "rb":
+            return native
+        handle = Handle(native)
+        handles.append(handle)
+        return handle
+
+    def write(staging):
+        writer = recorder._RunWriter(staging)
+        stats = recorder._CaptureStats(writer)
+        with recorder._writer_lifecycle(writer, [], capture_stats=stats):
+            pass
+
+    monkeypatch.setattr(recorder, "open_filesystem_file", observed_open)
+    with pytest.raises(OSError) as caught:
+        recorder.atomic_write_directory(tmp_path / "capture", write)
+    assert caught.value is primary
+    assert primary.__notes__ == ["iterator close also failed: RuntimeError"]
+    assert handles and all(handle.native.closed for handle in handles)
+    assert not tuple(tmp_path.iterdir())

@@ -171,12 +171,12 @@ def test_atomic_long_paths_create_parents_keep_old_good_and_preserve_primary(
     if kind == "file":
         assert atomic_write_text(final, "old") == final
 
-        def forbidden():
-            pytest.fail("existing_target_consumed_input")
-            yield "new"
+        class ForbiddenChunks:
+            def __iter__(self):
+                raise AssertionError("input_iterated_before_existing_target_gate")
 
         with pytest.raises(OutputAlreadyExistsError):
-            atomic.atomic_write_chunks(final, forbidden())
+            atomic.atomic_write_chunks(final, ForbiddenChunks())
         assert Path(native_filesystem_path(final)).read_text(encoding="utf-8") == "old"
     else:
         atomic_write_directory(

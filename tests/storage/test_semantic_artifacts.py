@@ -1027,3 +1027,217 @@ def test_trial_enum_types_reject_in_native_ledger_and_compare_without_mutating_g
         for path in good_ledger.rglob("*")
         if path.is_file()
     } == ledger_before
+
+
+def _metric_operational_metadata(value):
+    from copy import deepcopy
+
+    from quant_research_platform.runtime.execution_metrics import (
+        record_run_observations,
+    )
+
+    observations = {}
+    with record_run_observations(observations):
+        pass
+    observations["status"] = "DEFINED"
+    observations["reason"] = ""
+    observations["metrics"] = {
+        key: {"status": "DEFINED", "value": value} for key in observations["metrics"]
+    }
+    compressed = deepcopy(observations)
+    environment = compressed.pop("environment")
+    created_at = environment.pop("created_at_utc")
+    compressed["environment"] = {"context": 0, "created_at_utc": created_at}
+    return {
+        "model_phase_observations": {
+            "environments": [environment],
+            "phases": [
+                {
+                    "phase": "shared_candidate_fit",
+                    "selection_group": None,
+                    "family_id": "ridge",
+                    "quarter_id": None,
+                    "fit_count": 1,
+                    "observations": compressed,
+                }
+            ],
+        },
+        "final_alpha_observations": observations,
+    }
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        0,
+        0.0,
+        -0.0,
+        1.25,
+        2**53 + 1,
+        10**400 + 1,
+        10**4095,
+        float.fromhex("0x1.fffffffffffffp+1023"),
+    ],
+    ids=[
+        "integer_zero",
+        "float_zero",
+        "signed_zero",
+        "finite_float",
+        "exact_integer",
+        "large_integer",
+        "json_integer_limit",
+        "maximum_float",
+    ],
+)
+def test_operational_metrics_preserve_numeric_type_and_precision_in_native_artifacts(
+    tmp_path, value
+):
+    from quant_research_platform.storage.semantic_artifacts import (
+        compare_semantic_artifacts,
+        read_semantic_artifact_operational_metadata,
+    )
+
+    metadata = _metric_operational_metadata(value)
+
+    def writer(staging):
+        filesystem_write_bytes(staging / "model.bin", b"model")
+
+    good = write_semantic_artifact(
+        tmp_path / "good", _envelope(), writer, operational_metadata=metadata
+    )
+    before = _immediate_file_bytes(good)
+    decoded = read_semantic_artifact_operational_metadata(good)
+    assert decoded == metadata
+    for observations in (
+        decoded["final_alpha_observations"],
+        decoded["model_phase_observations"]["phases"][0]["observations"],
+    ):
+        for metric in observations["metrics"].values():
+            assert type(metric["value"]) is type(value)
+            assert metric["value"] == value
+            if type(value) is float:
+                assert metric["value"].hex() == value.hex()
+    candidate = write_semantic_artifact(
+        tmp_path / "candidate", _envelope(), writer, operational_metadata=metadata
+    )
+    assert compare_semantic_artifacts(good, candidate).status == "MATCH"
+    assert _immediate_file_bytes(good) == before
+
+
+@pytest.mark.parametrize(
+    "branch", ["model_phase_observations", "final_alpha_observations"]
+)
+@pytest.mark.parametrize(
+    "bad,error",
+    [
+        (True, "research_run_operation_evidence_invalid"),
+        (False, "research_run_operation_evidence_invalid"),
+        (-1, "research_run_operation_evidence_invalid"),
+        (-0.5, "research_run_operation_evidence_invalid"),
+        (-(10**400), "research_run_operation_evidence_invalid"),
+        (None, "research_run_operation_evidence_invalid"),
+        (float("nan"), "qrp_json_nonfinite_number"),
+        (float("inf"), "qrp_json_nonfinite_number"),
+        (-float("inf"), "qrp_json_nonfinite_number"),
+        (10**4096, "qrp_json_integer_too_large"),
+    ],
+    ids=[
+        "true",
+        "false",
+        "negative_integer",
+        "negative_float",
+        "negative_large_integer",
+        "null",
+        "nan",
+        "positive_infinity",
+        "negative_infinity",
+        "over_integer_limit",
+    ],
+)
+def test_invalid_operational_metrics_reject_before_publication_and_native_compare(
+    tmp_path, branch, bad, error
+):
+    import json
+    from copy import deepcopy
+
+    from quant_research_platform.storage.manifests import read_manifest
+    from quant_research_platform.storage.semantic_artifacts import (
+        compare_semantic_artifacts,
+        read_semantic_artifact_operational_metadata,
+    )
+
+    valid = _metric_operational_metadata(1)
+
+    def writer(staging):
+        filesystem_write_bytes(staging / "model.bin", b"model")
+
+    good = write_semantic_artifact(
+        tmp_path / "good", _envelope(), writer, operational_metadata=valid
+    )
+    before = _immediate_file_bytes(good)
+    instances = tuple(filesystem_iterdir(good.parent))
+    invalid = deepcopy(valid)
+    observations = invalid[branch]
+    if branch == "model_phase_observations":
+        observations = observations["phases"][0]["observations"]
+    observations["metrics"]["read_bytes"]["value"] = bad
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        write_semantic_artifact(
+            tmp_path / "good",
+            _envelope(seed=1),
+            writer,
+            operational_metadata=invalid,
+        )
+    assert tuple(filesystem_iterdir(good.parent)) == instances
+    assert _immediate_file_bytes(good) == before
+
+    candidate = write_semantic_artifact(
+        tmp_path / "candidate", _envelope(), writer, operational_metadata=valid
+    )
+    manifest_path = candidate / "manifest.json"
+    forged = read_manifest(manifest_path)
+    forged["operational_metadata"] = invalid
+    raw = (json.dumps(forged, ensure_ascii=False) + "\n").encode("utf-8")
+    filesystem_write_bytes(manifest_path, raw)
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        read_semantic_artifact_operational_metadata(candidate)
+    assert compare_semantic_artifacts(good, candidate).status == "INSPECTION_FAILED"
+    assert filesystem_read_bytes(manifest_path) == raw
+    assert _immediate_file_bytes(good) == before
+
+
+def test_operational_observations_keep_the_existing_json_byte_limit(tmp_path):
+    from quant_research_platform.contracts.json_codec import (
+        bounded_rendered_qrp_json_object_size,
+    )
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact_operational_metadata,
+    )
+
+    metadata = {
+        "final_alpha_observations": _metric_operational_metadata(1)[
+            "final_alpha_observations"
+        ]
+    }
+    observations = metadata["final_alpha_observations"]
+    size = bounded_rendered_qrp_json_object_size(observations, max_bytes=65536)
+    observations["environment"]["platform"] += "x" * (65536 - size)
+    assert bounded_rendered_qrp_json_object_size(observations, max_bytes=65536) == 65536
+    good = write_semantic_artifact(
+        tmp_path / "good",
+        _envelope(),
+        lambda staging: filesystem_write_bytes(staging / "model.bin", b"model"),
+        operational_metadata=metadata,
+    )
+    before = _immediate_file_bytes(good)
+    assert read_semantic_artifact_operational_metadata(good) == metadata
+    observations["environment"]["platform"] += "x"
+    with pytest.raises(ValueError, match="^qrp_json_render_exceeds_max_bytes$"):
+        write_semantic_artifact(
+            tmp_path / "good",
+            _envelope(seed=1),
+            lambda staging: filesystem_write_bytes(staging / "model.bin", b"model"),
+            operational_metadata=metadata,
+        )
+    assert tuple(filesystem_iterdir(good.parent)) == (good,)
+    assert _immediate_file_bytes(good) == before

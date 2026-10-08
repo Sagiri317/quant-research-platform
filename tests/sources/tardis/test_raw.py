@@ -647,3 +647,117 @@ def test_verified_file_preserves_non_missing_contract_failure(tmp_path):
         with _verified_file(tmp_path):
             pass
     assert caught.value.__cause__ is None
+
+
+@pytest.mark.parametrize("kind", ("import", "download"))
+@pytest.mark.parametrize("member", ("gaps.jsonl.gz", "observation_intervals.jsonl.gz"))
+@pytest.mark.parametrize("failure", ("none", "close", "both"))
+def test_native_sidecar_digest_preserves_failure_and_existing_archive(
+    tmp_path, monkeypatch, kind, member, failure
+):
+    from quant_research_platform.sources.tardis import raw
+    from quant_research_platform.sources.tardis.replay import native_source_identity
+
+    slices = _slices(tmp_path / "source", _snapshot() + b"\n", count=1)
+    source_before = slices[0].read_bytes()
+    monkeypatch.setattr(
+        "urllib.request.urlopen", lambda *_a, **_k: _DownloadResponse(source_before)
+    )
+
+    def publish(destination):
+        if kind == "import":
+            return raw.import_slices(
+                destination, date="2026-09-01", slices=slices, byte_budget=1024**2
+            )
+        return raw.download_slices(
+            destination, date="2026-09-01", slice_count=1, byte_budget=1024**2
+        )
+
+    good = tmp_path / "good"
+    manifest = publish(good)
+    good_before = {path.name: path.read_bytes() for path in good.iterdir()}
+    identity = native_source_identity(
+        good,
+        "fixture",
+        exchange=raw.EXCHANGE,
+        symbols=raw.SYMBOLS,
+        channels=raw.CHANNELS,
+    )
+    assert identity is not None
+    for key in ("gaps", "observation_intervals"):
+        descriptor = manifest[key]
+        assert (
+            descriptor["sha256"]
+            == hashlib.sha256(good_before[descriptor["path"]]).hexdigest()
+        )
+        assert descriptor["compressed_bytes"] == len(good_before[descriptor["path"]])
+    original = raw.open_filesystem_file
+    primary = OSError("synthetic_sidecar_read")
+    secondary = RuntimeError("synthetic_sidecar_close")
+    opened = []
+
+    class Handle:
+        def __init__(self, native):
+            self.native = native
+            self.close_calls = 0
+
+        def __getattr__(self, name):
+            return getattr(self.native, name)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            self.close()
+
+        def readinto(self, buffer):
+            if failure == "both":
+                raise primary
+            return self.native.readinto(buffer)
+
+        def close(self):
+            self.close_calls += 1
+            self.native.close()
+            if failure in {"close", "both"}:
+                raise secondary
+
+    def observed_open(path, mode="rb", **kwargs):
+        native = original(path, mode, **kwargs)
+        if mode != "rb" or Path(path).name != member:
+            return native
+        handle = Handle(native)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(raw, "open_filesystem_file", observed_open)
+    destination = tmp_path / "candidate"
+    if failure == "none":
+        result = publish(destination)
+        key = "gaps" if member == "gaps.jsonl.gz" else "observation_intervals"
+        descriptor = result[key]
+        assert (
+            descriptor["sha256"]
+            == hashlib.sha256(
+                (destination / descriptor["path"]).read_bytes()
+            ).hexdigest()
+        )
+    else:
+        with pytest.raises(BaseException) as caught:
+            publish(destination)
+        assert caught.value is (primary if failure == "both" else secondary)
+        if failure == "both":
+            assert primary.__notes__ == ["iterator close also failed: RuntimeError"]
+        assert not destination.exists()
+        assert not list(tmp_path.glob(".a-*"))
+    assert len(opened) == 1
+    assert opened[0].close_calls == 1
+    assert opened[0].native.closed
+    assert source_before == slices[0].read_bytes()
+    assert good_before == {path.name: path.read_bytes() for path in good.iterdir()}
+    assert identity == native_source_identity(
+        good,
+        "fixture",
+        exchange=raw.EXCHANGE,
+        symbols=raw.SYMBOLS,
+        channels=raw.CHANNELS,
+    )

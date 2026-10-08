@@ -255,9 +255,7 @@ def read_export_header(
             primary.add_note(
                 f"CSMAR CSV row cleanup also failed: {type(close_error).__name__}"
             )
-    if len(columns) != len(set(columns)):
-        raise ValueError("duplicate_csmar_provider_column")
-    return tuple(str(column) for column in columns)
+    return columns
 
 
 def materialize_header_record(record: list[str]) -> list[str]:

@@ -596,3 +596,145 @@ def test_notebook_metrics_preserve_each_published_scope(is_crypto):
         )
         html = next(item for item in displayed if isinstance(item, str))
         assert all(episode in html for _, episode in scopes)
+
+
+def _write_metric_run(project_root, value):
+    from quant_research_platform.artifacts.research import write_research_run_record
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.contracts.targets import (
+        ProducerKind,
+        ResearchRunRecord,
+        ResearchRunTargetResult,
+        RunStatus,
+        TargetStatus,
+    )
+    from quant_research_platform.runtime.execution_metrics import (
+        record_run_observations,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    observations = {}
+    with record_run_observations(observations):
+        pass
+    observations["status"] = "DEFINED"
+    observations["reason"] = ""
+    observations["metrics"] = {
+        key: {"status": "DEFINED", "value": value} for key in observations["metrics"]
+    }
+    protocol = {"scenario_id": "pv_all", "access_window": "development"}
+    record = ResearchRunRecord(
+        run_id="operation_metric",
+        profile_id=research_profile().profile_id,
+        scenario_id="pv_all",
+        protocol=protocol,
+        protocol_identity=canonical_json_hash(protocol),
+        research_window={
+            "start": "2019-01-01",
+            "end": "2019-12-31",
+            "access": "development",
+        },
+        software_identity="c" * 64,
+        terminal_targets=("portfolio",),
+        target_results=(
+            ResearchRunTargetResult(
+                target_id="portfolio",
+                producer_kind=ProducerKind.PORTFOLIO,
+                status=TargetStatus.BLOCKED,
+                reason="synthetic_missing",
+            ),
+        ),
+        status=RunStatus.BLOCKED,
+        operation_evidence=observations,
+    )
+    path = write_research_run_record(
+        StorageLayout(project_root).research_run_path(record.run_id), record
+    )
+    return record, path
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+@pytest.mark.parametrize(
+    "value",
+    [10**400 + 1, 10**4095, 2**53 + 1, float.fromhex("0x1.fffffffffffffp+1023")],
+    ids=["large_integer", "json_integer_limit", "exact_integer", "maximum_float"],
+)
+async def test_status_api_preserves_native_operation_metric_precision(
+    anyio_backend, tmp_path, value
+):
+    from quant_research_platform.artifacts.research import read_research_run_record
+
+    record, path = _write_metric_run(tmp_path, value)
+    before = path.read_bytes()
+    assert read_research_run_record(path).payload() == record.payload()
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=create_app(project_root=tmp_path), raise_app_exceptions=False
+        ),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/status", params={"run_id": record.run_id})
+    assert response.status_code == 200
+    assert response.json() == record.payload()
+    for metric in response.json()["operation_evidence"]["metrics"].values():
+        assert type(metric["value"]) is type(value)
+        assert metric["value"] == value
+    assert path.read_bytes() == before
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("anyio_backend", ["asyncio"])
+@pytest.mark.parametrize(
+    "bad,error",
+    [
+        (True, "research_run_record_invalid"),
+        (False, "research_run_record_invalid"),
+        (-1, "research_run_record_invalid"),
+        (-0.5, "research_run_record_invalid"),
+        (-(10**400), "research_run_record_invalid"),
+        (float("nan"), "qrp_json_nonfinite_number"),
+        (float("inf"), "qrp_json_nonfinite_number"),
+        (-float("inf"), "qrp_json_nonfinite_number"),
+        (10**4096, "qrp_json_integer_too_large"),
+    ],
+    ids=[
+        "true",
+        "false",
+        "negative_integer",
+        "negative_float",
+        "negative_large_integer",
+        "nan",
+        "positive_infinity",
+        "negative_infinity",
+        "over_integer_limit",
+    ],
+)
+async def test_invalid_persisted_operation_metrics_keep_api_failure_projection(
+    anyio_backend, tmp_path, bad, error
+):
+    from quant_research_platform.artifacts.research import read_research_run_record
+    from quant_research_platform.storage.layout import StorageLayout
+
+    record, good = _write_metric_run(tmp_path, 1)
+    before = good.read_bytes()
+    payload = record.payload()
+    payload["run_id"] = "operation_bad"
+    payload["operation_evidence"]["metrics"]["read_bytes"]["value"] = bad
+    candidate = StorageLayout(tmp_path).research_run_path(payload["run_id"])
+    raw = (json.dumps(payload, ensure_ascii=False) + "\n").encode("utf-8")
+    candidate.write_bytes(raw)
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        read_research_run_record(candidate)
+    async with AsyncClient(
+        transport=ASGITransport(
+            app=create_app(project_root=tmp_path), raise_app_exceptions=False
+        ),
+        base_url="http://testserver",
+    ) as client:
+        response = await client.get("/api/status", params={"run_id": payload["run_id"]})
+        valid = await client.get("/api/status", params={"run_id": record.run_id})
+    assert response.status_code == 422
+    assert response.json()["error"]["error_code"] == "published_evidence_invalid"
+    assert valid.status_code == 200 and valid.json() == record.payload()
+    assert good.read_bytes() == before
+    assert candidate.read_bytes() == raw
