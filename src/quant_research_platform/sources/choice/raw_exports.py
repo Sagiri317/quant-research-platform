@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import hashlib
 import re
-import sys
 import threading
 from collections import deque
 from collections.abc import Iterator
@@ -150,11 +149,14 @@ def choice_session(sdk: Any) -> Iterator[ChoiceRawSession]:
         if started.ErrorCode != 0:
             raise RuntimeError(f"choice_login_failed:{started.ErrorCode}")
         session = ChoiceRawSession(sdk)
+        primary = None
         try:
             yield session
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
             session.active = False
-            primary = sys.exception()
             try:
                 stopped = sdk.stop()
                 if stopped.ErrorCode != 0:

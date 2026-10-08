@@ -605,6 +605,82 @@ def test_invalid_fee_csv_header_preserves_previous_artifact(tmp_path):
     assert _file_bytes(root) == before
 
 
+@pytest.mark.parametrize("boundary", ["header", "record"])
+def test_malformed_fee_csv_is_source_local_and_preserves_old_good(
+    tmp_path, monkeypatch, boundary
+):
+    from quant_research_platform.sources.reference import a_share_fees
+    from tests.helpers.a_share_raw import write_industry_reference_fixture
+
+    raw = _write_reference_root(tmp_path / "raw")
+    layout = StorageLayout(project_root=tmp_path / "project")
+    result = interim.materialize_interim_data(layout=layout, raw_root=raw / "reference")
+    old_root = result.artifact_roots[A_SHARE_FEE_SCHEDULE_DATA_ID]
+    before = _file_bytes(old_root)
+    source = raw / "reference" / "a_share_fee_schedule"
+    path = source / A_SHARE_FEE_CSV_NAME
+    header = (
+        path.read_bytes().splitlines(keepends=True)[0] if boundary == "record" else b""
+    )
+    payload = header + b'"unterminated\n'
+    path.write_bytes(payload)
+    sidecar = source / A_SHARE_FEE_SIDECAR_NAME
+    metadata = json.loads(sidecar.read_text(encoding="utf-8"))
+    metadata.update(
+        file_bytes=len(payload), file_sha256=hashlib.sha256(payload).hexdigest()
+    )
+    sidecar.write_text(json.dumps(metadata), encoding="utf-8")
+    opened = []
+    original_open = a_share_fees.open_filesystem_file
+
+    def tracked_open(*args, **kwargs):
+        handle = original_open(*args, **kwargs)
+        opened.append(handle)
+        return handle
+
+    monkeypatch.setattr(a_share_fees, "open_filesystem_file", tracked_open)
+    with pytest.raises(
+        ValueError, match="^a_share_fee_source_schema_invalid$"
+    ) as caught:
+        load_a_share_fee_source(reference_root=raw / "reference")
+    assert isinstance(caught.value.__cause__, csv.Error)
+    write_industry_reference_fixture(raw, observations=_industry_observations())
+    target = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+    profile = research_profile()
+    requested = (A_SHARE_FEE_SCHEDULE_DATA_ID, target)
+    plan = research.plan_targets(
+        profile=profile,
+        action="data materialize",
+        terminal_targets=requested,
+        layout=layout,
+        raw_root=raw,
+    )
+    planned = {row["target_id"]: row for row in plan["targets"]}
+    assert planned[A_SHARE_FEE_SCHEDULE_DATA_ID]["decision"] == "BLOCKED"
+    assert planned[A_SHARE_FEE_SCHEDULE_DATA_ID]["blocker"] == "source_identity_invalid"
+    assert planned[target]["decision"] == "BUILD"
+    result = research.data_materialize(
+        profile=profile,
+        layout=layout,
+        raw_root=raw,
+        start_date=None,
+        end_date=None,
+        data_ids=requested,
+    )
+    targets = {row["target_id"]: row for row in result["target_results"]}
+    assert result["status"] == "BLOCKED"
+    assert targets[A_SHARE_FEE_SCHEDULE_DATA_ID]["status"] == "BLOCKED"
+    assert targets[A_SHARE_FEE_SCHEDULE_DATA_ID]["reason"] == "source_identity_invalid"
+    assert targets[target]["status"] == "BUILT"
+    root = layout.instance_root(
+        layout.interim_data_root("reference", target),
+        targets[target]["instance_identity"],
+    )
+    assert len(read_dataset(root)) == 1
+    assert _file_bytes(old_root) == before
+    assert opened and all(handle.closed for handle in opened)
+
+
 def test_fee_csv_bounded_decoder_preserves_quoted_multiline_fields(tmp_path):
     raw = _write_reference_root(tmp_path / "raw") / "reference"
     source = raw / "a_share_fee_schedule"

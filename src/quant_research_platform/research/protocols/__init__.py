@@ -39,6 +39,7 @@ def bind_research_selection(profile, library, configuration):
     if set(config) - {"research_plan", "auxiliary_sources"} != required or (
         config["schema_id"] != "qrp-research-configuration"
         or config["profile_id"] != profile.profile_id
+        or type(config["stage"]) is not str
         or config["stage"] not in {"evaluation", "research"}
     ):
         raise ValueError("research_configuration_invalid")
@@ -191,10 +192,6 @@ def bind_research_selection(profile, library, configuration):
         else:
             item.setdefault("hyperparameters", {})
         item["training_weighting"] = model.training_weighting.payload()
-    if a_share_market:
-        half_lives = {model.training_weighting.half_life for model in models}
-        if 756 in half_lives and len(half_lives) > 1:
-            raise ValueError("a_share_training_weighting_research_roles_mixed")
     model_configurations = {item["model_id"]: item for item in config["models"]}
     canonical_factors = []
     for model in models:

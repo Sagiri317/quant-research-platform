@@ -8,7 +8,6 @@ import gzip
 import hashlib
 import math
 import os
-import sys
 import urllib.error
 import urllib.request
 from pathlib import Path
@@ -294,6 +293,7 @@ def _iter_records(root, *, expected_manifest_hash):
     if identity != expected_manifest_hash:
         raise ValueError("tardis_normalized_selection_identity_changed")
     path = root / "data.csv.gz"
+    primary = None
     try:
         with closing_iterator(
             _rows(
@@ -321,8 +321,10 @@ def _iter_records(root, *, expected_manifest_hash):
                 or last != manifest["last_observed_us"]
             ):
                 raise ValueError("tardis_normalized_coverage_changed")
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             if canonical_json_hash(read_manifest(root / "manifest.json")) != identity:
                 raise ValueError("tardis_normalized_manifest_changed")

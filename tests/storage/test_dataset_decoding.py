@@ -805,9 +805,9 @@ def test_physical_values_cannot_be_reinterpreted_by_forged_logical_dtype(
     if mode == "writer":
         original_write = writing.write_parquet_file
 
-        def forged_write(table, path):
+        def forged_write(table, path, **kwargs):
             forged, _logical = forge(table)
-            return original_write(forged, path)
+            return original_write(forged, path, **kwargs)
 
         monkeypatch.setattr(writing, "write_parquet_file", forged_write)
         with pytest.raises(ValueError, match="dataset_logical_dtype_mismatch"):
@@ -1420,3 +1420,41 @@ def test_explicit_generator_exit_keeps_primary_during_final_verification(
         )
     assert caught.value is primary
     assert "dataset verification also failed: ValueError" in primary.__notes__
+
+
+@pytest.mark.parametrize("selection", ["populated", "empty", "filtered"])
+@pytest.mark.parametrize("termination", ["exhaust", "close"])
+def test_dataset_final_verification_ignores_handled_outer(
+    tmp_path, monkeypatch, selection, termination
+):
+    root = make_dataset_artifact_root(tmp_path, "handled_outer")
+    frame = make_default_dataset_frame()
+    write_dataset(
+        root,
+        frame.iloc[:0] if selection == "empty" else frame,
+        spec=make_processed_dataset_spec("handled_outer"),
+    )
+    session = dataset_reading.open_dataset_session(
+        root,
+        columns=None,
+        time_window=TimeWindow("2099-01-01", "2099-01-02")
+        if selection == "filtered"
+        else None,
+    )
+    iterator = dataset_reading.iter_dataset_chunks(session)
+    next(iterator)
+    verifications = 0
+
+    def fail_final_verify(_session):
+        nonlocal verifications
+        verifications += 1
+        raise ValueError("final_identity_failure")
+
+    monkeypatch.setattr(dataset_reading.DatasetSession, "verify", fail_final_verify)
+    try:
+        raise RuntimeError("handled_outer")
+    except RuntimeError as outer:
+        with pytest.raises(ValueError, match="final_identity_failure"):
+            list(iterator) if termination == "exhaust" else iterator.close()
+        assert not getattr(outer, "__notes__", [])
+    assert verifications >= 1

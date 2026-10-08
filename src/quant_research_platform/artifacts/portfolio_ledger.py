@@ -154,7 +154,6 @@ def write_portfolio_ledger_artifact(
                     parquet_table_writer(handle, compression="zstd", schema=schema)
                 )
             buffers = {name: [] for name in _TABLE_TYPES}
-            written = set()
             sequence = 0
             previous = None
 
@@ -169,7 +168,6 @@ def write_portfolio_ledger_artifact(
                     frame, schema=_SCHEMAS[name], preserve_index=False
                 )
                 writers[name](table)
-                written.add(name)
                 records.clear()
 
             def emit(batch: PortfolioLedgerBatch) -> None:
@@ -192,8 +190,6 @@ def write_portfolio_ledger_artifact(
                 raise ValueError("portfolio_ledger_empty")
             for name in writers:
                 flush(name)
-                if name not in written:
-                    writers[name](pa.Table.from_pylist([], schema=_SCHEMAS[name]))
         with closing_iterator(
             _iter_batches(staging, capital, envelope.research_window)
         ) as batches:

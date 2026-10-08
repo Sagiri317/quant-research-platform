@@ -1517,3 +1517,37 @@ def test_a_share_financial_scenarios_keep_allowed_model_feature_sources(scenario
         dataset.context_columns
     )
     assert selected.models.get(model.model_id).input_columns == model.input_columns
+
+
+@pytest.mark.parametrize("market", ("a_share", "crypto"))
+@pytest.mark.parametrize("bad", ([], {}), ids=("array", "object"))
+def test_configuration_stage_types_reject_at_binding_and_research_plan_boundary(
+    tmp_path, market, bad
+):
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.workflows.research import research_run
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration(
+        market, "core6" if market == "a_share" else "baseline"
+    )
+    before = copy.deepcopy(config)
+    profile = research_profile(
+        "a_share_csmar_choice" if market == "a_share" else "crypto_binance_hft"
+    )
+    selected = bind_research_configuration(profile, config)
+    assert selected.profile_id == profile.profile_id
+    assert config == before
+    changed = copy.deepcopy(config)
+    changed["stage"] = bad
+    with pytest.raises(ValueError, match="^research_configuration_invalid$"):
+        bind_research_configuration(profile, changed)
+    with pytest.raises(ValueError, match="^research_configuration_invalid$"):
+        research_run(
+            profile=profile,
+            layout=StorageLayout(tmp_path / "project"),
+            research_plan=changed,
+            plan=True,
+        )
+    assert not (tmp_path / "project").exists()
+    assert config == before

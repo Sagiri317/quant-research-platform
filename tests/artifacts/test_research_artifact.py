@@ -282,3 +282,43 @@ def test_report_parser_binds_actual_bytes_to_verified_member(tmp_path, monkeypat
     filesystem_write_bytes(member, original)
     monkeypatch.setattr(research, "read_json_evidence", original_reader)
     assert read_research_report_artifact(root, expected_identity=root.name) == payload
+
+
+@pytest.mark.parametrize("field", ("source_run_status", "report_status"))
+@pytest.mark.parametrize("bad", ([], {}), ids=("array", "object"))
+def test_report_status_types_reject_before_publish_and_from_verified_members(
+    tmp_path, field, bad
+):
+    envelope, payload = _report()
+    logical_root = tmp_path / "good"
+    good = write_research_report_artifact(
+        logical_root, envelope=envelope, payload=payload
+    )
+    assert (
+        read_research_report_artifact(
+            good, expected_identity=envelope.instance_identity
+        )
+        == payload
+    )
+    before = _files(good)
+    changed = deepcopy(payload)
+    changed[field] = bad
+    with pytest.raises(ValueError, match="^research_report_payload_invalid$"):
+        write_research_report_artifact(logical_root, envelope=envelope, payload=changed)
+    assert _files(good) == before
+
+    def write(staging):
+        write_json_evidence(staging / "report.json", changed)
+        write_markdown_evidence(
+            staging / "report.md",
+            filesystem_read_text(good / "report.md", encoding="utf-8"),
+        )
+
+    forged = write_semantic_artifact(tmp_path / "forged", envelope, write)
+    forged_before = _files(forged)
+    with pytest.raises(ValueError, match="^research_report_payload_invalid$"):
+        read_research_report_artifact(
+            forged, expected_identity=envelope.instance_identity
+        )
+    assert _files(forged) == forged_before
+    assert _files(good) == before

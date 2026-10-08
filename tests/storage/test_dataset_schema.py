@@ -109,7 +109,7 @@ def test_writer_rejects_missing_persisted_logical_dtype_metadata(
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "missing_logical_dtype")
 
-    def write_without_metadata(table, path):
+    def write_without_metadata(table, path, **_kwargs):
         filesystem_mkdir(path.parent, parents=True, exist_ok=True)
         pq.write_table(
             table.replace_schema_metadata(None), native_filesystem_path(path)

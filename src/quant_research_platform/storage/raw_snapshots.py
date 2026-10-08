@@ -7,7 +7,6 @@ import hashlib
 import io
 import json
 import os
-import sys
 from collections.abc import Callable, Iterable, Iterator
 from pathlib import Path
 
@@ -224,6 +223,7 @@ def iter_csv_snapshot(
                 yield value
 
         rows = decoded_rows()
+        primary = None
         try:
             # Keep rows resumable so the finally block can verify unread content.
             for row in rows:
@@ -231,8 +231,10 @@ def iter_csv_snapshot(
                     yield row
                 except GeneratorExit:
                     return
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            primary = sys.exception()
             try:
                 for _row in rows:
                     pass

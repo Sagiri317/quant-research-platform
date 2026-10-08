@@ -218,8 +218,9 @@ def test_refit_stage_has_one_resolved_candidate_and_no_selection_score():
     for parents in (("b" * 64, "a" * 64), ("a" * 64, "a" * 64), ("invalid",)):
         with pytest.raises(ValueError, match="^experiment_selection_parents_invalid$"):
             replace(refit, selection_ledger_semantic_identities=parents)
-    with pytest.raises(ValueError, match="^experiment_selection_group_required$"):
-        replace(refit, selection_group=None)
+    for group in (None, [], {}, False, 1):
+        with pytest.raises(ValueError, match="^experiment_selection_group_required$"):
+            replace(refit, selection_group=group)
     with pytest.raises(ValueError, match="^experiment_selection_group_invalid$"):
         replace(plan, selection_group="global")
     assert replace(refit, fit_cutoff=refit.fit_windows[-1].end)

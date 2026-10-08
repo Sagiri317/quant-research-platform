@@ -213,6 +213,46 @@ def test_same_coordinate_overlap_compares_values_and_keeps_request_scope(tmp_pat
         interim.materialize_interim_data(layout=layout, data_ids=("financial_income",))
 
 
+@pytest.mark.parametrize(
+    "compact_period,compact_end", [(True, False), (False, True), (True, True)]
+)
+def test_request_date_formats_share_semantic_coordinates_and_preserve_raw(
+    tmp_path, compact_period, compact_end
+):
+    layout = StorageLayout(tmp_path)
+    period = "20191231" if compact_period else "2019-12-31"
+    day = "20200130" if compact_end else "2020-01-30"
+    with choice_session(SDK(response())) as session:
+        first, first_request = _disclosure(session, layout)
+        duplicate, duplicate_request = write_css(
+            session,
+            layout,
+            period=period,
+            end_date="20251231",
+            indicators=DATE_FIELDS,
+            data={CODE: ["2020/1/30", None, None]},
+        )
+        _snapshot(session, layout, day, [100.0] * len(FIELDS), period=period)
+    assert (
+        first != duplicate and first_request.identity() != duplicate_request.identity()
+    )
+    before = _file_hashes(layout.raw_source_root("choice"))
+    identity = interim.source_content_identity(
+        layout.raw_source_root("choice"), "financial_balance"
+    )
+    frames = _read(interim.materialize_interim_data(layout=layout))
+    assert set(frames) == {*FINANCIAL_FIELDS, "financial_first_disclosure"}
+    assert len(frames["financial_first_disclosure"]) == 1
+    assert frames["financial_balance"].total_assets.tolist() == [100.0]
+    assert frames["financial_balance"].report_period.tolist() == [
+        pd.Timestamp("2019-12-31")
+    ]
+    assert identity == interim.source_content_identity(
+        layout.raw_source_root("choice"), "financial_balance"
+    )
+    assert _file_hashes(layout.raw_source_root("choice")) == before
+
+
 def test_disclosure_and_financial_superset_is_one_raw_response(tmp_path):
     layout = StorageLayout(tmp_path)
     with choice_session(SDK(response())) as session:
@@ -366,8 +406,9 @@ def test_unfetched_field_is_blocked_and_other_coordinates_cannot_fill_it(
 
 @pytest.mark.parametrize("financial", [False, True])
 @pytest.mark.parametrize("null", [False, True])
+@pytest.mark.parametrize("compact", [False, True])
 def test_overlapping_single_field_conflict_including_provider_null_is_rejected(
-    tmp_path, financial, null
+    tmp_path, financial, null, compact
 ):
     layout = StorageLayout(tmp_path)
     with choice_session(SDK(response())) as session:
@@ -377,8 +418,10 @@ def test_overlapping_single_field_conflict_including_provider_null_is_rejected(
         write_css(
             session,
             layout,
-            period="2019-12-31",
-            end_date="2020-01-30" if financial else "2025-12-31",
+            period="20191231" if compact else "2019-12-31",
+            end_date=("20200130" if financial else "20251231")
+            if compact
+            else ("2020-01-30" if financial else "2025-12-31"),
             indicators=FIELDS[:1] if financial else DATE_FIELDS[:1],
             data={CODE: [None if null else 99.0 if financial else "2020/1/31"]},
         )

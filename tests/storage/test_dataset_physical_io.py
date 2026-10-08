@@ -85,12 +85,12 @@ def test_nonstring_categorical_native_roundtrip(
         99 if isinstance(categories, list) else categories[-1] + pd.Timedelta(days=1)
     )
 
-    def corrupt_domain(table, path):
+    def corrupt_domain(table, path, **kwargs):
         position = table.schema.get_field_index("value")
         values = pa.array(
             [invalid] * table.num_rows, type=table.schema.field("value").type
         )
-        return native_write(table.set_column(position, "value", values), path)
+        return native_write(table.set_column(position, "value", values), path, **kwargs)
 
     monkeypatch.setattr(dataset_writing, "write_parquet_file", corrupt_domain)
     invalid_root = make_dataset_artifact_root(tmp_path, "invalid_domain")

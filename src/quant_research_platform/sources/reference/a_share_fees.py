@@ -280,6 +280,8 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
                 row = values = value = None
                 record_bytes = 0
             final = dataset_file_identity_from_stat(os.fstat(binary.fileno()))
+    except csv.Error as exc:
+        raise ValueError("a_share_fee_source_schema_invalid") from exc
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("a_share_fee_source_unavailable") from exc
     if final != expected or _file_identity(path) != expected:

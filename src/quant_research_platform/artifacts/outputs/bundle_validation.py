@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import os
 import stat
-import sys
 from collections.abc import Callable, Mapping, Sequence
 from pathlib import Path
 
@@ -108,11 +107,14 @@ def validate_output_bundle(
         physical_identities.add(identity)
         captured_identities.append((path, identity))
     admitted_identities = tuple(captured_identities)
+    primary = None
     try:
         if observer is not None:
             observer(manifest, admitted_identities)
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             final_resolved_root, final_root_identity = _validated_bundle_root(
                 bundle_root

@@ -21,6 +21,7 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.json_codec import (
     MAX_QRP_JSON_BYTES,
     bounded_qrp_json_object_snapshot,
+    canonical_identity_bytes,
     render_qrp_json_object,
 )
 from quant_research_platform.contracts.targets import _operation_evidence
@@ -121,9 +122,11 @@ def compare_semantic_artifacts(
             candidate_plan, candidate_records = read_trial_ledger_reference(
                 trial_layout, candidate_ref
             )
-            if trial_ledger_semantic_payload(
-                old_plan, old_records
-            ) != trial_ledger_semantic_payload(candidate_plan, candidate_records):
+            if canonical_identity_bytes(
+                trial_ledger_semantic_payload(old_plan, old_records)
+            ) != canonical_identity_bytes(
+                trial_ledger_semantic_payload(candidate_plan, candidate_records)
+            ):
                 return SemanticArtifactComparison("CONTENT_MISMATCH")
         for member, candidate_member in zip(
             old_members, candidate_members, strict=True
@@ -435,8 +438,10 @@ def _operational_metadata(value: object) -> dict[str, object]:
                     "fit_count",
                     "observations",
                 }
+                or type(phase["phase"]) is not str
                 or phase["phase"]
                 not in {"shared_candidate_fit", "group_scoring", "final_refit"}
+                or (type(phase["selection_group"]) not in {str, type(None)})
                 or (phase["selection_group"] not in {None, "global", "quarterly"})
                 or (type(phase["fit_count"]) is not int)
                 or (phase["fit_count"] < 0)

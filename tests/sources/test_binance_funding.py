@@ -300,7 +300,7 @@ def test_funding_unconsumed_later_source_is_verified_at_exit(
     if interrupt:
         assert caught.value is primary
         assert primary.__notes__ == [
-            "Raw CSV consumed-content verification also failed: ValueError"
+            "Funding source verification also failed: ValueError"
         ]
     else:
         assert str(caught.value) == "raw_csv_content_invalid"
@@ -367,3 +367,39 @@ def test_funding_numeric_strings_are_normalized_through_persisted_reader(tmp_pat
         assert -event.rate * event.mark_price == -1.0
         assert forecast.cashflows == ((50, -1.0),)
         assert type(forecast.cashflows[0][1]) is float
+
+
+@pytest.mark.parametrize("bad", ([], {}), ids=("array", "object"))
+def test_funding_coverage_status_types_reject_in_reader_and_identity(tmp_path, bad):
+    good_raw = tmp_path / "good" / "raw"
+    row = ("forecast", 0, 100, None, None, [])
+    _write(good_raw, rows=(row,))
+    good = good_raw.parent / "funding" / "BTCUSDT"
+    before = {path.name: path.read_bytes() for path in good.iterdir()}
+    with read_funding_observations((good,), symbol="BTCUSDT") as source:
+        assert source.coverage == ((0, 100),)
+        assert source.events == ()
+        assert len(tuple(source.forecasts)) == 1
+        identity = source.identity
+    assert funding_source_identity((good,), "ledger", symbol="BTCUSDT") == identity
+
+    changed_raw = tmp_path / "changed" / "raw"
+    _write(
+        changed_raw,
+        rows=(row,),
+        metadata_changes={"coverage": {"start_ns": 0, "end_ns": 100, "status": bad}},
+    )
+    changed = changed_raw.parent / "funding" / "BTCUSDT"
+    changed_before = {path.name: path.read_bytes() for path in changed.iterdir()}
+    with pytest.raises(ValueError, match="^binance_funding_coverage_invalid$"):
+        with read_funding_observations((changed,), symbol="BTCUSDT"):
+            pytest.fail("Malformed coverage must fail before observations are yielded")
+    with pytest.raises(ValueError, match="^binance_funding_input_invalid$") as raised:
+        funding_source_identity((changed,), "ledger", symbol="BTCUSDT")
+    assert type(raised.value.__cause__) is ValueError
+    assert str(raised.value.__cause__) == "binance_funding_coverage_invalid"
+    assert {
+        path.name: path.read_bytes() for path in changed.iterdir()
+    } == changed_before
+    assert {path.name: path.read_bytes() for path in good.iterdir()} == before
+    assert funding_source_identity((good,), "ledger", symbol="BTCUSDT") == identity

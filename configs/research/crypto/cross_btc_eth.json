@@ -441,14 +441,7 @@
         0.0,
         1.0,
         2.0
-      ],
-      "maker": {
-        "maker_fee_bps": 2.0,
-        "latency_ms": 100,
-        "min_calibration_samples": 100,
-        "inventory_target": 0.0,
-        "inventory_skew": 0.0
-      }
+      ]
     },
     "test": {
       "start": "2026-09-01T00:00:00",

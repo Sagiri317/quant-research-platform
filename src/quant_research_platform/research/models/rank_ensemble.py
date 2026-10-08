@@ -248,16 +248,20 @@ def _training_rank_correlations(frame, columns, label_column, sample_weight):
         if timestamps is not None and sample_weight is not None
         else None
     )
+    label_domains = {}
+    for timestamp, indices in groups.items():
+        labels = (
+            frame[label_column]
+            .array.take(indices)
+            .to_numpy(dtype="float64", copy=False)
+        )
+        label_domains[timestamp] = labels, np.isfinite(labels)
     for column in columns:
         correlations, period_weights = [], []
         for timestamp, indices in groups.items():
             x = frame[column].array.take(indices).to_numpy(dtype="float64", copy=False)
-            y = (
-                frame[label_column]
-                .array.take(indices)
-                .to_numpy(dtype="float64", copy=False)
-            )
-            valid = np.isfinite(x) & np.isfinite(y)
+            y, label_finite = label_domains[timestamp]
+            valid = np.isfinite(x) & label_finite
             if int(valid.sum()) < 2:
                 continue
             corr, _reason = _pearson_correlation_result(

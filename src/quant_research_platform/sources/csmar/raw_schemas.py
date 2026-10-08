@@ -6,7 +6,6 @@ import csv
 import io
 import os
 import re
-import sys
 from collections.abc import Iterator
 from dataclasses import dataclass
 from pathlib import Path
@@ -166,7 +165,6 @@ class _BoundedCsvRecords:
         return fields
 
     def close(self):
-        primary = sys.exception()
         failure = None
         try:
             if (
@@ -175,20 +173,11 @@ class _BoundedCsvRecords:
             ):
                 raise ValueError("csmar_raw_export_identity_changed")
         except BaseException as error:
-            if primary is not None:
-                primary.add_note(
-                    "CSMAR source verification also failed: " + type(error).__name__
-                )
-            else:
-                failure = error
+            failure = error
         try:
             self._text.close()
         except BaseException as error:
-            if primary is not None:
-                primary.add_note(
-                    "CSMAR source close also failed: " + type(error).__name__
-                )
-            elif failure is not None:
+            if failure is not None:
                 failure.add_note(
                     "CSMAR source close also failed: " + type(error).__name__
                 )
@@ -204,6 +193,7 @@ def iter_export_csv_records(
 
     def activate() -> Iterator[tuple[list[str], int]]:
         records: _BoundedCsvRecords | None = None
+        primary = None
         try:
             records = _BoundedCsvRecords(
                 Path(path),
@@ -217,8 +207,10 @@ def iter_export_csv_records(
                 except GeneratorExit:
                     return
                 del record
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            primary = sys.exception()
             if records is not None:
                 try:
                     records.close()
@@ -243,6 +235,7 @@ def read_export_header(
     if suffix != ".csv":
         raise ValueError(f"Unsupported CSMAR export extension: {suffix}")
     rows = iter_export_csv_records(export_path, expected_identity=expected_identity)
+    primary = None
     try:
         record = next(rows, None)
         columns = (
@@ -250,8 +243,10 @@ def read_export_header(
         )
         if not columns:
             raise ValueError("malformed_csmar_csv_row")
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             rows.close()
         except BaseException as close_error:

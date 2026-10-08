@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 import pytest
 
+from quant_research_platform.catalog.models import ModelCatalog
 from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
     bind_research_configuration,
@@ -57,18 +58,7 @@ def test_sparse_decay_rank_factories_publish_exact_direction_and_weights(
         if model["model_algorithm"]
         in {"equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"}
     ]
-    config["evaluation"] = {
-        "factors": list(factors),
-        "labels": ["forward_return_5d"],
-        "primary_label": "forward_return_5d",
-    }
-    config["comparison_model_id"] = config["models"][0]["model_id"]
-    config["portfolios"] = [
-        item
-        for item in config["portfolios"]
-        if item["prediction_selector"] == "champion"
-    ]
-    specs = bind_research_configuration(research_profile(), config).models.list()
+    specs = ModelCatalog.from_configuration(config["models"]).list()
     all_dates = pd.bdate_range("2014-01-02", "2019-03-20")
     dates = all_dates[np.linspace(0, len(all_dates) - 1, count, dtype=int)]
     if ordinary:

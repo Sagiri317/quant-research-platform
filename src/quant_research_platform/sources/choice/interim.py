@@ -294,7 +294,7 @@ def _raw_index(raw_root, financial, *, members):
     def rows():
         with closing_iterator(_raw_requests(raw_root, financial=financial)) as requests:
             for root, request, options, disclosure in requests:
-                period = options["reportdate"]
+                period = date.fromisoformat(options["reportdate"]).isoformat()
                 try:
                     expected_metadata = members[root / "response.metadata.json"]
                 except KeyError:
@@ -314,7 +314,7 @@ def _raw_index(raw_root, financial, *, members):
                     pair = [code, period]
                     coordinate = [
                         *pair,
-                        options["enddate"],
+                        date.fromisoformat(options["enddate"]).isoformat(),
                         options.get("type", "1"),
                     ]
                     if disclosure:

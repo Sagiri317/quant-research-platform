@@ -2,7 +2,6 @@
 
 import os
 import platform
-import sys
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from hashlib import sha256
@@ -118,10 +117,13 @@ def record_run_observations(sink):
     sink.update(unmeasured_operation_evidence("observation_initialization_incomplete"))
     sample()
     sink.update(payload(complete=False))
+    primary = None
     try:
         yield sample
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             sample()
             finalized = payload(complete=True)

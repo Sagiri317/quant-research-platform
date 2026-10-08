@@ -7,6 +7,7 @@ from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
     validate_business_manifest_envelope,
 )
+from quant_research_platform.contracts.json_codec import canonical_json_hash
 
 
 def _envelope(**overrides: object) -> BusinessManifestEnvelope:
@@ -86,17 +87,34 @@ def test_validator_requires_hash_protocol_named_upstreams_and_exact_window() -> 
     envelope = _envelope()
     payload = envelope.payload()
 
-    for field, value in (
-        ("protocol_or_spec_identity", "a_share_low_frequency"),
-        ("upstream_identities", {"upstream_dataset": "upstream"}),
+    assert validate_business_manifest_envelope(payload) == payload
+    for field, value, error in (
+        (
+            "protocol_or_spec_identity",
+            "a_share_low_frequency",
+            "protocol_or_spec_identity_invalid",
+        ),
+        (
+            "upstream_identities",
+            {"upstream_dataset": "upstream"},
+            "business_manifest_upstream_identity_invalid",
+        ),
         (
             "research_window",
             {"start": "2020-01-01", "end": "2020-12-31", "other": True},
+            "business_manifest_research_window_invalid",
         ),
     ):
         candidate = envelope.payload()
         candidate[field] = value
-        with pytest.raises(ValueError):
+        candidate["instance_identity"] = canonical_json_hash(
+            {
+                key: item
+                for key, item in candidate.items()
+                if key not in {"instance_identity", "status"}
+            }
+        )
+        with pytest.raises(ValueError, match=f"^{error}$"):
             validate_business_manifest_envelope(candidate)
 
     reordered = _envelope(

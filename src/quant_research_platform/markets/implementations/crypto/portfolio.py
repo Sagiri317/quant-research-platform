@@ -2,6 +2,7 @@
 
 from array import array
 from bisect import bisect_left
+from collections import deque
 from contextlib import ExitStack
 from functools import partial
 from itertools import chain, groupby, islice, zip_longest
@@ -1356,6 +1357,12 @@ def validate_maker_calibration(artifact, envelope):
                 partial(_calibration_events, artifact, fold_id),
                 price_unit=price_unit,
             )
+            native_events = reads.enter_context(
+                closing_iterator(_calibration_events(artifact, fold_id))
+            )
+            window = deque()
+            native_count = 0
+            initial_state = None
             start_header = next(starts, None)
             end_header = next(ends, None)
             previous_start = previous_end = latest_state = None
@@ -1441,10 +1448,46 @@ def validate_maker_calibration(artifact, envelope):
                 ):
                     raise ValueError("crypto_calibration_event_coordinates_invalid")
                 covered = max(covered, stop)
+                # Preserve full-source rejection order without retaining fold history.
+                if sample_id == 0:
+                    history_counts = dict.fromkeys(("buy", "sell", "events"), 0)
+                    with closing_iterator(model._source_samples()) as history:
+                        for historical_sample in history:
+                            history_counts[historical_sample["side"]] += 1
+                    with closing_iterator(
+                        _calibration_rows(
+                            artifact,
+                            "crypto_maker_events.parquet",
+                            (("fold_id", "==", fold_id),),
+                        )
+                    ) as history:
+                        for expected, (event_id, group) in enumerate(
+                            groupby(history, key=lambda row: row.event_id),
+                            start=history_counts["events"],
+                        ):
+                            if next(group).event_kind == "book":
+                                for _row in group:
+                                    pass
+                            if event_id != expected:
+                                raise ValueError(
+                                    "crypto_calibration_event_order_invalid"
+                                )
+                while window and window[0].event_id < start:
+                    event = window.popleft()
+                    if event.kind in ("book", "boundary"):
+                        initial_state = event
+                while native_count < stop:
+                    event = next(native_events)
+                    native_count += 1
+                    if event.event_id < start:
+                        if event.kind in ("book", "boundary"):
+                            initial_state = event
+                    else:
+                        window.append(event)
                 for row in pair:
                     sample = row._asdict()
                     sample["decision_at"] = decision
-                    state = next(model.events(initial, initial + 1))
+                    state = initial_state
                     if (row.initial_bid_index, row.initial_ask_index) != (
                         state.bids[0][0],
                         state.asks[0][0],
@@ -1475,9 +1518,7 @@ def validate_maker_calibration(artifact, envelope):
                             commands=(),
                             lifetime_ns=CryptoMakerPlan.quote_horizon_ms * 1000000,
                             replace_quantity=row.quote_quantity,
-                            events=model.events(
-                                int(sample["event_start"]), int(sample["event_end"])
-                            ),
+                            events=iter(window),
                         )
                     ) as response:
                         while True:
@@ -1503,6 +1544,8 @@ def validate_maker_calibration(artifact, envelope):
                     totals["samples"] += 1
             if end_header is not None:
                 raise ValueError("crypto_calibration_event_coordinates_invalid")
+            for _event in native_events:
+                pass
         for side, row in summaries.items():
             count, zero, rejected = counts[side]
             if (

@@ -11,6 +11,9 @@ from quant_research_platform.artifacts.outputs.manifest import (
     prediction_output_metadata,
     validate_output_manifest_business_envelope,
 )
+from quant_research_platform.artifacts.outputs.prediction_validation import (
+    validate_prediction_output_metadata_shape,
+)
 from quant_research_platform.contracts.outputs import OutputScope
 from tests.helpers.output_frames import (
     make_prediction_report_spec,
@@ -19,8 +22,19 @@ from tests.helpers.output_frames import (
 )
 
 
-def _prediction_manifest_payload() -> dict[str, object]:
+def _prediction_manifest_payload(*, ridge: bool = False) -> dict[str, object]:
     frame = make_price_volume_prediction_output_frame()
+    if ridge:
+        from sklearn import __version__
+
+        frame.attrs["model_metadata"].update(
+            model_algorithm="ridge_regression",
+            dependency_status={
+                "status": "available",
+                "package": "sklearn",
+                "version": __version__,
+            },
+        )
     return output_manifest_payload(
         output_spec=make_prediction_report_spec(),
         metadata=prediction_output_metadata(
@@ -48,14 +62,8 @@ def test_output_manifest_builder_validates_current_business_envelope() -> None:
 def test_output_manifest_preserves_actual_external_dependency_version() -> None:
     from sklearn import __version__
 
-    payload = _prediction_manifest_payload()
+    payload = _prediction_manifest_payload(ridge=True)
     model = payload["metadata"]["model_metadata"]
-    model["model_algorithm"] = "ridge_regression"
-    model["dependency_status"] = {
-        "status": "available",
-        "package": "sklearn",
-        "version": __version__,
-    }
     assert validate_output_manifest_business_envelope(payload) is payload
     assert model["dependency_status"]["version"] == __version__
 
@@ -117,7 +125,7 @@ def test_output_manifest_preserves_typed_identifier_values() -> None:
 def test_output_manifest_rejects_unsafe_free_form_metadata_before_publish(
     mutation: str,
 ) -> None:
-    payload = _prediction_manifest_payload()
+    payload = _prediction_manifest_payload(ridge=True)
     model_metadata = payload["metadata"]["model_metadata"]
     if mutation == "absolute_path":
         model_metadata["model_algorithm"] = "ridge_regression"
@@ -135,7 +143,11 @@ def test_output_manifest_rejects_unsafe_free_form_metadata_before_publish(
         }[mutation]
         model_metadata["hyperparameters"][mutation] = marker
         model_metadata["resolved_hyperparameters"][mutation] = marker
-    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+    assert (
+        validate_prediction_output_metadata_shape(payload["metadata"])
+        is payload["metadata"]
+    )
+    with pytest.raises(ValueError, match="^output_manifest_metadata_invalid$"):
         validate_output_manifest_business_envelope(payload)
 
 
@@ -143,11 +155,15 @@ def test_output_manifest_rejects_unsafe_free_form_metadata_before_publish(
 def test_output_manifest_rejects_structured_credentials_before_publish(
     key: str,
 ) -> None:
-    payload = _prediction_manifest_payload()
+    payload = _prediction_manifest_payload(ridge=True)
     model_metadata = payload["metadata"]["model_metadata"]
     model_metadata["hyperparameters"][key] = "secret-value"
     model_metadata["resolved_hyperparameters"][key] = "secret-value"
-    with pytest.raises(ValueError, match="output_manifest_metadata_invalid"):
+    assert (
+        validate_prediction_output_metadata_shape(payload["metadata"])
+        is payload["metadata"]
+    )
+    with pytest.raises(ValueError, match="^output_manifest_metadata_invalid$"):
         validate_output_manifest_business_envelope(payload)
 
 

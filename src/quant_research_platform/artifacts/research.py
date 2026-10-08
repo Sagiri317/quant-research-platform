@@ -736,7 +736,9 @@ def _validate_report_payload(payload: object) -> None:
     }:
         raise ValueError("research_report_payload_invalid")
     if (
-        payload["source_run_status"] not in {"COMPLETE", "BLOCKED", "FAILED"}
+        type(payload["source_run_status"]) is not str
+        or payload["source_run_status"] not in {"COMPLETE", "BLOCKED", "FAILED"}
+        or type(payload["report_status"]) is not str
         or payload["report_status"] not in {"COMPLETE", "BLOCKED", "FAILED"}
         or type(payload["sections"]) is not dict
         or (set(payload["sections"]) != set(_report_contract(payload["schema_id"])[0]))

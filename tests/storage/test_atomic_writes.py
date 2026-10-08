@@ -257,3 +257,23 @@ def test_atomic_chunk_failure_closes_source_and_preserves_primary(
     assert closed == [True] and chunks.gi_frame is None
     assert "iterator close also failed: OSError" in primary.__notes__
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize("message", (None, "", "custom_rejection"))
+def test_existing_output_error_preserves_contract_and_exception_chain(
+    tmp_path, message
+):
+    error = OutputAlreadyExistsError(message)
+    assert isinstance(error, ValueError)
+    assert error.failure_code == "output_already_exists"
+    assert str(error) == (message or "output_already_exists")
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.write_bytes(b"candidate")
+    target.write_bytes(b"old_good")
+    with pytest.raises(
+        OutputAlreadyExistsError, match="^output_already_exists$"
+    ) as caught:
+        publish_no_replace(source, target)
+    assert isinstance(caught.value.__cause__, FileExistsError)
+    assert source.read_bytes() == b"candidate"
+    assert target.read_bytes() == b"old_good"

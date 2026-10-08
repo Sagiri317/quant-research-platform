@@ -1146,3 +1146,57 @@ def test_parquet_writer_finalizes_deferred_mtime_before_read(tmp_path, monkeypat
     with pytest.raises(ValueError, match="dataset_file_identity_changed"):
         with physical._opened_parquet(path, expected_identity=None) as (parquet, _, _):
             parquet.read()
+
+
+@pytest.mark.parametrize(
+    "operation", ["file_identity", "csv_records", "choice_logout", "rebuild_cleanup"]
+)
+def test_cleanup_scope_ignores_handled_outer(tmp_path, monkeypatch, operation):
+    path = tmp_path / "member.csv"
+    identity.filesystem_write_bytes(path, b"value\n1\n")
+    try:
+        raise RuntimeError("handled_outer")
+    except RuntimeError as outer:
+        if operation == "file_identity":
+            expected = identity.dataset_file_identity(path)
+            with identity.open_filesystem_file(path, "rb") as handle:
+                with pytest.raises(ValueError, match="dataset_file_identity_changed"):
+                    with identity.verified_file_handle(
+                        path, handle, expected_identity=expected
+                    ):
+                        identity.filesystem_write_bytes(path, b"changed-content\n")
+                assert not handle.closed
+        elif operation == "csv_records":
+            from quant_research_platform.sources.csmar.raw_schemas import (
+                iter_export_csv_records,
+            )
+
+            records = iter_export_csv_records(path)
+            assert next(records)[0] == ["value"]
+            identity.filesystem_write_bytes(path, b"changed-content\n")
+            with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
+                records.close()
+        elif operation == "choice_logout":
+            from quant_research_platform.sources.choice.raw_exports import (
+                choice_session,
+            )
+            from tests.helpers.choice_raw import SDK, response
+
+            sdk = SDK(response())
+            sdk.stop_error = 17
+            with pytest.raises(RuntimeError, match="choice_logout_failed:17"):
+                with choice_session(sdk) as session:
+                    assert session.active
+            assert sdk.stops == 1 and not session.active
+        else:
+            import quant_research_platform.storage.rebuild as rebuild
+            from quant_research_platform.storage.layout import StorageLayout
+
+            def fail_cleanup(_root):
+                raise OSError("scratch_cleanup_failed")
+
+            monkeypatch.setattr(rebuild, "remove_owned_scratch", fail_cleanup)
+            with pytest.raises(OSError, match="scratch_cleanup_failed"):
+                with rebuild.rebuild_candidate_workspace(StorageLayout(tmp_path)):
+                    pass
+        assert not getattr(outer, "__notes__", [])

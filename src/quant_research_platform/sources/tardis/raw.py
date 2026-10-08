@@ -219,12 +219,13 @@ def _verified_file(path: Path, *, expected_sha256=None):
         if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != identity:
             raise ValueError("tardis_raw_identity_changed")
         reader = _DigestingReader(handle) if expected_sha256 is not None else handle
+        primary = None
         try:
             yield reader
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            import sys
-
-            primary = sys.exception()
             try:
                 if expected_sha256 is not None:
                     reader.drain()

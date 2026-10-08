@@ -22,6 +22,7 @@ from quant_research_platform.contracts.filtering import (
     validate_sample_filter_mode,
 )
 from quant_research_platform.contracts.json_codec import (
+    canonical_identity_bytes,
     parse_qrp_json_object,
     render_qrp_json_object,
 )
@@ -154,9 +155,11 @@ def _resolved_model_hyperparameters_match(
             ):
                 return False
             expected["n_jobs"] = actual
+        return canonical_identity_bytes(
+            resolved_hyperparameters
+        ) == canonical_identity_bytes(expected)
     except (TypeError, ValueError):
         return False
-    return resolved_hyperparameters == expected
 
 
 def _resolved_model_thread_count(
@@ -621,6 +624,7 @@ def validate_a_share_model_selection_metadata(value: object) -> None:
         type(value) is not dict
         or set(value) != required
         or value["status"] != "selected"
+        or type(value["selection_group"]) is not str
         or value["selection_group"] not in {"global", "quarterly"}
         or value["selection_metric"] != "validation_rankic"
         or value["selection_direction"] != "maximize"

@@ -23,6 +23,7 @@ from quant_research_platform.contracts.experiments import (
     training_availability_columns,
 )
 from quant_research_platform.contracts.filtering import required_filter_columns
+from quant_research_platform.contracts.json_codec import canonical_identity_bytes
 from quant_research_platform.contracts.models import (
     ModelSpec,
     _thaw_model_hyperparameters,
@@ -146,7 +147,12 @@ def validate_model_state(predictor: object, metadata: dict[str, object]) -> None
             if isinstance(expected_value, float) and np.isnan(expected_value):
                 matches = isinstance(actual_value, float) and np.isnan(actual_value)
             else:
-                matches = actual_value == expected_value
+                try:
+                    matches = canonical_identity_bytes(
+                        actual_value
+                    ) == canonical_identity_bytes(expected_value)
+                except ValueError:
+                    matches = False
             if not matches:
                 raise ValueError("model_state_metadata_mismatch")
         try:

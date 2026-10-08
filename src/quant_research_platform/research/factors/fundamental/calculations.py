@@ -46,11 +46,20 @@ def calculate_fundamental_factors(
         )
         if column == "capex_to_assets":
             numerator = (numerator[0].where(numerator[0].ge(0.0)),)
-        ratio = _ratio(
-            numerator[0] if len(numerator) == 1 else numerator, values[denominator]
-        )
+        divisor = values[denominator]
         if adjustment:
-            ratio = ratio + adjustment
+            terms = (numerator[0], adjustment * divisor)
+            with np.errstate(over="ignore"):
+                difference = terms[0] + terms[1]
+            ratio = _ratio(difference, divisor)
+            overflow = np.isinf(difference)
+            if overflow.any():
+                ratio.loc[overflow] = _ratio(
+                    tuple(term.loc[overflow] for term in terms),
+                    divisor.loc[overflow],
+                )
+        else:
+            ratio = _ratio(numerator[0] if len(numerator) == 1 else numerator, divisor)
         result[column] = ratio.replace([np.inf, -np.inf], np.nan).astype("float64")
     return result
 

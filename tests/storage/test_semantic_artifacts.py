@@ -208,13 +208,25 @@ def test_exact_comparison_keeps_attempt_provenance_outside_model_semantics(
         storage.compare_semantic_artifacts(old, same, trial_layout=layout).status
         == "MATCH"
     )
-    for candidate in (build("parameter", alpha=2.0), build("metric", metric=0.3)):
+    for candidate in (
+        build("parameter", alpha=2.0),
+        build("typed_parameter", alpha=1),
+        build("metric", metric=0.3),
+    ):
         assert (
             storage.compare_semantic_artifacts(
                 old, candidate, trial_layout=layout
             ).status
             == "CONTENT_MISMATCH"
         )
+    assert (
+        storage.compare_semantic_artifacts(
+            build("positive_zero", alpha=0.0),
+            build("negative_zero", alpha=-0.0),
+            trial_layout=layout,
+        ).status
+        == "MATCH"
+    )
     assert filesystem_read_bytes(old / "manifest.json") == before
     import hashlib
 
@@ -772,3 +784,246 @@ def test_operational_metadata_schema_rejects_absolute_keys_before_write_and_read
     ):
         read_semantic_artifact_operational_metadata(root)
     assert filesystem_read_bytes(manifest_path) == forged_bytes
+
+
+@pytest.mark.parametrize("bad", ([], {}))
+@pytest.mark.parametrize(
+    "path,error",
+    (
+        (
+            ("model_phase_observations", "phases", 0, "phase"),
+            "semantic_artifact_operational_metadata_invalid",
+        ),
+        (
+            ("model_phase_observations", "phases", 0, "selection_group"),
+            "semantic_artifact_operational_metadata_invalid",
+        ),
+        (
+            ("model_phase_observations", "phases", 0, "observations", "status"),
+            "research_run_operation_evidence_invalid",
+        ),
+        (
+            ("model_phase_observations", "environments", 0, "host_id", "status"),
+            "research_run_operation_evidence_invalid",
+        ),
+        (
+            (
+                "model_phase_observations",
+                "environments",
+                0,
+                "native_thread_env",
+                "OMP_NUM_THREADS",
+                "status",
+            ),
+            "research_run_operation_evidence_invalid",
+        ),
+        (
+            ("final_alpha_observations", "status"),
+            "research_run_operation_evidence_invalid",
+        ),
+    ),
+)
+def test_operational_metadata_rejects_wrong_enum_types_without_mutating_good(
+    tmp_path, path, error, bad
+):
+    from copy import deepcopy
+
+    from quant_research_platform.contracts.json_codec import render_qrp_json_object
+    from quant_research_platform.runtime.execution_metrics import (
+        record_run_observations,
+    )
+    from quant_research_platform.storage.manifests import read_manifest
+    from quant_research_platform.storage.semantic_artifacts import (
+        compare_semantic_artifacts,
+        read_semantic_artifact_operational_metadata,
+    )
+
+    observations = {}
+    with record_run_observations(observations):
+        pass
+    compressed = deepcopy(observations)
+    environment = compressed.pop("environment")
+    created_at = environment.pop("created_at_utc")
+    compressed["environment"] = {"context": 0, "created_at_utc": created_at}
+    valid = {
+        "model_phase_observations": {
+            "environments": [environment],
+            "phases": [
+                {
+                    "phase": "shared_candidate_fit",
+                    "selection_group": None,
+                    "family_id": "ridge",
+                    "quarter_id": None,
+                    "fit_count": 1,
+                    "observations": compressed,
+                }
+            ],
+        },
+        "final_alpha_observations": observations,
+    }
+
+    def writer(staging):
+        filesystem_write_bytes(staging / "model.bin", b"model")
+
+    good = write_semantic_artifact(
+        tmp_path / "good", _envelope(), writer, operational_metadata=valid
+    )
+    before = _immediate_file_bytes(good)
+    assert read_semantic_artifact_operational_metadata(good) == valid
+    invalid = deepcopy(valid)
+    parent = invalid
+    for key in path[:-1]:
+        parent = parent[key]
+    parent[path[-1]] = bad
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        write_semantic_artifact(
+            tmp_path / "good",
+            _envelope(seed=1),
+            writer,
+            operational_metadata=invalid,
+        )
+    assert tuple(filesystem_iterdir(good.parent)) == (good,)
+    assert _immediate_file_bytes(good) == before
+
+    candidate = write_semantic_artifact(
+        tmp_path / "candidate", _envelope(), writer, operational_metadata=valid
+    )
+    assert compare_semantic_artifacts(good, candidate).status == "MATCH"
+    forged = read_manifest(candidate / "manifest.json")
+    forged["operational_metadata"] = invalid
+    forged_bytes = (render_qrp_json_object(forged) + "\n").encode("utf-8")
+    filesystem_write_bytes(candidate / "manifest.json", forged_bytes)
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        read_semantic_artifact_operational_metadata(candidate)
+    assert compare_semantic_artifacts(good, candidate).status == "INSPECTION_FAILED"
+    assert filesystem_read_bytes(candidate / "manifest.json") == forged_bytes
+    assert _immediate_file_bytes(good) == before
+
+
+def test_known_parquet_schema_publishes_typed_empty_file_without_explicit_rows(
+    tmp_path,
+):
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.storage.parquet import parquet_table_writer
+
+    schema = pa.schema(
+        (
+            pa.field("sequence", pa.int64()),
+            pa.field("amount", pa.float64()),
+            pa.field("asset_id", pa.string()),
+            pa.field("timestamp", pa.timestamp("ns")),
+        )
+    )
+    path = tmp_path / "empty.parquet"
+    with path.open("xb") as handle:
+        with parquet_table_writer(handle, compression="zstd", schema=schema):
+            pass
+    actual = pq.read_table(path)
+    assert actual.equals(pa.Table.from_pylist([], schema=schema), check_metadata=True)
+
+
+@pytest.mark.parametrize("bad", ([], {}))
+@pytest.mark.parametrize(
+    "field,error",
+    (
+        ("status", "trial_status_invalid"),
+        ("selection_direction", "experiment_selection_direction_invalid"),
+        ("stage", "experiment_stage_invalid"),
+        ("selection_group", "experiment_selection_group_invalid"),
+    ),
+)
+def test_trial_enum_types_reject_in_native_ledger_and_compare_without_mutating_good(
+    tmp_path, bad, field, error
+):
+    from dataclasses import replace
+
+    from quant_research_platform.contracts.experiments import (
+        ExperimentPlan,
+        TrialRecord,
+        trial_ledger_semantic_identity,
+    )
+    from quant_research_platform.contracts.json_codec import render_qrp_json_object
+    from quant_research_platform.storage.experiments import (
+        append_trial_record,
+        read_trial_ledger,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.storage.manifests import read_manifest
+    from quant_research_platform.storage.semantic_artifacts import (
+        compare_semantic_artifacts,
+    )
+    from tests.research.test_experiment_ledger import _plan, _record
+
+    plan = _plan()
+    mother = _record(plan, event_id="event", attempt_index=1, status="attempted")
+    for status in ("attempted", "completed", "failed", "abandoned", "invalid"):
+        record = replace(mother, status=status)
+        assert TrialRecord.from_payload(record.payload()) == record
+    for direction in ("maximize", "minimize"):
+        selected = replace(plan, selection_direction=direction)
+        assert ExperimentPlan.from_payload(selected.protocol_payload()) == selected
+    decoder = (
+        TrialRecord.from_payload if field == "status" else ExperimentPlan.from_payload
+    )
+    payload = mother.payload() if field == "status" else plan.protocol_payload()
+    payload[field] = bad
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        decoder(payload)
+
+    layout = StorageLayout(tmp_path)
+
+    def publish(name):
+        record = replace(mother, event_id=f"event_{name}", run_id=f"run_{name}")
+        ledger = layout.trial_ledger_root(record.run_id, plan.experiment_id)
+        append_trial_record(ledger, plan, record)
+        assert read_trial_ledger(ledger) == (plan, (record,))
+        reference = {
+            "run_id": record.run_id,
+            "experiment_id": plan.experiment_id,
+            "protocol_hash": plan.protocol_hash,
+            "semantic_identity": trial_ledger_semantic_identity(plan, (record,)),
+        }
+        artifact = write_semantic_artifact(
+            tmp_path / name,
+            _envelope(),
+            lambda stage: filesystem_write_bytes(stage / "model.bin", b"model"),
+            operational_metadata={"model_trial_ledgers": [reference]},
+        )
+        return artifact, ledger
+
+    good, good_ledger = publish("good")
+    candidate, candidate_ledger = publish("candidate")
+    artifact_before = _immediate_file_bytes(good)
+    ledger_before = {
+        path.relative_to(good_ledger): path.read_bytes()
+        for path in good_ledger.rglob("*")
+        if path.is_file()
+    }
+    assert (
+        compare_semantic_artifacts(good, candidate, trial_layout=layout).status
+        == "MATCH"
+    )
+    changed = (
+        candidate_ledger / "records" / "00000001.json"
+        if field == "status"
+        else candidate_ledger / "plan.json"
+    )
+    forged = read_manifest(changed)
+    forged[field] = bad
+    forged_bytes = (render_qrp_json_object(forged) + "\n").encode("utf-8")
+    filesystem_write_bytes(changed, forged_bytes)
+    with pytest.raises(ValueError, match=f"^{error}$"):
+        read_trial_ledger(candidate_ledger)
+    assert (
+        compare_semantic_artifacts(good, candidate, trial_layout=layout).status
+        == "INSPECTION_FAILED"
+    )
+    assert filesystem_read_bytes(changed) == forged_bytes
+    assert _immediate_file_bytes(good) == artifact_before
+    assert {
+        path.relative_to(good_ledger): path.read_bytes()
+        for path in good_ledger.rglob("*")
+        if path.is_file()
+    } == ledger_before

@@ -160,8 +160,9 @@ class _OpenFile:
     path: Path
 
 
-def _close_compressed_handles(gzip_handle: Any, raw_handle: Any) -> None:
-    primary = sys.exception()
+def _close_compressed_handles(
+    gzip_handle: Any, raw_handle: Any, *, primary: BaseException | None = None
+) -> None:
     failure: BaseException | None = None
     for handle, label in (
         (gzip_handle, "Binance gzip handle close also failed"),
@@ -304,8 +305,8 @@ class _RunWriter:
                 mode="wb",
                 compresslevel=6,
             )
-        except BaseException:
-            _close_compressed_handles(None, raw_handle)
+        except BaseException as primary:
+            _close_compressed_handles(None, raw_handle, primary=primary)
             raise
         opened = _OpenFile(raw_handle, gzip_handle, path)
         self._handles[key] = opened
@@ -355,8 +356,8 @@ class _RunWriter:
                 mode="wb",
                 compresslevel=6,
             )
-        except BaseException:
-            _close_compressed_handles(None, raw_handle)
+        except BaseException as primary:
+            _close_compressed_handles(None, raw_handle, primary=primary)
             raise
         self._interval_raw_handle = raw_handle
         self._interval_gzip_handle = gzip_handle
@@ -495,11 +496,13 @@ def _writer_lifecycle(
     files: list[dict[str, Any]],
     capture_stats: _CaptureStats | None = None,
 ) -> Iterator[None]:
+    primary = None
     try:
         yield
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
-        failure = None
         try:
             if not writer._aborted:  # noqa: SLF001
                 writer.close()
@@ -509,15 +512,12 @@ def _writer_lifecycle(
                         writer.connection_interval_manifest()
                     )
         except BaseException as cleanup_error:
-            if primary is not None:
-                primary.add_note(
-                    "Binance run writer cleanup also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
-            else:
-                failure = cleanup_error
-        if failure is not None:
-            raise failure
+            if primary is None:
+                raise
+            primary.add_note(
+                "Binance run writer cleanup also failed: "
+                f"{type(cleanup_error).__name__}"
+            )
 
 
 @dataclass
@@ -764,6 +764,7 @@ class _StreamReader(threading.Thread):
                 closed_at = _utc_now()
                 closed_monotonic_ns = time.monotonic_ns()
 
+        primary = None
         try:
             try:
                 websocket = _connect_websocket(
@@ -883,27 +884,21 @@ class _StreamReader(threading.Thread):
                         raise _DepthResyncRequired()
                     if not result:
                         self.stats.stale()
-        except _DepthResyncRequired:
-            close_reason = "depth_resync"
-            freeze_close()
-            raise
-        except _InvalidPayload:
-            close_reason = "failure"
-            freeze_close()
-            raise
-        except _ConnectionProblem:
-            close_reason = "connection_problem"
-            freeze_close()
-            raise
-        except BaseException:
-            close_reason = "failure"
+        except BaseException as body_error:
+            primary = body_error
+            close_reason = (
+                "depth_resync"
+                if isinstance(body_error, _DepthResyncRequired)
+                else "connection_problem"
+                if isinstance(body_error, _ConnectionProblem)
+                else "failure"
+            )
             freeze_close()
             raise
         finally:
             with self._network_lock:
                 self._active_websocket = None
                 self._request_socket = None
-            primary = sys.exception()
             first_failure: BaseException | None = None
             cleanups = []
             if opened:
@@ -1193,6 +1188,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
         market_metadata = _record_market_metadata(
             writer, market_types=market_types, symbols=config.symbols
         )
+        primary = None
         try:
             readers = [
                 _StreamReader(
@@ -1242,8 +1238,11 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                         raise reader.failure
                     if not reader.is_alive():
                         raise RuntimeError("binance_recorder_reader_thread_died")
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            active_primary = sys.exception()
+            active_primary = primary
             stop.set()
             join_failed = False
             for reader in readers:
@@ -1292,7 +1291,7 @@ def _record_staged(config: RecorderConfig, root: Path) -> dict[str, Any]:
                         "Binance run writer abort also failed: "
                         f"{type(cleanup_error).__name__}"
                     )
-            if sys.exception() is None and active_primary is not None:
+            if primary is None and active_primary is not None:
                 raise active_primary
 
     captured = stats.payload()

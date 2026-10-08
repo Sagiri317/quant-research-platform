@@ -17,6 +17,7 @@ from quant_research_platform.contracts.business_manifest import _freeze_json_val
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.json_codec import (
     bounded_qrp_json_object_snapshot,
+    canonical_identity_bytes,
     canonical_json_hash,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
@@ -157,7 +158,10 @@ class ExperimentPlan:
         ):
             raise ValueError("experiment_test_overlap")
         if self.market_id == "a_share" and self.stage == "refit":
-            if self.selection_group not in {"global", "quarterly"}:
+            if type(self.selection_group) is not str or self.selection_group not in {
+                "global",
+                "quarterly",
+            }:
                 raise ValueError("experiment_selection_group_required")
         elif self.selection_group is not None:
             raise ValueError("experiment_selection_group_invalid")
@@ -165,7 +169,12 @@ class ExperimentPlan:
             _validate_non_empty_string(
                 self.selection_metric, "experiment_selection_metric_required"
             )
-            if self.selection_direction not in {"maximize", "minimize"}:
+            if type(
+                self.selection_direction
+            ) is not str or self.selection_direction not in {
+                "maximize",
+                "minimize",
+            }:
                 raise ValueError("experiment_selection_direction_invalid")
             if (
                 not self.folds
@@ -582,7 +591,7 @@ class TrialRecord:
                 raise ValueError("trial_definition_id_invalid")
         if type(self.random_seed) is not int:
             raise ValueError("trial_random_seed_invalid")
-        if self.status not in {
+        if type(self.status) is not str or self.status not in {
             "attempted",
             "completed",
             "failed",
@@ -702,10 +711,10 @@ def validate_trial_record_against_plan(
         raise ValueError("trial_candidate_not_registered")
     if plan.stage == "refit" and record.random_seed != plan.random_seed:
         raise ValueError("trial_refit_seed_mismatch")
-    if (
-        plan.candidate_parameters
-        and record.normalized_parameters
-        != plan.candidate_parameters[record.candidate_id]
+    if plan.candidate_parameters and canonical_identity_bytes(
+        _thaw_json(record.normalized_parameters)
+    ) != canonical_identity_bytes(
+        _thaw_json(plan.candidate_parameters[record.candidate_id])
     ):
         raise ValueError("trial_parameters_not_frozen")
     if record.fold_id not in plan.fold_ids:

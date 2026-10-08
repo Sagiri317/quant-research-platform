@@ -307,25 +307,29 @@ def parquet_table_writer(
 ):
     """Own the native writer and preserve the primary failure during close."""
     with closing_iterator(ExitStack()) as native:
-        writer = None
+
+        def open_writer(writer_schema):
+            return native.enter_context(
+                closing_iterator(
+                    pq.ParquetWriter(
+                        handle,
+                        writer_schema,
+                        compression=compression,
+                        use_dictionary=False,
+                        write_statistics=list(statistics) if statistics else False,
+                        write_page_index=False,
+                        write_page_checksum=False,
+                        **options,
+                    )
+                )
+            )
+
+        writer = open_writer(schema) if schema is not None else None
 
         def write_table(table, *, row_group_size=None):
             nonlocal writer
             if writer is None:
-                writer = native.enter_context(
-                    closing_iterator(
-                        pq.ParquetWriter(
-                            handle,
-                            table.schema if schema is None else schema,
-                            compression=compression,
-                            use_dictionary=False,
-                            write_statistics=list(statistics) if statistics else False,
-                            write_page_index=False,
-                            write_page_checksum=False,
-                            **options,
-                        )
-                    )
-                )
+                writer = open_writer(table.schema)
             writer.write_table(
                 table,
                 row_group_size=_parquet_row_group_size(table.num_rows)

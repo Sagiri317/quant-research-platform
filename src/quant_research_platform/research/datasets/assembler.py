@@ -20,6 +20,7 @@ from quant_research_platform.contracts.validation import (
     strict_bool_series,
     strict_finite_numeric_series,
 )
+from quant_research_platform.markets.implementations.a_share.ids import MARKET_ID
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.validation import (
     validate_research_dataset,
@@ -529,7 +530,7 @@ def _generated_feature_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, 
 
 
 def _generated_semantic_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...]:
-    if dataset_spec.data_id not in SCENARIO_IDS:
+    if dataset_spec.market_id != MARKET_ID or dataset_spec.data_id not in SCENARIO_IDS:
         return ()
     return tuple(
         column
@@ -541,7 +542,7 @@ def _generated_semantic_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str,
 def _add_a_share_semantic_columns(
     frame: pd.DataFrame, dataset_spec: ResearchDatasetSpec
 ) -> pd.DataFrame:
-    if dataset_spec.data_id not in SCENARIO_IDS:
+    if dataset_spec.market_id != MARKET_ID or dataset_spec.data_id not in SCENARIO_IDS:
         return frame
     missing = sorted(set(A_SHARE_ELIGIBILITY_FACTS).difference(frame.columns))
     if missing:

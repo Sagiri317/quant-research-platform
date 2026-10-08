@@ -1,7 +1,6 @@
 """Immutable per-symbol funding observations with separate known forecasts."""
 
 import hashlib
-import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -208,6 +207,7 @@ def _manifest(root, symbol):
         or type(coverage["start_ns"]) is not int
         or type(coverage["end_ns"]) is not int
         or not 0 <= coverage["start_ns"] <= coverage["end_ns"]
+        or type(coverage["status"]) is not str
         or coverage["status"] not in {"COMPLETE", "UNPROVEN"}
     ):
         raise ValueError("binance_funding_coverage_invalid")
@@ -424,11 +424,14 @@ def read_funding_observations(funding_roots, *, symbol):
                     except GeneratorExit:
                         return
 
+    primary = None
     try:
         with closing_iterator(forecasts()) as source:
             yield FundingObservations(identity, tuple(coverage), tuple(events), source)
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             # Revalidate each source even if forecasts were only partly consumed.
             with closing_iterator(records()) as rows:

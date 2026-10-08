@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import datetime as dt
 import pickle
-import sys
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field
 from fractions import Fraction
@@ -577,10 +576,13 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
             replay_resources,
         )
         with replay_resources:
+            primary = None
             try:
                 yield run
+            except BaseException as body_error:
+                primary = body_error
+                raise
             finally:
-                primary = sys.exception()
                 try:
                     verify_files()
                     _after_raw, after = read_bounded_qrp_json(

@@ -234,6 +234,23 @@ def _calculate_values(
                 )
         output[first - start :][valid] = result
         return output
+    if factor == "abnormal_turnover_20_250":
+        if source_name not in sums:
+            sums[source_name] = _binary_prefix(source)
+        totals, _unit = sums[source_name]
+        short = windows[1]
+        result = np.full(np.count_nonzero(valid), np.nan)
+        for index, position in enumerate(np.flatnonzero(valid) + first + 1):
+            denominator = totals[position] - totals[position - size]
+            if denominator > 0:
+                numerator = size * (totals[position] - totals[position - short])
+                try:
+                    result[index] = numerator / (short * denominator)
+                except OverflowError:
+                    # Preserve the nonfinite result of an unrepresentable signed ratio.
+                    result[index] = np.inf if numerator > 0 else -np.inf
+        output[first - start :][valid] = result
+        return output
     current = matrix[valid]
     extra = {name: data[valid] for name, data in extra.items()}
     if factor.startswith("volatility_") or factor in {
@@ -262,19 +279,6 @@ def _calculate_values(
         result = np.fromiter(
             (arithmetic_mean(row) for row in np.partition(current, -5, axis=1)[:, -5:]),
             dtype=float,
-        )
-    elif factor == "abnormal_turnover_20_250":
-        scale = np.max(np.abs(current), axis=1, keepdims=True)
-        normalized = np.divide(
-            current, scale, out=np.zeros_like(current), where=scale > 0
-        )
-        denominator = np.mean(normalized, axis=1)
-        numerator = np.mean(normalized[:, -20:], axis=1)
-        result = np.divide(
-            numerator,
-            denominator,
-            out=np.full(len(current), np.nan),
-            where=denominator > 0,
         )
     elif factor == "min_return_20d":
         result = np.min(current, axis=1)

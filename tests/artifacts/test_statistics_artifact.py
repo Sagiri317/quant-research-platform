@@ -287,6 +287,8 @@ def maker_calibration_tables():
         "pair",
         "unit_invalid",
         "unit_mixed",
+        "tail",
+        "empty",
     ],
 )
 def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
@@ -350,6 +352,17 @@ def test_mature_shared_maker_tape_round_trip_and_rejects_corruption(
         tables["crypto_maker_events"] = (
             tables["crypto_maker_events"].loc[lambda frame: frame.event_id.lt(4)].copy()
         )
+    elif mutation == "tail":
+        extra = (
+            tables["crypto_maker_events"].loc[lambda frame: frame.event_id.eq(4)].copy()
+        )
+        extra.event_id = 5
+        extra.event_at += pd.Timedelta(milliseconds=100)
+        tables["crypto_maker_events"] = pd.concat(
+            [tables["crypto_maker_events"], extra], ignore_index=True
+        )
+    elif mutation == "empty":
+        tables["crypto_maker_samples"] = tables["crypto_maker_samples"].iloc[:0]
     elif mutation == "immature":
         tables["crypto_maker_samples"].loc[0, "label_available_at"] = pd.Timestamp(
             "1970-01-01T00:00:04"
@@ -1388,7 +1401,14 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
 
 @pytest.mark.parametrize(
     "corruption",
-    ("none", "global_mean", "quarterly_mean", "mean_difference", "observation_count"),
+    (
+        "none",
+        "global_mean",
+        "quarterly_mean",
+        "mean_difference",
+        "observation_count",
+        "access_window",
+    ),
 )
 @pytest.mark.parametrize("fdr_method", ("BY", "NOT_APPLICABLE"))
 def test_defined_group_comparison_requires_descriptive_facts(
@@ -1407,7 +1427,9 @@ def test_defined_group_comparison_requires_descriptive_facts(
     row["fdr_method"] = fdr_method
     if fdr_method == "NOT_APPLICABLE":
         row["fdr_adjusted_p_value"] = float("nan")
-    if corruption != "none":
+    if corruption == "access_window":
+        row[corruption] = "development"
+    elif corruption != "none":
         row[corruption] = 0 if corruption == "observation_count" else float("nan")
     tables["model_group_comparison"] = pd.DataFrame([row])
     if corruption != "none":
@@ -1416,7 +1438,7 @@ def test_defined_group_comparison_requires_descriptive_facts(
             tables,
             envelope,
             "model_group_comparison.parquet",
-            error="statistics_group_comparison_invalid",
+            error="^statistics_group_comparison_invalid$",
         )
     else:
         root = statistics.write_statistics_artifact(
@@ -1464,3 +1486,290 @@ def _defined_group_comparison_row():
         bootstrap_lower=float("nan"),
         bootstrap_upper=float("nan"),
     )
+
+
+@pytest.mark.parametrize("boundary", [False, True])
+def test_maker_validator_reuses_overlapping_and_adjacent_native_paths(
+    tmp_path, monkeypatch, maker_calibration_tables, boundary
+):
+    from collections import deque
+
+    from quant_research_platform.markets.implementations.crypto import portfolio
+
+    tables, envelope = maker_calibration_tables
+    if boundary:
+        from tests.markets.crypto.calibration_test_support import maker_event_rows
+        from tests.markets.crypto.test_hft_execution import _boundary
+
+        events = tables["crypto_maker_events"]
+        rows = pd.DataFrame(
+            [
+                {"fold_id": "fold_1", **row}
+                for row in maker_event_rows(3, _boundary(2250))
+            ],
+            columns=events.columns,
+        )
+        rows.event_at = pd.to_datetime(rows.event_at, unit="ns")
+        events.loc[events.event_id.ge(3), "event_id"] += 1
+        tables["crypto_maker_events"] = pd.concat(
+            [
+                events.loc[events.event_id.lt(3)],
+                rows,
+                events.loc[events.event_id.gt(3)],
+            ],
+            ignore_index=True,
+        )
+        samples = tables["crypto_maker_samples"]
+        samples.event_end += 1
+        samples.loc[
+            samples.sample_id.eq(1) & samples.side.eq("buy"), "filled_quantity"
+        ] = 0.0
+        samples.loc[
+            samples.sample_id.eq(1) | samples.side.eq("sell"), "terminal_reason"
+        ] = "book_boundary"
+        summary = tables["crypto_maker_calibration"]
+        summary.loc[summary.side.eq("buy"), "zero_fill_count"] += 1
+    event_count = tables["crypto_maker_events"].event_id.nunique()
+    for name in ("crypto_maker_samples", "crypto_maker_events"):
+        frame = tables[name]
+        later = frame.copy()
+        for column in (
+            "decision_at",
+            "prediction_end",
+            "label_available_at",
+            "event_at",
+        ):
+            if column in later:
+                later[column] += pd.Timedelta(milliseconds=600)
+        for column in ("initial_book_event_id", "event_start", "event_end", "event_id"):
+            if column in later:
+                later[column] += event_count
+        if "sample_id" in later:
+            later.sample_id += 2
+        tables[name] = pd.concat([frame, later], ignore_index=True)
+    summary = tables["crypto_maker_calibration"]
+    for column in ("sample_count", "zero_fill_count", "post_only_rejection_count"):
+        summary[column] *= 2
+
+    paths, decoded, closed, maxima = [], [], [], []
+    native_events = portfolio._calibration_events
+    native_response = portfolio.MakerCalibration._response
+
+    def events(*args):
+        count = 0
+        try:
+            for event in native_events(*args):
+                count += 1
+                yield event
+        finally:
+            decoded.append(count)
+            closed.append(True)
+
+    def response(model, sample, **kwargs):
+        path = tuple(kwargs.pop("events"))
+        paths.append((sample["sample_id"], sample["side"], path))
+        return (yield from native_response(model, sample, events=iter(path), **kwargs))
+
+    class Window(deque):
+        def append(self, event):
+            super().append(event)
+            maxima.append(len(self))
+
+    def no_full_history(_model):
+        pytest.fail("validator materialized a full fold history")
+
+    monkeypatch.setattr(portfolio, "deque", Window, raising=False)
+    monkeypatch.setattr(portfolio, "_calibration_events", events)
+    monkeypatch.setattr(portfolio.MakerCalibration, "_response", response)
+    monkeypatch.setattr(portfolio.MakerCalibration, "_load", no_full_history)
+
+    def produce(on_table):
+        for name, frame in tables.items():
+            on_table(name, frame)
+
+    root = statistics.write_statistics_artifact(
+        tmp_path / "paths",
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    statistics.read_statistics_artifact(
+        root,
+        expected_identity=envelope.instance_identity,
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    assert decoded == [event_count * 2] * 2 and len(closed) == 2
+    assert max(maxima) < event_count * 2
+    assert len(paths) == 16
+    for first in (0, 8):
+        for index in range(first, first + 8, 2):
+            buy, sell = paths[index : index + 2]
+            assert (buy[1], sell[1]) == ("buy", "sell")
+            assert len(buy[2]) == len(sell[2])
+            assert all(
+                left is right for left, right in zip(buy[2], sell[2], strict=True)
+            )
+        previous = {event.event_id: event for event in paths[first][2]}
+        overlap = [event for event in paths[first + 2][2] if event.event_id in previous]
+        assert overlap and all(event is previous[event.event_id] for event in overlap)
+        assert paths[first + 4][2][0].event_id > paths[first + 2][2][-1].event_id
+
+
+@pytest.mark.parametrize("finish", ["close_failed", "cancel"])
+def test_maker_validator_closes_native_stream_and_preserves_primary(
+    tmp_path, monkeypatch, maker_calibration_tables, finish
+):
+    from quant_research_platform.markets.implementations.crypto import portfolio
+
+    tables, envelope = maker_calibration_tables
+
+    def produce(on_table):
+        for name, frame in tables.items():
+            on_table(name, frame)
+
+    root = statistics.write_statistics_artifact(
+        tmp_path / "good",
+        envelope=envelope,
+        tables=produce,
+        table_group="crypto_maker_calibration",
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+    before = {
+        path.name: filesystem_read_bytes(path)
+        for path in root.iterdir()
+        if path.is_file()
+    }
+    native_events = portfolio._calibration_events
+    primary = KeyboardInterrupt("synthetic_reference_cancel")
+    cleanup = RuntimeError("synthetic_native_close_failure")
+    closed, opened = [], 0
+
+    def events(*args):
+        nonlocal opened
+        opened += 1
+        number = opened
+        try:
+            yield from native_events(*args)
+        finally:
+            closed.append(number)
+            if number == 1:
+                raise cleanup
+
+    def cancel(*_args, **_kwargs):
+        raise primary
+
+    with monkeypatch.context() as patch:
+        patch.setattr(portfolio, "_calibration_events", events)
+        if finish == "cancel":
+            patch.setattr(portfolio.MakerCalibration, "_response", cancel)
+        with pytest.raises(
+            KeyboardInterrupt if finish == "cancel" else RuntimeError
+        ) as caught:
+            statistics.read_statistics_artifact(
+                root,
+                expected_identity=envelope.instance_identity,
+                validate_tables=portfolio.validate_maker_calibration,
+            )
+        assert caught.value is (primary if finish == "cancel" else cleanup)
+    assert closed == [1]
+    if finish == "cancel":
+        assert any("RuntimeError" in note for note in primary.__notes__)
+    assert {
+        path.name: filesystem_read_bytes(path)
+        for path in root.iterdir()
+        if path.is_file()
+    } == before
+    statistics.read_statistics_artifact(
+        root,
+        expected_identity=envelope.instance_identity,
+        validate_tables=portfolio.validate_maker_calibration,
+    )
+
+
+@pytest.mark.parametrize(
+    "damage",
+    [
+        "side",
+        "events_side",
+        "ordinal",
+        "generic_before_ordinal",
+        "book_cross_batch",
+        "trade_cross_batch",
+    ],
+)
+def test_maker_validator_preserves_full_load_compound_error_priority(
+    tmp_path, monkeypatch, maker_calibration_tables, damage
+):
+    from functools import partial
+
+    from quant_research_platform.markets.implementations.crypto import portfolio
+
+    tables, envelope = maker_calibration_tables
+    tables["crypto_maker_samples"].loc[0, "filled_quantity"] = 0.5
+    if damage in ("side", "events_side", "generic_before_ordinal"):
+        extra = tables["crypto_maker_samples"].iloc[[0]].copy()
+        extra.side = "events" if damage == "events_side" else "unknown"
+        if damage == "generic_before_ordinal":
+            extra.sample_id = -1
+        tables["crypto_maker_samples"] = pd.concat(
+            [tables["crypto_maker_samples"], extra], ignore_index=True
+        )
+    if damage in ("ordinal", "generic_before_ordinal"):
+        extra = (
+            tables["crypto_maker_events"].loc[lambda frame: frame.event_id.eq(4)].copy()
+        )
+        extra.event_id = 6
+        extra.event_at += pd.Timedelta(milliseconds=500)
+        tables["crypto_maker_events"] = pd.concat(
+            [tables["crypto_maker_events"], extra], ignore_index=True
+        )
+
+    if damage in ("book_cross_batch", "trade_cross_batch"):
+        events = tables["crypto_maker_events"]
+        extra = events.loc[
+            events.event_id.eq(4 if damage == "book_cross_batch" else 2)
+        ].copy()
+        if damage == "trade_cross_batch":
+            extra = pd.concat([extra, extra], ignore_index=True)
+        extra.event_id = 6
+        extra.event_at = pd.Timestamp("1970-01-01T00:00:03.150000")
+        extra.iloc[-1, extra.columns.get_loc("quantity")] = float("inf")
+        tables["crypto_maker_events"] = pd.concat([events, extra], ignore_index=True)
+        monkeypatch.setattr(
+            statistics,
+            "iter_declared_parquet_member_batches",
+            partial(statistics.iter_declared_parquet_member_batches, batch_rows=1),
+        )
+
+    def write(staging):
+        for name, frame in tables.items():
+            pq.write_table(
+                pa.Table.from_pandas(
+                    frame,
+                    schema=statistics._ARROW_SCHEMAS[f"{name}.parquet"],
+                    preserve_index=False,
+                ),
+                native_filesystem_path(staging / f"{name}.parquet"),
+            )
+
+    root = write_semantic_artifact(tmp_path / "compound", envelope, write)
+    artifact = statistics.read_statistics_artifact(
+        root,
+        expected_identity=envelope.instance_identity,
+        validate_tables=lambda *_: None,
+    )
+    original_model = portfolio.MakerCalibration(
+        partial(portfolio._calibration_samples, artifact, "fold_1"),
+        partial(portfolio._calibration_events, artifact, "fold_1"),
+        price_unit="0.1",
+    )
+    with pytest.raises((KeyError, ValueError)) as original:
+        next(original_model.events(0, 1))
+    with pytest.raises(type(original.value)) as current:
+        statistics.read_statistics_artifact(
+            root,
+            expected_identity=envelope.instance_identity,
+            validate_tables=portfolio.validate_maker_calibration,
+        )
+    assert current.value.args == original.value.args

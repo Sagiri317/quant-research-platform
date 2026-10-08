@@ -53,3 +53,17 @@ def test_runtime_observation_finalization_keeps_primary(monkeypatch):
         "observation finalization also failed" in note for note in primary.__notes__
     )
     assert _operation_evidence(evidence)["reason"] == "operation_incomplete"
+
+
+def test_runtime_finalization_surfaces_failure_inside_handled_outer(monkeypatch):
+    import quant_research_platform.runtime.execution_metrics as owner
+
+    times = iter((0.0, 0.1))
+    monkeypatch.setattr(owner, "perf_counter", lambda: next(times))
+    try:
+        raise RuntimeError("handled_outer")
+    except RuntimeError as outer:
+        with pytest.raises(RuntimeError, match="generator raised StopIteration"):
+            with record_run_observations({}):
+                pass
+        assert not getattr(outer, "__notes__", [])

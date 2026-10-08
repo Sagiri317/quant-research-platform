@@ -14,7 +14,10 @@ import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.contracts.experiments import label_maturity_mask
-from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.contracts.json_codec import (
+    canonical_identity_bytes,
+    canonical_json_hash,
+)
 from quant_research_platform.contracts.models import (
     A_SHARE_QUARTERLY_MODEL_ARTIFACT_SCHEMA_ID,
     CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID,
@@ -978,11 +981,14 @@ def _validate_a_share_model_payload(
                 )[plan.candidate_ids.index(record.candidate_id)]
                 expected_parameters = model_spec_payload(expected_spec)
                 if (
-                    record.payload()["normalized_parameters"] != expected_parameters
-                    or plan.protocol_payload()["candidate_parameters"][
-                        record.candidate_id
-                    ]
-                    != expected_parameters
+                    canonical_identity_bytes(record.payload()["normalized_parameters"])
+                    != canonical_identity_bytes(expected_parameters)
+                    or canonical_identity_bytes(
+                        plan.protocol_payload()["candidate_parameters"][
+                            record.candidate_id
+                        ]
+                    )
+                    != canonical_identity_bytes(expected_parameters)
                     or record.metrics["n_train"]
                     != metadata["rows_after_input_label_dropna"]
                     or (entry["training_window"] != _window_payload(fold.train))
@@ -1203,13 +1209,18 @@ def _validate_a_share_model_payload(
             or (plan.candidate_ids != (expected_spec.model_id,))
             or (plan.random_seed != expected_spec.random_seed)
             or (
-                plan.protocol_payload()["candidate_parameters"]
-                != {expected_spec.model_id: normalized}
+                canonical_identity_bytes(
+                    plan.protocol_payload()["candidate_parameters"]
+                )
+                != canonical_identity_bytes({expected_spec.model_id: normalized})
             )
             or (_window_payload(plan.test) != protocol["holdout_window"])
             or (len(records) != 1)
             or (records[0].status != "completed")
-            or (records[0].payload()["normalized_parameters"] != normalized)
+            or (
+                canonical_identity_bytes(records[0].payload()["normalized_parameters"])
+                != canonical_identity_bytes(normalized)
+            )
             or (records[0].common_coverage_id != metadata["fit_coverage_id"])
             or (
                 dict(records[0].metrics)
@@ -1262,7 +1273,9 @@ def _validate_model_parameters(metadata, parameters, *, error):
         "max_train_rows",
         "training_weighting",
     ):
-        if metadata[key] != parameters[key]:
+        if canonical_identity_bytes(metadata[key]) != canonical_identity_bytes(
+            parameters[key]
+        ):
             raise ValueError(error)
 
 
@@ -1753,12 +1766,19 @@ def _validate_crypto_model_payload(
                 or (plan.selection_direction != "minimize")
                 or (plan.research_protocol_identity != canonical_json_hash(protocol))
                 or (
-                    plan.protocol_payload()["candidate_parameters"]
-                    != {entry["model_id"]: parameters}
+                    canonical_identity_bytes(
+                        plan.protocol_payload()["candidate_parameters"]
+                    )
+                    != canonical_identity_bytes({entry["model_id"]: parameters})
                 )
                 or (len(records) != 1)
                 or (records[0].status != "completed")
-                or (records[0].payload()["normalized_parameters"] != parameters)
+                or (
+                    canonical_identity_bytes(
+                        records[0].payload()["normalized_parameters"]
+                    )
+                    != canonical_identity_bytes(parameters)
+                )
                 or (
                     records[0].metrics["n_train"]
                     != entry["model_metadata"]["rows_after_input_label_dropna"]
@@ -1856,6 +1876,10 @@ def _validate_crypto_model_payload(
         refit_plan, records = read_model_trial_ledger_reference(trial_layout, refit_ref)
         parameters = selection_records[0].payload()["normalized_parameters"]
         metadata = entry["model_metadata"]
+        refit_protocol, selection_protocol = (
+            refit_plan.protocol_payload(),
+            selection_plan.protocol_payload(),
+        )
         if (
             refit_plan.stage != "refit"
             or refit_plan.selection_ledger_semantic_identities
@@ -1863,7 +1887,8 @@ def _validate_crypto_model_payload(
             or refit_plan.fit_windows != (final_fold.train, final_fold.validation)
             or (refit_plan.fit_cutoff != final_fold.validation.end)
             or any(
-                getattr(refit_plan, key) != getattr(selection_plan, key)
+                canonical_identity_bytes(refit_protocol[key])
+                != canonical_identity_bytes(selection_protocol[key])
                 for key in (
                     "market_id",
                     "research_dataset_id",
@@ -1880,13 +1905,18 @@ def _validate_crypto_model_payload(
                 )
             )
             or (
-                refit_plan.protocol_payload()["candidate_parameters"]
-                != {entry["model_id"]: parameters}
+                canonical_identity_bytes(
+                    refit_plan.protocol_payload()["candidate_parameters"]
+                )
+                != canonical_identity_bytes({entry["model_id"]: parameters})
             )
             or (refit_plan.random_seed != parameters["random_seed"])
             or (len(records) != 1)
             or (records[0].status != "completed")
-            or (records[0].payload()["normalized_parameters"] != parameters)
+            or (
+                canonical_identity_bytes(records[0].payload()["normalized_parameters"])
+                != canonical_identity_bytes(parameters)
+            )
             or (records[0].random_seed != metadata["random_seed"])
             or (records[0].common_coverage_id != entry["fit_coverage_id"])
             or (re.fullmatch("[0-9a-f]{64}", entry["fit_coverage_id"]) is None)

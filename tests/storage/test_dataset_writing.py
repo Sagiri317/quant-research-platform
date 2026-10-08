@@ -967,14 +967,14 @@ def test_pending_nested_parquet_rewrite_failure_occurs_after_close(
         if failure_stage == "close":
             raise OSError("pending_close_failure")
 
-    def write(table, path):
+    def write(table, path, **kwargs):
         nonlocal write_calls
         write_calls += 1
         if write_calls == 3:
             events.append("rewrite")
             assert events[:2] == ["read", "parquet-close"]
             raise OSError("pending_rewrite_failure")
-        return original_write(table, path)
+        return original_write(table, path, **kwargs)
 
     def chunks():
         try:
@@ -1001,3 +1001,78 @@ def test_pending_nested_parquet_rewrite_failure_occurs_after_close(
     )
     assert not root.exists()
     assert list(root.parent.iterdir()) == []
+
+
+@pytest.mark.parametrize("with_time_key", (False, True))
+def test_dataset_statistics_use_only_contract_time_key_and_read_old_files(
+    tmp_path, monkeypatch, with_time_key
+):
+    from dataclasses import replace
+
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.contracts.columns import ColumnRole
+    from quant_research_platform.contracts.data import DataGrain
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.storage.datasets.reading import (
+        iter_dataset_chunks,
+        open_dataset_session,
+    )
+    from quant_research_platform.storage.parquet import _matching_row_groups
+
+    spec = make_processed_dataset_spec(
+        "time_statistics", partition_columns=("year",) if with_time_key else ()
+    )
+    roles = dict(spec.column_roles)
+    roles["session_at"] = roles.pop("timestamp")
+    roles["observed_at"] = ColumnRole.CONTEXT
+    spec = replace(
+        spec,
+        column_roles=roles,
+        primary_key=("market_id", "asset_id", "session_at")
+        if with_time_key
+        else ("market_id", "asset_id"),
+        grain=DataGrain.ASSET_TIMESTAMP if with_time_key else DataGrain.ASSET_REFERENCE,
+    )
+    frame = make_default_dataset_frame(asset_ids=("asset_0", "asset_1", "asset_2"))
+    frame = frame.rename(columns={"timestamp": "session_at"})
+    frame["session_at"] = frame["session_at"].astype("datetime64[ns]")
+    frame["observed_at"] = frame["session_at"] + pd.Timedelta(days=1)
+    native = dataset_writing.write_parquet_file
+
+    def without_statistics(table, path, **_kwargs):
+        return native(table, path)
+
+    before, after = (
+        make_dataset_artifact_root(tmp_path / label, "time_statistics")
+        for label in ("before", "after")
+    )
+    with monkeypatch.context() as patch:
+        patch.setattr(dataset_writing, "write_parquet_file", without_statistics)
+        write_dataset(before, frame, spec=spec)
+    write_dataset(after, frame, spec=spec)
+    window = TimeWindow("2015-01-01", "2015-12-31") if with_time_key else None
+    for root, enabled in ((before, False), (after, with_time_key)):
+        session = open_dataset_session(root, columns=None, time_window=window)
+        actual = pd.concat(iter_dataset_chunks(session), ignore_index=True)
+        expected = (
+            (frame.loc[frame.session_at.dt.year.eq(2015)] if with_time_key else frame)
+            .loc[:, list(spec.required_columns)]
+            .reset_index(drop=True)
+        )
+        pd.testing.assert_frame_equal(actual, expected)
+        session.verify()
+        for member in session.all_paths:
+            with pq.ParquetFile(member) as parquet:
+                for group in range(parquet.metadata.num_row_groups):
+                    columns = parquet.metadata.row_group(group)
+                    for index in range(columns.num_columns):
+                        column = columns.column(index)
+                        assert (column.statistics is not None) == (
+                            enabled and column.path_in_schema == "session_at"
+                        )
+                if not enabled:
+                    assert _matching_row_groups(
+                        parquet, list(session.parquet_filters or ())
+                    ) == list(range(parquet.metadata.num_row_groups))
+    assert compare_datasets(before, after).status == "MATCH"

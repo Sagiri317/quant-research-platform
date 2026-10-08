@@ -125,7 +125,7 @@ def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, o
     models = metadata["quarterly_models"]
     champions = metadata["champion_by_quarter"]
     group = metadata["selection_group"]
-    if group not in {"global", "quarterly"}:
+    if type(group) is not str or group not in {"global", "quarterly"}:
         raise ValueError("invalid_model_metadata")
     if type(models) is not list or not models or type(champions) is not dict:
         raise ValueError("invalid_model_metadata")
@@ -144,16 +144,17 @@ def _validate_model_artifact_lineage(metadata: dict[str, object]) -> dict[str, o
         quarter, family = model["quarter_id"], model["family_id"]
         source = model["prediction_source"]
         decision_id = model["decision_id"]
+        validate_run_id(family)
         if (
             type(quarter) is not str
             or str(pd.Period(quarter, freq="Q")) != quarter
+            or type(source) is not str
             or source not in {"validation", "final"}
             or decision_id
             != ("final" if source == "final" or group == "global" else quarter)
             or (quarter, family) in seen
         ):
             raise ValueError("invalid_model_metadata")
-        validate_run_id(family)
         validate_run_id(model["model_id"])
         window = model["prediction_window"]
         if (

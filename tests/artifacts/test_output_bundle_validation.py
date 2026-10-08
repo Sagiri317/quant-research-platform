@@ -474,11 +474,15 @@ def test_validate_output_bundle_preserves_observer_primary_over_final_secondary(
     } == {"caught_is_primary": True, "observer_hits": 1, "root_hits": 2}
 
 
+@pytest.mark.parametrize("outer_handled", [False, True])
 @pytest.mark.parametrize(
     "secondary_type", (RuntimeError, KeyboardInterrupt, SystemExit)
 )
 def test_validate_output_bundle_propagates_final_secondary_without_primary(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, secondary_type: type[BaseException]
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    secondary_type: type[BaseException],
+    outer_handled,
 ) -> None:
     root = tmp_path / "bundle"
     _write_bundle(root)
@@ -500,10 +504,22 @@ def test_validate_output_bundle_propagates_final_secondary_without_primary(
 
     monkeypatch.setattr(bundle_validation, "_validated_bundle_root", final_secondary)
     caught: BaseException | None = None
-    try:
-        validate_output_bundle(root, observer=observer)
-    except BaseException as exc:
-        caught = exc
+
+    def check():
+        nonlocal caught
+        try:
+            validate_output_bundle(root, observer=observer)
+        except BaseException as exc:
+            caught = exc
+
+    if outer_handled:
+        try:
+            raise RuntimeError("handled_outer")
+        except RuntimeError as outer:
+            check()
+            assert not getattr(outer, "__notes__", [])
+    else:
+        check()
     assert {
         "caught_is_secondary": caught is secondary,
         "observer_hits": observer_hits,

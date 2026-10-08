@@ -8,7 +8,6 @@ import os
 import re
 import shutil
 import stat
-import sys
 from collections.abc import Iterable, Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -149,10 +148,13 @@ def verified_file_handle(
             raise ValueError(error)
 
     verify()
+    primary = None
     try:
         yield handle
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             verify()
         except BaseException as verification_error:

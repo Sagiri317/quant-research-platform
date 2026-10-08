@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -134,6 +133,7 @@ def _episode_rows(
         pd.Timestamp(window["start"]).value,
         pd.Timestamp(window["end"]).value,
     )
+    primary = None
     try:
         with _opened_parquet(
             root / "episodes.parquet", expected_identity=identities["episodes.parquet"]
@@ -238,8 +238,10 @@ def _episode_rows(
                         return
         if not count or expected_paths != {member["path"] for member in members}:
             raise ValueError("crypto_episode_child_members_invalid")
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             observed_paths = set()
             _visit_member_paths(

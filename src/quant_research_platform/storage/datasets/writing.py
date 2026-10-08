@@ -415,7 +415,7 @@ def _write_contents(
             resolved = table.cast(
                 schema.with_metadata(table.schema.metadata), safe=True
             )
-            write_parquet_file(resolved, pending)
+            write_parquet_file(resolved, pending, timestamp_column=timestamp_column)
             accumulator.observe_file(pending, batch_rows=batch_rows)
         pending_parts.clear()
 
@@ -456,7 +456,7 @@ def _write_contents(
                 part_index = part_indices.get(partition, 0)
                 part_indices[partition] = part_index + 1
                 path = partition_part_path(root, partition, part_index)
-                write_parquet_file(persisted, path)
+                write_parquet_file(persisted, path, timestamp_column=timestamp_column)
                 assert accumulator._arrow_schema is not None
                 if any(
                     arrow_type_has_null(field.type)
@@ -482,7 +482,7 @@ def _write_contents(
         table = table.replace_schema_metadata(
             {b"qrp.logical-dtypes": logical_dtype_metadata_bytes(logical_dtypes)}
         )
-        write_parquet_file(table, path)
+        write_parquet_file(table, path, timestamp_column=timestamp_column)
         accumulator.observe_file(path, batch_rows=batch_rows)
     return accumulator
 
@@ -547,7 +547,9 @@ def _validate_persisted_categorical_values(
             raise ValueError("dataset_categorical_domain_mismatch")
 
 
-def write_parquet_file(table: pa.Table, path: Path) -> Path:
+def write_parquet_file(
+    table: pa.Table, path: Path, *, timestamp_column: str | None = None
+) -> Path:
     filesystem_mkdir(path.parent, parents=True, exist_ok=True)
     pq.write_table(
         table,
@@ -555,7 +557,7 @@ def write_parquet_file(table: pa.Table, path: Path) -> Path:
         compression="zstd",
         row_group_size=_parquet_row_group_size(table.num_rows),
         use_dictionary=False,
-        write_statistics=False,
+        write_statistics=[timestamp_column] if timestamp_column is not None else False,
         write_page_index=False,
         write_page_checksum=False,
     )

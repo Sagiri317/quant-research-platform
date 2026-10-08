@@ -770,3 +770,77 @@ def test_begin_refit_persists_fit_domain_and_all_real_parent_ledgers(tmp_path, g
             selection_group=group,
         )
     assert set(layout.trial_ledger_root("run_refit").iterdir()) == roots_before
+
+
+@pytest.mark.parametrize("boundary", ("record", "plan", "terminal"))
+@pytest.mark.parametrize("before,after", ((1, 1.0), (True, 1), (0, 0.0)))
+def test_trial_ledger_typed_parameter_identity_preserves_old_bytes(
+    tmp_path, boundary, before, after
+):
+    from quant_research_platform.contracts.json_codec import render_qrp_json_object
+
+    plan = _plan()
+    root = tmp_path / "ledger"
+    if boundary == "record":
+        plan = replace(plan, candidate_parameters={"ridge": {"alpha": before}})
+    elif boundary == "plan":
+        plan = replace(plan, cost_assumptions={"commission": before})
+    start = replace(
+        _record(plan, event_id="started", attempt_index=1, status="attempted"),
+        normalized_parameters={"alpha": before},
+    )
+    append_trial_record(root, plan, start)
+    original = {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*.json")
+    }
+    terminal = replace(start, event_id="finished", status="completed")
+    if boundary == "plan":
+        other_plan = replace(plan, cost_assumptions={"commission": after})
+        with pytest.raises(ValueError, match="^trial_plan_mismatch$"):
+            read_trial_ledger(root, other_plan)
+        with pytest.raises(ValueError, match="^trial_plan_mismatch$"):
+            append_trial_record(
+                root,
+                other_plan,
+                replace(terminal, protocol_hash=other_plan.protocol_hash),
+            )
+    else:
+        changed = replace(terminal, normalized_parameters={"alpha": after})
+        error = (
+            "trial_parameters_not_frozen"
+            if boundary == "record"
+            else "trial_terminal_identity_mismatch"
+        )
+        with pytest.raises(ValueError, match=f"^{error}$"):
+            append_trial_record(root, plan, changed)
+    assert {
+        path.relative_to(root): path.read_bytes() for path in root.rglob("*.json")
+    } == original
+    if boundary == "terminal":
+        (root / "records" / "00000001-terminal.json").write_text(
+            render_qrp_json_object(changed.payload()) + "\n", encoding="utf-8"
+        )
+        with pytest.raises(ValueError, match="^trial_terminal_identity_mismatch$"):
+            read_trial_ledger(root)
+
+
+def test_trial_ledger_canonical_float_zero_and_frozen_json_containers(tmp_path):
+    plan = replace(
+        _plan(), candidate_parameters={"ridge": {"grid": [0.0, {"alpha": 1}]}}
+    )
+    start = replace(
+        _record(plan, event_id="started", attempt_index=1, status="attempted"),
+        normalized_parameters={"grid": [-0.0, {"alpha": 1}]},
+    )
+    root = tmp_path / "ledger"
+    append_trial_record(root, plan, start)
+    terminal = replace(
+        start,
+        event_id="finished",
+        status="completed",
+        normalized_parameters={"grid": [0.0, {"alpha": 1}]},
+    )
+    append_trial_record(root, plan, terminal)
+    saved, records = read_trial_ledger(root, plan)
+    assert saved.protocol_hash == plan.protocol_hash and len(records) == 1
+    assert records[0].status == "completed"

@@ -1187,7 +1187,10 @@ fit、持久化、reload、transform 和 predict 共用 ModelMatrixScaler。
 756-period配置单独运行，派生`training_weighting.role=robustness`；不得与其他half-life模型混入同一选型实例。
 其内部训练、验证排序与单项HAC/bootstrap仍保留，正式FDR、SPA、StepM、MCS与PBO排除该实例，
 原因使用`training_weighting_robustness_excluded`；冻结test的G/Q单项比较保留，联合FDR为`NOT_APPLICABLE`。
-主方案的half_life为null；756-period稳健性作为预注册配置，不用留出结果选择模型或参数。
+正式 A 股协议仅接受 `half_life=null` 主方案或独立的全 `half_life=756` 稳健性方案。
+由 `AShareProtocol` 统一校验；主方案与稳健性混合拒绝，其他半衰期（含 378 或 null+378）
+在正式入口明确拒绝，不标为 primary，也不进入正式联合检验。通用模型与 Crypto 的半衰期
+合同保留；756-period 稳健性仍保留单项诊断，不用留出结果选择模型或参数。
 
 缩放器的加权均值/标准差使用精确的最终训练样本权重。
 

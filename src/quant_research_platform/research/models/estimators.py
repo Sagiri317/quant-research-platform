@@ -21,6 +21,7 @@ def linear_regression_estimator(
 def ridge_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
     from sklearn.linear_model import Ridge
 
+    _set_random_state(params, spec)
     return Ridge(**params)
 
 

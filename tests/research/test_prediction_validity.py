@@ -410,3 +410,68 @@ def test_persisted_ic_rank_keeps_only_defined_weight_columns(tmp_path):
             rtol=0,
             atol=1e-14,
         )
+
+
+@pytest.mark.parametrize("bad", ([], {}))
+def test_a_share_persisted_selection_and_lineage_reject_wrong_enum_types(tmp_path, bad):
+    from quant_research_platform.artifacts.outputs.prediction_validation import (
+        validate_model_metadata_shape,
+    )
+    from quant_research_platform.contracts.models import (
+        validate_a_share_model_selection_metadata,
+    )
+    from quant_research_platform.research.models.persisted import (
+        read_quarterly_model_artifact,
+    )
+    from tests.research.test_quarterly_model_artifacts import _file_bytes, _republish
+
+    case = shared_model_case(tmp_path / "good")
+    before = _file_bytes(case.root)
+    selection = case.artifact.selection("global", None, access_window="development")
+    validate_a_share_model_selection_metadata(selection)
+    mutated = deepcopy(selection)
+    mutated["selection_group"] = bad
+    with pytest.raises(ValueError, match="^invalid_model_metadata$"):
+        validate_a_share_model_selection_metadata(mutated)
+
+    def mutate(relative, payload):
+        if relative == "selections/global/final.json":
+            payload["selection"]["selection_group"] = bad
+
+    root = _republish(case, tmp_path / "candidate", mutate=mutate)
+    with pytest.raises(ValueError, match="^model_selection_decision_mismatch$"):
+        read_quarterly_model_artifact(root, trial_layout=case.layout)
+    lineage = case.artifact.prediction_lineage(
+        TimeWindow("2019-01-01", "2019-03-31"),
+        selection_group="global",
+        access_window="development",
+    )
+    assert validate_model_metadata_shape(lineage) is lineage
+    for field in ("selection_group", "prediction_source", "family_id"):
+        changed = deepcopy(lineage)
+        owner = (
+            changed if field == "selection_group" else changed["quarterly_models"][0]
+        )
+        owner[field] = bad
+        error = "invalid_run_id" if field == "family_id" else "invalid_model_metadata"
+        with pytest.raises(ValueError, match=f"^{error}$"):
+            validate_model_metadata_shape(changed)
+    assert _file_bytes(case.root) == before
+
+
+@pytest.mark.parametrize("bad", ([], {}, False, 1))
+def test_portfolio_candidate_selection_group_rejects_wrong_enum_type(bad):
+    from dataclasses import replace
+
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from tests.helpers.research_configuration import research_configuration
+
+    configuration = research_configuration()
+    bound = bind_research_configuration(research_profile(), configuration)
+    candidate = bound.protocol(configuration["scenario_id"]).portfolio_candidates()[0]
+    assert candidate.selection_group == "global"
+    with pytest.raises(ValueError, match="^portfolio_selection_group_invalid$"):
+        replace(candidate, selection_group=bad)

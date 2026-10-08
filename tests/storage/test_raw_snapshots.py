@@ -9,9 +9,12 @@ from quant_research_platform.storage.raw_snapshots import (
 )
 
 
+@pytest.mark.parametrize("outer_handled", [False, True])
 @pytest.mark.parametrize("changed", [False, True])
 @pytest.mark.parametrize("termination", ["exhaust", "close", "primary"])
-def test_csv_consumed_digest_is_verified_on_every_exit(tmp_path, changed, termination):
+def test_csv_consumed_digest_is_verified_on_every_exit(
+    tmp_path, changed, termination, outer_handled
+):
     root = tmp_path / "snapshot"
     write_csv_snapshot(
         root,
@@ -36,19 +39,30 @@ def test_csv_consumed_digest_is_verified_on_every_exit(tmp_path, changed, termin
         path.write_bytes(replacement)
     rows = iter_csv_snapshot(root, expected_manifest=manifest, max_bytes=1024)
     assert next(rows) == (1,)
-    if termination == "primary":
-        primary = KeyboardInterrupt("body_primary")
-        with pytest.raises(KeyboardInterrupt) as caught:
-            rows.throw(primary)
-        assert caught.value is primary
-        assert bool(getattr(primary, "__notes__", [])) == changed
-    elif changed:
-        with pytest.raises(ValueError, match="raw_csv_content_invalid"):
-            list(rows) if termination == "exhaust" else rows.close()
-    elif termination == "exhaust":
-        assert list(rows) == [(2,)]
+
+    def finish():
+        if termination == "primary":
+            primary = KeyboardInterrupt("body_primary")
+            with pytest.raises(KeyboardInterrupt) as caught:
+                rows.throw(primary)
+            assert caught.value is primary
+            assert bool(getattr(primary, "__notes__", [])) == changed
+        elif changed:
+            with pytest.raises(ValueError, match="raw_csv_content_invalid"):
+                list(rows) if termination == "exhaust" else rows.close()
+        elif termination == "exhaust":
+            assert list(rows) == [(2,)]
+        else:
+            rows.close()
+
+    if outer_handled:
+        try:
+            raise RuntimeError("handled_outer")
+        except RuntimeError as outer:
+            finish()
+            assert not getattr(outer, "__notes__", [])
     else:
-        rows.close()
+        finish()
     assert read_manifest(root / "response.metadata.json") == manifest
 
 

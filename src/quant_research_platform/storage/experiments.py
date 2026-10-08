@@ -15,6 +15,7 @@ from quant_research_platform.contracts.experiments import (
 from quant_research_platform.contracts.json_codec import (
     MAX_QRP_JSON_BYTES,
     bounded_rendered_qrp_json_object_size,
+    canonical_identity_bytes,
 )
 from quant_research_platform.contracts.models import (
     validate_completed_model_trial_metrics,
@@ -85,7 +86,9 @@ def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
     saved = ExperimentPlan.from_payload(
         read_bounded_qrp_json(root / "plan.json", expected_identity=identity)[1]
     )
-    if plan is not None and saved.protocol_payload() != plan.protocol_payload():
+    if plan is not None and canonical_identity_bytes(
+        saved.protocol_payload()
+    ) != canonical_identity_bytes(plan.protocol_payload()):
         raise ValueError("trial_plan_mismatch")
     plan = saved
     entries = read_bounded_qrp_json_directory(
@@ -129,7 +132,9 @@ def _validate_trial_completion(start: TrialRecord, terminal: TrialRecord) -> Non
         thread_settings=terminal.thread_settings,
         undefined_reasons=terminal.undefined_reasons,
     )
-    if expected.payload() != terminal.payload():
+    if canonical_identity_bytes(expected.payload()) != canonical_identity_bytes(
+        terminal.payload()
+    ):
         raise ValueError("trial_terminal_identity_mismatch")
 
 

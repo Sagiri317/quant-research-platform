@@ -96,10 +96,11 @@ def test_native_line_order_is_preserved_without_a_fabricated_clock(tmp_path):
     ]
 
 
+@pytest.mark.parametrize("outer_handled", [False, True])
 @pytest.mark.parametrize("changed", [False, True])
 @pytest.mark.parametrize("termination", ["exhaust", "close", "primary"])
 def test_native_consumed_digest_is_verified_on_every_exit(
-    tmp_path, changed, termination
+    tmp_path, changed, termination, outer_handled
 ):
     path = tmp_path / "native.gz"
     original = gzip.compress(_snapshot() + b"\n", mtime=0)
@@ -113,19 +114,30 @@ def test_native_consumed_digest_is_verified_on_every_exit(
         path, date="2026-09-01", offset_minutes=0, expected_sha256=expected
     )
     next(rows)
-    if termination == "primary":
-        primary = KeyboardInterrupt("body_primary")
-        with pytest.raises(KeyboardInterrupt) as caught:
-            rows.throw(primary)
-        assert caught.value is primary
-        assert bool(getattr(primary, "__notes__", [])) == changed
-    elif changed:
-        with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
-            list(rows) if termination == "exhaust" else rows.close()
-    elif termination == "exhaust":
-        list(rows)
+
+    def finish():
+        if termination == "primary":
+            primary = KeyboardInterrupt("body_primary")
+            with pytest.raises(KeyboardInterrupt) as caught:
+                rows.throw(primary)
+            assert caught.value is primary
+            assert bool(getattr(primary, "__notes__", [])) == changed
+        elif changed:
+            with pytest.raises(ValueError, match="tardis_raw_identity_changed"):
+                list(rows) if termination == "exhaust" else rows.close()
+        elif termination == "exhaust":
+            list(rows)
+        else:
+            rows.close()
+
+    if outer_handled:
+        try:
+            raise RuntimeError("handled_outer")
+        except RuntimeError as outer:
+            finish()
+            assert not getattr(outer, "__notes__", [])
     else:
-        rows.close()
+        finish()
 
 
 @pytest.mark.parametrize("count", [1, 2, 289])

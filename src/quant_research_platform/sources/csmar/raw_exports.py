@@ -5,7 +5,6 @@ from __future__ import annotations
 import os
 import re
 import stat
-import sys
 from collections.abc import Callable, Iterable, Iterator
 from contextlib import contextmanager
 from itertools import groupby, islice
@@ -208,11 +207,14 @@ def _raw_export_path_session(
                     continue
                 yield path
 
+    primary = None
     try:
         require_unaliased_path(root, error="csmar_raw_export_identity_changed")
         yield (iter_paths(), verify_root)
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         if primary is None:
             verify_root()
         else:

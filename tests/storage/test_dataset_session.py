@@ -283,7 +283,7 @@ def test_writer_manifest_uses_persisted_bytes_not_prewrite_summary(
     root = make_dataset_artifact_root(tmp_path, "persisted_truth")
     original = dataset_writing.write_parquet_file
 
-    def write_infinite(table, path):
+    def write_infinite(table, path, **kwargs):
         position = table.schema.get_field_index("value")
         persisted = table.set_column(
             position,
@@ -292,7 +292,7 @@ def test_writer_manifest_uses_persisted_bytes_not_prewrite_summary(
                 [float("inf")] * table.num_rows, type=table.schema.field(position).type
             ),
         )
-        return original(persisted, path)
+        return original(persisted, path, **kwargs)
 
     monkeypatch.setattr(dataset_writing, "write_parquet_file", write_infinite)
     with pytest.raises(ValueError, match="dataset_infinite_value"):
@@ -432,14 +432,16 @@ def test_writer_rejects_persisted_category_outside_declared_domain(
     frame["asset_id"] = pd.Categorical(frame["asset_id"])
     original = dataset_writing.write_parquet_file
 
-    def write_extra_domain(current, path):
+    def write_extra_domain(current, path, **kwargs):
         persisted = current.to_pandas(use_threads=False)
         persisted["asset_id"] = persisted["asset_id"].cat.add_categories(
             ["FORGED_UNUSED_CATEGORY"]
         )
         persisted.loc[persisted.index[0], "asset_id"] = "FORGED_UNUSED_CATEGORY"
         forged = pa.Table.from_pandas(persisted, preserve_index=False)
-        return original(forged.replace_schema_metadata(current.schema.metadata), path)
+        return original(
+            forged.replace_schema_metadata(current.schema.metadata), path, **kwargs
+        )
 
     monkeypatch.setattr(dataset_writing, "write_parquet_file", write_extra_domain)
     with pytest.raises(ValueError, match="dataset_categorical_domain_mismatch"):

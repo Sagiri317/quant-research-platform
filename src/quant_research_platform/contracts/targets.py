@@ -55,6 +55,7 @@ def _operation_evidence(value):
         }
         or result["schema_id"] != "qrp-run-observations"
         or result["sampling"] != "target_boundaries_not_full_process_peaks"
+        or type(result["status"]) is not str
         or result["status"] not in {"DEFINED", "UNDEFINED"}
         or type(result["reason"]) is not str
         or type(result["sample_count"]) is not int
@@ -99,6 +100,7 @@ def _operation_evidence(value):
     for item in (environment["host_id"], *environment["native_thread_env"].values()):
         if (
             type(item) is not dict
+            or type(item.get("status")) is not str
             or (
                 item.get("status") == "DEFINED"
                 and (set(item) != {"status", "value"} or type(item["value"]) is not str)

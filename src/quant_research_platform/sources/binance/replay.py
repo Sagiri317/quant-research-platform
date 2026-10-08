@@ -8,7 +8,6 @@ import heapq
 import json
 import os
 import stat
-import sys
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields
@@ -204,6 +203,7 @@ class ObservationCoverageIndex:
                 )
             raise
         count = 0
+        primary = None
         try:
             while True:
                 line: bytes | None = None
@@ -233,8 +233,10 @@ class ObservationCoverageIndex:
             ):
                 raise ValueError("binance_replay_connection_intervals_invalid")
             _verify_raw_file_handle(raw_handle, expected_identity=self.identity)
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            primary = sys.exception()
             first_failure: BaseException | None = None
             try:
                 gzip_handle.close()
@@ -538,10 +540,13 @@ def _raw_path_session(root: Path) -> Iterator[Callable[[], None]]:
         if not unchanged:
             raise ValueError(_RAW_IDENTITY_ERROR)
 
+    primary = None
     try:
         yield verify_root
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             verify_root()
         except BaseException as verify_error:
@@ -625,10 +630,13 @@ def open_recorder_run(root: Path) -> Iterator[RecorderRun]:
             _files=files,
             _coverage_index=coverage_index,
         )
+        primary = None
         try:
             yield run
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            primary = sys.exception()
             try:
                 verify_root()
                 current_manifest, current_identity = _read_run_manifest(run_root)
@@ -1024,6 +1032,7 @@ def _sha256_file(path: Path, identity: DatasetFileIdentity) -> str:
         handle = open_filesystem_file(path, "rb")
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("binance_replay_file_identity_mismatch") from exc
+    primary = None
     try:
         _verify_raw_file_handle(handle, expected_identity=identity)
         digest = hashlib.sha256()
@@ -1032,8 +1041,10 @@ def _sha256_file(path: Path, identity: DatasetFileIdentity) -> str:
             digest.update(memoryview(buffer)[:count])
         _verify_raw_file_handle(handle, expected_identity=identity)
         return digest.hexdigest()
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             handle.close()
         except BaseException as close_error:
@@ -1075,10 +1086,12 @@ def _iter_raw_file(
         raw_handle = open_filesystem_file(path, "rb")
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("binance_replay_raw_file_open_failed") from exc
+    primary = None
     try:
         _verify_raw_file_handle(raw_handle, expected_identity=item.identity)
         digesting_handle = _DigestingReader(raw_handle)
         gzip_handle = gzip.GzipFile(fileobj=digesting_handle, mode="rb")
+        primary = None
         try:
             count = 0
             minimum: int | None = None
@@ -1128,8 +1141,10 @@ def _iter_raw_file(
                 or maximum != metadata["capture_seq_max"]
             ):
                 raise ValueError("binance_replay_file_manifest_mismatch")
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            primary = sys.exception()
             try:
                 gzip_handle.close()
                 digesting_handle.drain()
@@ -1145,8 +1160,10 @@ def _iter_raw_file(
                 else:
                     raise
 
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        primary = sys.exception()
         try:
             raw_handle.close()
         except BaseException as close_error:

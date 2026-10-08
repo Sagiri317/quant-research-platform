@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import heapq
-import sys
 from collections.abc import Callable, Iterable, Mapping
 from contextlib import ExitStack
 from itertools import groupby
@@ -76,6 +75,7 @@ def write_prediction_outputs(
 
     def _write(temp_root: Path) -> None:
         paths = []
+        primary = None
         try:
             active_frames = output_chunks
             if spec.prediction_mode == "a_share_oos":
@@ -108,8 +108,10 @@ def write_prediction_outputs(
                 if spec.prediction_mode == "crypto_oos"
                 else None,
             )
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            primary = sys.exception()
             for _quarter, _family, path in paths:
                 try:
                     remove_owned_scratch(path)

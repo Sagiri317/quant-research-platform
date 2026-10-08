@@ -689,7 +689,11 @@ def _compute_processed_frame(
                 .loc[:, list(spec.required_columns)]
             )
         input_frame = dependencies[next(iter(spec.processed_input_data_ids))]
-        if any(definition.family == "fundamental" for definition in definitions):
+        if any(
+            definition.family == "fundamental"
+            and "total_market_cap" in definition.input_columns
+            for definition in definitions
+        ):
             market = next(
                 frame
                 for frame in dependencies.values()

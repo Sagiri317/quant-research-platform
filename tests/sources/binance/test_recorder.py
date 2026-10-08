@@ -98,8 +98,7 @@ def test_depth_validation_maps_large_json_integer_to_stable_owner_error() -> Non
         _validate_stream(FUTURES_STREAMS[0], payload)
 
 
-def test_run_writer_handle_cleanup_preserves_active_primary(tmp_path: Path) -> None:
-
+def test_compressed_handle_cleanup_preserves_explicit_primary() -> None:
     class FailingClose:
         def __init__(self, message: str) -> None:
             self.message = message
@@ -111,19 +110,19 @@ def test_run_writer_handle_cleanup_preserves_active_primary(tmp_path: Path) -> N
 
     raw_handle = FailingClose("raw_close")
     gzip_handle = FailingClose("gzip_close")
-    writer = recorder._RunWriter(tmp_path)
-    key = (FUTURES_MARKET_TYPE, "depth", "stream", "connection")
-    writer._handles[key] = recorder._OpenFile(
-        raw_handle=raw_handle, gzip_handle=gzip_handle, path=tmp_path / "raw.jsonl.gz"
-    )
-    with pytest.raises(KeyboardInterrupt, match="body_primary") as raised:
+    primary = KeyboardInterrupt("body_primary")
+    with pytest.raises(KeyboardInterrupt) as raised:
         try:
-            raise KeyboardInterrupt("body_primary")
-        finally:
-            writer._close_key(key)
+            raise primary
+        except KeyboardInterrupt as body_error:
+            recorder._close_compressed_handles(
+                gzip_handle, raw_handle, primary=body_error
+            )
+            raise
+    assert raised.value is primary
     assert gzip_handle.close_calls == 1
     assert raw_handle.close_calls == 1
-    assert raised.value.__notes__ == [
+    assert primary.__notes__ == [
         "Binance gzip handle close also failed: OSError",
         "Binance raw handle close also failed: OSError",
     ]
@@ -1379,3 +1378,21 @@ def test_join_primary_survives_all_reader_cleanup_and_abort(
         *(["Binance run writer abort also failed: OSError"] if abort_fails else []),
     ]
     assert not output.exists()
+
+
+def test_compressed_close_surfaces_failure_inside_handled_outer():
+    closed = []
+
+    class Handle:
+        def close(self):
+            closed.append(True)
+            raise OSError("close_failure")
+
+    try:
+        raise RuntimeError("handled_outer")
+    except RuntimeError as outer:
+        with pytest.raises(OSError, match="close_failure") as caught:
+            recorder._close_compressed_handles(Handle(), Handle())
+        assert not getattr(outer, "__notes__", [])
+    assert closed == [True, True]
+    assert caught.value.__notes__ == ["Binance raw handle close also failed: OSError"]

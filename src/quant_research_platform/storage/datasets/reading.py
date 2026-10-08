@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import math
-import sys
 from collections.abc import Callable, Iterator, Mapping
 from dataclasses import dataclass, replace
 from datetime import date, datetime, time, timedelta
@@ -463,14 +462,18 @@ def iter_dataset_chunks(
 ) -> Iterator[pd.DataFrame]:
     rows_per_batch = _validated_batch_rows(batch_rows)
     if not context.read_paths:
+        primary = None
         try:
             empty = _empty_frame(context, context.logical_columns)
             try:
                 yield empty
             except GeneratorExit:
                 return
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            _verify_preserving_primary(context)
+            _verify_preserving_primary(context, primary)
         return
     yielded = False
     with closing_iterator(
@@ -491,14 +494,18 @@ def iter_dataset_chunks(
             except GeneratorExit:
                 return
     if not yielded:
+        primary = None
         try:
             empty = _empty_frame(context, context.logical_columns)
             try:
                 yield empty
             except GeneratorExit:
                 return
+        except BaseException as body_error:
+            primary = body_error
+            raise
         finally:
-            _verify_preserving_primary(context)
+            _verify_preserving_primary(context, primary)
 
 
 def iter_declared_parquet_member_batches(
@@ -553,6 +560,7 @@ def iter_dataset_file_batches(
         context.logical_dtypes, columns=columns
     )
     context.verify()
+    primary = None
     try:
         for path in context.read_paths:
             metadata = context.metadata_for(path)
@@ -577,12 +585,16 @@ def iter_dataset_file_batches(
                         yield value
                     except GeneratorExit:
                         return
+    except BaseException as body_error:
+        primary = body_error
+        raise
     finally:
-        _verify_preserving_primary(context)
+        _verify_preserving_primary(context, primary)
 
 
-def _verify_preserving_primary(context: DatasetSession) -> None:
-    primary = sys.exception()
+def _verify_preserving_primary(
+    context: DatasetSession, primary: BaseException | None
+) -> None:
     if primary is None:
         context.verify()
         return

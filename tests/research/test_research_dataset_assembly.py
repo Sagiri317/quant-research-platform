@@ -98,6 +98,63 @@ def test_research_dataset_assembles_from_processed_inputs(tmp_path: Path) -> Non
     )
 
 
+@pytest.mark.parametrize(
+    "scenario", ("pv_all", "pv_expanded", "fusion_nf_core", "fusion_nf_expectations")
+)
+def test_non_a_share_named_scenario_keeps_input_semantics_and_requires_real_columns(
+    tmp_path, scenario
+):
+    from dataclasses import replace
+
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.research_processed_inputs import (
+        make_dummy_processed_catalog,
+        write_dummy_processed_inputs,
+    )
+    from tests.helpers.research_specs import make_dummy_research_dataset_spec
+
+    layout = StorageLayout(tmp_path)
+    processed = make_dummy_processed_catalog()
+    spec = make_dummy_research_dataset_spec(data_id=scenario)
+    write_dummy_processed_inputs(layout, processed)
+    root = assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=ResearchDatasetCatalog((spec,)),
+        processed_catalog=processed,
+        dataset_id=scenario,
+        time_window=TimeWindow("2024-01-02", "2024-01-03"),
+    )
+    frame = read_dataset(root)
+    assert frame.eligible.tolist() == [True, False]
+    assert assembler_module._generated_semantic_columns(spec) == ()
+    assert assembler_module._add_a_share_semantic_columns(frame, spec) is frame
+    a_share = replace(spec, market_id=MarketId("a_share"))
+    assert assembler_module._generated_semantic_columns(a_share) == ("eligible",)
+    with pytest.raises(ValueError, match="^a_share_eligibility_facts_missing:"):
+        assembler_module._add_a_share_semantic_columns(
+            frame.assign(market_id="a_share"), a_share
+        )
+    missing = ProcessedDataCatalog(
+        tuple(
+            replace(
+                item,
+                column_roles={
+                    key: role
+                    for key, role in item.column_roles.items()
+                    if key != "eligible"
+                },
+            )
+            if str(item.data_id) == "filters"
+            else item
+            for item in processed.list()
+        )
+    )
+    with pytest.raises(
+        ValueError, match="^missing_research_required_columns: eligible$"
+    ):
+        assembler_module._validate_research_input_specs(spec, missing)
+
+
 def test_research_time_window_driver_uses_one_window_per_physical_chunk(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

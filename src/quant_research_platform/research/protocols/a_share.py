@@ -136,9 +136,15 @@ class AShareProtocol:
         if self.root_seed != ROOT_SEED:
             raise ValueError("a_share_root_seed_must_be_frozen")
         if self.configuration_json is not None:
-            _validate_a_share_model_family_ids(
-                item["model_id"] for item in self.configuration()["models"]
-            )
+            models = self.configuration()["models"]
+            _validate_a_share_model_family_ids(item["model_id"] for item in models)
+            half_lives = {
+                item.get("training_weighting", {}).get("half_life") for item in models
+            }
+            if 756 in half_lives and len(half_lives) > 1:
+                raise ValueError("a_share_training_weighting_research_roles_mixed")
+            if half_lives.difference({None, 756}):
+                raise ValueError("a_share_training_weighting_half_life_not_supported")
 
     @property
     def time_window(self) -> TimeWindow:

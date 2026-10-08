@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import sys
 from collections.abc import Iterator
 from contextlib import contextmanager
 from dataclasses import dataclass
@@ -55,13 +54,4 @@ def rebuild_candidate_workspace(
         raise
     finally:
         if not workspace._preserve:
-            primary = sys.exception()
-            try:
-                remove_owned_scratch(root)
-            except BaseException as cleanup_error:
-                if primary is None:
-                    raise
-                primary.add_note(
-                    "rebuild candidate scratch cleanup also failed: "
-                    f"{type(cleanup_error).__name__}"
-                )
+            remove_owned_scratch(root)
