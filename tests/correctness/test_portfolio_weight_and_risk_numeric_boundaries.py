@@ -39,7 +39,7 @@ from quant_research_platform.research.portfolios.risk import (
 )
 from quant_research_platform.storage.datasets import read_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from tests.helpers.portfolio_ledger import write_test_sessions
+from tests.helpers.portfolio_ledger import write_market_evidence, write_test_sessions
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.test_portfolio_ledger import _real_fee_schedule
 from tests.workflows.test_portfolio_workflow_integration import _processed_specs
@@ -319,7 +319,9 @@ def test_native_panel_feeds_risk_state_and_holding_attribution(tmp_path):
         {"calendar_date": dates, "source_market_type": 1, "is_trading_day": True}
     )
     stream = iter_holding_factor_inputs(
-        layout=layout.with_target_roots({"market_panel_1d": root}),
+        layout=layout.with_target_roots(
+            {"market_panel_1d": root, **write_market_evidence(layout, panel)}
+        ),
         calendar=calendar,
         time_window=TimeWindow(dates[0], dates[-1]),
         unified_trading_sessions=unified_trading_sessions,
@@ -411,8 +413,9 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         panel=panel.loc[panel.timestamp.eq(dates[0])],
         next_panel=panel.loc[panel.timestamp.eq(dates[1])],
         endpoint_panel=panel.loc[panel.timestamp.eq(dates[2])],
+        closed_assets=frozenset(),
         dataset=dataset,
-        execution=read_dataset(execution_root),
+        execution=read_dataset(execution_root).assign(execution_at=dates[1]),
         holdings=pd.Series(dtype="float64"),
         cash=1.0,
         nav=1.0,

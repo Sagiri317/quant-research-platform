@@ -11,6 +11,16 @@
 
 CSMAR 提供 A 股市场、指数、行业和分析师事实；其财务只作验证。
 
+现有 `sources/csmar/field_mappings.py` 声明支持的表和必需字段，
+`sources/csmar/interim.py` 统一执行类型、枚举、日期及单位规范化。
+供应商说明书中的同名字段只证明该版字段定义；输入还须绑定实际表标识、原件哈希和
+适用域，不因此承诺任意导出版本、未知字段或历史完整性。股数、市值、价格、成交量/额
+及百分比换算见 [A 股价格、收益与市值真值](a-share.md#55-价格收益与市值真值)。
+未知枚举在对应 owner 明确失败；缺失哨兵只按已经核实的表/字段规则处理，
+不能将某字段的 `-9666` 定义推广到其他列。`index_info.base_point` 的既有特殊值
+规则属于项目明确的适配约定，不能据此宣称供应商全部字段使用同一缺失值。
+财务验证输入不能替代正式来源的首次披露或历史版本证明。
+
 CSMAR `index_membership` 是供应商指数成分事件，包含不同市场及证券类型，不能将所有
 成分强制解释为六位 A 股股票代码。`constituent_stock_code` 保留供应商代码字符串；
 `constituent_asset_id` 是原码、`market_code`、`security_type` 三项规范 JSON 的内容哈希，
@@ -24,14 +34,55 @@ CSMAR `index_weights.Weight` 与 `index_market.Idxtrd08` 的原始缺失值在�
 
 ### Choice
 
-Choice 是正式财务 PIT 唯一来源；原生响应先不可变保存，再由已有 owner 离线处理。
-[官方 SDK 下载包](https://cftdlcdn.eastmoney.com/Choice/EMQuantAPI/EMQuantAPI_Python.zip)
-中的指标手册 V2.7.3.0 对沪深一般企业可回测财务指标明确使用 CSS `Type`：
-1 为合并报表，2 为母公司报表，3 为调整后的合并报表，4 为调整后的母公司报表。
-现有正式财务消费者只接受 `Type=1/3`。CTR 财务报表的 `ReportType` 则按
-1、2、3、4 分别表示合并、调整合并、母公司、调整母公司，不能将其数字直接用于 CSS。
-Raw 原样保留请求；已知财务 CSS 指标若带 `ReportType`，正式 source identity 与 interim
-消费明确拒绝，不默认为 `Type=1`，不增加 CTR 到 CSS 的兼容映射。
+Choice 是现有正式财务 PIT 的来源绑定；原生响应先不可变保存，再由已有 owner 离线处理。
+[官方接口与指标资料](https://quantapi.eastmoney.com/AIGuide/Install?from=client)
+对沪深一般企业财务 CSS 指标明确使用 `Type`：1 为合并报表，2 为母公司报表，
+3 为调整后的合并报表，4 为调整后的母公司报表。现有正式消费者只接受 `Type=1/3`。
+CTR 财务报表的 `ReportType` 则按 1、2、3、4 分别表示合并、调整合并、母公司、
+调整母公司，不能将其数字直接用于 CSS。Raw 原样保留请求；已知财务 CSS 指标若带
+`ReportType`，正式 source identity 与 interim 消费明确拒绝，不默认为 `Type=1`，
+不增加 CTR 到 CSS 的兼容映射。
+
+`sources/choice/fields.py` 是三张报表共 14 项一般企业指标的唯一字段映射。
+官方指标资料将这些数值列声明为元。按 CNY 消费的依据是境内上市一般企业的
+编报财务报表域：[财会〔2006〕3 号](https://kjs.mof.gov.cn/zhengcefabu/200805/t20080522_33653.htm)
+规定上市公司自 2007 年起执行企业会计准则，
+[《企业会计准则第 19 号》第四、十五条](https://kjs.mof.gov.cn/zt/kjzzss/kuaijizhunzeshishi/200806/t20080618_46229.htm)
+要求编报报表折算为人民币，记账本位币可以不同。这里使用报表列报币种，
+不能只从“元”推定，也不移用其他接口的币种参数。现有适配器用这些指标、
+CSS 类型及境内证券代码限定消费域，不执行汇率换算；境外原币报表、其他报表
+类型及未知单位不属于这一合同。该适用域依据不代替逐期快照与版本资格。
+`EndDate` 只按官方定义表示截止日期，参数存在或请求成功不证明历史版本可回溯。
+`STMTACTDATE` 表示定期报告实际披露日期，`ACTUALISSUINGDATE` 排除招股披露，
+`ITEMVALUECHANGEDATE` 表示财报科目数据变更日期；三者不相互冒充，也不单独证明
+对应数值当日已公开。每个被消费的版本必须由同一请求坐标和不可变原件证明。
+日期字符串在现有日期 owner 归一为语义坐标，原始请求与字节身份保留。
+日期型已公开信息在下一市场交易日可用；这是项目的保守研究规则，
+不是供应商对日内可见性或全部历史修订的保证。规则与修订传播见 [A 股](a-share.md#53-pit-会计与可用时点)。
+缺少真实版本、含糊的同日冲突或覆盖不足只阻塞依赖该来源的目标；
+不能补造旧原件的时间、版本或完成字段，也不等待无关的全供应商历史保证才消费已合格范围。
+
+### CNINFO 公开公告
+
+[巨潮资讯](https://www.cninfo.com.cn/) 的公开公告与附件保存在
+`data/raw/cninfo/public-reports/`，来源标识始终为 `cninfo`。公开查询成功、
+某页 `hasMore=false` 或下载一份 PDF 只证明该次请求/原件，不证明全发行人、
+全部报告期、首次披露或更正历史齐备；摘要不能代替必要报表正文。
+查询参数、响应原字节、实际 HTTP 结果、公告标识、公开日期及附件原字节分别绑定身份。
+不同报告期、合并/母公司口径及历史版本不能靠文件名合并或互相补齐。
+
+公开原件适用的项目规则是：只接受有逐字段报表定位和明确币种/单位证据的值，
+保留原始空单元格为 NULL；用实际公告公开日期约束该份文档所有列的可用时点，
+包括其中较早报告期的比较列，禁止把后见比较值回写到早年。
+只知道公开日期时沿用下一市场交易日规则；后续文档的变更值从该文档的可用日生效。
+无法证明首次/更正关系、同日冲突顺序、发行人身份或必要覆盖时明确拒绝，
+不声称查询服务保存了全部历史版本。公告原件完整与正式 PIT 资格分别验证。
+
+正式财务绑定仍由现有类型化 Interim spec 和 profile 的 producer/source identity 决定。
+公告如需正式接入，应在这一边界以真实来源生成既有三张报表和
+`financial_first_disclosure`，复用共同的财务事件、TTM、PIT、storage 和下游 owner；
+不得改名为 Choice、补造 Choice 请求，或并建财务计算与研究调度路径。
+原件仅被保存不表示已经注册或具有正式研究资格。
 
 ### Binance
 
@@ -70,6 +121,17 @@ aggTrade ID 非单调仍明确失败，并保存频道、slice offset、行号�
 仅验证单调性。[Binance 聚合成交流说明](https://developers.binance.com/en/docs/catalog/core-trading-derivatives-trading-usd-s-m-futures/api/ws-streams/market#aggregate-trade-streams)
 定义聚合 ID；该定义本身不证明订阅消息逐 ID 加一；[Tardis 来源说明](https://docs.tardis.dev/historical-data-details/binance-futures)
 也不能替代该保证。adapter 严格度差异不构成已证实漏消息，也不授权自动放宽 gap 合同。
+
+来源适用域按 [Tardis 历史频道说明](https://docs.tardis.dev/historical-data-details/binance-futures)
+和原件清单中的频道/频率共同决定。只给出变更日期而没有精确时刻的深度、markPrice
+过渡日由现有 source owner 拒绝，不能推定在 UTC 零点切换。
+[OKX 面值调整公告](https://www.okx.com/zh-hans/help/adjustment-of-face-value-for-usdt-margined-perpetual-swap-futures-trading)
+给出的调整半小时区间保持为不确定域；区间外才使用已经证明的合约乘数。
+[Tardis 数量说明](https://docs.tardis.dev/faq/data)中的 `amount` 可能是合约数、基础资产或
+报价金额，须按场所、品种、时段和实际单位归一；当前接口字段名不能证明全历史单位。
+[历史合约 metadata](https://docs.tardis.dev/api/instruments-metadata-api) 的字段和变更记录
+也只能在其声明的保证范围内使用，不能把一个字段的历史保证推广到所有字段。
+这些限制保留不确定域的局部失败，不否定域外已通过原件、单位、身份及覆盖校验的输入。
 
 Binance Spot 和期货辅助状态的原生归档由配置显式选择，格式和消费边界见 [Crypto](crypto.md)。
 Bybit 与 OKX normalized 来源在 `data/raw/tardis/<exchange>/` 下按配置选择归档，

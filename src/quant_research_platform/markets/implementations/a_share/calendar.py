@@ -205,8 +205,4 @@ def _require_normalized_calendar(calendar: pd.DataFrame) -> pd.DataFrame:
 
 
 def _sorted_unique_sessions(values: pd.Series) -> pd.DatetimeIndex:
-    dates = strict_timestamp_series(
-        values,
-        error="invalid_calendar_date",
-    ).dt.normalize()
-    return pd.DatetimeIndex(sorted(dates.dropna().unique()))
+    return pd.DatetimeIndex(sorted(values.dropna().unique()))

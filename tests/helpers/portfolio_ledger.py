@@ -97,3 +97,36 @@ def write_test_sessions(root, *, envelope, ledger_chunks, final_calibration=None
     return write_portfolio_ledger_artifact(
         root, envelope=envelope, produce=produce, final_calibration=final_calibration
     )
+
+
+def write_market_evidence(layout, panel, *, bars=None, stocks=None):
+    """Write actual synthetic source facts for portfolio valuation qualification."""
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage.datasets import write_dataset
+
+    if bars is None:
+        bars = (
+            panel.loc[:, ["asset_id", "timestamp", "market_type"]]
+            .rename(columns={"asset_id": "source_asset_id"})
+            .assign(filling_flag=0)
+        )
+    if stocks is None:
+        first = panel.groupby("asset_id", sort=False).timestamp.min()
+        stocks = pd.DataFrame(
+            {
+                "source_asset_id": first.index,
+                "timestamp": first.to_numpy(),
+                "listing_date": first.to_numpy(),
+                "delisting_date": pd.NaT,
+                "company_status": "active",
+            }
+        )
+    roots = {}
+    for target, frame in (("market_bars_1d", bars), ("stock_master", stocks)):
+        spec = research_profile().interim.get(target)
+        root = layout.target_root(
+            target, layout.interim_data_root(spec.source_id, target)
+        )
+        write_dataset(root, frame.reindex(columns=spec.required_columns), spec=spec)
+        roots[target] = root
+    return roots

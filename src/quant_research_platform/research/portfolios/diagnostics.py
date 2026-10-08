@@ -627,6 +627,7 @@ def iter_holding_factor_inputs(
         _ENHANCED_PANEL_COLUMNS,
         _enhanced_risk_cross,
         _iter_input_sessions,
+        _iter_portfolio_sessions,
         _risk_context_input_sessions,
         _validate_input_keys,
     )
@@ -651,10 +652,16 @@ def iter_holding_factor_inputs(
                 closing_iterator(_iter_input_sessions(root, projection, window))
             )
 
-        panels = stream(
-            layout.target_root("market_panel_1d", None),
-            _ENHANCED_PANEL_COLUMNS,
-            history,
+        panels = channels.enter_context(
+            closing_iterator(
+                _iter_portfolio_sessions(
+                    layout=layout,
+                    panel_root=layout.target_root("market_panel_1d", None),
+                    panel_columns=_ENHANCED_PANEL_COLUMNS,
+                    calendar=calendar,
+                    time_window=history,
+                )
+            )
         )
         risk_inputs = _risk_context_input_sessions(
             roots=tuple(
@@ -679,11 +686,11 @@ def iter_holding_factor_inputs(
 
         def take_panels(through):
             nonlocal panel
-            while panel is not None and stamp(panel) <= through:
-                timestamp = stamp(panel)
-                if panel.asset_id.duplicated().any() or timestamp not in sessions:
+            while panel is not None and panel.timestamp <= through:
+                timestamp = panel.timestamp
+                if panel.panel.asset_id.duplicated().any() or timestamp not in sessions:
                     raise ValueError("holding_panel_keys_invalid")
-                panel_window[timestamp] = panel.copy(deep=True)
+                panel_window[timestamp] = panel
                 panel = next(panels, None)
 
         for interval in intervals.itertuples(index=False):
@@ -692,11 +699,12 @@ def iter_holding_factor_inputs(
             ):
                 timestamp = sessions[position]
                 take_panels(timestamp)
-                current = panel_window.get(timestamp)
+                current_view = panel_window.get(timestamp)
+                current = current_view.panel if current_view is not None else None
                 for context in context_frames.values():
                     if context is not None and stamp(context) < timestamp:
                         raise ValueError("holding_risk_context_calendar_misaligned")
-                if current is None:
+                if current is None or current.empty:
                     cross = None
                 else:
                     risk_frames = []
@@ -735,7 +743,7 @@ def iter_holding_factor_inputs(
             if weights.duplicated(["benchmark_id", "asset_id"]).any():
                 raise ValueError("holding_benchmark_keys_invalid")
             prices = [
-                panel_window.get(timestamp)
+                panel_window[timestamp].valuation if timestamp in panel_window else None
                 for timestamp in (
                     interval.decision_at,
                     interval.entry_at,
@@ -746,6 +754,7 @@ def iter_holding_factor_inputs(
             reason = "attribution_pit_history_missing" if cross is None else None
             close = entry = pd.Series(dtype="float64")
             holding_cross = None
+            decision_exposure_assets = frozenset()
             if any(frame is None for frame in prices):
                 reason = "holding_prices_missing"
             else:
@@ -754,6 +763,13 @@ def iter_holding_factor_inputs(
                 endpoint = prices[2].set_index("asset_id").adj_open
                 if reason is None:
                     holding_cross = risk.prepare_exposures(cross)
+                    decision_exposure_assets = frozenset(holding_cross.asset_id)
+                    real_pairs = set(
+                        panel_window[interval.entry_at].panel.asset_id
+                    ) & set(panel_window[interval.end_at].panel.asset_id)
+                    holding_cross = holding_cross.loc[
+                        holding_cross.asset_id.isin(real_pairs)
+                    ].copy()
                     holding_cross["asset_return"] = holding_cross.asset_id.map(
                         endpoint.div(entry) - 1.0
                     )
@@ -767,6 +783,27 @@ def iter_holding_factor_inputs(
                         reason = str(error)
                     if fitted is None and reason is None:
                         reason = "holding_factor_fit_unidentified"
+            decision_closed = panel_window[interval.decision_at].closed_assets
+            closed_domain = (
+                decision_closed
+                | panel_window[interval.entry_at].closed_assets
+                | panel_window[interval.end_at].closed_assets
+            )
+            closed_assets = pd.Index(
+                closed_domain & (decision_exposure_assets | decision_closed)
+            )
+            if any(frame is None for frame in prices):
+                closed_assets = closed_assets[:0]
+            else:
+                for frame, column in zip(
+                    prices, ("adj_close", "adj_open", "adj_open"), strict=True
+                ):
+                    mark = (
+                        frame.set_index("asset_id")[column]
+                        .reindex(closed_assets)
+                        .astype("float64")
+                    )
+                    closed_assets = closed_assets[np.isfinite(mark) & mark.gt(0)]
             result = HoldingFactorInputs(
                 interval.decision_at,
                 interval.entry_at,
@@ -776,6 +813,7 @@ def iter_holding_factor_inputs(
                 entry,
                 weights,
                 reason,
+                frozenset(closed_assets),
             )
             try:
                 yield result
@@ -795,20 +833,15 @@ def build_portfolio_statistics_tables(
     unified_trading_sessions,
     layout,
 ):
-    from quant_research_platform.contracts.time import TimeWindow
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.types import DatasetReadMode
 
-    history = TimeWindow(
-        pd.Timestamp(protocol_manifest["formal_dataset_window"]["start"]),
-        pd.Timestamp(time_window.end),
-    )
     pieces = []
 
     calendar = read_dataset(
         layout.target_root("trading_calendar", None),
         columns=("calendar_date", "source_market_type", "is_trading_day"),
-        time_window=history,
+        time_window=None,
         mode=DatasetReadMode.MATERIALIZED,
     )
     codes = protocol_manifest["benchmark_total_return_indices"]

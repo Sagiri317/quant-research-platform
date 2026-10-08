@@ -140,6 +140,7 @@ class HoldingFactorInputs:
     entry_open: pd.Series
     benchmark_weights: pd.DataFrame
     reason: str | None = None
+    closed_assets: frozenset[str] = frozenset()
 
 
 def holding_attribution(
@@ -175,14 +176,28 @@ def holding_attribution(
         )
         return values, reasons, pd.Series(dtype="float64")
     held = after_notionals.loc[after_notionals.ne(0.0)]
-    if not set(held.index).issubset(fitted.exposures.index):
-        reasons.update(
-            {
-                name: "holding_exposures_incomplete"
-                for name in components
-                if name != "benchmark"
-            }
+    missing = held.index.difference(fitted.exposures.index)
+    if not missing.empty:
+        prices = pd.concat(
+            (
+                inputs.decision_close.reindex(missing),
+                inputs.entry_open.reindex(missing),
+            ),
+            axis=1,
         )
+        known_closed = (
+            set(missing).issubset(inputs.closed_assets)
+            and np.isfinite(prices).all().all()
+            and prices.gt(0).all().all()
+            and np.isfinite(holding_returns.reindex(missing)).all()
+            and holding_returns.reindex(missing).gt(-1).all()
+        )
+        reason = (
+            "holding_closed_market_domain_unidentified"
+            if known_closed
+            else "holding_exposures_incomplete"
+        )
+        reasons.update({name: reason for name in components if name != "benchmark"})
         return values, reasons, pd.Series(dtype="float64")
     if not np.allclose(
         holding_returns.reindex(held.index),
@@ -576,19 +591,20 @@ class FactorRiskState:
             columns=columns,
         )
         specific: dict[str, float] = {}
+        maximum_magnitude = np.sqrt(np.finfo(np.float64).max)
+        minimum_magnitude = np.sqrt(np.finfo(np.float64).tiny)
         for asset, values in self._residuals.items():
             if len(values) >= self.config.minimum_specific_dates:
+                values = np.asarray(values)
+                absolute_values = np.abs(values)
                 ages = self._session_count - np.asarray(self._residual_sessions[asset])
                 weights = _ewma_weights(ages, self.config.specific_half_life)
                 if (
                     weights.dtype == object
-                    or np.any(np.abs(values) > np.sqrt(np.finfo(np.float64).max))
+                    or np.any(absolute_values > maximum_magnitude)
                     or np.any(
-                        (np.asarray(values) != 0)
-                        & (
-                            np.abs(values) * np.sqrt(weights)
-                            < np.sqrt(np.finfo(np.float64).tiny)
-                        )
+                        (values != 0)
+                        & (absolute_values * np.sqrt(weights) < minimum_magnitude)
                     )
                 ):
                     with localcontext() as context:

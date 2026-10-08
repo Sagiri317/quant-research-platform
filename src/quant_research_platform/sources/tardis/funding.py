@@ -95,10 +95,20 @@ def import_funding_history(
     identity = dataset_file_identity(path)
     raw = events = metadata = native = None
     with closing_iterator(open_filesystem_file(path, "rb")) as handle:
-        raw = handle.read(identity.size + 1)
-    if identity != dataset_file_identity(path) or len(raw) != identity.size:
+        if identity.size >= byte_budget:
+            byte_count = 0
+            while byte_count <= identity.size:
+                block = handle.read(min(1024 * 1024, identity.size + 1 - byte_count))
+                if not block:
+                    break
+                byte_count += len(block)
+                del block
+        else:
+            raw = handle.read(identity.size + 1)
+            byte_count = len(raw)
+    if identity != dataset_file_identity(path) or byte_count != identity.size:
         raise ValueError("tardis_funding_source_changed")
-    if byte_budget <= len(raw):
+    if byte_budget <= byte_count:
         raise ValueError("tardis_funding_budget_exceeded")
     events, proof = _settlement_response(
         raw,

@@ -586,3 +586,148 @@ def test_settlement_read_handle_close_preserves_primary(
             pass
     assert caught.value is (primary if body_fails else secondary)
     assert handles and all(handle.closed for handle in handles)
+
+
+@pytest.mark.parametrize("case", ("over", "equal", "identity", "long", "short"))
+def test_import_rejects_oversized_settlement_with_bounded_reads(
+    tmp_path, monkeypatch, case
+):
+    from dataclasses import replace
+
+    import quant_research_platform.sources.tardis.funding as funding
+
+    destination = _publish_funding_archive(
+        tmp_path, "2026-09-01", include_funding=False
+    )
+    response = tmp_path / "settlements.json"
+    size = 2 * 1024**2 + 13
+    response.write_bytes(b" " * size)
+    expected = funding.dataset_file_identity(response)
+    identity_calls = 0
+
+    def identity(_path):
+        nonlocal identity_calls
+        identity_calls += 1
+        return (
+            replace(expected, modified_ns=expected.modified_ns + 1)
+            if case == "identity" and identity_calls > 1
+            else expected
+        )
+
+    monkeypatch.setattr(funding, "dataset_file_identity", identity)
+    original_open = funding.open_filesystem_file
+    requests = []
+    returned = []
+    handles = []
+
+    class Handle:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def read(self, count):
+            requests.append(count)
+            value = self.handle.read(count)
+            returned.append(len(value))
+            return value
+
+        def close(self):
+            self.handle.close()
+
+    def open_handle(path, *args, **kwargs):
+        if case == "long":
+            with path.open("ab") as handle:
+                handle.write(b" ")
+        elif case == "short":
+            with path.open("r+b") as handle:
+                handle.truncate(size - 1)
+        handle = original_open(path, *args, **kwargs)
+        handles.append(handle)
+        return Handle(handle)
+
+    def no_decode(*_args, **_kwargs):
+        pytest.fail("a rejected oversized source must not reach its decoder")
+
+    monkeypatch.setattr(funding, "open_filesystem_file", open_handle)
+    monkeypatch.setattr(funding, "_settlement_response", no_decode)
+    start = pd.Timestamp("2026-09-01").value // 1000000
+    reason = (
+        "tardis_funding_budget_exceeded"
+        if case in {"over", "equal"}
+        else "tardis_funding_source_changed"
+    )
+    with open_tardis_archive(destination) as archive:
+        with pytest.raises(ValueError, match="^" + reason + "$"):
+            funding.import_funding_history(
+                archive,
+                symbol="BTCUSDT",
+                source_id="binance",
+                request_limit=1000,
+                response_path=response,
+                http_status=200,
+                start_ms=start,
+                end_ms=start + 600000 - 1,
+                byte_budget=size if case == "equal" else size - 1,
+            )
+    assert identity_calls == 2
+    assert requests and max(requests) <= 1024**2
+    assert sum(returned) <= size + 1
+    assert sum(returned) == size + {"long": 1, "short": -1}.get(case, 0)
+    assert handles and all(handle.closed for handle in handles)
+    assert not (destination / "funding/BTCUSDT").exists()
+
+
+@pytest.mark.parametrize("oversized", (False, True))
+@pytest.mark.parametrize("body_fails", (False, True))
+def test_import_settlement_handle_close_preserves_primary(
+    tmp_path, monkeypatch, oversized, body_fails
+):
+    import quant_research_platform.sources.tardis.funding as funding
+
+    destination = _publish_funding_archive(
+        tmp_path, "2026-09-01", include_funding=False
+    )
+    response = tmp_path / "settlements.json"
+    response.write_bytes(b" " * (2 * 1024**2 + 13) if oversized else b"[]")
+    primary = MemoryError("synthetic_import_read")
+    secondary = OSError("synthetic_import_close")
+    original_open = funding.open_filesystem_file
+    handles = []
+
+    class Handle:
+        def __init__(self, handle):
+            self.handle = handle
+
+        def read(self, count):
+            if body_fails:
+                raise primary
+            return self.handle.read(count)
+
+        def close(self):
+            self.handle.close()
+            raise secondary
+
+    def open_handle(path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        handles.append(handle)
+        return Handle(handle)
+
+    monkeypatch.setattr(funding, "open_filesystem_file", open_handle)
+    start = pd.Timestamp("2026-09-01").value // 1000000
+    with open_tardis_archive(destination) as archive:
+        with pytest.raises(MemoryError if body_fails else OSError) as caught:
+            funding.import_funding_history(
+                archive,
+                symbol="BTCUSDT",
+                source_id="binance",
+                request_limit=1000,
+                response_path=response,
+                http_status=200,
+                start_ms=start,
+                end_ms=start + 600000 - 1,
+                byte_budget=1024**2,
+            )
+    assert caught.value is (primary if body_fails else secondary)
+    if body_fails:
+        assert primary.__notes__ == ["iterator close also failed: OSError"]
+    assert handles and all(handle.closed for handle in handles)
+    assert not (destination / "funding/BTCUSDT").exists()

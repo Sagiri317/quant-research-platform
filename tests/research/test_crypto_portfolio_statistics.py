@@ -834,8 +834,12 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
         1099.0,
         1048.0,
     ]
+    import hashlib
     import json
+    from io import BytesIO
     from pathlib import Path
+
+    from quant_research_platform.interfaces import queries
 
     monkeypatch.setenv("MPLCONFIGDIR", str(tmp_path / "matplotlib"))
     import matplotlib
@@ -845,16 +849,27 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
     from matplotlib.dates import AutoDateLocator, ConciseDateFormatter
     from matplotlib.ticker import StrMethodFormatter
 
-    notebook = json.loads(
-        (
-            Path(__file__).resolve().parents[2]
-            / "notebooks"
-            / "research-interview-demo.ipynb"
-        ).read_text(encoding="utf-8")
+    notebook_path = (
+        Path(__file__).resolve().parents[2]
+        / "notebooks"
+        / "research-interview-demo.ipynb"
     )
+    notebook_source = notebook_path.read_bytes()
+    notebook = json.loads(notebook_source)
+    data_before = {
+        member.relative_to(tmp_path): hashlib.sha256(member.read_bytes()).digest()
+        for member in (tmp_path / "data").rglob("*")
+        if member.is_file()
+    }
     plot = next(cell for cell in notebook["cells"] if cell["id"] == "research-cell-11")
     namespace = {
-        "curves": [curve],
+        "selected_targets": [descriptor.target_id],
+        "queries": queries,
+        "profile": profile,
+        "layout": layout,
+        "RUN_ID": run.run_id,
+        "NAV_STRIDE": 1,
+        "np": np,
         "pd": pd,
         "plt": plt,
         "is_crypto": True,
@@ -872,6 +887,15 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
     assert len(figure.axes) == 2
     assert [axis.lines[0].get_ydata()[0] for axis in figure.axes] == [1000.0, 1000.0]
     assert [axis.lines[0].get_ydata()[-1] for axis in figure.axes] == [1099.0, 1048.0]
+    png = BytesIO()
+    figure.savefig(png, format="png")
+    assert png.getvalue().startswith(b"\x89PNG\r\n\x1a\n")
+    assert notebook_path.read_bytes() == notebook_source
+    assert {
+        member.relative_to(tmp_path): hashlib.sha256(member.read_bytes()).digest()
+        for member in (tmp_path / "data").rglob("*")
+        if member.is_file()
+    } == data_before
     figure = namespace = curve = None
     report = _build_report_from_run(
         profile=profile, layout=layout, record=run, plan=False
@@ -900,8 +924,6 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
     assert saved["sections"]["portfolio"]["intervals"]["results"]
     assert saved["sections"]["Data/Coverage"]["execution_coverage"]["results"]
     report = saved = candidates = None
-    from quant_research_platform.interfaces import queries
-
     replacement = write_crypto_episode_artifact(
         tmp_path / "replacement",
         envelope=execution_envelope,

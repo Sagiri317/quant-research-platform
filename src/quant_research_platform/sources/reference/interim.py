@@ -353,7 +353,7 @@ def _industry_source(reference_root):
 
 
 def _industry_frame(metadata, members):
-    frames = []
+    rows = []
     for snapshot in metadata["snapshots"]:
         path, expected = members[snapshot["candidate_file"]]
         raw, candidate = read_bounded_qrp_json(path, expected_identity=expected)
@@ -371,7 +371,6 @@ def _industry_frame(metadata, members):
             or not candidate["records"]
         ):
             raise ValueError("industry_snapshot_candidate_invalid")
-        rows = []
         seen = set()
         for row in candidate["records"]:
             if type(row) is not dict or set(row) != {
@@ -418,7 +417,7 @@ def _industry_frame(metadata, members):
             ):
                 raise ValueError("industry_snapshot_major_invalid")
             seen.add(code)
-            if not rows:
+            if len(seen) == 1:
                 dates = (
                     pd.Timestamp(snapshot["publication_date"]) + pd.Timedelta(days=1),
                     pd.Timestamp(snapshot["observation_date"]),
@@ -437,14 +436,13 @@ def _industry_frame(metadata, members):
                     row["source_locator"],
                 )
             )
-        frame = pd.DataFrame(rows, columns=_INDUSTRY_COLUMNS)
-        for column in _INDUSTRY_COLUMNS:
-            if column not in {
-                "timestamp",
-                "observation_date",
-                "publication_date",
-            }:
-                frame[column] = frame[column].astype("string")
-        frames.append(frame)
-        del raw, candidate, rows
-    return pd.concat(frames, ignore_index=True)
+        del raw, candidate
+    frame = pd.DataFrame(rows, columns=_INDUSTRY_COLUMNS)
+    for column in _INDUSTRY_COLUMNS:
+        if column not in {
+            "timestamp",
+            "observation_date",
+            "publication_date",
+        }:
+            frame[column] = frame[column].astype("string")
+    return frame

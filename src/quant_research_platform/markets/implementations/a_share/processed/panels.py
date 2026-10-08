@@ -600,7 +600,9 @@ def _prepare_industry_inputs(
     )
     if industry_sets is not None:
         known = history["_industry_known"]
-        resolved = _resolve_industry_hierarchy(history.loc[known], industry_sets)
+        resolved = _resolve_industry_hierarchy(
+            history.loc[known], _industry_dictionary(industry_sets)
+        )
         history.loc[known, "_industry_known"] = resolved["industry_level1_code"].notna()
         for column in (
             "industry_level1_code",
@@ -787,7 +789,7 @@ def _snapshot_industry_history(
     )
     known = result["_industry_known"]
     if known.any():
-        resolved = _resolve_industry_hierarchy(result.loc[known], industry_sets)
+        resolved = _resolve_industry_hierarchy(result.loc[known], lookup)
         for column in (
             "industry_level1_code",
             "industry_level1_name",
@@ -930,9 +932,8 @@ def _industry_dictionary(sets: pd.DataFrame):
 
 def _resolve_industry_hierarchy(
     history: pd.DataFrame,
-    sets: pd.DataFrame,
+    lookup: dict,
 ) -> pd.DataFrame:
-    lookup = _industry_dictionary(sets)
     result = history.copy()
     resolved_codes: list[str | None] = []
     resolved_names: list[str | None] = []

@@ -581,6 +581,8 @@ class AShareProtocol:
                     candidate.trading_calendar_target_id,
                     candidate.fee_schedule_target_id,
                     candidate.market_panel_target_id,
+                    "market_bars_1d",
+                    "stock_master",
                     *candidate.risk_context_target_ids,
                     *(
                         (candidate.benchmark_weights_target_id,)
@@ -640,6 +642,8 @@ class AShareProtocol:
                             dataset,
                             "market_panel_1d",
                             "trading_calendar",
+                            "market_bars_1d",
+                            "stock_master",
                             *(
                                 (market_ids.PRICE_VOLUME_DATA_ID,)
                                 if not any(

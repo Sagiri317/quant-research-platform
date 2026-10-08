@@ -366,6 +366,10 @@ def canonical_feature_pipeline(
     )
     feature_values: dict[str, pd.Series] = {}
     result = frame.copy()
+    industry_present = scoped[industry_column].notna()
+    industry_size_present = (
+        industry_present & scoped[size_column].notna() if factor_columns else None
+    )
     for factor in factor_columns:
         values = residualized[factor]
         raw_missing = scoped[factor].isna()
@@ -390,9 +394,9 @@ def canonical_feature_pipeline(
         identifiable = (
             values.notna().groupby(scoped["timestamp"], sort=False).transform("any")
         )
-        context_valid = scoped[industry_column].notna()
-        if factor != size_column:
-            context_valid &= scoped[size_column].notna()
+        context_valid = (
+            industry_present if factor == size_column else industry_size_present
+        )
         ordinary_missing = raw_missing & identifiable & context_valid
         feature.loc[scoped.index] = scoped_feature.mask(ordinary_missing, 0.0)
         missing = pd.Series(0, index=result.index, dtype="int8")

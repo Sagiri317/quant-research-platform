@@ -293,6 +293,13 @@ def _build_producer(
             trading_calendar_target_id="calendar",
             fee_schedule_target_id="fee",
         )
+    frames = dict(frames)
+    frames["market_bars_1d"] = (
+        frames["panel"]
+        .loc[:, ["asset_id", "timestamp", "market_type"]]
+        .rename(columns={"asset_id": "source_asset_id"})
+        .assign(filling_flag=0)
+    )
     identities = {
         target_id: ("a" if target_id not in {"fee", "calendar"} else "f") * 64
         for target_id in (
@@ -303,6 +310,8 @@ def _build_producer(
             "calendar",
             "benchmark",
             "risk_context",
+            "market_bars_1d",
+            "stock_master",
         )
     }
     roots = {}
@@ -334,7 +343,15 @@ def _build_producer(
                     ),
                     list(columns),
                 ]
-                .sort_values(["timestamp", "asset_id"], kind="mergesort")
+                .sort_values(
+                    [
+                        "timestamp",
+                        "asset_id"
+                        if "asset_id" in frames[target_id]
+                        else "source_asset_id",
+                    ],
+                    kind="mergesort",
+                )
             )
             return iter((selected.copy(),))
         if target_id == "fee":
@@ -397,8 +414,12 @@ def _build_producer(
         ]
         return selected.loc[:, list(columns)].copy()
 
-    def input_session(root, *, columns, time_window):
+    def input_session(root, *, columns=None, time_window=None):
         target = next((key for key, value in roots.items() if value == root))
+        if time_window is None:
+            time_window = TimeWindow(
+                frames[target].timestamp.min(), frames[target].timestamp.max()
+            )
         return SimpleNamespace(
             root=root,
             time_window=time_window,
@@ -414,6 +435,33 @@ def _build_producer(
         ):
             yield (session.root / "synthetic.parquet", frame)
 
+    def source_evidence(layout, panel_root, calendar):
+        from quant_research_platform.markets.implementations.a_share.processed import (
+            panels,
+        )
+
+        panel = frames["panel"]
+        stocks = (
+            panel.groupby("asset_id", sort=False)
+            .timestamp.min()
+            .rename("listing_date")
+            .reset_index()
+        )
+        stocks["source_asset_id"] = stocks.asset_id
+        stocks["timestamp"] = stocks.listing_date
+        stocks["delisting_date"] = pd.NaT
+        return (
+            input_session(roots["market_bars_1d"]),
+            input_session(panel_root),
+            panel.loc[:, ["asset_id", "timestamp", "market_type"]],
+            {
+                asset: tuple(sorted(group.timestamp.unique()))
+                for asset, group in panel.groupby("asset_id", sort=False)
+            },
+            panels._canonical_stock_master(stocks),
+        )
+
+    monkeypatch.setattr(production, "_portfolio_session_evidence", source_evidence)
     monkeypatch.setattr(production, "open_dataset_session", input_session)
     monkeypatch.setattr(production, "iter_dataset_file_batches", file_batches)
     monkeypatch.setattr(production, "read_dataset", fake_read_dataset)
@@ -567,7 +615,7 @@ def test_portfolio_stream_count_does_not_scale_with_decision_dates(
     streams = Counter(
         (target for target, mode, _window in calls if mode is DatasetReadMode.CHUNKED)
     )
-    assert streams == {"panel": 1, "dataset": 1, "execution": 1}
+    assert streams == {"panel": 1, "dataset": 1, "execution": 1, "market_bars_1d": 1}
     assert all(
         (
             target in {"fee", "calendar"}
@@ -1433,12 +1481,13 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         ),
         next_panel=at_date(panel, "2023-01-09"),
         endpoint_panel=at_date(panel, "2023-01-10"),
+        closed_assets=frozenset(),
         dataset=production._session_frame(
             at_date(frames["dataset"], "2023-01-06"), production._DATASET_COLUMNS
         ),
         execution=production._session_frame(
             at_date(frames["execution"], "2023-01-06"), production._EXECUTION_COLUMNS
-        ),
+        ).assign(execution_at=pd.Timestamp("2023-01-09")),
         holdings=pd.Series({"a": 45.0, "b": 45.0}),
         cash=10.0,
         nav=100.0,
@@ -1684,7 +1733,7 @@ def test_simple_producer_retains_zero_activity_suspension_rows(
         for target, _mode, window in calls
         if target == "panel" and window is not None
     ]
-    assert panel_reads[0] == sessions[warmup_position]
+    assert panel_reads[0] == sessions[0]
 
 
 def test_simple_producer_handles_universe_arrival_and_zero_weight_departure(
@@ -2392,7 +2441,9 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
 def test_amount_history_rejects_invalid_present_amounts(invalid):
     panel = pd.DataFrame({"asset_id": ["unrelated"], "amount": [invalid]})
     with pytest.raises(ValueError, match="portfolio_amount_invalid"):
-        production._update_amount_history(panel, {}, pd.Series(dtype="float64"))
+        production._update_amount_history(
+            panel, {}, pd.Series(dtype="float64"), frozenset()
+        )
 
 
 def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
@@ -2406,6 +2457,7 @@ def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
             ),
             history,
             holdings,
+            frozenset(),
         )
         assert np.mean(history["known"]) == 1000.0
         if index >= 20:
@@ -2415,6 +2467,7 @@ def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
         pd.DataFrame({"asset_id": ["known", "unrelated"], "amount": [1000.0, 1000.0]}),
         history,
         holdings,
+        frozenset(),
     )
     assert np.mean(history["unrelated"]) == 1000.0
 

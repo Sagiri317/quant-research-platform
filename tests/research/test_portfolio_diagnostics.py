@@ -198,9 +198,14 @@ def test_simple_only_configuration_reads_its_persisted_risk_context(tmp_path):
         root = layout.processed_data_root("a_share", spec.kind, spec.data_id)
         write_dataset(root, frame, spec=spec)
         roots[spec.data_id] = root
+    from tests.helpers.portfolio_ledger import write_market_evidence
+
+    roots.update(write_market_evidence(layout, panel))
     source = iter_holding_factor_inputs(
         layout=layout.with_target_roots(roots),
-        calendar=pd.DataFrame({"calendar_date": dates}),
+        calendar=pd.DataFrame(
+            {"calendar_date": dates, "source_market_type": 1, "is_trading_day": True}
+        ),
         time_window=TimeWindow(dates[0], dates[-1]),
         unified_trading_sessions=lambda frame: pd.DatetimeIndex(frame.calendar_date),
         style_columns=candidate.risk_style_columns,
@@ -840,8 +845,13 @@ def test_holding_input_reader_replays_real_history_and_freezes_decision_universe
             risk_data.loc[:, list(context_spec.required_columns)],
             spec=context_spec,
         )
+    from tests.helpers.portfolio_ledger import write_market_evidence
+
+    roots.update(write_market_evidence(base_layout, panel))
     layout = StorageLayout(tmp_path).with_target_roots(roots)
-    calendar = pd.DataFrame({"calendar_date": dates})
+    calendar = pd.DataFrame(
+        {"calendar_date": dates, "source_market_type": 1, "is_trading_day": True}
+    )
     window = TimeWindow(dates[-4], dates[-1])
     source = iter_holding_factor_inputs(
         benchmark_required=True,

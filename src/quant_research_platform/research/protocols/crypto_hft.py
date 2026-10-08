@@ -954,7 +954,7 @@ class CryptoProtocol:
         models = f"{dataset}_models"
         predictions = f"{dataset}_predictions"
         panel = build_hft_research_dataset_catalog().get(dataset).base_input_data_id
-        return (
+        targets = (
             *(
                 TargetSpec(
                     evaluation.evaluation_id,
@@ -991,6 +991,10 @@ class CryptoProtocol:
                 for candidate in self.portfolio_candidates()
                 if isinstance(candidate, CryptoMakerCandidate) and candidate.calibrated
             ),
+        )
+        execution_targets = self.execution_targets()
+        return (
+            *targets,
             *(
                 TargetSpec(
                     target.target_id,
@@ -1009,7 +1013,7 @@ class CryptoProtocol:
                     ),
                     producer_id=target.target_id,
                 )
-                for target in self.execution_targets()
+                for target in execution_targets
             ),
             *(
                 TargetSpec(
@@ -1017,7 +1021,7 @@ class CryptoProtocol:
                     dependencies=(target.target_id,),
                     producer_id=target.statistics_target_id,
                 )
-                for target in self.execution_targets()
+                for target in execution_targets
             ),
         )
 

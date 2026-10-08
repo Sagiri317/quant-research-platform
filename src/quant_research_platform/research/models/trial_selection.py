@@ -246,9 +246,9 @@ def evaluate_model_trial_metrics_from_chunks(
         raise ValueError("model_trial_common_coverage_mismatch")
     if not parts:
         raise ValueError("empty_model_selection_validation_window")
-    values = pd.concat(parts, ignore_index=True).sort_values(
-        "timestamp_ns", kind="stable"
-    )
+    values = pd.concat(parts, ignore_index=True)
+    if not values["timestamp_ns"].is_monotonic_increasing:
+        values = values.sort_values("timestamp_ns", kind="stable")
     if validation_axis == "cross_sectional":
         ranks = values.groupby("timestamp_ns", sort=False)[
             ["label", "prediction"]

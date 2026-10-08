@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import deque
 from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
@@ -206,6 +207,267 @@ class _EnhancedDecision:
     calibration: AlphaCalibration
 
 
+_MARKET_FACT_COLUMNS = ("source_asset_id", "timestamp", "market_type", "filling_flag")
+_STOCK_FACT_COLUMNS = (
+    "source_asset_id",
+    "timestamp",
+    "listing_date",
+    "delisting_date",
+    "company_status",
+)
+
+
+@dataclass(frozen=True, slots=True)
+class _PortfolioSession:
+    timestamp: pd.Timestamp
+    panel: pd.DataFrame
+    valuation: pd.DataFrame
+    closed_assets: frozenset[str]
+    execution: pd.DataFrame
+
+
+def _portfolio_session_evidence(layout, panel_root, calendar):
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        panels,
+        producer,
+    )
+
+    bars = open_dataset_session(
+        layout.target_root("market_bars_1d", None),
+        columns=_MARKET_FACT_COLUMNS,
+        time_window=None,
+    )
+    _, _, membership, _, _ = producer._processed_axis(
+        bars, panel_source=True, calendar=calendar
+    )
+    panel = open_dataset_session(panel_root, columns=None, time_window=None)
+    _, _, _, asset_sessions, _ = producer._processed_axis(
+        panel, panel_source=False, include_asset_sessions=True
+    )
+    stocks = panels._canonical_stock_master(
+        _read_materialized(
+            layout.target_root("stock_master", None),
+            _STOCK_FACT_COLUMNS,
+            time_window=None,
+        )
+    )
+    return bars, panel, membership, asset_sessions, stocks
+
+
+def _iter_portfolio_sessions(
+    *, layout, panel_root, panel_columns, calendar, time_window, execution_root=None
+):
+    """Project proved closed-market marks without changing materialized inputs."""
+    from quant_research_platform.markets.implementations.a_share.calendar import (
+        CURRENT_MARKET_TYPES,
+        unified_trading_sessions,
+    )
+    from quant_research_platform.markets.implementations.a_share.processed import panels
+
+    bars, panel, membership, asset_sessions, stocks = _portfolio_session_evidence(
+        layout, panel_root, calendar
+    )
+    sessions = unified_trading_sessions(calendar)
+    calendar = calendar.set_index(["calendar_date", "source_market_type"])[
+        "is_trading_day"
+    ]
+    if calendar.index.has_duplicates:
+        raise ValueError("duplicate_trading_calendar_key")
+    market_events = iter(membership.sort_values("timestamp").groupby("timestamp"))
+    pending_membership = next(market_events, None)
+    market_types = pd.Series(dtype="Int64")
+    unknown_membership: set[str] = set()
+    blocked: set[str] = set()
+    last = pd.DataFrame(columns=panel_columns).set_index("asset_id", drop=False)
+    masks = pd.DataFrame(columns=(*_EXECUTION_COLUMNS, "execution_at")).set_index(
+        "asset_id", drop=False
+    )
+    with closing_iterator(ExitStack()) as channels:
+        bar_frames = channels.enter_context(
+            closing_iterator(_iter_input_session_frames(bars, _MARKET_FACT_COLUMNS))
+        )
+        panel_frames = channels.enter_context(
+            closing_iterator(_iter_input_session_frames(panel, panel_columns))
+        )
+        execution_frames = (
+            channels.enter_context(
+                closing_iterator(
+                    _iter_input_sessions(execution_root, _EXECUTION_COLUMNS, None)
+                )
+            )
+            if execution_root is not None
+            else iter(())
+        )
+        pending_bar = next(bar_frames, None)
+        pending_panel = next(panel_frames, None)
+        pending_execution = next(execution_frames, None)
+        dates = pd.date_range(
+            calendar.index.get_level_values("calendar_date").min(),
+            pd.Timestamp(time_window.end),
+            freq="D",
+        ).as_unit("ns")
+        for timestamp in dates:
+            day_bars = pd.DataFrame(columns=_MARKET_FACT_COLUMNS)
+            while (
+                pending_bar is not None
+                and pd.Timestamp(pending_bar.timestamp.iloc[0]) <= timestamp
+            ):
+                current = pending_bar
+                unknown = ~current.market_type.isin(CURRENT_MARKET_TYPES)
+                unknown_membership.update(
+                    current.loc[unknown, "source_asset_id"].astype(str)
+                )
+                unknown_membership.difference_update(
+                    current.loc[~unknown, "source_asset_id"].astype(str)
+                )
+                blocked.update(
+                    current.loc[
+                        unknown | ~current.filling_flag.isin((0, 1, 2)),
+                        "source_asset_id",
+                    ].astype(str)
+                )
+                if pd.Timestamp(current.timestamp.iloc[0]) == timestamp:
+                    day_bars = current.set_index("source_asset_id", drop=False)
+                pending_bar = next(bar_frames, None)
+            while pending_membership is not None and pending_membership[0] <= timestamp:
+                event = pending_membership[1].set_index("asset_id").market_type
+                market_types = pd.concat(
+                    (market_types.drop(event.index, errors="ignore"), event)
+                )
+                pending_membership = next(market_events, None)
+            status = calendar.reindex(
+                pd.MultiIndex.from_arrays(
+                    ([timestamp] * len(market_types), market_types),
+                    names=("calendar_date", "source_market_type"),
+                )
+            )
+            status.index = market_types.index
+            blocked.update(status.index[status.isna()].astype(str))
+            closed = frozenset(
+                str(asset)
+                for asset in status.index[status.eq(False).fillna(False)]
+                if str(asset) not in unknown_membership
+            )
+            raw = pd.DataFrame(columns=panel_columns)
+            while (
+                pending_panel is not None
+                and pd.Timestamp(pending_panel.timestamp.iloc[0]) <= timestamp
+            ):
+                if pd.Timestamp(pending_panel.timestamp.iloc[0]) == timestamp:
+                    raw = _session_frame(pending_panel, panel_columns)
+                pending_panel = next(panel_frames, None)
+            if not raw.empty:
+                indexed = raw.set_index("asset_id", drop=False)
+                if set(indexed.index.astype(str)) & closed:
+                    raise ValueError("portfolio_market_panel_calendar_conflict")
+                prices = indexed.loc[:, ["adj_open", "adj_close"]]
+                valid = np.isfinite(prices).all(axis=1) & prices.gt(0).all(axis=1)
+                flags = day_bars.filling_flag.reindex(indexed.index)
+                known = flags.isin((0, 1)) & ~indexed.index.isin(unknown_membership)
+                blocked.update(indexed.index[~valid | ~known].astype(str))
+                real = valid & known & flags.eq(0)
+                blocked.difference_update(indexed.index[real].astype(str))
+                previous = indexed.loc[real]
+                if not previous.empty:
+                    last = (
+                        previous.copy()
+                        if last.empty
+                        else pd.concat(
+                            (last.drop(previous.index, errors="ignore"), previous)
+                        )
+                    )
+            blocked.update(
+                status.index[
+                    status.eq(True).fillna(False) & ~status.index.isin(raw.asset_id)
+                ].astype(str)
+            )
+            execution = pd.DataFrame(columns=_EXECUTION_COLUMNS)
+            while (
+                pending_execution is not None
+                and pd.Timestamp(pending_execution.timestamp.iloc[0]) <= timestamp
+            ):
+                if pd.Timestamp(pending_execution.timestamp.iloc[0]) == timestamp:
+                    execution = _session_frame(pending_execution, _EXECUTION_COLUMNS)
+                pending_execution = next(execution_frames, None)
+            if not raw.empty:
+                masks = masks.drop(raw.asset_id, errors="ignore")
+            if not execution.empty:
+                execution = execution.copy()
+                endpoints = []
+                for asset in execution.asset_id.astype(str):
+                    axis = asset_sessions.get(asset, ())
+                    position = bisect_right(axis, timestamp)
+                    endpoints.append(axis[position] if position < len(axis) else pd.NaT)
+                execution["execution_at"] = endpoints
+                masks = pd.concat((masks, execution.set_index("asset_id", drop=False)))
+                masks[["can_enter", "can_exit"]] = masks[
+                    ["can_enter", "can_exit"]
+                ].astype("boolean")
+            if timestamp not in sessions or timestamp < pd.Timestamp(time_window.start):
+                continue
+            carried = last.loc[last.index.isin(closed)].copy()
+            if not carried.empty:
+                facts = panels._asof_join_stock_master(
+                    pd.DataFrame(
+                        {
+                            "asset_id": carried.index.astype(stocks.asset_id.dtype),
+                            "timestamp": timestamp,
+                        }
+                    ),
+                    stocks,
+                ).set_index("asset_id")
+                alive = (
+                    facts.listing_date.notna()
+                    & facts.listing_date.le(timestamp)
+                    & facts.delisting_date.ge(timestamp)
+                    & facts.listing_date.le(carried.timestamp)
+                )
+                carried = carried.loc[alive.reindex(carried.index).fillna(False)]
+                carried["timestamp"] = timestamp
+                carried["market_type"] = market_types.reindex(carried.index)
+                carried["adj_open"] = carried["adj_close"]
+                carried.loc[carried.index.isin(blocked), ["adj_open", "adj_close"]] = (
+                    np.nan
+                )
+            valuation = raw.copy()
+            valuation.loc[
+                valuation.asset_id.isin(blocked), ["adj_open", "adj_close"]
+            ] = np.nan
+            if not carried.empty:
+                valuation = (
+                    carried.reset_index(drop=True)
+                    if valuation.empty
+                    else pd.concat(
+                        (valuation, carried.reset_index(drop=True)), ignore_index=True
+                    )
+                )
+            result = _PortfolioSession(
+                timestamp, raw, valuation, closed, masks.reset_index(drop=True).copy()
+            )
+            try:
+                yield result
+            except GeneratorExit:
+                return
+
+
+def _price_returns(start, end, assets):
+    """Compute returns only where both proved valuation endpoints are available."""
+    prices = []
+    for source in (start, end):
+        values = source.reindex(assets)
+        if values.isna().any():
+            raise PortfolioTargetBlocked("portfolio_held_return_missing")
+        values = pd.to_numeric(values, errors="raise").astype("float64")
+        if not np.isfinite(values).all() or values.le(0).any():
+            raise ValueError("portfolio_return_invalid")
+        prices.append(values)
+    with np.errstate(over="ignore"):
+        result = prices[1] / prices[0] - 1.0
+    if not np.isfinite(result).all():
+        raise ValueError("portfolio_return_invalid")
+    return result
+
+
 def build_portfolio_ledger(
     *,
     candidate: PortfolioCandidateSpec,
@@ -348,6 +610,8 @@ def build_portfolio_ledger(
     execution_root = _required_input_root(
         layout, upstream_identities, candidate.execution_mask_target_id
     )
+    for target_id in ("market_bars_1d", "stock_master"):
+        _required_input_root(layout, upstream_identities, target_id)
     benchmark_root = None
     if enhanced:
         benchmark_root = _required_input_root(
@@ -374,7 +638,16 @@ def build_portfolio_ledger(
         history = TimeWindow(sessions[0], sessions[-1])
         panel_columns = _ENHANCED_PANEL_COLUMNS if enhanced else _PANEL_COLUMNS
         panel_frames = input_channels.enter_context(
-            closing_iterator(_iter_input_sessions(panel_root, panel_columns, history))
+            closing_iterator(
+                _iter_portfolio_sessions(
+                    layout=layout,
+                    panel_root=panel_root,
+                    panel_columns=panel_columns,
+                    calendar=calendar,
+                    time_window=history,
+                    execution_root=execution_root,
+                )
+            )
         )
         dataset_frames = input_channels.enter_context(
             closing_iterator(
@@ -403,16 +676,12 @@ def build_portfolio_ledger(
 
         def panel_at(timestamp):
             if timestamp not in panel_window:
-                panel_window[timestamp] = _read_next_session(
-                    panel_frames, panel_columns, timestamp
-                )
+                for view in panel_frames:
+                    panel_window[view.timestamp] = view
+                    if view.timestamp == timestamp:
+                        break
             return panel_window[timestamp]
 
-        execution_frames = input_channels.enter_context(
-            closing_iterator(
-                _iter_input_sessions(execution_root, _EXECUTION_COLUMNS, history)
-            )
-        )
         benchmark_frames = (
             input_channels.enter_context(
                 closing_iterator(
@@ -432,17 +701,20 @@ def build_portfolio_ledger(
             )
 
             release_panels(decision_timestamp)
-            panel = panel_at(decision_timestamp)
-            if panel.empty:
+            view = panel_at(decision_timestamp)
+            panel = view.panel
+            if panel.empty and view.valuation.empty:
                 raise PortfolioTargetBlocked("portfolio_panel_session_missing")
-            _update_amount_history(panel, amount_history, holdings)
+            _update_amount_history(panel, amount_history, holdings, view.closed_assets)
             benchmark_weights = pd.Series(dtype="float64")
             alpha: pd.Series | None = None
             current_cross: pd.DataFrame | None = None
             if enhanced:
                 assert factor_risk is not None
                 risk_frames = []
-                for columns, context_frames in risk_inputs.values():
+                for columns, context_frames in (
+                    risk_inputs.values() if not panel.empty else ()
+                ):
                     context = _read_next_session(
                         context_frames, columns, decision_timestamp
                     )
@@ -455,9 +727,17 @@ def build_portfolio_ledger(
                 )
                 risk_frames.clear()
 
-                if previous_risk_cross is not None:
+                if previous_risk_cross is not None and not panel.empty:
                     factor_risk.observe_return_session(
                         _factor_return_cross(exposures=previous_risk_cross, panel=panel)
+                    )
+                if previous_risk_cross is not None:
+                    carried = previous_risk_cross.loc[
+                        previous_risk_cross.asset_id.isin(view.closed_assets)
+                    ].copy()
+                    carried["timestamp"] = decision_timestamp
+                    current_cross = pd.concat(
+                        (current_cross, carried), ignore_index=True
                     )
                 previous_risk_cross = current_cross.copy(deep=True)
                 if calibration_rows and calibration_rows[0][
@@ -475,7 +755,7 @@ def build_portfolio_ledger(
                     == calibration_dates.loc[pending_calibration[2], "available_at"]
                 ):
                     calibration_rows.extend(
-                        _completed_calibration_rows(pending_calibration, panel)
+                        _completed_calibration_rows(pending_calibration, view.valuation)
                     )
                     pending_calibration = None
                 if (
@@ -485,15 +765,23 @@ def build_portfolio_ledger(
                 ):
                     pending_calibration = (
                         waiting_alpha[0],
-                        panel.set_index("asset_id")["adj_open"].astype("float64"),
+                        view.valuation.set_index("asset_id")["adj_open"].astype(
+                            "float64"
+                        ),
                         waiting_alpha[1],
                     )
                     waiting_alpha = None
                 if decision_timestamp >= alpha_start:
-                    dataset = _read_next_session(
-                        dataset_frames, dataset_columns, decision_timestamp
+                    dataset = (
+                        _read_next_session(
+                            dataset_frames, dataset_columns, decision_timestamp
+                        )
+                        if not panel.empty
+                        else pd.DataFrame(columns=dataset_columns).astype(
+                            {"eligible": "bool"}
+                        )
                     )
-                    if dataset.empty:
+                    if dataset.empty and not panel.empty:
                         raise PortfolioTargetBlocked(
                             "portfolio_research_dataset_session_missing"
                         )
@@ -521,21 +809,25 @@ def build_portfolio_ledger(
             if decision_timestamp < output_start:
                 continue
             if not enhanced:
-                dataset = _read_next_session(
-                    dataset_frames, dataset_columns, decision_timestamp
+                dataset = (
+                    _read_next_session(
+                        dataset_frames, dataset_columns, decision_timestamp
+                    )
+                    if not panel.empty
+                    else pd.DataFrame(columns=dataset_columns).astype(
+                        {"eligible": "bool"}
+                    )
                 )
-                if dataset.empty:
+                if dataset.empty and not panel.empty:
                     raise PortfolioTargetBlocked(
                         "portfolio_research_dataset_session_missing"
                     )
             assert dataset is not None
-            execution = _read_next_session(
-                execution_frames, _EXECUTION_COLUMNS, decision_timestamp
-            )
-            if execution.empty:
-                raise PortfolioTargetBlocked("portfolio_execution_mask_missing")
+            execution = view.execution
             _validate_input_keys(dataset, panel)
-            _validate_input_keys(dataset, execution)
+            _validate_input_keys(
+                dataset, execution.loc[execution.timestamp.eq(decision_timestamp)]
+            )
             if not enhanced:
                 alpha = _prediction_alpha(
                     dataset,
@@ -545,24 +837,18 @@ def build_portfolio_ledger(
             if decision_timestamp not in output_intervals.index:
                 continue
             endpoint_timestamp = output_intervals.loc[decision_timestamp, "end_at"]
-            next_panel = panel_at(next_timestamp)
-            if next_panel.empty:
-                raise PortfolioTargetBlocked("portfolio_market_session_missing")
-            endpoint_panel = panel_at(endpoint_timestamp)
-            if endpoint_panel.empty:
-                raise PortfolioTargetBlocked("portfolio_market_session_missing")
+            next_view = panel_at(next_timestamp)
+            next_panel = next_view.valuation
+            endpoint_panel = panel_at(endpoint_timestamp).valuation
             enhanced_decision: _EnhancedDecision | None = None
             target_override: pd.Series | None = None
             decision_reason = PORTFOLIO_DECISION_REASON_SIMPLE
             if not holdings.empty:
-                prices = panel.set_index("asset_id")
+                prices = view.valuation.set_index("asset_id")
                 holdings, cash, nav = drift_continuous_holdings(
                     holdings,
                     cash,
-                    prices.adj_close.reindex(holdings.index).div(
-                        prices.adj_open.reindex(holdings.index)
-                    )
-                    - 1.0,
+                    _price_returns(prices.adj_open, prices.adj_close, holdings.index),
                 )
             if enhanced:
                 assert alpha is not None and current_cross is not None
@@ -585,6 +871,10 @@ def build_portfolio_ledger(
                     if benchmark_weights.empty:
                         raise PortfolioTargetBlocked(
                             "portfolio_benchmark_snapshot_missing"
+                        )
+                    if set(benchmark_weights.index) & next_view.closed_assets:
+                        raise PortfolioTargetBlocked(
+                            "portfolio_initial_holding_market_closed"
                         )
                     holdings = benchmark_weights.multiply(nav)
                     cash = 0.0
@@ -613,7 +903,7 @@ def build_portfolio_ledger(
             if enhanced:
                 required_assets = benchmark_weights.index.union(holdings.index)
                 industry = _industry_group_codes(
-                    panel.set_index("asset_id"), "industry_level1_code"
+                    view.valuation.set_index("asset_id"), "industry_level1_code"
                 ).reindex(required_assets)
                 if industry.isna().any():
                     raise PortfolioTargetBlocked("portfolio_industry_context_missing")
@@ -621,9 +911,10 @@ def build_portfolio_ledger(
                 candidate=candidate,
                 decision_timestamp=decision_timestamp,
                 next_timestamp=next_timestamp,
-                panel=panel,
+                panel=view.valuation,
                 next_panel=next_panel,
                 endpoint_panel=endpoint_panel,
+                closed_assets=next_view.closed_assets,
                 dataset=dataset,
                 execution=execution,
                 holdings=holdings,
@@ -795,7 +1086,7 @@ def _enhanced_risk_cross(
     panel_by_asset = panel.set_index("asset_id")
     assets = pd.Index(sorted(set(panel_by_asset.index)), dtype="string")
     result = pd.DataFrame(index=assets)
-    result["timestamp"] = pd.Timestamp(panel["timestamp"].iloc[0])
+    result["timestamp"] = panel["timestamp"].iloc[0] if not panel.empty else pd.NaT
     result["asset_return"] = (
         pd.to_numeric(panel_by_asset["period_return"], errors="raise")
         .reindex(assets)
@@ -824,6 +1115,9 @@ def _enhanced_risk_cross(
                     .reindex(assets)
                     .astype("float64")
                 )
+    if panel.empty:
+        for column in style_columns:
+            result[column] = pd.Series(dtype="float64")
     return result.reset_index(names="asset_id")
 
 
@@ -1055,6 +1349,7 @@ def _build_session(
     panel: pd.DataFrame,
     next_panel: pd.DataFrame,
     endpoint_panel: pd.DataFrame,
+    closed_assets: frozenset[str],
     dataset: pd.DataFrame,
     execution: pd.DataFrame,
     holdings: pd.Series,
@@ -1094,18 +1389,21 @@ def _build_session(
     elif is_rebalance_session(
         decision_timestamp, next_timestamp, candidate.rebalance_schedule
     ):
-        target = build_simple_target_weights(
-            alpha,
-            eligible=prediction_eligible,
-            method="float_cap_weight"
-            if candidate.construction == "top20_float_cap"
-            else "equal_weight",
-            top_quantile=float(candidate.top_quantile),
-            bottom_quantile=float(candidate.top_quantile),
-            float_market_cap=dataset["float_market_cap"]
-            if candidate.construction == "top20_float_cap"
-            else None,
-        )
+        if dataset.empty:
+            target = pd.Series(dtype="float64")
+        else:
+            target = build_simple_target_weights(
+                alpha,
+                eligible=prediction_eligible,
+                method="float_cap_weight"
+                if candidate.construction == "top20_float_cap"
+                else "equal_weight",
+                top_quantile=float(candidate.top_quantile),
+                bottom_quantile=float(candidate.top_quantile),
+                float_market_cap=dataset["float_market_cap"]
+                if candidate.construction == "top20_float_cap"
+                else None,
+            )
     else:
         target = holdings.div(nav).copy(deep=True)
     target = target.loc[target.ne(0.0)]
@@ -1130,7 +1428,7 @@ def _build_session(
         },
         dtype="float64",
     )
-    masks = _mask_values(execution, assets)
+    masks = _mask_values(execution, assets, next_timestamp, closed_assets)
     prepared = {
         (market, side): prepare_trade_cost(
             next_timestamp.date(), market, side, fee_schedule, assumptions
@@ -1230,11 +1528,10 @@ def _build_session(
     )
     execution_holdings, execution_cash, execution_nav = (current, cash, nav)
     if not initialize_at_execution and (not current.empty):
-        overnight = (
-            next_panel.set_index("asset_id")
-            .adj_open.reindex(current.index)
-            .div(panel_by_asset.adj_close.reindex(current.index))
-            - 1.0
+        overnight = _price_returns(
+            panel_by_asset.adj_close,
+            next_panel.set_index("asset_id").adj_open,
+            current.index,
         )
         execution_holdings, execution_cash, execution_nav = drift_continuous_holdings(
             current, cash, overnight
@@ -1349,11 +1646,14 @@ def _session_frame(
 
 
 def _update_amount_history(
-    panel: pd.DataFrame, history: dict[str, deque[float]], holdings: pd.Series
+    panel: pd.DataFrame,
+    history: dict[str, deque[float]],
+    holdings: pd.Series,
+    closed_assets: frozenset[str],
 ) -> None:
     current_assets = set(panel["asset_id"].astype(str))
     for asset in tuple(history):
-        if asset not in current_assets:
+        if asset not in current_assets and asset not in closed_assets:
             if float(holdings.get(asset, 0.0)) != 0.0:
                 raise PortfolioTargetBlocked("portfolio_held_asset_missing_from_panel")
             del history[asset]
@@ -1364,24 +1664,34 @@ def _update_amount_history(
         history.setdefault(asset, deque(maxlen=20)).append(float(amount))
 
 
-def _mask_values(execution: pd.DataFrame, assets: pd.Index) -> dict[str, pd.Series]:
-    if assets.empty:
-        empty = pd.Series(dtype="bool")
-        return {"can_enter": empty, "can_exit": empty}
+def _mask_values(
+    execution: pd.DataFrame,
+    assets: pd.Index,
+    execution_at: pd.Timestamp,
+    closed_assets: frozenset[str],
+) -> dict[str, pd.Series]:
+    masks = {
+        column: pd.Series(False, index=assets, dtype="bool")
+        for column in ("can_enter", "can_exit")
+    }
+    open_assets = assets[~assets.isin(closed_assets)]
+    if open_assets.empty:
+        return masks
     if not pd.api.types.is_bool_dtype(
         execution["can_enter"]
     ) or not pd.api.types.is_bool_dtype(execution["can_exit"]):
         raise ValueError("portfolio_execution_mask_invalid")
     indexed = execution.set_index("asset_id")
-    missing = [asset for asset in assets if asset not in indexed.index]
-    if missing:
+    if not open_assets.isin(indexed.index).all():
         raise PortfolioTargetBlocked("portfolio_execution_mask_missing")
-    if indexed.loc[list(assets), ["can_enter", "can_exit"]].isna().any().any():
+    current = indexed.loc[open_assets]
+    if current[["can_enter", "can_exit", "execution_at"]].isna().any().any():
         raise PortfolioTargetBlocked("portfolio_execution_fact_unknown")
-    return {
-        column: indexed.loc[list(assets), column].astype(bool)
-        for column in ("can_enter", "can_exit")
-    }
+    if not current.execution_at.eq(execution_at).all():
+        raise PortfolioTargetBlocked("portfolio_execution_date_misaligned")
+    for column in masks:
+        masks[column].loc[open_assets] = current[column].astype(bool)
+    return masks
 
 
 def _holding_returns(
@@ -1392,20 +1702,11 @@ def _holding_returns(
     selected = assets.loc[account.asset_ledger["post_trade_notional"].to_numpy() > 0.0]
     if selected.empty:
         return returns
-    prices = []
-    for frame in (next_panel, endpoint_panel):
-        values = frame.set_index("asset_id")["adj_open"].reindex(selected)
-        if values.isna().any():
-            raise PortfolioTargetBlocked("portfolio_held_return_missing")
-        values = pd.to_numeric(values, errors="raise").astype("float64")
-        if not np.isfinite(values).all() or values.le(0).any():
-            raise ValueError("portfolio_return_invalid")
-        prices.append(values)
-    with np.errstate(over="ignore"):
-        values = prices[1] / prices[0] - 1.0
-    if not np.isfinite(values).all():
-        raise ValueError("portfolio_return_invalid")
-    returns.loc[selected] = values
+    returns.loc[selected] = _price_returns(
+        next_panel.set_index("asset_id").adj_open,
+        endpoint_panel.set_index("asset_id").adj_open,
+        selected,
+    )
     return returns
 
 

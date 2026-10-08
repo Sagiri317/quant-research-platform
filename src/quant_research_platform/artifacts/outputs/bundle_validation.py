@@ -254,8 +254,6 @@ def _validate_prediction_output_bundle(
         if manifest["output_definition_id"] != "prediction_outputs":
             raise ValueError("prediction_output_definition_mismatch")
         metadata = manifest.get("metadata")
-        if type(metadata) is not dict:
-            raise ValueError("persisted_prediction_metadata_mismatch")
         primary_key_value = metadata.get("primary_key")
         prediction_column = metadata.get("prediction_column")
         prediction_mode = metadata.get("prediction_mode")

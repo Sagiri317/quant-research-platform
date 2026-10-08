@@ -116,7 +116,14 @@ def _interim_specs() -> InterimDataCatalog:
         partition_columns=("year",),
     )
     return InterimDataCatalog(
-        (calendar, fee, research_profile().interim.get("index_market"))
+        (
+            calendar,
+            fee,
+            *(
+                research_profile().interim.get(target)
+                for target in ("index_market", "market_bars_1d", "stock_master")
+            ),
+        )
     )
 
 
@@ -375,7 +382,28 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
         ]
     )
     fees["included_in"] = pd.Series([pd.NA] * len(fees), dtype="string")
+    bars = (
+        panel[["asset_id", "timestamp", "market_type"]]
+        .rename(columns={"asset_id": "source_asset_id"})
+        .assign(filling_flag=0)
+    )
+    first = panel.groupby("asset_id", sort=False).timestamp.min()
+    stocks = pd.DataFrame(
+        {
+            "source_asset_id": first.index,
+            "timestamp": first.to_numpy(),
+            "listing_date": first.to_numpy(),
+            "delisting_date": pd.NaT,
+            "company_status": "active",
+        }
+    )
     return {
+        "market_bars_1d": bars.reindex(
+            columns=research_profile().interim.get("market_bars_1d").required_columns
+        ),
+        "stock_master": stocks.reindex(
+            columns=research_profile().interim.get("stock_master").required_columns
+        ),
         "market_panel_1d": panel,
         "market_model_factors": market_factors,
         "price_volume_facts": dataset.loc[
