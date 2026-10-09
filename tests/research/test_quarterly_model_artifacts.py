@@ -1741,6 +1741,8 @@ def test_model_reader_uses_published_science_but_publisher_rechecks(
             list(artifact.trial_ledgers),
             case.layout,
             verify_science=True,
+            operational_metadata=artifact.operational_metadata,
+            directory_identities=artifact.directory_identities,
         )
     predictor = read_quarterly_predictor(artifact, "global", "linear_regression")
     assert np.isfinite(predictor.predict(case.frame[["x"]])).all()

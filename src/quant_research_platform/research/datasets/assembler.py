@@ -547,23 +547,7 @@ def _open_input_dataset_sessions(
                 processed_spec.market_id, processed_spec.kind, processed_spec.data_id
             ),
         )
-        try:
-            session = open_dataset_session(
-                root, columns=columns, time_window=time_window
-            )
-        except ValueError as exc:
-            if str(exc) == "dataset_column_not_found":
-                missing_keys = [
-                    column
-                    for column in dataset_spec.primary_key
-                    if column not in processed_spec.required_columns
-                ]
-                if missing_keys:
-                    raise ValueError(
-                        f"missing_research_join_key: {processed_spec.data_id}: "
-                        + ", ".join(missing_keys)
-                    ) from exc
-            raise
+        session = open_dataset_session(root, columns=columns, time_window=time_window)
         sessions[data_id] = session
         existing_columns = tuple(dict.fromkeys((*existing_columns, *columns)))
     return sessions

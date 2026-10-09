@@ -1398,7 +1398,7 @@ def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
     result = producer._fundamental_pit_frame(
         research_profile().processed.get("fundamental_pit"), panel=panel, pit=pit
     )
-    assert pivots == ["value", "prior_year_value"]
+    assert sorted(pivots) == ["prior_year_value", "value"]
     for metric in ("total_assets", "parent_equity"):
         pd.testing.assert_series_equal(
             result[f"beginning_{metric}"],
@@ -1410,3 +1410,100 @@ def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
             assert result[f"average_{metric}"].isna().all()
         elif prior == 1e308:
             assert result[f"average_{metric}"].eq(1e308).all()
+        else:
+            assert result[f"average_{metric}"].eq(5e307).all()
+        expected_prior = np.nan if prior is None else prior
+        np.testing.assert_array_equal(
+            result[f"beginning_{metric}"], [expected_prior] * 2
+        )
+
+
+@pytest.mark.parametrize("batch_rows", (6, 3000))
+@pytest.mark.parametrize("second_only", (False, True))
+@pytest.mark.parametrize("relisted", (False, True))
+def test_panel_preserves_proven_listing_lifecycles(
+    tmp_path, monkeypatch, batch_rows, second_only, relisted
+):
+    dates = pd.bdate_range("2020-01-02", periods=8).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    from quant_research_platform.sources.csmar.interim import _transform_interim_chunk
+
+    raw_master = pd.DataFrame(
+        {
+            "Stkcd": ["000001"] * (2 if relisted else 1),
+            "Stknme": "synthetic",
+            "Listdt": [dates[0], dates[5]] if relisted else [dates[0]],
+            "DelistedDate": [dates[2], pd.NaT] if relisted else [pd.NaT],
+            "Markettype": 1,
+            "Nnindcd": "C",
+            "Nnindnme": "synthetic",
+            "Statco": "normal",
+            "Statdt": pd.NaT,
+        }
+    )
+    normalized, _ = _transform_interim_chunk(
+        raw_master,
+        data_id="stock_master",
+        start_date=None,
+        end_date=None,
+    )
+    stock = normalized.iloc[:1]
+    revision = stock.assign(timestamp=dates[1], stock_name="revised")
+    if relisted:
+        normalized.loc[normalized.listing_date.eq(dates[0]), "delisting_date"] = pd.NaT
+
+    source["stock_master"] = pd.concat([normalized, revision], ignore_index=True).iloc[
+        ::-1
+    ]
+    bars = source["market_bars_1d"]
+    bars = bars.loc[bars.source_asset_id.eq(stock.source_asset_id.iloc[0])].copy()
+    if relisted:
+        bars = bars.loc[~bars.timestamp.isin(dates[3:5])].copy()
+    bars.loc[bars.timestamp.eq(dates[5]), "filling_flag"] = 1
+    source["market_bars_1d"] = bars
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    for data_id in spec.source_input_data_ids:
+        source_spec = profile.interim.get(data_id)
+        write_dataset(
+            layout.interim_data_root(source_spec.source_id, data_id),
+            source[data_id],
+            spec=source_spec,
+        )
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    with producer.produce_a_share_processed_data(
+        spec,
+        layout=layout,
+        time_window=TimeWindow(dates[5] if second_only else dates[0], dates[-1]),
+        processed_catalog=profile.processed,
+        source_catalog=profile.interim,
+    ) as (frames, metadata, verify):
+        write_dataset(
+            root,
+            frames,
+            spec=spec,
+            instance_metadata=metadata,
+            staged_validator=verify,
+        )
+    actual = read_dataset(root)
+    expected = (
+        dates[5:]
+        if second_only
+        else (dates[:3].append(dates[5:]) if relisted else dates)
+    )
+    assert actual.timestamp.tolist() == expected.tolist()
+    assert actual.stock_name.tolist() == [
+        "synthetic" if day == dates[0] or (relisted and day >= dates[5]) else "revised"
+        for day in expected
+    ]
+    assert actual.listing_age_trading_days.tolist() == [
+        dates.get_loc(day) - (5 if relisted and day >= dates[5] else 0) + 1
+        for day in expected
+    ]
+    suspended = actual.loc[actual.timestamp.eq(dates[5])]
+    assert (
+        suspended[["close", "adj_close", "open", "adj_open"]].isna().all().all()
+        == relisted
+    )

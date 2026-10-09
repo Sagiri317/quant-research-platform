@@ -67,6 +67,7 @@ from quant_research_platform.storage.manifests import read_dataset_manifest_evid
 from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact_record,
     semantic_artifact_read_session,
+    verify_semantic_artifact_snapshot,
     write_semantic_artifact,
 )
 
@@ -175,6 +176,7 @@ def load_a_share_run_evidence(
     record: ResearchRunRecord,
     selections,
     reference_member_identities=None,
+    model_artifacts=None,
 ) -> dict[str, object]:
     references = {result.target_id: result for result in record.target_results}
     issues: list[dict[str, str]] = [
@@ -204,6 +206,13 @@ def load_a_share_run_evidence(
         )
         if native:
             captured[target_id] = expected
+            loaded[target_id] = result
+            return result
+        if model_artifacts is not None and target_id in model_artifacts:
+            artifact = model_artifacts[target_id]
+            _validate_reference_envelope(result, artifact.envelope)
+            captured[target_id] = artifact.member_identities
+            operations[target_id] = artifact.operational_metadata
             loaded[target_id] = result
             return result
         try:
@@ -668,35 +677,50 @@ def produce_a_share_report(
     read_model_artifact,
 ) -> dict[str, object]:
     selections = {}
-    reference_member_identities = {}
-    for result in record.target_results:
-        if result.producer_kind is not ProducerKind.MODEL or result.status in {
-            TargetStatus.BLOCKED,
-            TargetStatus.FAILED,
-        }:
-            continue
-        identities = {}
-        try:
-            read_validated_reference(layout, result, member_identities=identities)
-        except (FileNotFoundError, OSError, ValueError):
-            continue
-        persisted = read_model_artifact(
-            _instance_root(layout, result),
-            expected_identity=result.instance_identity,
-            trial_layout=layout,
-            expected_member_identities=identities,
-        )
-        selections = persisted.selections
-        reference_member_identities[result.target_id] = identities
-    return build_a_share_report(
-        record=record,
-        evidence=load_a_share_run_evidence(
-            layout=layout,
+    models = {}
+    primary = None
+    try:
+        for result in record.target_results:
+            if result.producer_kind is not ProducerKind.MODEL or result.status in {
+                TargetStatus.BLOCKED,
+                TargetStatus.FAILED,
+            }:
+                continue
+            persisted = read_model_artifact(
+                _instance_root(layout, result),
+                expected_identity=result.instance_identity,
+                trial_layout=layout,
+            )
+            models[result.target_id] = persisted
+            _validate_reference_envelope(result, persisted.envelope)
+            selections = persisted.selections
+        return build_a_share_report(
             record=record,
-            selections=selections,
-            reference_member_identities=reference_member_identities,
-        ),
-    )
+            evidence=load_a_share_run_evidence(
+                layout=layout,
+                record=record,
+                selections=selections,
+                model_artifacts=models,
+            ),
+        )
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        for artifact in models.values():
+            try:
+                verify_semantic_artifact_snapshot(
+                    artifact.instance_root,
+                    artifact.member_identities,
+                    artifact.directory_identities,
+                )
+            except BaseException as error:
+                if primary is None:
+                    raise
+                primary.add_note(
+                    "semantic artifact verification also failed: "
+                    + type(error).__name__
+                )
 
 
 def read_validated_reference(

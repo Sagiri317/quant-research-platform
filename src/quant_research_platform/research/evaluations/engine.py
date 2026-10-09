@@ -459,54 +459,64 @@ def _iter_single_asset_time_series_output_chunks(
                 for x, y in zip(left[valid], right[valid], strict=True):
                     moments.update(float(x), float(y))
 
-    for chunk in _iter_evaluation_work_frames(
+    work_frames = _iter_evaluation_work_frames(
         frames,
         spec=spec,
         asset_column=asset_column,
         source_columns_by_kind=source_columns_by_kind,
-    ):
-        filtered, filter_metadata = apply_filter_mode(
-            chunk, mode=spec.filter_mode, metadata_key="filter_mode"
-        )
-        rows_input += strict_non_negative_count_value(filter_metadata["rows_input"])
-        rows_after_filter += strict_non_negative_count_value(
-            filter_metadata["rows_after_filter_mode"]
-        )
-        filter_columns_used = tuple(
-            str(column) for column in filter_metadata["filter_columns_used"]
-        )
-        filter_definition_value = str(filter_metadata["filter_definition"])
-        if filtered.empty:
-            continue
-        assets = filtered[asset_column]
-        unique_assets = assets.drop_duplicates()
-        if len(unique_assets) != 1 or bool(assets.isna().any()):
-            raise ValueError("single_asset_time_series_evaluation_requires_one_asset")
-        chunk_asset = unique_assets.iloc[0]
-        if asset is None:
-            asset = chunk_asset
-        elif chunk_asset != asset:
-            raise ValueError("single_asset_time_series_evaluation_requires_one_asset")
-        timestamps = strict_timestamp_series(
-            filtered["timestamp"], error="invalid_evaluation_timestamp_values"
-        )
-        if bool(timestamps.duplicated().any()):
-            raise ValueError("single_asset_time_series_evaluation_duplicate_timestamp")
-        chunk_minimum = pd.Timestamp(timestamps.min())
-        chunk_maximum = pd.Timestamp(timestamps.max())
-        if maximum_timestamp is not None and chunk_minimum <= maximum_timestamp:
-            raise ValueError("single_asset_time_series_evaluation_time_non_monotonic")
-        timestamp_count += len(timestamps)
-        minimum_timestamp = (
-            chunk_minimum
-            if minimum_timestamp is None
-            else min(minimum_timestamp, chunk_minimum)
-        )
-        maximum_timestamp = chunk_maximum
-        values = filtered.loc[:, list(numeric_columns)].to_numpy(
-            dtype="float64", copy=True
-        )
-        consume_values(values)
+    )
+    with closing_iterator(work_frames):
+        for chunk in work_frames:
+            filtered, filter_metadata = apply_filter_mode(
+                chunk, mode=spec.filter_mode, metadata_key="filter_mode"
+            )
+            rows_input += strict_non_negative_count_value(filter_metadata["rows_input"])
+            rows_after_filter += strict_non_negative_count_value(
+                filter_metadata["rows_after_filter_mode"]
+            )
+            filter_columns_used = tuple(
+                str(column) for column in filter_metadata["filter_columns_used"]
+            )
+            filter_definition_value = str(filter_metadata["filter_definition"])
+            if filtered.empty:
+                continue
+            assets = filtered[asset_column]
+            unique_assets = assets.drop_duplicates()
+            if len(unique_assets) != 1 or bool(assets.isna().any()):
+                raise ValueError(
+                    "single_asset_time_series_evaluation_requires_one_asset"
+                )
+            chunk_asset = unique_assets.iloc[0]
+            if asset is None:
+                asset = chunk_asset
+            elif chunk_asset != asset:
+                raise ValueError(
+                    "single_asset_time_series_evaluation_requires_one_asset"
+                )
+            timestamps = strict_timestamp_series(
+                filtered["timestamp"], error="invalid_evaluation_timestamp_values"
+            )
+            if bool(timestamps.duplicated().any()):
+                raise ValueError(
+                    "single_asset_time_series_evaluation_duplicate_timestamp"
+                )
+            chunk_minimum = pd.Timestamp(timestamps.min())
+            chunk_maximum = pd.Timestamp(timestamps.max())
+            if maximum_timestamp is not None and chunk_minimum <= maximum_timestamp:
+                raise ValueError(
+                    "single_asset_time_series_evaluation_time_non_monotonic"
+                )
+            timestamp_count += len(timestamps)
+            minimum_timestamp = (
+                chunk_minimum
+                if minimum_timestamp is None
+                else min(minimum_timestamp, chunk_minimum)
+            )
+            maximum_timestamp = chunk_maximum
+            values = filtered.loc[:, list(numeric_columns)].to_numpy(
+                dtype="float64", copy=True
+            )
+            consume_values(values)
     metrics = _time_series_metrics_frame(
         stats if maximum_timestamp is not None else {}, timestamp=maximum_timestamp
     )

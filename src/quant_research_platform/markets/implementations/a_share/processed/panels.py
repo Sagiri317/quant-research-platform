@@ -268,7 +268,24 @@ def _canonical_stock_master(frame: pd.DataFrame) -> pd.DataFrame:
         if duplicates.drop_duplicates().duplicated(key, keep=False).any():
             raise ValueError("duplicate_stock_master_key")
         result = result.drop_duplicates(key, keep="last")
-    return result.sort_values(key, kind="mergesort")
+    result = result.sort_values(key, kind="mergesort")
+    if result["delisting_date"].lt(result["listing_date"]).any():
+        raise ValueError("invalid_stock_master_lifecycle")
+    previous = result.groupby("asset_id", sort=False)[
+        ["listing_date", "delisting_date"]
+    ].shift()
+    changed = previous["listing_date"].notna() & result["listing_date"].ne(
+        previous["listing_date"]
+    )
+    if (
+        changed
+        & (
+            result["listing_date"].le(previous["listing_date"])
+            | result["listing_date"].le(previous["delisting_date"])
+        )
+    ).any():
+        raise ValueError("conflicting_stock_master_lifecycles")
+    return result
 
 
 def _canonical_market_cap(frame: pd.DataFrame) -> pd.DataFrame:
@@ -317,16 +334,7 @@ def _dense_lifecycle_panel(
         stock = stocks.iloc[stock_groups.get(asset_id, [])]
         if stock.empty:
             continue
-        listing = stock["listing_date"].min()
-        finite_delistings = stock.loc[
-            stock["delisting_date"] < pd.Timestamp.max.normalize(), "delisting_date"
-        ]
-        delisting = (
-            finite_delistings.min()
-            if not finite_delistings.empty
-            else pd.Timestamp.max.normalize()
-        )
-        dates = sessions[(sessions >= listing) & (sessions <= delisting)]
+        dates = sessions[sessions >= stock["listing_date"].min()]
         if dates.empty:
             continue
         base = pd.DataFrame({"asset_id": asset_id, "timestamp": dates})
@@ -359,7 +367,11 @@ def _dense_lifecycle_panel(
     result["market_id"] = str(MARKET_ID)
     result["session_date"] = result["timestamp"]
     result["available_at"] = result["timestamp"]
-    return _asof_join_stock_master(result, stocks)
+    result = _asof_join_stock_master(result, stocks)
+    return result.loc[
+        result["timestamp"].ge(result["listing_date"])
+        & result["timestamp"].le(result["delisting_date"])
+    ].copy()
 
 
 def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.DataFrame:
@@ -1062,8 +1074,9 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
         .astype("boolean")
         .where(result["filling_flag"].isin((0, 1)))
     )
-    for asset_id, positions in result.groupby("asset_id", sort=False).groups.items():
-        _ = asset_id
+    for _, positions in result.groupby(
+        ["asset_id", "listing_date"], sort=False, dropna=False
+    ).groups.items():
         values = result.loc[positions]
         trading = result.loc[positions, "is_trading"].fillna(False)
         suspended = values["filling_flag"].eq(1).fillna(False)

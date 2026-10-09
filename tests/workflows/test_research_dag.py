@@ -3435,3 +3435,28 @@ def test_stage_selection_prose_does_not_change_computation_contracts():
         != config["models"][0]["input_factor_columns"]
     ):
         assert projection(changed)[1] != original
+
+
+def test_planner_reads_frozen_manifest_once_for_all_targets(tmp_path, monkeypatch):
+    profile = research_profile()
+    protocol_type = type(profile.protocol("pv_all"))
+    original = protocol_type.manifest
+    calls = []
+
+    def observed(self):
+        calls.append(True)
+        return original(self)
+
+    arguments = dict(
+        profile=profile,
+        action="dataset build",
+        terminal_targets=("pv_all",),
+        layout=StorageLayout(tmp_path),
+    )
+    expected = research.plan_targets(**arguments)
+    monkeypatch.setattr(protocol_type, "manifest", observed)
+    actual = research.plan_targets(**arguments)
+    assert actual == expected
+    assert len(actual["targets"]) > 2
+    # One frozen-state read and one final public manifest.
+    assert len(calls) == 2

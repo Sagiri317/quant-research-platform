@@ -453,3 +453,20 @@ def _validate_inputs(
 def test_dummy_spec_preserves_explicit_overrides(overrides, expected):
     spec = make_dummy_research_dataset_spec(**overrides)
     assert (spec.data_id, spec.market_id) == expected
+
+
+def test_native_reader_missing_column_propagates_from_assembler(tmp_path):
+    layout = StorageLayout(tmp_path)
+    write_dummy_processed_inputs(layout, make_dummy_processed_catalog())
+    processed = make_dummy_processed_catalog(include_extensions=True)
+    datasets = make_research_dataset_catalog(
+        make_dummy_research_dataset_spec(factor_columns=("factor_2",)),
+    )
+    with pytest.raises(ValueError, match="^dataset_column_not_found$"):
+        assemble_research_dataset(
+            layout=layout,
+            dataset_catalog=datasets,
+            processed_catalog=processed,
+            dataset_id="dummy_dataset",
+            time_window=TimeWindow("2024-01-02", "2024-01-03"),
+        )

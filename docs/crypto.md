@@ -158,7 +158,7 @@ train、validation、test 按时间先后划分；最后一折的实际 train �
 历史来源复用同一盘口、100ms PANEL、因子/标签、模型和经济账本，不建立另一套回测链。
 Binance 原生字段由同一个来源校验 owner 按清单 schema 和绑定的供应商观测 UTC 判定。
 官方录制要求其供应商 schema 对应字段；Tardis 历史归档按当日 schema 校验。
-依据 [Binance 更新日志](https://developers.binance.com/en/docs/derivatives/change-log)，
+依据 [Binance 更新日志](https://developers.binance.com/en/docs/products/derivatives-trading-usds-futures/change-log)，
 聚合成交的非 RPI 数量 `nq` 自 2025-12-31 引入，CM/UM 的 `st`/`ps` 自
 2026-06-30 引入。历史可选字段一旦出现仍严格检查其类型、身份和数量范围。
 缺失的历史 `nq` 不填入原载荷，也不推断为 `q` 或零；内部成交事件保留未知。

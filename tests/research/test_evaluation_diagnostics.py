@@ -1077,3 +1077,66 @@ def test_evaluation_close_verifies_real_dataset_without_generator_finalization(
             result.close()
     else:
         result.close()
+
+
+def test_single_asset_cancel_preserves_close_failure(monkeypatch):
+    import sys
+    import traceback
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2026-01-01", periods=2),
+            "asset_id": ["btc_usdt"] * 2,
+            "feature": [1.0, 2.0],
+            "label": [2.0, 4.0],
+            "eligible": [True, True],
+        }
+    )
+    spec = EvaluationSpec(
+        evaluation_id="cancel",
+        market_id=MarketId("crypto"),
+        research_dataset_id="hft_research",
+        signals=(make_artifact_signal_spec(),),
+        label_columns=("label",),
+        evaluation_axis="single_asset_time_series",
+        n_groups=2,
+    )
+    failure = KeyboardInterrupt("cancel")
+    closed = []
+    unraisable = []
+    monkeypatch.setattr(sys, "unraisablehook", unraisable.append)
+
+    class Source:
+        def __iter__(self):
+            return self
+
+        def __next__(self):
+            return frame
+
+        def close(self):
+            closed.append(True)
+            raise RuntimeError("source_close_failed")
+
+    def interrupt(*args):
+        raise failure
+
+    monkeypatch.setattr(evaluation_engine._CorrelationMoments, "update", interrupt)
+    with evaluation_engine.build_evaluation_result_from_frames(
+        Source(),
+        spec=spec,
+        asset_column="asset_id",
+        source_columns_by_kind={"feature": ("feature",)},
+    ) as result:
+        with pytest.raises(KeyboardInterrupt) as caught:
+            next(iter(result.output_chunks))
+        assert caught.value is failure
+        assert "interrupt" in [
+            item.name for item in traceback.extract_tb(failure.__traceback__)
+        ]
+        assert any(
+            "iterator close also failed: RuntimeError" in note
+            for note in failure.__notes__
+        )
+        assert closed == [True]
+        assert not unraisable
+    assert closed == [True]

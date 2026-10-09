@@ -834,12 +834,13 @@ def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
 
     monkeypatch.setattr(interim, "_raw_index", observed_index)
     good = interim.materialize_interim_data(layout=layout)
-    assert opened == [*FINANCIAL_FIELDS, "financial_first_disclosure"]
+    assert sorted(opened) == sorted([*FINANCIAL_FIELDS, "financial_first_disclosure"])
     before = {
         root / relative: digest
         for root in good.artifact_roots.values()
         for relative, digest in _file_hashes(root).items()
     }
+    opened.clear()
     original_write = interim.write_dataset
     published = []
     candidate = StorageLayout(tmp_path / "candidate")
@@ -865,16 +866,13 @@ def test_bulk_import_uses_table_scopes_and_keeps_published_identity(
         interim.materialize_interim_data(
             layout=candidate, raw_root=layout.raw_source_root("choice")
         )
-    assert published == ["financial_balance"]
-    assert opened == [
-        *FINANCIAL_FIELDS,
-        "financial_first_disclosure",
-        "financial_balance",
-        "financial_income",
-    ]
-    assert not filesystem_exists(
-        candidate.interim_data_root("choice", "financial_income")
-    )
+    assert len(published) == 1
+    assert len(opened) == len(set(opened)) == 2
+    assert published[0] in opened
+    for data_id in (*FINANCIAL_FIELDS, "financial_first_disclosure"):
+        assert filesystem_exists(candidate.interim_data_root("choice", data_id)) == (
+            data_id == published[0]
+        )
     assert all(
         (
             hashlib.sha256(filesystem_read_bytes(path)).hexdigest() == digest

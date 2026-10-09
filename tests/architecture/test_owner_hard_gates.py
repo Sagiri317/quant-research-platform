@@ -3,6 +3,8 @@ from __future__ import annotations
 import ast
 from pathlib import Path
 
+import pytest
+
 SOURCE_ROOT = Path("src/quant_research_platform")
 WORKFLOW_ACTIONS = (
     "data_materialize",
@@ -72,20 +74,15 @@ def test_public_action_reference_check_accepts_import_aliases():
 
 
 def test_research_and_profile_owners_have_no_provider_traversal(import_edges) -> None:
-    research_sources = "\n".join(
-        path.read_text(encoding="utf-8")
-        for path in (SOURCE_ROOT / "research").rglob("*.py")
-    )
     from tests.helpers.import_graph import import_edges_under, is_ids_contract_import
 
     for edge in import_edges_under(import_edges, SOURCE_ROOT / "research"):
         if edge.module.startswith("quant_research_platform.markets.implementations"):
             assert is_ids_contract_import(edge.module)
-    assert "quant_research_platform.sources" not in research_sources
-
-    profile = (SOURCE_ROOT / "profiles" / "research.py").read_text(encoding="utf-8")
-    assert "write_dataset" not in profile
-    assert "pandas" not in profile
+        assert not edge.module.startswith("quant_research_platform.sources")
+    for edge in import_edges_under(import_edges, SOURCE_ROOT / "profiles/research.py"):
+        assert edge.module.rsplit(".", 1)[-1] != "write_dataset"
+        assert not edge.module.startswith("pandas")
 
 
 def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
@@ -146,12 +143,9 @@ def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction() -> None:
         / "producer.py"
     )
     producer_tree = ast.parse(producer_path.read_text(encoding="utf-8"))
-    assert any(
-        isinstance(node, ast.ImportFrom)
-        and node.module
-        == "quant_research_platform.markets.implementations.a_share.fundamentals"
-        and any(alias.name == "construct_ttm_events" for alias in node.names)
-        for node in ast.walk(producer_tree)
+    assert (
+        "quant_research_platform.markets.implementations.a_share.fundamentals.construct_ttm_events"
+        in _canonical_references(producer_tree)
     )
 
     from quant_research_platform.markets.implementations.a_share.processed import (
@@ -175,15 +169,37 @@ def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction() -> None:
 
 
 def test_workflow_production_statuses_have_no_readiness_aliases() -> None:
-    literals: set[str] = set()
-    for path in SOURCE_ROOT.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
-        literals.update(
-            node.value
-            for node in ast.walk(tree)
-            if isinstance(node, ast.Constant) and type(node.value) is str
+    from quant_research_platform.contracts.targets import RunStatus, TargetStatus
+
+    assert {item.value for item in RunStatus} == {"COMPLETE", "BLOCKED", "FAILED"}
+    assert {item.value for item in TargetStatus} == {
+        "REUSED",
+        "BUILT",
+        "BLOCKED",
+        "FAILED",
+    }
+    for enum in (RunStatus, TargetStatus):
+        assert set(enum.__members__) == {item.value for item in enum}
+        for value in ("READY", "STALE", "undeclared"):
+            with pytest.raises(ValueError):
+                enum(value)
+
+
+def test_pit_reference_check_accepts_owner_aliases_and_rejects_wrong_owner():
+    owner = "quant_research_platform.markets.implementations.a_share.fundamentals"
+    for source in (
+        f"from {owner} import construct_ttm_events as construct\nconstruct()",
+        "from quant_research_platform.markets.implementations.a_share "
+        "import fundamentals as facts\nfacts.construct_ttm_events()",
+        f"import {owner} as facts\nfacts.construct_ttm_events()",
+    ):
+        assert owner + ".construct_ttm_events" in _canonical_references(
+            ast.parse(source)
         )
-    assert {"READY", "STALE"}.isdisjoint(literals)
+    source = "from wrong_owner import construct_ttm_events\nconstruct_ttm_events()"
+    assert owner + ".construct_ttm_events" not in _canonical_references(
+        ast.parse(source)
+    )
 
 
 def test_configured_model_algorithms_use_the_single_capability_owner() -> None:

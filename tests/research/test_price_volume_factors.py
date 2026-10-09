@@ -836,6 +836,7 @@ def test_turnover_uses_canonical_suspension_zero_and_preserves_unknown(tmp_path)
         }
     )
     raw.loc[19, "float_market_cap"] = np.nan
+    raw["listing_date"] = raw["timestamp"].min()
     panel = panels._apply_suspension_semantics(raw)
     root = make_dataset_artifact_root(tmp_path, "canonical_turnover")
     selected = panel[["market_id", "asset_id", "timestamp", "turnover"]]

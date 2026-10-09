@@ -445,3 +445,142 @@ def test_crypto_daily_report_distinguishes_empty_observations(
     if other_status is None and not has_daily:
         assert result["reason"] == "insufficient_complete_utc_days"
         assert report["sections"]["execution"] == {"status": "DEFINED", "results": []}
+
+
+@pytest.fixture
+def a_share_model_report_case(tmp_path):
+    from tests.research.workflow_test_support import shared_model_case
+
+    case = shared_model_case(tmp_path)
+    run = record()
+    run.protocol["research_configuration"]["stage"] = "models"
+    run.target_results = (
+        SimpleNamespace(
+            target_id=case.artifact.model_id,
+            producer_kind=ProducerKind.MODEL,
+            status=TargetStatus.BUILT,
+            reason=None,
+            instance_identity=case.envelope.instance_identity,
+            schema_identity=case.envelope.schema_identity,
+            artifact_root=case.root.parent.parent.relative_to(tmp_path).as_posix(),
+        ),
+    )
+    return case, run
+
+
+def test_a_share_report_validates_model_members_once(
+    a_share_model_report_case, monkeypatch
+):
+    from collections import Counter
+
+    from quant_research_platform.artifacts import research
+    from quant_research_platform.research.models.persisted import (
+        read_quarterly_model_artifact,
+    )
+    from quant_research_platform.storage import semantic_artifacts
+
+    case, run = a_share_model_report_case
+    before = {p: p.read_bytes() for p in case.root.rglob("*") if p.is_file()}
+    expected = research.build_a_share_report(
+        record=run,
+        evidence=research.load_a_share_run_evidence(
+            layout=case.layout,
+            record=run,
+            selections=case.artifact.selections,
+        ),
+    )
+    counts = Counter()
+    original = semantic_artifacts._member_record
+
+    def counted(relative, path, **kwargs):
+        if path.is_relative_to(case.root):
+            counts[relative] += 1
+        return original(relative, path, **kwargs)
+
+    monkeypatch.setattr(semantic_artifacts, "_member_record", counted)
+    actual = research.produce_a_share_report(
+        layout=case.layout,
+        record=run,
+        read_model_artifact=read_quarterly_model_artifact,
+    )
+    assert actual == expected
+    assert counts == Counter({m["path"]: 1 for m in case.artifact.member_records})
+    assert {p: p.read_bytes() for p in before} == before
+    counts.clear()
+    assert (
+        research.produce_a_share_report(
+            layout=case.layout,
+            record=run,
+            read_model_artifact=read_quarterly_model_artifact,
+        )
+        == actual
+    )
+    assert counts == Counter({m["path"]: 1 for m in case.artifact.member_records})
+    assert actual["sections"]["model selection"]["trial_ledger"]["attempt_count"] > 0
+
+
+@pytest.mark.parametrize(
+    "mutation", ("manifest", "add", "remove", "same_size", "primary")
+)
+def test_a_share_report_rechecks_consumed_model_snapshot(
+    a_share_model_report_case,
+    monkeypatch,
+    mutation,
+):
+    from quant_research_platform.artifacts import research
+    from quant_research_platform.research.models.persisted import (
+        read_quarterly_model_artifact,
+    )
+
+    case, run = a_share_model_report_case
+    original = research.build_a_share_report
+    primary = KeyboardInterrupt("report_cancel")
+
+    def mutate(**kwargs):
+        report = original(**kwargs)
+        path = case.root / "model.json"
+        if mutation == "manifest":
+            path = case.root / "manifest.json"
+            path.write_bytes(path.read_bytes() + b" ")
+        elif mutation == "add":
+            (case.root / "unexpected.json").write_bytes(b"{}")
+        elif mutation == "remove":
+            path.unlink()
+        else:
+            data = path.read_bytes()
+            path.write_bytes(data.replace(b"model", b"Model", 1))
+        if mutation == "primary":
+            raise primary
+        return report
+
+    monkeypatch.setattr(research, "build_a_share_report", mutate)
+    with pytest.raises(
+        KeyboardInterrupt if mutation == "primary" else ValueError
+    ) as caught:
+        research.produce_a_share_report(
+            layout=case.layout,
+            record=run,
+            read_model_artifact=read_quarterly_model_artifact,
+        )
+    if mutation == "primary":
+        assert caught.value is primary
+        assert any("verification also failed" in note for note in primary.__notes__)
+
+
+@pytest.mark.parametrize("field", ("target_id", "schema_identity", "instance_identity"))
+def test_a_share_report_rejects_model_reference_mismatch(
+    a_share_model_report_case, field
+):
+    from quant_research_platform.artifacts import research
+    from quant_research_platform.research.models.persisted import (
+        read_quarterly_model_artifact,
+    )
+
+    case, run = a_share_model_report_case
+    setattr(run.target_results[0], field, "f" * 64)
+    with pytest.raises((ValueError, FileNotFoundError)):
+        research.produce_a_share_report(
+            layout=case.layout,
+            record=run,
+            read_model_artifact=read_quarterly_model_artifact,
+        )

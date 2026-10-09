@@ -75,7 +75,6 @@ from quant_research_platform.storage.parquet import (
 )
 from quant_research_platform.storage.semantic_artifacts import (
     _member_record,
-    read_semantic_artifact_record,
     semantic_artifact_read_session,
     verify_semantic_artifact_member,
     write_semantic_artifact,
@@ -116,6 +115,8 @@ class PersistedQuarterlyModelArtifact:
     member_records: tuple
     trial_ledgers: tuple
     member_identities: dict
+    operational_metadata: dict
+    directory_identities: dict
 
     def selection(self, group, quarter_id, *, access_window):
         if group not in {"global", "quarterly"}:
@@ -483,6 +484,8 @@ def write_quarterly_model_artifact(
             operational["model_trial_ledgers"],
             trial_layout,
             verify_science=True,
+            operational_metadata=operational,
+            directory_identities={},
         )
         verify_source()
 
@@ -748,22 +751,26 @@ def read_quarterly_model_artifact(
     instance_root = Path(instance_root)
     member_identities = {}
     operational = {}
-    envelope, members = read_semantic_artifact_record(
+    directories = {}
+    with semantic_artifact_read_session(
         instance_root,
         expected_identity=expected_identity,
         member_identities=member_identities,
         expected_member_identities=expected_member_identities,
         operational_metadata=operational,
-    )
-    return _validate_a_share_model_payload(
-        instance_root,
-        envelope,
-        members,
-        operational.get("model_trial_ledgers"),
-        trial_layout,
-        verify_science=False,
-        member_identities=member_identities,
-    )
+        directory_identities=directories,
+    ) as (envelope, members):
+        return _validate_a_share_model_payload(
+            instance_root,
+            envelope,
+            members,
+            operational.get("model_trial_ledgers"),
+            trial_layout,
+            verify_science=False,
+            member_identities=member_identities,
+            operational_metadata=operational,
+            directory_identities=directories,
+        )
 
 
 def _validate_a_share_model_payload(
@@ -774,6 +781,8 @@ def _validate_a_share_model_payload(
     trial_layout,
     *,
     verify_science,
+    operational_metadata,
+    directory_identities,
     member_identities=None,
 ):
     if trial_layout is None:
@@ -1308,6 +1317,8 @@ def _validate_a_share_model_payload(
         tuple(members),
         tuple(references),
         member_identities,
+        operational_metadata,
+        directory_identities,
     )
 
 

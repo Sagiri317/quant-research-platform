@@ -355,6 +355,7 @@ def _plan_targets(
     requested = set(terminals)
     by_request: dict[tuple[str, TimeWindow], TargetPlan] = {}
     requests = _target_requests(profile, action, protocol, ordered, terminals, window)
+    frozen = protocol.manifest().get("frozen_development")
     for request in requests:
         spec = request.spec
         rebuild_target = rebuild and request.publish and spec.target_id in requested
@@ -362,7 +363,6 @@ def _plan_targets(
             dependency: by_request[(dependency, dependency_window)]
             for dependency, dependency_window in request.dependencies
         }
-        frozen = protocol.manifest().get("frozen_development")
         if frozen is not None and spec.target_id in frozen["targets"]:
             target = frozen["targets"][spec.target_id]
             reference = target["reference"]

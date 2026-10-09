@@ -48,6 +48,7 @@ def test_missing_trading_prices_remain_missing_and_suspension_preserves_units(
             "has_252_trading_sessions": True,
         }
     )
+    frame["listing_date"] = frame["timestamp"].min()
     actual = _apply_suspension_semantics(frame)
     assert actual.loc[1, ["close", "open", "high", "low", "adj_open"]].isna().all()
     assert not a_share_eligibility(actual, "pv_all").iloc[1]
@@ -1537,3 +1538,26 @@ def test_industry_batch_join_preserves_asset_order_and_unknown_barriers():
     assert str(result.industry_level1_code.dtype) == "string"
     assert str(result.is_nonfinancial_industry.dtype) == "boolean"
     pd.testing.assert_frame_equal(panel, before, check_exact=True)
+
+
+@pytest.mark.parametrize(
+    "delisting, error",
+    [
+        ("2020-01-09", "conflicting_stock_master_lifecycles"),
+        (None, "conflicting_stock_master_lifecycles"),
+        ("2020-01-01", "invalid_stock_master_lifecycle"),
+    ],
+)
+def test_conflicting_listing_lifecycles_are_rejected(delisting, error):
+    from quant_research_platform.markets.implementations.a_share.processed import panels
+
+    with pytest.raises(ValueError, match=error):
+        panels._canonical_stock_master(
+            pd.DataFrame(
+                {
+                    "source_asset_id": ["000001", "000001"],
+                    "listing_date": ["2020-01-02", "2020-01-09"],
+                    "delisting_date": [delisting, None],
+                }
+            )
+        )

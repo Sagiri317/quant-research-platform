@@ -689,6 +689,7 @@ def test_canonical_listing_null_does_not_invalidate_complete_market_history(
         }
     )
     raw.loc[1, missing_column] = np.nan
+    raw["listing_date"] = raw["timestamp"].min()
     panel = panels._apply_suspension_semantics(panels._canonical_bars(raw))
     panel["eligible"] = panel.asset_id.eq("a")
     assert panel.loc[panel.asset_id.eq("new_listing"), missing_column].isna().all()

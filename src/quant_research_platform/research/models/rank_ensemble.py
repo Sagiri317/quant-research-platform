@@ -169,25 +169,22 @@ def _centered_rank_frame(
     columns: tuple[str, ...],
 ) -> pd.DataFrame:
     result = pd.DataFrame(0.0, index=frame.index, columns=columns)
-    groups = (
-        frame.groupby(timestamps, sort=False)
-        if timestamps is not None
-        else ((None, frame),)
-    )
-    for _timestamp, group in groups:
-        for column in columns:
-            values = strict_finite_numeric_series(
-                group[column],
-                error=f"invalid_rank_ensemble_column: {column}",
-                allow_null=True,
-            )
-            valid = values.notna()
-            count = int(valid.sum())
-            if count == 0:
-                continue
-            ranks = values.loc[valid].rank(method="average")
-            centered = (ranks - (count + 1.0) / 2.0) / count
-            result.loc[centered.index, column] = centered
+    for column in columns:
+        values = strict_finite_numeric_series(
+            frame[column],
+            error=f"invalid_rank_ensemble_column: {column}",
+            allow_null=True,
+        )
+        if timestamps is None:
+            ranks = values.rank(method="average")
+            count = values.count()
+        else:
+            grouped = values.groupby(timestamps, sort=False)
+            ranks = grouped.rank(method="average")
+            count = grouped.transform("count")
+        centered = (ranks - (count + 1.0) / 2.0) / count
+        # Preserve the original matrix layout and final dot-product reduction.
+        result.loc[:, column] = centered.fillna(0.0)
     return result
 
 

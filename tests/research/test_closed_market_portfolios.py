@@ -163,6 +163,9 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
         new = stocks.loc[stocks.source_asset_id.eq("a0")].assign(
             timestamp=closed[0], listing_date=closed[0]
         )
+        stocks.loc[stocks.source_asset_id.eq("a0"), "delisting_date"] = closed[
+            0
+        ] - pd.Timedelta(days=1)
         stocks = pd.concat((stocks, new), ignore_index=True)
     if fault == "unknown_before_suspension":
         calendar = calendar.loc[
