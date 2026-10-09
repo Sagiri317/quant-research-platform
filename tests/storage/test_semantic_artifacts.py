@@ -740,13 +740,15 @@ def test_operational_metadata_schema_rejects_absolute_keys_before_write_and_read
     from quant_research_platform.contracts.json_codec import render_qrp_json_object
     from quant_research_platform.storage.manifests import read_manifest
     from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_operational_metadata,
+        read_semantic_artifact_record,
     )
 
     root = _write_artifact(tmp_path)
     before = _immediate_file_bytes(root)
     before_instances = set(filesystem_iterdir(root.parent))
-    assert read_semantic_artifact_operational_metadata(root) == {}
+    decoded_operational = {}
+    read_semantic_artifact_record(root, operational_metadata=decoded_operational)
+    assert decoded_operational == {}
     with pytest.raises(
         ValueError, match="^semantic_artifact_operational_metadata_invalid$"
     ):
@@ -767,7 +769,7 @@ def test_operational_metadata_schema_rejects_absolute_keys_before_write_and_read
     with pytest.raises(
         ValueError, match="^semantic_artifact_operational_metadata_invalid$"
     ):
-        read_semantic_artifact_operational_metadata(root)
+        read_semantic_artifact_record(root)
     assert filesystem_read_bytes(manifest_path) == forged_bytes
 
 
@@ -820,7 +822,7 @@ def test_operational_metadata_rejects_wrong_enum_types_without_mutating_good(
     from quant_research_platform.storage.manifests import read_manifest
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
-        read_semantic_artifact_operational_metadata,
+        read_semantic_artifact_record,
     )
 
     observations = {}
@@ -854,7 +856,9 @@ def test_operational_metadata_rejects_wrong_enum_types_without_mutating_good(
         tmp_path / "good", _envelope(), writer, operational_metadata=valid
     )
     before = _immediate_file_bytes(good)
-    assert read_semantic_artifact_operational_metadata(good) == valid
+    decoded_operational = {}
+    read_semantic_artifact_record(good, operational_metadata=decoded_operational)
+    assert decoded_operational == valid
     invalid = deepcopy(valid)
     parent = invalid
     for key in path[:-1]:
@@ -879,7 +883,7 @@ def test_operational_metadata_rejects_wrong_enum_types_without_mutating_good(
     forged_bytes = (render_qrp_json_object(forged) + "\n").encode("utf-8")
     filesystem_write_bytes(candidate / "manifest.json", forged_bytes)
     with pytest.raises(ValueError, match=f"^{error}$"):
-        read_semantic_artifact_operational_metadata(candidate)
+        read_semantic_artifact_record(candidate)
     assert compare_semantic_artifacts(good, candidate).status == "INSPECTION_FAILED"
     assert filesystem_read_bytes(candidate / "manifest.json") == forged_bytes
     assert _immediate_file_bytes(good) == before
@@ -1079,7 +1083,7 @@ def test_operational_metrics_preserve_numeric_type_and_precision_in_native_artif
 ):
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
-        read_semantic_artifact_operational_metadata,
+        read_semantic_artifact_record,
     )
 
     metadata = _metric_operational_metadata(value)
@@ -1091,7 +1095,8 @@ def test_operational_metrics_preserve_numeric_type_and_precision_in_native_artif
         tmp_path / "good", _envelope(), writer, operational_metadata=metadata
     )
     before = _immediate_file_bytes(good)
-    decoded = read_semantic_artifact_operational_metadata(good)
+    decoded = {}
+    read_semantic_artifact_record(good, operational_metadata=decoded)
     assert decoded == metadata
     for observations in (
         decoded["final_alpha_observations"],
@@ -1146,7 +1151,7 @@ def test_invalid_operational_metrics_reject_before_publication_and_native_compar
     from quant_research_platform.storage.manifests import read_manifest
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
-        read_semantic_artifact_operational_metadata,
+        read_semantic_artifact_record,
     )
 
     valid = _metric_operational_metadata(1)
@@ -1183,7 +1188,7 @@ def test_invalid_operational_metrics_reject_before_publication_and_native_compar
     raw = (json.dumps(forged, ensure_ascii=False) + "\n").encode("utf-8")
     filesystem_write_bytes(manifest_path, raw)
     with pytest.raises(ValueError, match=f"^{error}$"):
-        read_semantic_artifact_operational_metadata(candidate)
+        read_semantic_artifact_record(candidate)
     assert compare_semantic_artifacts(good, candidate).status == "INSPECTION_FAILED"
     assert filesystem_read_bytes(manifest_path) == raw
     assert _immediate_file_bytes(good) == before
@@ -1191,7 +1196,7 @@ def test_invalid_operational_metrics_reject_before_publication_and_native_compar
 
 def test_operational_observations_roundtrip_above_former_byte_quota(tmp_path):
     from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_operational_metadata,
+        read_semantic_artifact_record,
     )
 
     metadata = {
@@ -1207,5 +1212,7 @@ def test_operational_observations_roundtrip_above_former_byte_quota(tmp_path):
         operational_metadata=metadata,
     )
     before = _immediate_file_bytes(good)
-    assert read_semantic_artifact_operational_metadata(good) == metadata
+    decoded_operational = {}
+    read_semantic_artifact_record(good, operational_metadata=decoded_operational)
+    assert decoded_operational == metadata
     assert _immediate_file_bytes(good) == before

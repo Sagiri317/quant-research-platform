@@ -836,14 +836,13 @@ def test_spot_uses_snapshot_plus_one_bootstrap(tmp_path: Path) -> None:
         ],
     )
     with open_recorder_run(root) as run:
-        owned_states = [
+        states = [
             event
             for event in iter_reconstructed_depth(
                 run, SPOT_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
             )
             if isinstance(event, BookState)
         ]
-        states = [event for event in owned_states]
     assert [state.update_id for state in states] == [11, 12]
     assert all(state.transaction_time_ms is None for state in states)
     assert [state.event_time_ms for state in states] == [10, 20]
@@ -863,10 +862,7 @@ def test_gap_emits_boundary_and_recovery_never_reuses_old_book(tmp_path: Path) -
                 run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
             )
         )
-        assert [
-            type(event) if isinstance(event, BookState) else type(event)
-            for event in events
-        ] == [BookState, BookBoundary, BookState]
+        assert [type(event) for event in events] == [BookState, BookBoundary, BookState]
         assert events[1].reason == "sequence_gap"
         assert events[1].transaction_time_ms == 20
         assert events[2].segment_id == "s2"
@@ -939,9 +935,7 @@ def test_same_run_replay_is_deterministic(tmp_path: Path) -> None:
                 run, FUTURES_MARKET_TYPE, symbol="BTCUSDT", required_levels=1
             )
         )
-        assert [
-            event if isinstance(event, BookState) else event for event in first
-        ] == [event if isinstance(event, BookState) else event for event in second]
+        assert first == second
 
 
 @pytest.mark.parametrize("mode", ("complete", "cancel", "same_owner_overlap"))

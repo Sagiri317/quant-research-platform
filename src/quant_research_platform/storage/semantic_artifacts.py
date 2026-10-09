@@ -442,14 +442,6 @@ def _read_artifact_manifest(
     return envelope, members, manifest_identity, operational
 
 
-def read_semantic_artifact_operational_metadata(
-    instance_root: Path,
-) -> dict[str, object]:
-    metadata: dict[str, object] = {}
-    read_semantic_artifact_record(instance_root, operational_metadata=metadata)
-    return metadata
-
-
 def _operational_metadata(value: object) -> dict[str, object]:
     snapshot = qrp_json_object_snapshot(value)
     if set(snapshot) - {

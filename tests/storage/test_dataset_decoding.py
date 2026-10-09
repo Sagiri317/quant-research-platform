@@ -70,16 +70,17 @@ def test_plain_reader_streams_normal_files(tmp_path, filtered):
     )
     expected = np.arange(1024 if filtered else 0, 4096, dtype=np.int64)
     delivered = 0
+    batch_rows = 1
     with closing_iterator(
         dataset_physical.iter_dataset_part_batches(
             path,
             expected_identity=None,
             parquet_filters=[("value", ">=", 1024)] if filtered else None,
-            batch_rows=1,
+            batch_rows=batch_rows,
         )
     ) as batches:
         for batch in batches:
-            assert batch.num_rows <= 10
+            assert batch.num_rows <= batch_rows
             np.testing.assert_array_equal(
                 batch.column(0).to_numpy(),
                 expected[delivered : delivered + batch.num_rows],

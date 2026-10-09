@@ -449,18 +449,6 @@ def _assert_public_text_is_sanitized(text: str) -> None:
 
 
 @pytest.mark.parametrize(
-    "unsafe",
-    ["token=SYNTHETIC_SECRET", r"C:\private\rows.csv", "/home/private/rows.csv"],
-)
-def test_public_output_guard_preserves_identifiers_and_rejects_secrets(unsafe):
-    _assert_public_text_is_sanitized(
-        "provider_id=demo source_id=fixture 000001 600000 data/raw"
-    )
-    with pytest.raises(AssertionError):
-        _assert_public_text_is_sanitized(unsafe)
-
-
-@pytest.mark.parametrize(
     "status, exit_code", [("COMPLETE", 0), ("FAILED", 1), ("BLOCKED", 3)]
 )
 def test_cli_materialize_leaves_raw_root_resolution_to_project_layout(

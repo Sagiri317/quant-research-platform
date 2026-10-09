@@ -2473,9 +2473,7 @@ def simulate_maker(
                 *(order for _time, _side, order in commands if order is not None),
             )
             censored_count = len(censored_orders)
-            censored_pending = sum(
-                order is not None for _time, _side, order in commands
-            )
+            censored_pending = len(commands)
             censored_zero_fill = sum(not order.had_fill for order in censored_orders)
             censored_quantity = sum(order.remaining for order in censored_orders)
             end_timestamp = max(

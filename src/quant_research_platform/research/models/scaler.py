@@ -177,7 +177,16 @@ class LinearScaledPredictor:
         coefficients = np.asarray(self.coefficients, dtype="float64")
         with np.errstate(over="ignore", invalid="ignore"):
             predictions = coefficients[0] + values @ coefficients[1:]
-        for row in np.flatnonzero(~np.isfinite(predictions)):
+        # A subnormal standardized value can lose a representable final affine term.
+        underflow = (
+            (np.abs(values) < np.finfo(float).tiny)
+            & (coefficients[1:] != 0)
+            & (
+                (frame.to_numpy(dtype="float64") != np.asarray(self.scaler.origin_))
+                | np.array([offset != 0 for offset in self.scaler.offset_])
+            )
+        ).any(axis=1)
+        for row in np.flatnonzero(~np.isfinite(predictions) | underflow):
             exact = Fraction(self.coefficients[0]) + sum(
                 Fraction(coefficient)
                 * (Fraction(float(value)) - Fraction(origin) - offset)

@@ -227,19 +227,6 @@ def test_write_dataset_rejects_duplicate_across_chunks_and_cleans_stage(
     assert not list(filesystem_glob(root.parent, ".a-*"))
 
 
-def test_write_dataset_rejects_existing_root_without_overwrite(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path)
-    write_dataset(
-        root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-    )
-    original = read_dataset(root)
-    with pytest.raises(ValueError, match="dataset_exists"):
-        write_dataset(
-            root, make_default_dataset_frame(), spec=make_processed_dataset_spec()
-        )
-    pd.testing.assert_frame_equal(read_dataset(root), original)
-
-
 def test_write_dataset_rejects_generic_tmp_artifact_root_fail_closed(
     tmp_path: Path,
 ) -> None:

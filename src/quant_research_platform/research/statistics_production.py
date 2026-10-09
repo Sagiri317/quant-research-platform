@@ -521,15 +521,18 @@ def _paired_group_rankic(
     )
     rows = []
     for family in family_ids:
-        values = differences[family].dropna().to_numpy(dtype="float64")
+        paired = np.isfinite(global_values[family]) & np.isfinite(
+            quarterly_values[family]
+        )
+        values = differences.loc[paired, family].to_numpy(dtype="float64")
         row = dict.fromkeys(columns, np.nan)
         row.update(
             family_id=family,
             access_window=access,
             observation_count=len(values),
             calendar_count=len(differences),
-            global_mean=float(global_values[family].mean()),
-            quarterly_mean=float(quarterly_values[family].mean()),
+            global_mean=float(global_values.loc[paired, family].mean()),
+            quarterly_mean=float(quarterly_values.loc[paired, family].mean()),
             mean_difference=float(values.mean()) if len(values) else np.nan,
             status="UNDEFINED",
             reason=inference_blocker if len(values) else "no_common_observations",

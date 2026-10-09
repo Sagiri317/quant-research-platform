@@ -302,7 +302,7 @@ def _validate_common_manifest_binding(
         raise ValueError("dataset_manifest_common_schema_identity_mismatch")
 
 
-def validate_dataset_spec(spec: DataSpec) -> str | None:
+def validate_dataset_spec(spec: DataSpec) -> None:
     if type(spec) not in {
         DataSpec,
         InterimDataSpec,
@@ -310,14 +310,6 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
         ResearchDatasetSpec,
     }:
         raise ValueError("dataset_spec_type_invalid")
-    return next(
-        (
-            column
-            for column in spec.primary_key
-            if spec.column_roles[column] is ColumnRole.TIMESTAMP
-        ),
-        None,
-    )
 
 
 def arrow_type_has_null(data_type: pa.DataType) -> bool:

@@ -202,6 +202,7 @@ def test_sanitizer_preserves_ordinary_identifiers_and_business_text() -> None:
 
 def test_share_safety_preserves_noncredential_counterexamples() -> None:
     safe_texts = (
+        "provider_id=demo source_id=fixture 000001 600000 data/raw",
         "authorization model",
         "basic factor model",
         "https://example.com/api/v1?mode=basic",

@@ -201,6 +201,9 @@ def test_dataset_write_read_long_path_preserves_existing_publication(
         for path in native_root.rglob("*")
         if path.is_file()
     } == original_bytes
+    pd.testing.assert_frame_equal(
+        dataset_reading.read_dataset(root), actual, check_exact=True
+    )
 
 
 def test_opened_parquet_close_preserves_generator_exit(

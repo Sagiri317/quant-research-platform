@@ -69,7 +69,13 @@ def test_abnormal_turnover_exact_windows_persist_across_chunks(
     sequences["missing"][240] = np.nan
     panel = pd.DataFrame(
         [
-            dict(market_id="a_share", asset_id=asset, timestamp=date, turnover=value)
+            dict(
+                market_id="a_share",
+                asset_id=asset,
+                timestamp=date,
+                listing_date=dates[0],
+                turnover=value,
+            )
             for asset, values in sequences.items()
             for date, value in zip(dates, values, strict=True)
         ]
@@ -139,7 +145,7 @@ def test_fundamental_growth_stable_differences_persist_across_chunks(
     for numerator, denominator in formulas.values():
         facts[numerator], facts[denominator] = zip(*cases, strict=True)
     panel = facts.loc[:, ["market_id", "asset_id", "timestamp"]].assign(
-        total_market_cap=1.0
+        total_market_cap=1.0, listing_date=dates[0]
     )
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
     saved = _produce_factors(
@@ -184,3 +190,65 @@ def test_abnormal_turnover_keeps_unrepresentable_signed_result():
         panel, factor_columns=("abnormal_turnover_20_250",)
     )
     assert output.abnormal_turnover_20_250.iloc[-1] == -np.inf
+
+
+@pytest.mark.parametrize("scale", (1e16, 1e308))
+@pytest.mark.parametrize("batch_rows", (6, 1000))
+def test_signed_amount_cancellation_persists_rank_direction(
+    tmp_path, monkeypatch, scale, batch_rows
+):
+    from quant_research_platform.research.models.rank_ensemble import (
+        EqualWeightRankEnsembleFactory,
+    )
+
+    dates = pd.bdate_range("2020-01-02", periods=20).as_unit("ns")
+    returns = [0.01, 0.01, -0.01] + [0.0] * 17
+    amounts = [scale, 1.0, scale] + [1.0] * 17
+    panel = pd.DataFrame(
+        [
+            dict(
+                market_id="a_share",
+                asset_id=asset,
+                timestamp=day,
+                listing_date=dates[0],
+                period_return=direction * value,
+                amount=amount,
+            )
+            for asset, direction in (("negative", -1.0), ("positive", 1.0))
+            for day, value, amount in zip(dates, returns, amounts, strict=True)
+        ]
+    )
+    columns = ("signed_amount_flow_20d", "return_amount_imbalance_20d")
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    saved = _produce_factors(
+        tmp_path,
+        "price_volume_facts",
+        {"market_panel_1d": panel},
+        columns,
+        TimeWindow(dates[-1], dates[-1]),
+    )
+    exact_amounts = tuple(map(Fraction, amounts))
+    exact_returns = tuple(map(Fraction, returns))
+    expected = (
+        float(Fraction(1) / sum(exact_amounts)),
+        float(
+            sum(
+                value * amount
+                for value, amount in zip(exact_returns, exact_amounts, strict=True)
+            )
+            / sum(
+                abs(value) * amount
+                for value, amount in zip(exact_returns, exact_amounts, strict=True)
+            )
+        ),
+    )
+    saved = saved.sort_values("asset_id")
+    for column, value in zip(columns, expected, strict=True):
+        assert value > 0.0
+        np.testing.assert_array_equal(saved[column], [-value, value])
+    saved["label"] = [-1.0, 1.0]
+    model = EqualWeightRankEnsembleFactory(columns, "label").fit(
+        saved, saved.label.to_numpy()
+    )
+    assert model.directions == (1.0, 1.0)
+    assert model.predict(saved)[0] < model.predict(saved)[1]

@@ -51,7 +51,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.semantic_artifacts import (
-    read_semantic_artifact_operational_metadata,
+    read_semantic_artifact_record,
     write_semantic_artifact,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
@@ -475,6 +475,9 @@ def _prediction_result(
 
 
 def _republish(case, logical, *, mutate, operational=None):
+    if not operational:
+        operational = {}
+        read_semantic_artifact_record(case.root, operational_metadata=operational)
 
     def write(stage):
         for member in case.artifact.member_records:
@@ -492,8 +495,7 @@ def _republish(case, logical, *, mutate, operational=None):
         logical,
         case.envelope,
         write,
-        operational_metadata=operational
-        or read_semantic_artifact_operational_metadata(case.root),
+        operational_metadata=operational,
     )
 
 

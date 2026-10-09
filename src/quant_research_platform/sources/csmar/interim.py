@@ -82,9 +82,6 @@ DEFAULT_INTERIM_DATA_IDS: tuple[str, ...] = (
     "equity_changes",
     "analyst_forecast",
 )
-TIME_RANGE_FILTER_DATA_IDS = {MARKET_BARS_DATA_ID}
-END_ONLY_FILTER_DATA_IDS = {"market_cap"}
-START_END_FILTER_DATA_IDS = {"adjustment"}
 SOURCE_ASSET_TIME_COLUMNS: tuple[str, ...] = (
     "source_asset_id",
     "timestamp",
@@ -941,9 +938,8 @@ def filter_by_source_date_range(
 ) -> pd.DataFrame:
     if start_date is None and end_date is None:
         return frame
-    column = _date_column(data_id)
     timestamps = strict_timestamp_series(
-        frame[column],
+        frame["timestamp"],
         error=f"invalid_{data_id}_source_timestamp",
         allow_null=True,
     )
@@ -1325,34 +1321,6 @@ def _normalize_trading_calendar_frame(frame: pd.DataFrame) -> pd.DataFrame:
     )
 
 
-def _date_column(data_id: str) -> str:
-    if data_id in {
-        MARKET_BARS_DATA_ID,
-        "adjustment",
-        "market_cap",
-        "stock_master",
-        "trading_calendar",
-        "index_membership",
-        "index_weights",
-        "index_market",
-        "financial_balance",
-        "financial_income",
-        "financial_cashflow",
-        "industry_classification",
-        "industry_classification_annual",
-        "industry_classification_versions",
-        "listing_status_changes",
-        "stock_info_changes",
-        "stock_info_annual",
-        "trading_no_limit",
-        "special_treatment_changes",
-        "equity_changes",
-        "analyst_forecast",
-    }:
-        return "timestamp"
-    raise ValueError(f"data_id_has_no_filtering_date_column: {data_id}")
-
-
 def _filter_normalized_frame(
     frame: pd.DataFrame,
     *,
@@ -1360,14 +1328,14 @@ def _filter_normalized_frame(
     start_date: str | None,
     end_date: str | None,
 ) -> pd.DataFrame:
-    if data_id in TIME_RANGE_FILTER_DATA_IDS | START_END_FILTER_DATA_IDS:
+    if data_id in {MARKET_BARS_DATA_ID, "adjustment"}:
         return filter_by_source_date_range(
             frame,
             data_id=data_id,
             start_date=start_date,
             end_date=end_date,
         )
-    if data_id in END_ONLY_FILTER_DATA_IDS:
+    if data_id == "market_cap":
         return filter_by_source_date_range(
             frame,
             data_id=data_id,

@@ -540,6 +540,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
     layout = StorageLayout(tmp_path)
     protocol = deepcopy(a_share.protocol("pv_all").manifest())
     protocol["statistics"]["factor_fdr_families"] = {"fixture": ["x"]}
+    if full_factor_history:
+        protocol["statistics"]["bootstrap_repetitions"] = 32
     protocol["statistics"]["fama_macbeth_core_factors"] = ["x"]
     families = tuple(f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS)
     dates = pd.bdate_range("2019-01-01", periods=64)

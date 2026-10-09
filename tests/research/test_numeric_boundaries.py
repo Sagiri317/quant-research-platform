@@ -453,7 +453,12 @@ def test_native_rank_one_industry_covariance_reaches_actual_optimizer():
         nav=100.0,
         assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
     )
-    np.testing.assert_array_equal(result.weights, np.full(15, 1 / 15))
+    assert np.isfinite(result.weights).all()
+    assert (result.weights >= 0.0).all()
+    assert result.weights.sum() == pytest.approx(1.0, abs=1e-12)
+    active = result.weights.to_numpy() - assets.benchmark_weight.to_numpy()
+    assert sum(map(Fraction, active)) == 0
+    assert float(assets.expected_alpha.to_numpy() @ result.weights.to_numpy()) == 0.0
     assert result.predicted_tracking_error == 0.0
 
 

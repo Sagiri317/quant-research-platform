@@ -586,7 +586,6 @@ def _apply_training_controls(frame: pd.DataFrame, spec: ModelSpec) -> pd.DataFra
     result["timestamp"] = strict_timestamp_series(
         result["timestamp"], error="invalid_model_training_timestamp"
     )
-    result = result.sort_values("timestamp", kind="mergesort")
     if spec.max_train_rows is not None:
         result = result.tail(spec.max_train_rows)
     return result.reset_index(drop=True)

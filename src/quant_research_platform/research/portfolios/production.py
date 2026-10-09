@@ -87,6 +87,7 @@ _PANEL_COLUMNS = (
 )
 _ENHANCED_PANEL_COLUMNS = (
     "asset_id",
+    "listing_date",
     "timestamp",
     "adj_open",
     "adj_close",
@@ -491,9 +492,9 @@ def build_portfolio_ledger(
                 ):
                     pending_calibration = (
                         waiting_alpha[0],
-                        view.valuation.set_index("asset_id")["adj_open"].astype(
-                            "float64"
-                        ),
+                        view.valuation.set_index(["asset_id", "listing_date"])[
+                            "adj_open"
+                        ].astype("float64"),
                         waiting_alpha[1],
                     )
                     waiting_alpha = None
@@ -529,7 +530,17 @@ def build_portfolio_ledger(
                             candidate.rebalance_schedule,
                         )
                     ):
-                        waiting_alpha = (alpha.copy(deep=True), decision_timestamp)
+                        calibration_alpha = alpha.copy(deep=True)
+                        calibration_alpha.index = pd.MultiIndex.from_arrays(
+                            (
+                                alpha.index,
+                                panel.set_index("asset_id").listing_date.reindex(
+                                    alpha.index
+                                ),
+                            ),
+                            names=("asset_id", "listing_date"),
+                        )
+                        waiting_alpha = (calibration_alpha, decision_timestamp)
                 assert benchmark_frames is not None
                 benchmark_weights = next(benchmark_frames)
             if decision_timestamp < output_start:
@@ -853,7 +864,9 @@ def _completed_calibration_rows(
 ) -> list[dict[str, float]]:
     alpha, previous_open, timestamp = pending
     current_open = (
-        pd.to_numeric(panel.set_index("asset_id")["adj_open"], errors="raise")
+        pd.to_numeric(
+            panel.set_index(["asset_id", "listing_date"])["adj_open"], errors="raise"
+        )
         .astype("float64")
         .reindex(alpha.index)
     )

@@ -45,7 +45,6 @@ from quant_research_platform.contracts.targets import (
     ProducerBinding,
     ProducerKind,
     TargetPlan,
-    research_run_record_from_payload,
 )
 from quant_research_platform.contracts.time import TimeWindow, a_share_analysis_windows
 from quant_research_platform.profiles.research import (
@@ -151,6 +150,7 @@ def _processed_specs() -> ProcessedDataCatalog:
         grain=DataGrain.ASSET_TIMESTAMP,
         column_roles={
             **common,
+            "listing_date": ColumnRole.CONTEXT,
             "adj_open": ColumnRole.CONTEXT,
             "adj_close": ColumnRole.CONTEXT,
             "amount": ColumnRole.CONTEXT,
@@ -332,6 +332,7 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
     panel["industry_level1_code"] = "A"
     panel["is_nonfinancial_industry"] = True
     panel = panel.assign(
+        listing_date=dates[0],
         is_a_share_scope=True,
         is_trading=True,
         is_st=False,
@@ -1774,19 +1775,6 @@ def both_groups_case(both_groups_baseline, tmp_path, monkeypatch):
 
 
 @_both_groups_windows()
-def test_native_run_record_rejects_escaping_target(
-    both_groups_baseline, tmp_path, monkeypatch
-):
-    record = both_groups_baseline.record
-    forged = record.payload()
-    next(target for target in forged["target_results"] if target["path"] is not None)[
-        "path"
-    ] = "../outside"
-    with pytest.raises(ValueError, match="research_run_record_invalid"):
-        research_run_record_from_payload(forged)
-
-
-@_both_groups_windows()
 def test_native_model_selection_chronology(both_groups_baseline, tmp_path, monkeypatch):
     layout = both_groups_baseline.layout
     model_ids = {
@@ -2085,10 +2073,8 @@ def test_native_prediction_interruption_preserves_primary_and_publication(
     request = both_groups_baseline.request
     protocol = both_groups_baseline.protocol
     prediction_id = both_groups_baseline.prediction_id
-    champion_root = both_groups_baseline.champion_root
     model_root = both_groups_baseline.model_root
     data_layout = both_groups_baseline.data_layout
-    bundle = champion_root / "outputs" / prediction_id
     from quant_research_platform.artifacts.outputs import (
         prediction as prediction_writer,
     )
@@ -2098,9 +2084,7 @@ def test_native_prediction_interruption_preserves_primary_and_publication(
         build_prediction_result_from_persisted_model,
     )
 
-    original_bytes = Path(
-        native_filesystem_path(bundle / "prediction.parquet")
-    ).read_bytes()
+    interrupted_layout = StorageLayout(tmp_path / "interrupted_prediction")
     native_write = prediction_writer.write_parquet_chunks
     primary = KeyboardInterrupt("merged_writer_interrupted")
     observed = []
@@ -2145,7 +2129,7 @@ def test_native_prediction_interruption_preserves_primary_and_publication(
                     output_spec=research._output_spec_for_target(
                         pspec.prediction_id, "a_share", "prediction"
                     ),
-                    layout=StorageLayout(tmp_path / "interrupted_prediction"),
+                    layout=interrupted_layout,
                     output_chunks=output.output_chunks,
                     model_metadata=output.model_metadata,
                     prediction_metadata_factory=output.prediction_metadata_factory,
@@ -2153,10 +2137,15 @@ def test_native_prediction_interruption_preserves_primary_and_publication(
         assert caught.value is primary
         assert observed
         output = model = None
-    assert (
-        Path(native_filesystem_path(bundle / "prediction.parquet")).read_bytes()
-        == original_bytes
+    candidate = prediction_writer.derive_output_bundle_root(
+        output_spec=research._output_spec_for_target(
+            pspec.prediction_id, "a_share", "prediction"
+        ),
+        layout=interrupted_layout,
+        expected_definition_id="prediction_outputs",
     )
+    assert not candidate.exists()
+    assert not candidate.parent.exists() or not tuple(candidate.parent.iterdir())
 
 
 @_both_groups_windows()

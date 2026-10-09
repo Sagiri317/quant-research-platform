@@ -997,3 +997,73 @@ def test_capture_fill_rows_keeps_delayed_identity_without_derived_fees(
         realized,
     ]
     assert economics.mark(2, close_price)["net_pnl"] == realized - 2.0
+
+
+def test_truncated_pending_cancels_survive_native_ledger_summary(tmp_path):
+    from dataclasses import asdict
+
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        summarize_portfolio_ledger,
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+
+    capital = PortfolioCapital("pending-cancels", 1000.0, "USDT", "linear_perpetual")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=capital.candidate_id,
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "1970-01-01",
+            "end": "1970-01-02",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+    results = []
+
+    def produce(emit):
+        result = _simulate_maker(
+            [_state(stamp) for stamp in (0, 100, 200, 240, 400)],
+            [],
+            [
+                _quote(0, book_segment_id="s1"),
+                _quote(200, book_segment_id="unavailable"),
+            ],
+            config=replace(_maker_config(), latency_ms=100),
+            observed_coverage={"s1": (0, 1000000001)},
+            trade_coverage={"trade-connection-1": (0, 1000000001)},
+            capital=capital,
+            asset_id="btc_usdt",
+            funding_events=(),
+            decision_windows_ns=((0, 1000000000),),
+            observation_window_ns=(0, 250000000),
+            on_ledger=emit,
+        )
+        results.append(result)
+
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger", envelope=envelope, produce=produce
+    )
+    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    summary = summarize_portfolio_ledger(saved.capital, saved.iter_chunks())
+    assert results[0]["censored_pending_command_count"] == 2
+    assert results[0]["cancelled_orders"] == results[0]["filled_orders"] == 0
+    import json
+
+    diagnostics = [
+        json.loads(row.text)
+        for batch in saved.iter_chunks()
+        for row in batch.diagnostics
+        if row.name == "execution_summary"
+    ]
+    assert len(diagnostics) == 1
+    assert diagnostics[0]["censored_pending_command_count"] == 2
+    assert diagnostics[0]["cancelled_orders"] == diagnostics[0]["filled_orders"] == 0
+    assert summary["net_pnl"] == 0.0
+    assert not any(batch.trades or batch.cashflows for batch in saved.iter_chunks())

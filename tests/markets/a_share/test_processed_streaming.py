@@ -1652,3 +1652,24 @@ def test_native_lifecycle_history_does_not_join_relisting(
     factors = results["price_volume_facts"]
     assert pd.isna(factors.loc[dates[300 + gap], "reversal_1d"])
     assert factors.loc[dates[302 + gap], "reversal_1d"] == 0.0
+    from quant_research_platform.research.portfolios.production import (
+        _completed_calibration_rows,
+    )
+
+    entry = (
+        panel.loc[[dates[289]]].reset_index().set_index(["asset_id", "listing_date"])
+    )
+    alpha = pd.Series(1.0, index=entry.index)
+    pending = (alpha, entry.adj_open, dates[288])
+    assert (
+        _completed_calibration_rows(
+            pending, panel.loc[[dates[302 + gap]]].reset_index()
+        )
+        == []
+    )
+    same_life = _completed_calibration_rows(
+        pending, panel.loc[[dates[295]]].reset_index()
+    )
+    assert same_life == [
+        {"timestamp": dates[288], "alpha_score": 1.0, "holding_return": 0.0}
+    ]

@@ -237,6 +237,22 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
     path = write_research_run_record(tmp_path / f"{record.run_id}.json", record)
     assert path.stat().st_size > 1024 * 1024
     assert read_research_run_record(path).payload() == original
+    from quant_research_platform.contracts.targets import (
+        research_run_record_from_payload,
+    )
+
+    single = replace(
+        record,
+        terminal_targets=("target_0",),
+        target_results=(record.target_results[0],),
+    )
+    assert (
+        research_run_record_from_payload(single.payload()).payload() == single.payload()
+    )
+    forged = single.payload()
+    forged["target_results"][0]["path"] = "../outside"
+    with pytest.raises(ValueError, match="research_run_record_invalid"):
+        research_run_record_from_payload(forged)
 
 
 @pytest.mark.parametrize(

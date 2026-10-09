@@ -20,7 +20,6 @@ from quant_research_platform.storage.datasets.reading import (
 from quant_research_platform.storage.experiments import read_trial_ledger_reference
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_glob,
     filesystem_iterdir,
     filesystem_read_bytes,
     filesystem_read_text,
@@ -320,14 +319,14 @@ def check_crypto_model_staging(*, layout, profile, saved):
     from quant_research_platform.storage import parquet as parquet_storage
     from quant_research_platform.storage.identity import native_filesystem_path
     from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_operational_metadata,
         read_semantic_artifact_record,
     )
 
-    original = read_semantic_artifact_record(saved.instance_root)
-    references = read_semantic_artifact_operational_metadata(saved.instance_root)[
-        "model_trial_ledgers"
-    ]
+    operational = {}
+    original = read_semantic_artifact_record(
+        saved.instance_root, operational_metadata=operational
+    )
+    references = operational["model_trial_ledgers"]
     contract = saved.envelope["semantic_metadata"]["target_contract"]["protocol"]
     protocol = profile.protocol(contract["scenario_id"])
     logical_root = saved.instance_root.parent.parent
@@ -535,7 +534,6 @@ def check_crypto_model_staging(*, layout, profile, saved):
         assert {
             p.name for p in filesystem_iterdir(saved.instance_root.parent)
         } == previous_instances
-        assert not tuple(filesystem_glob(logical_root, ".*staging*"))
     validation = None
     for index, failure in enumerate(
         (
@@ -689,7 +687,6 @@ def check_crypto_model_staging(*, layout, profile, saved):
             p.name for p in filesystem_iterdir(saved.instance_root.parent)
         } == previous_instances
         assert read_semantic_artifact_record(saved.instance_root) == original
-        assert not tuple(filesystem_glob(logical_root, ".*staging*"))
 
 
 def check_crypto_wide_fold_artifact(

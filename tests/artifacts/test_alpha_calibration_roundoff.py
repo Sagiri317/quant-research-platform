@@ -47,8 +47,13 @@ def test_rank_and_open_return_roundoff_survives_final_json_and_freeze(
             + 0.2 * alpha.to_numpy()
             + noise * ((offset + np.arange(1, count + 1)) % 3 - 1)
         )
-        previous_open = pd.Series(1.0, index=assets)
-        endpoint = pd.DataFrame({"asset_id": assets, "adj_open": 1.0 + returns})
+        alpha.index = pd.MultiIndex.from_arrays(
+            (assets, [dates[0]] * count), names=("asset_id", "listing_date")
+        )
+        previous_open = pd.Series(1.0, index=alpha.index)
+        endpoint = pd.DataFrame(
+            {"asset_id": assets, "listing_date": dates[0], "adj_open": 1.0 + returns}
+        )
         rows.extend(
             _completed_calibration_rows((alpha, previous_open, timestamp), endpoint)
         )

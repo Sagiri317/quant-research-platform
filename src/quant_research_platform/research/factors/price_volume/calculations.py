@@ -363,7 +363,8 @@ def _calculate_values(
             normalized = np.divide(
                 flow, scale, out=np.zeros_like(flow), where=scale > 0
             )
-            numerator = np.sum(np.sign(current) * normalized, axis=1)
+            terms = np.sign(current) * normalized
+            numerator = np.sum(terms, axis=1)
             denominator = np.sum(normalized, axis=1)
         else:
             return_mantissa, return_exponent = np.frexp(current)
@@ -380,7 +381,8 @@ def _calculate_values(
                 keepdims=True,
             )
             normalized = np.ldexp(products, exponents - scale)
-            numerator = np.sum(normalized, axis=1)
+            terms = normalized
+            numerator = np.sum(terms, axis=1)
             denominator = np.sum(np.abs(normalized) * np.sign(flow), axis=1)
         result = np.divide(
             numerator,
@@ -388,6 +390,48 @@ def _calculate_values(
             out=np.full(len(current), np.nan),
             where=denominator != 0,
         )
+        # Only ill-conditioned signed sums need exact products and cancellation.
+        denominator_terms = (
+            normalized
+            if factor == "signed_amount_flow_20d"
+            else np.abs(normalized) * np.sign(flow)
+        )
+        cancelled = np.zeros(len(current), dtype=bool)
+        for terms_, totals in ((terms, numerator), (denominator_terms, denominator)):
+            cancelled |= (
+                (terms_ > 0).any(axis=1)
+                & (terms_ < 0).any(axis=1)
+                & (
+                    np.abs(totals)
+                    <= size * np.finfo(float).eps * np.abs(terms_).sum(axis=1)
+                )
+            )
+        for row in np.flatnonzero(cancelled):
+            returns = tuple(map(Fraction, current[row]))
+            amounts = tuple(map(Fraction, flow[row]))
+            if factor == "signed_amount_flow_20d":
+                exact_numerator = sum(
+                    (1 if value > 0 else -1 if value < 0 else 0) * amount
+                    for value, amount in zip(returns, amounts, strict=True)
+                )
+                exact_denominator = sum(amounts)
+            else:
+                exact_numerator = sum(
+                    value * amount
+                    for value, amount in zip(returns, amounts, strict=True)
+                )
+                exact_denominator = sum(
+                    abs(value) * amount
+                    for value, amount in zip(returns, amounts, strict=True)
+                )
+            if exact_denominator:
+                ratio = exact_numerator / exact_denominator
+                try:
+                    result[row] = float(ratio)
+                except OverflowError:
+                    result[row] = np.inf if ratio > 0 else -np.inf
+            else:
+                result[row] = np.nan
     elif factor == "positive_return_fraction_20d":
         result = np.mean(current > 0.0, axis=1)
     elif factor in {"largest_daily_contribution_20d", "path_roughness_20d"}:

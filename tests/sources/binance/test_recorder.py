@@ -801,11 +801,10 @@ def test_recorder_start_failure_joins_only_started_native_threads(
     assert not output.exists()
 
 
-@pytest.mark.parametrize("join_completes,late_failure", [(True, False), (True, True)])
+@pytest.mark.parametrize("late_failure", (False, True))
 def test_recorder_publishes_only_after_reader_and_writer_completion(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
-    join_completes: bool,
     late_failure: bool,
 ) -> None:
     output_root = tmp_path / "run"
@@ -831,7 +830,7 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
 
         def join(self, timeout: float) -> None:
             del timeout
-            self.alive = not join_completes
+            self.alive = False
             if late_failure:
                 self.failure = OSError("final_write_failed")
 
@@ -868,7 +867,7 @@ def test_recorder_publishes_only_after_reader_and_writer_completion(
         with pytest.raises(OSError, match="final_write_failed"):
             recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
         assert not output_root.exists()
-    elif join_completes:
+    else:
         result = recorder.record(RecorderConfig(output_root, duration_seconds=0.001))
         assert result == json.loads(
             (output_root / "run.json").read_text(encoding="utf-8")

@@ -359,8 +359,9 @@ def test_rank_label_calibration_matches_full_fraction_accumulation(mode):
 
 
 @pytest.mark.parametrize("identity", (False, True))
+@pytest.mark.parametrize("scale", (1e-308, 1.0, 1e308))
 def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
-    tmp_path, identity
+    tmp_path, identity, scale
 ):
     import pickle
 
@@ -375,15 +376,15 @@ def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
         build_estimator_from_model_spec,
     )
 
-    stamps = pd.to_datetime(["2020-01-01", "2020-01-02"])
+    stamps = pd.to_datetime(["2020-01-01"] * 2 + ["2020-01-02"] * 2)
     frame = pd.DataFrame(
         dict(
             timestamp=stamps,
-            asset_id=["a", "a"],
+            asset_id=["a", "b", "a", "b"],
             eligible=True,
             label_available_at=stamps,
-            x=[1e-308, 2e-308],
-            y=[1e-308, 2e-308] if identity else [0.0, 0.0],
+            x=[-scale, scale] * 2,
+            y=[-scale, scale] * 2 if identity else [0.0] * 4,
         )
     )
     spec = ModelSpec(
@@ -401,5 +402,81 @@ def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
     path.write_bytes(pickle.dumps(result.prediction_model))
     predictor = pickle.loads(path.read_bytes())
     validate_model_state(predictor, result.metadata)
-    scores = prediction_callable(("x",), predictor)(pd.DataFrame({"x": [10.0]}))
-    np.testing.assert_allclose(scores, [10.0 if identity else 0.0], rtol=1e-14)
+    from quant_research_platform.artifacts.outputs import write_prediction_outputs
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        read_prediction_output_bundle,
+    )
+    from quant_research_platform.contracts.predictions import PredictionSpec
+    from quant_research_platform.research.predictions.outputs import (
+        build_prediction_result_from_frames,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.output_frames import make_prediction_report_spec
+
+    inputs = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-04"),
+            "asset_id": ["a", "b", "c"],
+            "eligible": True,
+            "x": [10.0, 1e-100, 0.0],
+        }
+    )
+    expected = np.array(
+        [
+            float(
+                Fraction(predictor.coefficients[0])
+                + Fraction(predictor.coefficients[1])
+                * (
+                    Fraction(value)
+                    - Fraction(predictor.scaler.origin_[0])
+                    - predictor.scaler.offset_[0]
+                )
+                / Fraction(predictor.scaler.scale_[0])
+            )
+            for value in inputs.x
+        ]
+    )
+    scores = prediction_callable(("x",), predictor)(inputs[["x"]])
+    np.testing.assert_allclose(scores, expected, rtol=1e-14, atol=0)
+    prediction_spec = PredictionSpec(
+        prediction_id="pred-run",
+        model_id="probe",
+        research_dataset_id="demo",
+        train_end="2020-01-02",
+        test_start="2020-01-04",
+        test_end="2020-01-04",
+    )
+    with build_prediction_result_from_frames(
+        (inputs,),
+        prediction_spec,
+        ("x",),
+        prediction_model=predictor,
+        model_metadata=result.metadata,
+    ) as output:
+        root = write_prediction_outputs(
+            spec=prediction_spec,
+            output_spec=make_prediction_report_spec(),
+            layout=StorageLayout(tmp_path),
+            output_chunks=output.output_chunks,
+            model_metadata=output.model_metadata,
+            prediction_metadata_factory=output.prediction_metadata_factory,
+        )
+    _, lookup = read_prediction_output_bundle(root, expected_output_id="pred-run")
+    values, found = lookup.values_for_frame(
+        inputs[["timestamp", "asset_id"]], mark_matched=True
+    )
+    assert all(found)
+    np.testing.assert_array_equal(values, scores)
+
+
+@pytest.mark.parametrize("value", (1e-100, 1.0, 10.0, -1e-100))
+def test_linear_affine_underflow_preserves_representable_result(value):
+    import pickle
+
+    from quant_research_platform.research.models.scaler import LinearScaledPredictor
+
+    scaler = ModelMatrixScaler.fit(pd.DataFrame({"x": [-1e308, 1e308] * 2}))
+    predictor = pickle.loads(pickle.dumps(LinearScaledPredictor((0.0, 1e308), scaler)))
+    frame = pd.DataFrame({"x": [value]})
+    expected = float(Fraction(1e308) * Fraction(value) / Fraction(scaler.scale_[0]))
+    assert predictor.predict(frame)[0] == expected == value

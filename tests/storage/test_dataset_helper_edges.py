@@ -220,9 +220,9 @@ def test_validate_dataset_spec_accepts_only_research_immutable_semantic_mappings
     research = make_demo_research_dataset_spec()
     assert type(research.column_roles) is MappingProxyType
     assert type(research.key_coverage) is MappingProxyType
-    assert validate_dataset_spec(research) == "timestamp"
+    validate_dataset_spec(research)
     processed = make_processed_dataset_spec("storage_demo", market_id="dummy")
-    assert validate_dataset_spec(processed) == "timestamp"
+    validate_dataset_spec(processed)
 
 
 @pytest.mark.parametrize("wrong_kind", ([], {}), ids=("list", "dict"))
@@ -564,7 +564,7 @@ def test_exact_comparison_primary_key_only_projection_has_empty_value() -> None:
 def test_exact_map_high_cardinality_and_multiplicity_are_order_independent() -> None:
     map_type = pa.map_(pa.string(), pa.int64())
     entries = [(f"key-{index:04d}", index % 7) for index in range(512)]
-    entries.extend((("duplicate", 2), ("duplicate", 1)))
+    entries.extend((("duplicate", 2), ("duplicate", 1), ("duplicate", 1)))
     forward = pa.array([entries], type=map_type)[0]
     reverse = pa.array([list(reversed(entries))], type=map_type)[0]
     forward_payload = bytearray()
@@ -572,6 +572,11 @@ def test_exact_map_high_cardinality_and_multiplicity_are_order_independent() -> 
     key_tracking._append_arrow_scalar_payload(forward_payload, forward, map_type)
     key_tracking._append_arrow_scalar_payload(reverse_payload, reverse, map_type)
     assert forward_payload == reverse_payload
+    reduced_payload = bytearray()
+    key_tracking._append_arrow_scalar_payload(
+        reduced_payload, pa.array([entries[:-1]], type=map_type)[0], map_type
+    )
+    assert reduced_payload != forward_payload
 
 
 def test_dataset_comparison_failure_summary_does_not_expose_local_path(

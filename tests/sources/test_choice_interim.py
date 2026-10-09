@@ -641,6 +641,7 @@ def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
             "market_id": "a_share",
             "asset_id": ["000001", "000001"],
             "timestamp": pd.to_datetime(["2020-01-31", "2020-02-03"]),
+            "listing_date": pd.Timestamp("2010-01-01"),
             "total_market_cap": 200.0,
         }
     )
@@ -654,6 +655,7 @@ def _persisted_financials_feed_all_nineteen_factors_and_keep_nulls(tmp_path):
             "market_id": ColumnRole.KEY,
             "asset_id": ColumnRole.KEY,
             "timestamp": ColumnRole.TIMESTAMP,
+            "listing_date": ColumnRole.CONTEXT,
             "total_market_cap": ColumnRole.CONTEXT,
         },
         primary_key=("market_id", "asset_id", "timestamp"),

@@ -1169,6 +1169,34 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(
             plan=plan,
             small_models=True,
         )
+        configuration["comparison_model_id"] = "crypto_hft_linear_regression"
+        consumed_models = {
+            "crypto_hft_lightgbm_regressor",
+            "crypto_hft_linear_regression",
+            "crypto_hft_maker_bid_sell_pressure_proxy",
+        }
+        configuration["models"] = [
+            model
+            for model in configuration["models"]
+            if model["model_id"] in consumed_models
+        ]
+        portfolios = []
+        for item in configuration["portfolios"]:
+            if item["candidate_id"] == "crypto_hft_lightgbm_regressor":
+                portfolios.extend(
+                    {
+                        **item,
+                        "candidate_id": f"{item['candidate_id']}_latency_{latency}ms",
+                        "latency_ms": latency,
+                    }
+                    for latency in (0, 100, 200)
+                )
+            elif item["candidate_id"] in {
+                "crypto_hft_maker_baseline",
+                "crypto_hft_maker",
+            }:
+                portfolios.append(item)
+        configuration["portfolios"] = portfolios
         development = research.research_run(
             profile=profile,
             layout=layout,
@@ -1209,6 +1237,13 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(
             if row["metric_id"] == "queue_assumption" and row["status"] == "DEFINED"
         }
         record = read_research_run_record(layout.research_run_path(result["run_id"]))
+        assert len(record.target_results) == 22
+        assert (
+            sum(
+                target.target_id.endswith("_ledger") for target in record.target_results
+            )
+            == 5
+        )
         latency_candidates = {
             f"crypto_hft_lightgbm_regressor_latency_{latency}ms": latency
             for latency in (0, 100, 200)

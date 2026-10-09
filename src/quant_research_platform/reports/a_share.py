@@ -201,6 +201,12 @@ def build_a_share_report(
     }
     for group, result in statistics.items():
         if result.get("status") == "DEFINED":
+            sections["OOS prediction"][group]["prediction_diagnostics"] = result[
+                "prediction_diagnostics"
+            ]
+            sections["OOS prediction"][group]["statistics_identity"] = result[
+                "identity"
+            ]
             sections["OOS prediction"][group]["family_comparison"] = result[
                 "model_comparison"
             ]

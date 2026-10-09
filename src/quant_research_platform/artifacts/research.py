@@ -423,6 +423,7 @@ def load_a_share_run_evidence(
                     name: table_records(artifact, name + ".parquet")
                     for name in (
                         "model_trials",
+                        "prediction_diagnostics",
                         "model_comparison",
                         "model_group_comparison",
                         "model_reality_checks",

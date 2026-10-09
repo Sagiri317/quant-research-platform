@@ -1069,7 +1069,20 @@ def test_instance_metadata_preserves_typed_mapping_and_error_order() -> None:
     metadata = UserDict(
         {"input_dataset_identities": identities, "source_artifact_identity": archive}
     )
-    expected = dataset_schema.merge_dataset_instance_metadata({}, metadata)
+    expected = {
+        "input_dataset_identities": {
+            "input": {
+                "data_id": "input",
+                "spec_hash": "a" * 64,
+                "manifest_hash": "b" * 64,
+            }
+        },
+        "source_artifact_identity": {
+            "schema_id": "archive",
+            "artifact_id": "first",
+            "manifest_hash": "c" * 64,
+        },
+    }
     actual = dataset_schema.merge_dataset_instance_metadata({}, metadata)
     assert actual == expected
     actual["input_dataset_identities"]["input"]["spec_hash"] = "d" * 64

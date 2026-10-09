@@ -49,15 +49,17 @@ def compare_datasets(
             right_path, columns=columns, time_window=time_window
         )
         key_columns = tuple(left_context.spec["primary_key"])
+        left_schema = comparison_schema(left_context)
+        right_schema = comparison_schema(right_context)
         same_schema = (
             left_context.logical_columns == right_context.logical_columns
-            and comparison_schema(left_context) == comparison_schema(right_context)
+            and left_schema == right_schema
             and key_columns == tuple(right_context.spec["primary_key"])
         )
         index = ExactPrimaryKeyIndex(primary_key=key_columns)
         changed = 0
 
-        def inspect(context, namespace):
+        def inspect(context, namespace, schema):
             def index_batch(batch, _frame):
                 nonlocal changed
                 table = pa.Table.from_batches([batch])
@@ -107,7 +109,7 @@ def compare_datasets(
                     partitions[partition] = partitions.get(partition, 0) + len(frame)
                     row_count += len(frame)
             return {
-                "schema_hash": canonical_json_hash(comparison_schema(context)),
+                "schema_hash": canonical_json_hash(schema),
                 "row_count": row_count,
                 "key_columns": tuple(context.spec["primary_key"]),
                 "file_count": file_count,
@@ -117,8 +119,8 @@ def compare_datasets(
                 ),
             }
 
-        left = inspect(left_context, "left")
-        right = inspect(right_context, "right")
+        left = inspect(left_context, "left", left_schema)
+        right = inspect(right_context, "right", right_schema)
         layout_delta = {
             key: {"left": left[key], "right": right[key]}
             for key in ("file_count", "partitions")
@@ -130,7 +132,7 @@ def compare_datasets(
         if (
             left["schema_hash"] != right["schema_hash"]
             or left_context.logical_columns != right_context.logical_columns
-            or comparison_schema(left_context) != comparison_schema(right_context)
+            or left_schema != right_schema
         ):
             status = "SCHEMA_MISMATCH"
         elif left["row_count"] != right["row_count"]:

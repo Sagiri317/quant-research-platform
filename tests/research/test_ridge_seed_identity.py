@@ -371,7 +371,7 @@ def test_model_reader_rejects_rehashed_typed_native_state_drift(tmp_path):
         filesystem_write_bytes,
     )
     from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_operational_metadata,
+        read_semantic_artifact_record,
         write_semantic_artifact,
     )
 
@@ -405,11 +405,13 @@ def test_model_reader_rejects_rehashed_typed_native_state_drift(tmp_path):
             filesystem_mkdir(destination.parent, parents=True, exist_ok=True)
             filesystem_write_bytes(destination, payload)
 
+    operational = {}
+    read_semantic_artifact_record(good.root, operational_metadata=operational)
     bad = write_semantic_artifact(
         tmp_path / "bad",
         good.envelope,
         write,
-        operational_metadata=read_semantic_artifact_operational_metadata(good.root),
+        operational_metadata=operational,
     )
     assert len(changed) == 1
     fresh = persisted.read_quarterly_model_artifact(

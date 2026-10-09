@@ -2031,3 +2031,173 @@ def test_legal_internal_model_name_survives_joint_test_publication(
             actual, checks.assign(reason=checks.reason.fillna("")), check_dtype=False
         )
         assert family in set(actual.family_id)
+
+
+@pytest.mark.parametrize("access", ("development", "holdout"))
+def test_paired_rankic_and_champion_diagnostics_reach_native_report(
+    tmp_path, tables, envelope, access
+):
+    import numpy as np
+
+    from quant_research_platform.artifacts.research import load_a_share_run_evidence
+    from quant_research_platform.contracts.targets import (
+        ProducerKind,
+        ResearchRunTargetResult,
+        TargetStatus,
+    )
+    from quant_research_platform.reports.a_share import build_a_share_report
+    from quant_research_platform.research import statistics_production as production
+    from quant_research_platform.research.protocols import a_share
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.research.test_report_selection import record as report_record
+
+    dates = pd.bdate_range("2023-01-02", periods=5)
+    permutations = {
+        "global": [(1, 2, 3), (1, 3, 2), (1, 1, 1), (1, 3, 2), (3, 1, 2)],
+        "quarterly": [(1, 3, 2), (1, 2, 3), (1, 2, 3), (3, 1, 2), (1, 2, 3)],
+    }
+    ranks = {}
+    for group, values in permutations.items():
+        frame = pd.DataFrame(
+            {
+                "timestamp": dates.repeat(3),
+                "asset_id": ["a", "b", "c"] * 5,
+                "prediction": np.asarray(values).ravel(),
+                "label": [1.0, 2.0, 3.0] * 5,
+            }
+        )
+        ranks[group] = (
+            production.cross_sectional_rank_ic(
+                frame, value_columns=("prediction",), label_column="label"
+            )
+            .set_index("timestamp")
+            .prediction
+        )
+    losses = {
+        group: pd.DataFrame(
+            dict(
+                timestamp=dates,
+                access_window=access,
+                quarter_id="2023Q1",
+                family_id="family",
+                config_id="config",
+                loss=-values.to_numpy(),
+                observation_count=3,
+                status=np.where(values.notna(), "DEFINED", "UNDEFINED"),
+                reason=np.where(values.notna(), "", "cross_sectional_rankic_undefined"),
+                common_date=values.notna().astype(int).to_numpy(),
+                common_observation_count=3,
+                asset_coverage_id="d" * 64,
+            )
+        )
+        for group, values in ranks.items()
+    }
+    protocol = a_share.protocol("pv_all").manifest()
+    protocol.update(access_window=access)
+    protocol["statistics"].update(
+        hac_lag=1, bootstrap_block=2, bootstrap_repetitions=32
+    )
+    record = report_record()
+    record.protocol["research_configuration"]["stage"] = "models"
+    record.research_window["access"] = access
+    layout = StorageLayout(tmp_path)
+    references = []
+    expected = {}
+    global_artifact = None
+    for group in ("global", "quarterly"):
+        target = f"factors_only_{group}_statistics"
+        base = build_business_manifest_envelope(
+            logical_artifact_id=target,
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity="c" * 64,
+            research_window={
+                "start": "2023-01-02",
+                "end": "2023-03-31",
+                "access": access,
+            },
+            upstream_identities={},
+            semantic_metadata={},
+        )
+        declaration = {
+            **protocol,
+            "selection_group": group,
+            "formal_dataset_window": {"start": "2023-01-02", "end": "2023-03-31"},
+            "development_window": {"start": "2023-01-02", "end": "2023-03-31"},
+            "holdout_window": {"start": "2023-01-02", "end": "2023-03-31"},
+        }
+        bound = statistics_envelope(base, group="research", protocol=declaration)
+        selected = {name: table.copy(deep=True) for name, table in tables.items()}
+        for table in selected.values():
+            if "access_window" in table:
+                table["access_window"] = access
+        selected["model_losses"] = losses[group]
+        selected["prediction_diagnostics"] = production._prediction_summary(
+            ranks[group].to_frame(production._PREDICTION_COLUMN),
+            prediction_id=f"factors_only_{group}_persisted_predictions",
+            inference_blocker="global_development_selection_reuses_validation"
+            if group == "global" and access == "development"
+            else None,
+            max_lags=1,
+            block_size=2,
+            repetitions=32,
+            seed=42,
+        )
+        if group == "quarterly":
+            selected["model_group_comparison"] = production._paired_group_rankic(
+                losses[group],
+                global_statistics=global_artifact,
+                selection_group=group,
+                family_ids=("family",),
+                protocol_manifest=declaration,
+            )
+        logical = tmp_path / "data/artifacts/a_share" / target
+        root = statistics.write_statistics_artifact(
+            logical, envelope=bound, tables=selected
+        )
+        artifact = statistics.read_statistics_artifact(
+            root, expected_identity=root.name
+        )
+        if group == "global":
+            global_artifact = artifact
+        else:
+            with artifact.table("model_group_comparison.parquet") as paired:
+                row = paired.iloc[0]
+                assert row.observation_count == 4 and row.calendar_count == 5
+                assert row.global_mean == 0.375
+                assert row.quarterly_mean == 0.5
+                assert (
+                    row.mean_difference == row.quarterly_mean - row.global_mean == 0.125
+                )
+                assert row.fdr_family_size == 1
+                assert row.status == (
+                    "UNDEFINED" if access == "development" else "DEFINED"
+                )
+        with artifact.table("prediction_diagnostics.parquet") as diagnostic:
+            expected[group] = (
+                diagnostic.astype(object)
+                .where(diagnostic.notna(), None)
+                .to_dict("records")
+            )
+        references.append(
+            ResearchRunTargetResult(
+                target_id=target,
+                producer_kind=ProducerKind.STATISTIC,
+                status=TargetStatus.BUILT,
+                instance_identity=root.name,
+                schema_identity=bound.schema_identity,
+                artifact_root=logical.relative_to(tmp_path).as_posix(),
+            )
+        )
+    record.target_results = tuple(references)
+    evidence = load_a_share_run_evidence(layout=layout, record=record, selections={})
+    report = build_a_share_report(record=record, evidence=evidence)
+    for group, reference in zip(("global", "quarterly"), references, strict=True):
+        shown = report["sections"]["OOS prediction"][group]
+        assert shown["prediction_diagnostics"] == expected[group]
+        assert shown["statistics_identity"] == reference.instance_identity
+        assert shown["prediction_diagnostics"][0]["status"] == (
+            "UNDEFINED" if group == "global" and access == "development" else "DEFINED"
+        )
+    # Unrelated targets are absent in this focused native publication fixture.
+    assert report["report_status"] == "BLOCKED"

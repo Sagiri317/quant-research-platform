@@ -154,6 +154,7 @@ def _inputs() -> tuple[dict[str, pd.DataFrame], pd.DataFrame, TimeWindow]:
             {
                 "asset_id": asset,
                 "timestamp": timestamp,
+                "listing_date": dates[0],
                 "adj_open": 100.0 + timestamp.day * (1 if asset == "a" else 2),
                 "adj_close": 100.0 + timestamp.day * (1 if asset == "a" else 2),
                 "amount": 1000.0,
@@ -1074,9 +1075,7 @@ def test_enhanced_membership_maintenance_keeps_explicit_benchmark_target(
         pd.testing.assert_frame_equal(actual, expected, check_exact=True)
 
 
-def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
-    tmp_path: Path, monkeypatch
-) -> None:
+def _enhanced_inputs(monkeypatch):
     frames, fee_frame, output_window = _inputs()
     output_window = TimeWindow("2023-01-03", "2023-01-10")
     frames["panel"]["period_return"] = 0.001
@@ -1155,6 +1154,13 @@ def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
         trading_calendar_target_id="calendar",
         fee_schedule_target_id="fee",
     )
+    return frames, fee_frame, output_window, candidate
+
+
+def test_enhanced_producer_reaches_optimizer_and_publishes_diagnostics(
+    tmp_path: Path, monkeypatch
+) -> None:
+    frames, fee_frame, output_window, candidate = _enhanced_inputs(monkeypatch)
     from quant_research_platform.contracts.portfolios import (
         PORTFOLIO_LEDGER_COST_COLUMNS,
     )
@@ -2994,3 +3000,91 @@ def test_enhanced_candidates_share_only_common_fits_and_preserve_ledgers(
         assert list(chunks)
         assert (counts["alpha"] > before["alpha"]) is changed_alpha
         assert (counts["risk"] > before["risk"]) is changed_risk
+
+
+@pytest.mark.parametrize("change_at", (None, "2022-12-19", "2022-12-22"))
+def test_unheld_scoring_asset_calibration_binds_signal_entry_and_completion(
+    tmp_path,
+    monkeypatch,
+    change_at,
+):
+    frames, fee, window, candidate = _enhanced_inputs(monkeypatch)
+    for key in ("panel", "dataset", "execution"):
+        extra = frames[key].loc[frames[key].asset_id.eq("b")].assign(asset_id="c")
+        if key == "panel":
+            extra = extra.assign(adj_open=10.0, adj_close=10.0)
+            if change_at is not None:
+                changed = extra.timestamp.ge(pd.Timestamp(change_at))
+                extra.loc[changed, ["adj_open", "adj_close"]] = 100.0
+                extra.loc[changed, "listing_date"] = pd.Timestamp(change_at)
+        frames[key] = pd.concat((frames[key], extra), ignore_index=True)
+
+    class Lookup(_PredictionLookup):
+        def values_for_frame(self, frame, *, mark_matched):
+            values, found = super().values_for_frame(frame, mark_matched=mark_matched)
+            values = values.copy()
+            values[frame.asset_id.eq("c").to_numpy()] = 2.0
+            return values, found
+
+    completed = {}
+    original = production._completed_calibration_rows
+
+    def observe(pending, panel):
+        rows = original(pending, panel)
+        completed[pending[2]] = rows
+        return rows
+
+    monkeypatch.setattr(production, "_completed_calibration_rows", observe)
+    chunks, _ = _build_producer(
+        tmp_path / "input",
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee,
+        output_window=window,
+        input_window=TimeWindow("2022-11-14", "2023-01-10"),
+        prediction_window=TimeWindow("2022-11-14", "2023-01-10"),
+        candidate=candidate,
+        prediction_lookup=Lookup(),
+        typed_batches=True,
+    )
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=candidate.candidate_id,
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": str(window.start),
+            "end": str(window.end),
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={
+            "portfolio_capital": {
+                "candidate_id": candidate.candidate_id,
+                "initial_capital": 100.0,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
+        },
+    )
+
+    def produce(emit):
+        for batch in chunks:
+            emit(batch)
+
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger", envelope=envelope, produce=produce
+    )
+    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    batches = list(saved.iter_chunks())
+    assert batches
+    assert not any(trade.asset_id == "c" for batch in batches for trade in batch.trades)
+    rows = completed[pd.Timestamp("2022-12-16")]
+    assert {row["alpha_score"] for row in rows} == (
+        {0.0, 1.0, 2.0} if change_at is None else {0.0, 1.0}
+    )
+    if change_at is None:
+        assert (
+            next(row for row in rows if row["alpha_score"] == 2.0)["holding_return"]
+            == 0.0
+        )
