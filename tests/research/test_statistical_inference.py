@@ -112,26 +112,13 @@ def test_stationary_bootstrap_and_cscv_are_deterministic_and_bounded() -> None:
     longer = stationary_bootstrap_mean_ci(values, block_size=3, repetitions=99, seed=11)
     assert (longer.lower, longer.upper) == pytest.approx((0.018125, 0.194375))
     assert longer.lower < longer.mean < longer.upper
-    result = cscv_pbo(returns, slice_count=4, max_combinations=6)
+    result = cscv_pbo(returns, slice_count=4)
     assert result.combination_count == 6
     assert result.status == "DEFINED"
     assert result.pbo == pytest.approx(1.0)
-    duplicate = cscv_pbo(
-        np.column_stack((values, values)), slice_count=4, max_combinations=6
-    )
+    duplicate = cscv_pbo(np.column_stack((values, values)), slice_count=4)
     assert duplicate.status == "UNDEFINED"
     assert duplicate.reason == "duplicate_candidate_series"
-    with pytest.raises(ValueError, match="^cscv_combination_budget_exceeded$"):
-        cscv_pbo(returns, slice_count=8, max_combinations=10)
-
-    class RejectMaterialization:
-        shape = (8, 3)
-
-        def __array__(self, *_args: object, **_kwargs: object) -> np.ndarray:
-            raise AssertionError("matrix_materialized_before_combination_admission")
-
-    with pytest.raises(ValueError, match="^cscv_combination_budget_exceeded$"):
-        cscv_pbo(RejectMaterialization(), slice_count=8, max_combinations=10)
 
 
 def test_psr_dsr_fixed_oracle() -> None:
@@ -343,7 +330,7 @@ def test_fama_macbeth_uses_period_cross_sections_then_hac() -> None:
 @pytest.mark.parametrize("count", (40, 80, 100))
 def test_decimal_constant_cscv_is_undefined(count):
     matrix = np.column_stack((np.full(count, 0.1), np.linspace(-0.1, 0.2, count)))
-    result = cscv_pbo(matrix, slice_count=10, max_combinations=252)
+    result = cscv_pbo(matrix, slice_count=10)
     assert result.status == "UNDEFINED"
     assert result.reason == "candidate_sharpe_undefined"
 
@@ -374,9 +361,7 @@ def test_nav_roundoff_is_explicit_and_retains_resolvable_variation():
     matrix = np.column_stack((varied, np.linspace(-0.01, 0.02, len(values))))
     matrix[:40, 0] = values[:40]
     errors = np.column_stack((error, np.zeros(len(values))))
-    result = cscv_pbo(
-        matrix, slice_count=10, max_combinations=252, return_roundoff=errors
-    )
+    result = cscv_pbo(matrix, slice_count=10, return_roundoff=errors)
     assert (
         result.status == "UNDEFINED" and result.reason == "candidate_sharpe_undefined"
     )
@@ -524,7 +509,7 @@ def test_cscv_preserves_finite_extreme_scale_against_decimal_oracle():
                 atol=0.0,
             )
     for scale in (1.0, 1e308):
-        result = cscv_pbo(matrix * scale, slice_count=4, max_combinations=6)
+        result = cscv_pbo(matrix * scale, slice_count=4)
         assert result.status == "DEFINED"
         assert result.pbo == overfit / 6
 
@@ -537,7 +522,7 @@ def test_cscv_subnormal_observations_keep_original_roundoff_resolution():
         assert _candidate_sharpes(matrix, np.ones_like(matrix)) is None
     for invalid in (-1.0, np.nan, -np.inf):
         with pytest.raises(ValueError, match="return_roundoff_invalid"):
-            cscv_pbo(matrix, slice_count=4, max_combinations=6, return_roundoff=invalid)
+            cscv_pbo(matrix, slice_count=4, return_roundoff=invalid)
 
 
 @pytest.mark.parametrize(
@@ -629,11 +614,11 @@ def test_return_roundoff_separates_intervals_with_equal_rounded_endpoints(
 def test_cscv_keeps_disjoint_uncertainty_intervals_defined():
     matrix = np.tile([[1.0, 0.1], [2.0, 0.3]], (4, 1))
     errors = np.tile([[0.0, 0.0], [np.nextafter(1.0, 0.0), 0.0]], (4, 1))
-    result = cscv_pbo(matrix, slice_count=4, max_combinations=6, return_roundoff=errors)
+    result = cscv_pbo(matrix, slice_count=4, return_roundoff=errors)
     assert result.status == "DEFINED"
     assert result.pbo == 0.0
     errors[1::2, 0] = 1.0
-    result = cscv_pbo(matrix, slice_count=4, max_combinations=6, return_roundoff=errors)
+    result = cscv_pbo(matrix, slice_count=4, return_roundoff=errors)
     assert result.status == "UNDEFINED"
     assert result.reason == "candidate_sharpe_undefined"
 

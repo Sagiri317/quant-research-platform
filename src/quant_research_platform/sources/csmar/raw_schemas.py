@@ -16,9 +16,7 @@ from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
     dataset_file_identity,
     dataset_file_identity_from_stat,
-    filesystem_exists,
     open_filesystem_file,
-    require_unaliased_path,
 )
 
 
@@ -44,7 +42,6 @@ class RawExportInspection:
     table_code: str
     columns: tuple[str, ...]
     missing_required_columns: list[str]
-    has_metadata: bool
 
 
 FILENAME_RE = re.compile(
@@ -103,7 +100,7 @@ def _infer_dataset_from_header(columns: tuple[str, ...]) -> str:
 
 
 class _CsvRecords:
-    """Parse strict provider CSV records while tracking consumed bytes."""
+    """Parse strict provider CSV records with source identity checks."""
 
     def __init__(self, path, *, expected_identity=None):
         try:
@@ -120,15 +117,12 @@ class _CsvRecords:
             ):
                 raise ValueError("csmar_raw_export_identity_changed")
             self._identity = identity
-            self._bom_bytes = 3 if self._handle.read(3) == b"\xef\xbb\xbf" else 0
-            self._handle.seek(0)
             self._text = io.TextIOWrapper(
                 self._handle, encoding="utf-8-sig", newline=""
             )
-            self._record_bytes = 0
             # The provider format permits fields above Python's default limit.
             csv.field_size_limit(sys.maxsize)
-            self._reader = csv.reader(self._lines(), strict=True)
+            self._reader = csv.reader(self._text, strict=True)
         except BaseException as primary:
             try:
                 self._handle.close()
@@ -138,17 +132,10 @@ class _CsvRecords:
                 )
             raise
 
-    def _lines(self):
-        while line := self._text.readline():
-            self._record_bytes += len(line.encode("utf-8")) + self._bom_bytes
-            self._bom_bytes = 0
-            yield line
-
     def __iter__(self):
         return self
 
     def __next__(self):
-        self._record_bytes = 0
         try:
             fields = next(self._reader)
         except (UnicodeError, csv.Error) as exc:
@@ -180,9 +167,9 @@ class _CsvRecords:
 
 def iter_export_csv_records(
     path: str | Path, *, expected_identity: DatasetFileIdentity | None = None
-) -> Iterator[tuple[list[str], int]]:
+) -> Iterator[list[str]]:
 
-    def activate() -> Iterator[tuple[list[str], int]]:
+    def activate() -> Iterator[list[str]]:
         records: _CsvRecords | None = None
         primary = None
         try:
@@ -191,9 +178,8 @@ def iter_export_csv_records(
                 expected_identity=expected_identity,
             )
             for record in records:
-                _yield_value = record, records._record_bytes
                 try:
-                    yield _yield_value
+                    yield record
                 except GeneratorExit:
                     return
                 del record
@@ -228,9 +214,7 @@ def read_export_header(
     primary = None
     try:
         record = next(rows, None)
-        columns = (
-            tuple(materialize_header_record(record[0])) if record is not None else ()
-        )
+        columns = tuple(materialize_header_record(record)) if record is not None else ()
         if not columns:
             raise ValueError("malformed_csmar_csv_row")
     except BaseException as body_error:
@@ -257,17 +241,10 @@ def materialize_header_record(record: list[str]) -> list[str]:
     return columns
 
 
-def expected_metadata_sidecar_path(path: str | Path) -> Path:
-    """Return the recommended metadata sidecar path for a raw export."""
-
-    export_path = Path(path)
-    return export_path.with_suffix(".metadata.json")
-
-
 def inspect_raw_export_file(
     path: str | Path, *, expected_identity: DatasetFileIdentity | None = None
 ) -> RawExportInspection:
-    """Inspect the file name, header, and metadata sidecar without full data reads."""
+    """Inspect the file name and header without full data reads."""
 
     export_path = Path(path)
     export_identity = raw_export_file_identity(export_path)
@@ -299,22 +276,12 @@ def inspect_raw_export_file(
 
     _field_mappings.validate_raw_column_names(columns, dataset)
     missing = _field_mappings.missing_raw_column_names(columns, dataset)
-    metadata_path = require_unaliased_path(
-        expected_metadata_sidecar_path(export_path),
-        error="csmar_raw_export_identity_changed",
-    )
-    metadata_identity = (
-        raw_export_file_identity(metadata_path)
-        if filesystem_exists(metadata_path)
-        else None
-    )
     return RawExportInspection(
         path=export_path,
         dataset=dataset,
         table_code=contract.table_code,
         columns=columns,
         missing_required_columns=missing,
-        has_metadata=metadata_identity is not None,
     )
 
 

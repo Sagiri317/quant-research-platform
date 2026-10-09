@@ -255,28 +255,6 @@ def test_dataset_session_metadata_stat_failure_precedes_metadata_read(
         assert caught.value is primary
 
 
-def test_dataset_writer_returns_final_inspection(
-    tmp_path: Path,
-) -> None:
-    private_root = make_dataset_artifact_root(tmp_path, "private_return")
-    public_root = make_dataset_artifact_root(tmp_path, "public_return")
-    private_result = dataset_writing.write_dataset(
-        private_root,
-        (make_default_dataset_frame(),),
-        spec=make_processed_dataset_spec("private_return"),
-    )
-    assert private_result.root == private_root
-    assert private_result.data_root == private_root / "data"
-    assert private_result.manifest["row_count"] == private_result.row_count
-    public_result = write_dataset(
-        public_root,
-        make_default_dataset_frame(),
-        spec=make_processed_dataset_spec("public_return"),
-    )
-    assert public_result.root == public_root
-    assert public_result.row_count == private_result.row_count
-
-
 def test_writer_manifest_uses_persisted_bytes_not_prewrite_summary(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -41,7 +41,7 @@ from quant_research_platform.storage.parquet import (
 from quant_research_platform.storage.semantic_artifacts import (
     _member_inventory,
     _visit_member_paths,
-    read_semantic_artifact_record,
+    semantic_artifact_read_session,
     write_semantic_artifact,
 )
 
@@ -260,21 +260,31 @@ class CryptoEpisodeArtifact:
     _manifest_identity: object
 
     def iter_episodes(self, *, consume_episode=None):
-        with closing_iterator(
-            _episode_rows(
-                self.root,
-                self._envelope,
-                self._members,
-                self._identities,
-                self._manifest_identity,
-                consume_episode,
-            )
-        ) as delegated_chunks:
-            for yielded_value in delegated_chunks:
-                try:
-                    yield yielded_value
-                except GeneratorExit:
-                    return
+        identities = {}
+        with semantic_artifact_read_session(
+            self.root,
+            expected_identity=self.identity,
+            member_identities=identities,
+            expected_member_identities={
+                **self._identities,
+                "manifest.json": self._manifest_identity,
+            },
+        ) as (envelope, members):
+            with closing_iterator(
+                _episode_rows(
+                    self.root,
+                    envelope,
+                    members,
+                    self._identities,
+                    self._manifest_identity,
+                    consume_episode,
+                )
+            ) as episodes:
+                for row in episodes:
+                    try:
+                        yield row
+                    except GeneratorExit:
+                        return
 
 
 def read_crypto_episode_artifact(
@@ -282,28 +292,35 @@ def read_crypto_episode_artifact(
 ):
     root = Path(root)
     identities = {}
-    envelope, members = read_semantic_artifact_record(
+    with semantic_artifact_read_session(
         root,
         expected_identity=expected_identity,
         member_identities=identities,
         expected_member_identities=expected_member_identities,
-    )
-    manifest_identity = identities.pop("manifest.json")
-    artifact = CryptoEpisodeArtifact(
-        root,
-        expected_identity,
-        _capital(envelope),
-        envelope,
-        members,
-        identities,
-        manifest_identity,
-    )
-    with closing_iterator(
-        artifact.iter_episodes(consume_episode=consume_episode)
-    ) as episodes:
-        for _row, _ledger in episodes:
-            pass
-    return artifact
+    ) as (envelope, members):
+        manifest_identity = identities["manifest.json"]
+        artifact = CryptoEpisodeArtifact(
+            root,
+            expected_identity,
+            _capital(envelope),
+            envelope,
+            members,
+            {key: value for key, value in identities.items() if key != "manifest.json"},
+            manifest_identity,
+        )
+        with closing_iterator(
+            _episode_rows(
+                root,
+                envelope,
+                members,
+                artifact._identities,
+                manifest_identity,
+                consume_episode,
+            )
+        ) as episodes:
+            for _row, _ledger in episodes:
+                pass
+        return artifact
 
 
 def write_crypto_episode_artifact(logical_root, *, envelope, produce):

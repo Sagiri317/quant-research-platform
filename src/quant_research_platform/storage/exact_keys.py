@@ -84,7 +84,13 @@ class ExactPrimaryKeyIndex:
         return self._insert_rows(rows)
 
     def add_float_value_table(
-        self, table: pa.Table, *, namespace: str, value_column: str
+        self,
+        table: pa.Table,
+        *,
+        namespace: str,
+        value_column: str,
+        selected=None,
+        validation_column: str | None = None,
     ) -> int:
         self._validate_comparison_table_grammar(
             table, namespace=namespace, value_columns=(value_column,)
@@ -92,12 +98,23 @@ class ExactPrimaryKeyIndex:
         keys = self._key_table(table)
 
         def rows():
-            for (_, key, _), scalar in zip(
-                self._payload_rows(keys, namespace=namespace),
-                table.column(value_column),
-                strict=True,
+            values = table.column(value_column)
+            validation = table.column(validation_column or value_column)
+            for position, (_, key, _) in enumerate(
+                self._payload_rows(keys, namespace=namespace)
             ):
-                yield (namespace, key, _float_value_payload(scalar))
+                raw = _float_value_payload(validation[position])
+                keep = selected is None or selected[position].as_py()
+                value = (
+                    (
+                        raw
+                        if validation_column in (None, value_column)
+                        else _float_value_payload(values[position])
+                    )
+                    if keep
+                    else None
+                )
+                yield (namespace, key, value)
 
         return table.num_rows - self._insert_rows(rows())
 
@@ -216,14 +233,27 @@ class ExactPrimaryKeyIndex:
     def identity_payload_value(self, *, namespace: str, payload: bytes) -> bytes | None:
         return self._namespace(namespace).get(bytes(payload))
 
-    def difference_counts(self, *, expected_namespace: str, actual_namespace: str):
+    def difference_counts(
+        self,
+        *,
+        expected_namespace: str,
+        actual_namespace: str,
+        payloads_only: bool = False,
+    ):
         expected, actual = (
             self._namespace(expected_namespace),
             self._namespace(actual_namespace),
         )
         return (
-            sum(key not in actual for key in expected),
-            sum(key not in expected for key in actual),
+            sum(
+                key not in actual
+                for key, value in expected.items()
+                if not payloads_only or value is not None
+            ),
+            sum(
+                key not in expected or (payloads_only and expected[key] is None)
+                for key in actual
+            ),
         )
 
     def _validate_comparison_table_grammar(

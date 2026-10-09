@@ -29,7 +29,6 @@ from quant_research_platform.contracts.time import (
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.exact_keys import (
     ExactPrimaryKeyIndex,
-    _float_value_payload,
 )
 from quant_research_platform.storage.identity import (
     filesystem_scandir,
@@ -162,14 +161,6 @@ class _PredictionLookup:
         self.champions = champions or {}
         self.row_count = 0
 
-    def add_table(self, table: pa.Table) -> None:
-        duplicates = self._index.add_float_value_table(
-            table, namespace="prediction", value_column=self.prediction_column
-        )
-        if duplicates:
-            raise ValueError("duplicate_persisted_prediction_keys")
-        self.row_count += table.num_rows
-
     def values_for_frame(
         self, frame: pd.DataFrame, *, mark_matched: bool
     ) -> tuple[Sequence[float], bytearray]:
@@ -208,7 +199,9 @@ class _PredictionLookup:
 
     def coverage_counts(self) -> tuple[int, int]:
         return self._index.difference_counts(
-            expected_namespace="prediction", actual_namespace="prediction-matched"
+            expected_namespace="prediction",
+            actual_namespace="prediction-matched",
+            payloads_only=True,
         )
 
 
@@ -287,7 +280,7 @@ def _validate_prediction_output_bundle(
             key_index = ExactPrimaryKeyIndex(primary_key=primary_key)
             if collect_lookup:
                 lookup = _PredictionLookup(
-                    index=ExactPrimaryKeyIndex(primary_key=primary_key),
+                    index=key_index,
                     primary_key=primary_key,
                     prediction_column=lookup_column,
                     family_selection=family_selection,
@@ -351,13 +344,6 @@ def _validate_prediction_output_bundle(
                             )
                         ):
                             raise ValueError("persisted_prediction_window_mismatch")
-                        duplicates = key_index.add_float_value_table(
-                            table,
-                            namespace="prediction-bundle-validation",
-                            value_column=prediction_column,
-                        )
-                        if duplicates:
-                            raise ValueError("duplicate_persisted_prediction_keys")
                         if table.num_rows:
                             batch_end = pd.Timestamp(pc.max(timestamps).as_py())
                             effective_test_end = (
@@ -378,6 +364,7 @@ def _validate_prediction_output_bundle(
                                 frame["family_id"].eq(selected_families).to_numpy()
                             )
 
+                        keep = family_keep
                         if time_window is not None:
                             keep = pc.and_(
                                 pc.greater_equal(
@@ -398,17 +385,23 @@ def _validate_prediction_output_bundle(
                             window_rows += int(pc.sum(keep).as_py() or 0)
                             if family_keep is not None:
                                 keep = pc.and_(keep, family_keep)
-                            table = table.filter(keep)
                         else:
                             window_rows += table.num_rows
-                            if family_keep is not None:
-                                table = table.filter(family_keep)
-                        if table.num_rows:
-                            if lookup is not None:
-                                lookup.add_table(table)
-                            elif lookup_column != prediction_column:
-                                for scalar in table.column(lookup_column):
-                                    _float_value_payload(scalar)
+                        duplicates = key_index.add_float_value_table(
+                            table,
+                            namespace="prediction",
+                            value_column=lookup_column,
+                            validation_column=prediction_column,
+                            selected=keep,
+                        )
+                        if duplicates:
+                            raise ValueError("duplicate_persisted_prediction_keys")
+                        if lookup is not None:
+                            lookup.row_count += (
+                                table.num_rows
+                                if keep is None
+                                else int(pc.sum(keep).as_py() or 0)
+                            )
                 if window_rows == 0:
                     raise ValueError("empty_prediction_window")
                 if (

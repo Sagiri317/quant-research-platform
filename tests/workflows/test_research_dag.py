@@ -2144,6 +2144,43 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     assert report_result["target_result"]["status"] == "BUILT"
     assert report_result["report"]["report_status"] == "BLOCKED"
 
+    selected = research.inspect(
+        profile=profile,
+        layout=layout,
+        dataset_id="pv_all_report_artifact",
+        run_id=run_id,
+    )
+    other_run = research.research_run(
+        profile=profile,
+        layout=layout,
+        research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
+    )
+    other_report = research.report_build(
+        profile=profile, layout=layout, run_id=other_run["run_id"]
+    )
+    other_root = layout.instance_root(
+        layout.semantic_artifact_root(profile.market_id, "pv_all_report_artifact"),
+        other_report["target_result"]["instance_identity"],
+    )
+    markdown = other_root / "report.md"
+    markdown.write_bytes(markdown.read_bytes() + b"\n")
+    assert (
+        research.inspect(
+            profile=profile,
+            layout=layout,
+            dataset_id="pv_all_report_artifact",
+            run_id=run_id,
+        )
+        == selected
+    )
+    with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
+        research.inspect(
+            profile=profile,
+            layout=layout,
+            dataset_id="pv_all_report_artifact",
+            run_id=other_run["run_id"],
+        )
+
     record = read_research_run_record(layout.research_run_path(run_id))
     assert record.status.value == "BLOCKED"
     assert record.run_id == run_id

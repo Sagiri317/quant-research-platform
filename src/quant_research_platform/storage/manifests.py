@@ -201,8 +201,8 @@ def write_internal_artifact_manifest(path: Path, payload: dict[str, Any]) -> Pat
     """Write private artifact metadata without corrupting schema keys.
 
     Internal manifests are private artifacts, so schema fields such as
-    ``source_id`` must remain round-trippable. We still reject path, credential,
-    and row-sample payloads that do not belong in schema metadata.
+    ``source_id`` must remain round-trippable. Reject credentials, local absolute
+    paths, tracebacks and restricted identifiers; this is not row anonymization.
     """
     snapshot, text = _qrp_json_snapshot_text(payload)
     _require_schema_id(snapshot)

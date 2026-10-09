@@ -30,8 +30,9 @@ from quant_research_platform.storage.parquet import (
     parquet_table_writer,
 )
 from quant_research_platform.storage.semantic_artifacts import (
-    read_semantic_artifact_record,
+    semantic_artifact_read_session,
     verify_semantic_artifact_member,
+    verify_semantic_artifact_snapshot,
     write_semantic_artifact,
 )
 
@@ -588,8 +589,17 @@ class StatisticsArtifact:
     _members: Mapping[str, object]
     _identities: Mapping[str, DatasetFileIdentity]
     _row_counts: Mapping[str, int]
+    _snapshot: Mapping[str, DatasetFileIdentity] | None = None
+    _directories: Mapping[str, tuple[int, int, int, int]] | None = None
+
+    def _verify_snapshot(self):
+        if self._snapshot is not None:
+            verify_semantic_artifact_snapshot(
+                self.root, self._snapshot, self._directories
+            )
 
     def _verify(self):
+        self._verify_snapshot()
         for member, identity in self._identities.items():
             path = self.root / member
             if dataset_file_identity(path) != identity:
@@ -623,6 +633,7 @@ class StatisticsArtifact:
             raise ValueError("statistics_table_member_invalid")
         path = self.root / member
         identity = self._identities[member]
+        self._verify_snapshot()
         verify_semantic_artifact_member(
             self.root, relative_path=member, expected=dict(self._members[member])
         )
@@ -636,7 +647,22 @@ class StatisticsArtifact:
             table = parquet.read()
             frame = table.to_pandas()
             result = _validated_frame(frame, member=member)
-            yield result
+            primary = None
+            try:
+                yield result
+            except BaseException as error:
+                primary = error
+                raise
+            finally:
+                try:
+                    self._verify_snapshot()
+                except BaseException as error:
+                    if primary is None:
+                        raise
+                    primary.add_note(
+                        "statistics snapshot verification also failed: "
+                        + type(error).__name__
+                    )
 
 
 def write_statistics_artifact(
@@ -731,7 +757,9 @@ def write_statistics_artifact(
     )
 
 
-def _statistics_artifact(root, envelope, members, member_identities=None):
+def _statistics_artifact(
+    root, envelope, members, member_identities=None, directory_identities=None
+):
     by_path = {str(member.get("path")): member for member in members}
     if not any(
         set(by_path) == set(group) for group in STATISTICS_TABLE_GROUPS.values()
@@ -762,6 +790,16 @@ def _statistics_artifact(root, envelope, members, member_identities=None):
         _members=MappingProxyType(by_path),
         _identities=MappingProxyType(identities),
         _row_counts=MappingProxyType(row_counts),
+        _snapshot=(
+            MappingProxyType(dict(member_identities))
+            if directory_identities is not None
+            else None
+        ),
+        _directories=(
+            MappingProxyType(dict(directory_identities))
+            if directory_identities is not None
+            else None
+        ),
     )
 
 
@@ -773,20 +811,24 @@ def read_statistics_artifact(
     expected_member_identities=None,
 ) -> StatisticsArtifact:
     identities = {}
-    envelope, members = read_semantic_artifact_record(
+    directories = {}
+    with semantic_artifact_read_session(
         Path(instance_root),
         expected_identity=expected_identity,
         member_identities=identities,
         expected_member_identities=expected_member_identities,
-    )
-    artifact = _statistics_artifact(Path(instance_root), envelope, members, identities)
-    if set(artifact._members) == set(
-        STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]
-    ):
-        if not callable(validate_tables):
-            raise ValueError("statistics_business_validator_required")
-        validate_tables(artifact, envelope)
-    return artifact
+        directory_identities=directories,
+    ) as (envelope, members):
+        artifact = _statistics_artifact(
+            Path(instance_root), envelope, members, identities, directories
+        )
+        if set(artifact._members) == set(
+            STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]
+        ):
+            if not callable(validate_tables):
+                raise ValueError("statistics_business_validator_required")
+            validate_tables(artifact, envelope)
+        return artifact
 
 
 def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:

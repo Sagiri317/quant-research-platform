@@ -719,6 +719,14 @@ beta_252d 与 residual_volatility_60d 复用 compute/market_model 的唯一风�
 该选择不要求 Choice 财务或增强组合。缺 PIT、分钟或 quote 事实的其他候选保留 BLOCKED，
 不会以代理字段冒充已具备数据。
 
+##### 路径机制因子
+
+三个路径变量单独注册，不改变 CORE6、PV25、PV52 原选择。使用完整20个日收益：
+`positive_return_fraction_20d = mean(r > 0)`；
+`largest_daily_contribution_20d = max(abs(r)) / sum(abs(r))`；
+`path_roughness_20d = 1 - abs(sum(r)) / sum(abs(r))`。
+缺失窗口不输出；绝对收益和为零时后两项保持 NULL。
+
 #### 5.9.2 基本面 19 因子
 
 正式 Fundamental19：
@@ -870,6 +878,18 @@ forward EP = median forecast EPS / unadjusted signal-day close  # 前瞻盈利�
 机构日中位数与跨机构中位数的临时精确值保留到最终 EPS/close 比值，落盘仍为现有 Float64。
 
 预期修订、超预期、PEAD 和业绩预告属于扩展研究方向，不属于本协议的预期4模块。
+
+##### 预期机制增量与研究准备
+
+预期机制沿用同一 FY1、机构日最新事件、新鲜度及至少3机构门槛。
+`forecast_dispersion_price_scaled_fy1` 是机构 EPS 的 MAD 除当日正收盘价；
+`median_forecast_age_days_fy1` 是当前机构状态报告年龄中位数；
+`newly_updated_institution_fraction_fy1` 是本可用日更新机构占当前机构的比例。
+同 EPS 的新报告仍更新事件状态。原4项预期因子不改名、不替换。
+
+主规格为90天，一次180天对照；完整模型、非金融共同样本与各自覆盖须同时报告。
+固定财年修订、滚动 FY1 跳转、ON/ID分解及报告事件研究先核对原始语义和单位；
+能力或配置绑定通过不代表这些机制已完成真实研究。缺少版本仅阻塞对应版本消费者。
 
 ### 5.10 特征范围与变换
 
@@ -1364,6 +1384,10 @@ IC 排名因子权重：
 
 排名缺失贡献中性 0；不得对每只股票仅按已观测因子重新归一化。
 
+A 股排名模型只学习排序所需方向或权重，不拟合或持久化未被消费的标签单位
+`label_calibration`。组合的 Alpha 校准仍按 §5.18 独立执行；Crypto 标签单位转换
+继续在真实 TRAIN/refit 域内拟合并冻结，见 [Crypto 标定](crypto.md#数值缩放与排名模型标定)。
+
 方向和权重在每个候选 fold 的 train 内学习，并在对应 validation 季度内冻结；
 2024–2025 最终留出按§5.13固定两年，不继续更新。
 
@@ -1410,7 +1434,7 @@ N_train
 | 字段 | 责任 |
 |---|---|
 | `candidate_id` | 配置内候选身份；协议分别派生 G/Q 两组身份 |
-| `construction` | `top20_equal_weight`、`top20_float_cap` 或 `benchmark_enhanced` |
+| `construction` | `top20_equal_weight`、`top20_equal_weight_half_step`、`top20_float_cap` 或 `benchmark_enhanced` |
 | `prediction_selector` | 已持久化预测中的具名 `model_id`，或保留选择器 `champion`，不借组合名称推断算法 |
 | `top_quantile` | 简单组合的最高分位比例，须满足 `0 < top_quantile <= 1`；增强组合为 `null` |
 | `rebalance_schedule` | `daily`、`weekly-last-trading-day` 或 `monthly-last-trading-day` |
@@ -1683,6 +1707,12 @@ TE 约束
 ```
 
 它们直接执行规则定义的目标；执行、现金、ADV 与成本仍使用和增强组合相同的经济执行账本。
+
+固定预测的持仓对照可选择 `top20_equal_weight_half_step`：换仓日先由原简单组合 owner
+生成完整等权目标，再与仍合格且有有效预测的当前持仓权重各取一半。首次从现金开始只建半仓；
+剩余现金不重归一化。失去资格或预测的旧仓目标归零，实际卖出仍遵守原交易限制。
+该构造进入组合语义身份，不改变模型或预测身份；报告同时比较毛/净收益、风险、现金和换手，
+不能把敞口差异导致的收益变化只归因为交易成本。该固定规则不根据回测收益调节。
 
 ### 5.22 组合时序与核算
 
@@ -2119,27 +2149,3 @@ ADV 范围/参与率
 字段或覆盖缺失不构成永久备用语义、虚假值、当前状态历史回填、缩短窗口或隐藏模型变化的理由。
 
 数据获取、延期和验收进度属于操作事实，不改变本研究合同；真实运行状态从对应持久化证据读取。
-
-### 5.22 预定机制增量与研究准备
-
-三个路径变量单独注册，不改变 CORE6、PV25、PV52 原选择。使用完整20个日收益：
-`positive_return_fraction_20d = mean(r > 0)`；
-`largest_daily_contribution_20d = max(abs(r)) / sum(abs(r))`；
-`path_roughness_20d = 1 - abs(sum(r)) / sum(abs(r))`。
-缺失窗口不输出；绝对收益和为零时后两项保持 NULL。
-
-预期机制沿用同一 FY1、机构日最新事件、新鲜度及至少3机构门槛。
-`forecast_dispersion_price_scaled_fy1` 是机构 EPS 的 MAD 除当日正收盘价；
-`median_forecast_age_days_fy1` 是当前机构状态报告年龄中位数；
-`newly_updated_institution_fraction_fy1` 是本可用日更新机构占当前机构的比例。
-同 EPS 的新报告仍更新事件状态。原4项预期因子不改名、不替换。
-
-主规格为90天，一次180天对照；完整模型、非金融共同样本与各自覆盖须同时报告。
-固定财年修订、滚动 FY1 跳转、ON/ID分解及报告事件研究先核对原始语义和单位；
-能力或配置绑定通过不代表这些机制已完成真实研究。缺少版本仅阻塞对应版本消费者。
-
-固定预测的持仓对照可选择 `top20_equal_weight_half_step`：换仓日先由原简单组合 owner
-生成完整等权目标，再与仍合格且有有效预测的当前持仓权重各取一半。首次从现金开始只建半仓；
-剩余现金不重归一化。失去资格或预测的旧仓目标归零，实际卖出仍遵守原交易限制。
-该构造进入组合语义身份，不改变模型或预测身份；报告同时比较毛/净收益、风险、现金和换手，
-不能把敞口差异导致的收益变化只归因为交易成本。该固定规则不根据回测收益调节。

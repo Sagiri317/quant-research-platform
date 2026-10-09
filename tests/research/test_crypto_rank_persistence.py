@@ -42,6 +42,7 @@ def crypto_rank_case(
     ineligible_holdout=False,
     time_series_inputs=False,
     omit_hyperparameters=False,
+    model_updates=None,
 ):
     plan = hft_research_plan()
     plan["folds"] = plan["folds"][:1]
@@ -69,6 +70,8 @@ def crypto_rank_case(
         model.pop("parameter_candidates", None)
         if omit_hyperparameters:
             model.pop("hyperparameters")
+        if model_updates is not None:
+            model.update(model_updates.get(algorithm, {}))
         models.append(model)
     configuration.update(
         models=models, portfolios=[], comparison_model_id=models[0]["model_id"]
@@ -697,3 +700,70 @@ def test_crypto_new_reader_preserves_immutable_and_lazy_acceptance_contract(
     else:
         with pytest.raises(ValueError, match="^model_state_metadata_mismatch$"):
             persisted.read_crypto_model_member(fresh, fresh.final_models[0])
+
+
+@pytest.mark.parametrize(
+    "difference",
+    (
+        {},
+        {"training_asset_ids": ["btc_usdt"]},
+        {"training_weighting": {"method": "equal_timestamp", "half_life": 8.0}},
+        {"max_train_rows": 12},
+        {"label_column": "future_mid_return_100ms"},
+    ),
+)
+def test_crypto_prepares_each_training_domain_once_without_changing_fits(
+    tmp_path,
+    monkeypatch,
+    difference,
+):
+    from quant_research_platform.research.models.scaler import ModelMatrixScaler
+
+    counts = {"collect": 0, "scale": 0, "fit": 0}
+    collect, scale, fit = (
+        fitting._collect_training_frame,
+        ModelMatrixScaler.fit,
+        fitting._fit_model_result,
+    )
+
+    def collect_once(*args, **kwargs):
+        counts["collect"] += 1
+        return collect(*args, **kwargs)
+
+    def scale_once(*args, **kwargs):
+        counts["scale"] += 1
+        return scale(*args, **kwargs)
+
+    def fit_each(*args, **kwargs):
+        counts["fit"] += 1
+        return fit(*args, **kwargs)
+
+    monkeypatch.setattr(fitting, "_collect_training_frame", collect_once)
+    monkeypatch.setattr(ModelMatrixScaler, "fit", scale_once)
+    monkeypatch.setattr(fitting, "_fit_model_result", fit_each)
+    options = dict(
+        algorithms=("linear_regression", "ridge_regression", "decision_tree_regressor"),
+        model_updates={"ridge_regression": difference},
+    )
+    shared = crypto_rank_case(tmp_path / "shared", **options)
+    domains = 2 if difference else 1
+    assert counts == {"collect": 2 * domains, "scale": 2 * domains, "fit": 6}
+    domain = production._training_domain
+    monkeypatch.setattr(
+        production, "_training_domain", lambda spec: (spec.model_id, *domain(spec))
+    )
+    counts.update(dict.fromkeys(counts, 0))
+    isolated = crypto_rank_case(tmp_path / "isolated", **options)
+    assert counts == {"collect": 6, "scale": 6, "fit": 6}
+    assert shared.saved.envelope == isolated.saved.envelope
+    expected = {entry["model_id"]: entry for entry in isolated.saved.final_models}
+    for entry in shared.saved.final_models:
+        other = expected[entry["model_id"]]
+        assert entry == other
+        model = persisted.read_crypto_model_member(shared.saved, entry)
+        reference = persisted.read_crypto_model_member(isolated.saved, other)
+        columns = tuple(entry["model_metadata"]["input_columns"])
+        np.testing.assert_array_equal(
+            fitting.prediction_callable(columns, model)(shared.frame),
+            fitting.prediction_callable(columns, reference)(shared.frame),
+        )

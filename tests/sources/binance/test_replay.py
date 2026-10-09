@@ -111,8 +111,7 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
 
         def close(self) -> None:
             self.close_calls += 1
-            if self.close_calls == 2:
-                raise OSError("gzip-close-secondary")
+            raise OSError("gzip-close-secondary")
 
     raw_handle = RawHandle()
     gzip_handle = FakeGzip()
@@ -131,6 +130,8 @@ def test_connection_coverage_gzip_close_failure_still_closes_raw(
         with pytest.raises(OSError, match="gzip-close-secondary"):
             index._load(markets={FUTURES_MARKET_TYPE})
         assert raw_handle.close_calls == 1
+        assert raw_handle.closed
+        assert gzip_handle.close_calls == 1
     finally:
         raw_handle.close()
 
@@ -155,9 +156,7 @@ def test_replay_file_handle_cleanup_preserves_hash_primary(
     )
     with pytest.raises(KeyboardInterrupt, match="hash_primary") as raised:
         replay._sha256_file(Path("synthetic-member.gz"), object())
-    assert raised.value.__notes__ == [
-        "Binance replay file handle close also failed: OSError"
-    ]
+    assert raised.value.__notes__ == ["iterator close also failed: OSError"]
 
 
 def _snapshot(

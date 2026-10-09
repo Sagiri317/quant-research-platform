@@ -159,9 +159,7 @@ def produce_hft_processed_data(
                     if synchronize
                     else independent_frames()
                 )
-                with closing_iterator(
-                    _event_frame_producer(source, columns=spec.required_columns)
-                ) as active:
+                with closing_iterator(iter(source)) as active:
                     for frame in active:
                         try:
                             yield frame
@@ -373,17 +371,6 @@ def _milliseconds(value: dt.datetime, *, ceil: bool = False) -> int:
     return -(-delta // unit) if ceil else delta // unit
 
 
-def _event_frame_producer(frames, *, columns):
-    with closing_iterator(iter(frames)) as active_frames:
-        for frame in active_frames:
-            if tuple(frame.columns) != columns:
-                raise ValueError("hft_panel_frame_columns_invalid")
-            try:
-                yield frame
-            except GeneratorExit:
-                return
-
-
 def _panel_frame_producer(
     session: DatasetSession,
     *,
@@ -409,7 +396,8 @@ def _panel_frame_producer(
                         except GeneratorExit:
                             return
 
-    yield from _event_frame_producer(frames(), columns=columns)
+    with closing_iterator(frames()) as active:
+        yield from active
 
 
 @contextmanager
@@ -561,7 +549,7 @@ def produce_spot_perp_context(
                             except GeneratorExit:
                                 return
 
-    data = _event_frame_producer(frames(), columns=spec.required_columns)
+    data = frames()
 
     def verify(_receipt):
         for session in sessions.values():
@@ -649,7 +637,7 @@ def produce_information_panel(
         columns=spec.required_columns,
         batch_rows=batch_rows,
     )
-    data = _event_frame_producer(frames, columns=spec.required_columns)
+    data = frames
 
     def verify(_receipt):
         for session in sessions:
@@ -724,7 +712,7 @@ def produce_cross_asset_context(
                     except GeneratorExit:
                         return
 
-    data = _event_frame_producer(frames(), columns=spec.required_columns)
+    data = frames()
 
     def verify(_receipt):
         for session in sessions.values():

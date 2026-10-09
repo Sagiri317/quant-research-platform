@@ -62,6 +62,29 @@ def test_factory_derives_a_frozen_identity_from_semantic_inputs() -> None:
     )
 
 
+def test_general_mapping_snapshot_is_frozen_detached_and_identity_preserving():
+    from collections import UserDict
+
+    metadata = UserDict({"nested": UserDict({"items": [1, (2, 3)]})})
+    envelope = _envelope(semantic_metadata=metadata)
+    plain = _envelope(semantic_metadata={"nested": {"items": [1, [2, 3]]}})
+    assert envelope.instance_identity == plain.instance_identity
+    metadata["nested"]["items"].append(4)
+    payload = envelope.payload()
+    payload["semantic_metadata"]["nested"]["items"].append(5)
+    assert envelope.payload() == plain.payload()
+    with pytest.raises(TypeError):
+        envelope.semantic_metadata["nested"]["items"][0] = 7
+    with pytest.raises(ValueError):
+        BusinessManifestEnvelope(
+            **{**envelope.payload(), "instance_identity": "f" * 64}
+        )
+    cyclic = UserDict()
+    cyclic["self"] = cyclic
+    with pytest.raises(ValueError, match="cycle"):
+        _envelope(semantic_metadata=cyclic)
+
+
 def test_validator_rejects_nonfinite_status_and_identity_mismatch() -> None:
     envelope = _envelope()
 

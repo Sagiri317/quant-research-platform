@@ -148,6 +148,7 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path, st
                 producer_kind=kind,
                 status=TargetStatus.BUILT,
                 instance_identity="a" * 64,
+                schema_identity="b" * 64,
                 artifact_root=key,
             )
             for key, kind in (
@@ -193,7 +194,12 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path, st
         research,
         "read_statistics_artifact",
         lambda *args, **kwargs: SimpleNamespace(
-            table=lambda member: nullcontext(pd.DataFrame())
+            envelope={
+                "logical_artifact_id": "factors_only_factor_statistics",
+                "instance_identity": "a" * 64,
+                "schema_identity": "b" * 64,
+            },
+            table=lambda member: nullcontext(pd.DataFrame()),
         ),
     )
     evidence = research.load_a_share_run_evidence(
@@ -205,7 +211,6 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path, st
         else [
             "factors_only",
             "factors_only_evaluation",
-            "factors_only_factor_statistics",
         ]
     )
     assert evidence["issues"] == []
@@ -292,7 +297,7 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked(candidat
     run = record()
     run.research_window = {"access": "holdout"}
     run.protocol["research_configuration"].update(
-        stage="portfolio",
+        stage="research",
         portfolios=[{"candidate_id": "candidate", "asset_id": "btc_usdt"}],
     )
     run.status = RunStatus.BLOCKED

@@ -227,7 +227,7 @@ def _raw_export_path_session(
 
 def iter_index_info_rows(
     export_path: Path, *, expected_identity: DatasetFileIdentity | None
-) -> Iterator[tuple[list[str], list[str], int]]:
+) -> Iterator[tuple[list[str], list[str]]]:
     rows = iter(
         _iter_csv_records(
             export_path, require_exact_width=False, expected_identity=expected_identity
@@ -237,14 +237,12 @@ def iter_index_info_rows(
     with closing_iterator(rows):
         pending_row: list[str] | None = None
         pending_start: int | None = None
-        pending_bytes = 0
         complete_row: list[str] | None = None
-        complete_bytes = 0
         row_number = 1
         header: list[str] | None = None
         while True:
             try:
-                header, record, source_bytes = next(rows)
+                header, record = next(rows)
             except StopIteration:
                 break
             row_number += 1
@@ -268,7 +266,7 @@ def iter_index_info_rows(
                     or not INDEX_INFO_CODE_RE.fullmatch(record[header.index("Indexcd")])
                 ):
                     raise ValueError(f"malformed_csmar_csv_row: {row_number}")
-                yield header, record, source_bytes
+                yield header, record
                 continue
             if pending_row is not None:
                 if _record_starts_index_info(record):
@@ -277,7 +275,6 @@ def iter_index_info_rows(
                 completes_row = (
                     len(pending_row) <= 6 and len(record) >= remaining_columns
                 )
-                next_bytes = pending_bytes + source_bytes
                 suffix = _append_continuation_fields(
                     continuations,
                     iter(record),
@@ -285,7 +282,6 @@ def iter_index_info_rows(
                     suffix_count=remaining_columns if completes_row else 0,
                     include_empty=False,
                 )
-                pending_bytes = next_bytes
                 if completes_row:
                     pending_row[-1] = _join_continuations(
                         pending_row[-1], continuations
@@ -294,11 +290,9 @@ def iter_index_info_rows(
                     complete_row = _normalize_index_info_row(
                         pending_row, len(header), pending_start
                     )
-                    complete_bytes = pending_bytes
                     continuations.clear()
                     pending_row = None
                     pending_start = None
-                    pending_bytes = 0
                 del record, suffix
                 continue
             if len(record) > len(header):
@@ -310,7 +304,6 @@ def iter_index_info_rows(
                     _append_continuation_fields(
                         continuations, iter(record), field_count=len(record)
                     )
-                    complete_bytes += source_bytes
                     del record
                     continue
                 else:
@@ -324,7 +317,7 @@ def iter_index_info_rows(
                             complete_row[-1] = _join_continuations(
                                 complete_row[-1], continuations
                             )
-                        _yield_value = (header, complete_row, complete_bytes)
+                        _yield_value = (header, complete_row)
                         try:
                             yield _yield_value
                         except GeneratorExit:
@@ -333,16 +326,13 @@ def iter_index_info_rows(
                     pending_row = row
                     pending_start = row_number
                     continuations.clear()
-                    pending_bytes = source_bytes
                     complete_row = None
-                    complete_bytes = 0
                     del row
                     continue
                 if complete_row is not None:
                     _append_continuation_fields(
                         continuations, row, field_count=len(row)
                     )
-                    complete_bytes += source_bytes
                     del row
                     continue
                 raise ValueError(f"malformed_csmar_csv_row: {row_number}")
@@ -351,7 +341,7 @@ def iter_index_info_rows(
                     complete_row[-1] = _join_continuations(
                         complete_row[-1], continuations
                     )
-                _yield_value = (header, complete_row, complete_bytes)
+                _yield_value = (header, complete_row)
                 try:
                     yield _yield_value
                 except GeneratorExit:
@@ -360,14 +350,13 @@ def iter_index_info_rows(
             complete_row = _normalize_index_info_row(row, len(header), row_number)
             del row
             continuations.clear()
-            complete_bytes = source_bytes
             del record
         if pending_row is not None:
             raise ValueError(f"malformed_csmar_csv_row: {pending_start}")
         if complete_row is not None:
             if continuations:
                 complete_row[-1] = _join_continuations(complete_row[-1], continuations)
-            _yield_value = (header, complete_row, complete_bytes)
+            _yield_value = (header, complete_row)
             try:
                 yield _yield_value
             except GeneratorExit:
@@ -444,17 +433,16 @@ def _looks_like_source_category_code(
     return stripped == "" or stripped in allowed_values
 
 
-def _clean_index_info_source_codes(frame: pd.DataFrame) -> pd.DataFrame:
-    result = frame
+def _validate_index_info_source_codes(frame: pd.DataFrame) -> None:
     for column, allowed_values in zip(
         INDEX_INFO_SOURCE_CODE_COLUMNS, INDEX_INFO_SOURCE_CODE_ENUMS, strict=True
     ):
-        if column not in result.columns:
+        if column not in frame.columns:
             continue
-        values = result[column].astype("string")
+        values = frame[column].astype("string")
         valid = values.isna() | values.isin(allowed_values)
-        result.loc[~valid, column] = pd.NA
-    return result
+        if not valid.all():
+            raise ValueError("invalid_csmar_index_info_source_code")
 
 
 def iter_private_export_chunks(
@@ -485,7 +473,7 @@ def iter_private_export_chunks(
             header = None
             while len(pending) < chunksize:
                 try:
-                    header, row, _row_bytes = next(rows)
+                    header, row = next(rows)
                 except StopIteration:
                     break
                 pending.append(row)
@@ -504,7 +492,7 @@ def iter_private_export_chunks(
                 pending = [[row[i] for i in positions] for row in pending]
             frame = _raw_frame(pending, header)
             if dataset == "index_info":
-                frame = _clean_index_info_source_codes(frame)
+                _validate_index_info_source_codes(frame)
             try:
                 yield frame
             except GeneratorExit:
@@ -517,14 +505,14 @@ def _iter_csv_records(
     require_exact_width: bool,
     dataset: str | None = None,
     expected_identity: DatasetFileIdentity | None = None,
-) -> Iterator[tuple[list[str], list[str], int]]:
+) -> Iterator[tuple[list[str], list[str]]]:
     rows = iter(iter_export_csv_records(path, expected_identity=expected_identity))
     with closing_iterator(rows):
         header = physical_header = row = record = None
         header_record = next(rows, None)
         if header_record is None:
             return
-        physical_header = materialize_header_record(header_record[0])
+        physical_header = materialize_header_record(header_record)
         physical_width = len(physical_header)
         selected_positions: frozenset[int] | None = None
         header = physical_header
@@ -554,7 +542,7 @@ def _iter_csv_records(
         del header_record
         while True:
             try:
-                record, source_bytes = next(rows)
+                record = next(rows)
             except StopIteration:
                 break
             row: list[str] = record
@@ -567,7 +555,7 @@ def _iter_csv_records(
                     if position in selected_positions
                 ]
                 del record
-            _yield_value = (header, row, source_bytes)
+            _yield_value = (header, row)
             try:
                 yield _yield_value
             except GeneratorExit:

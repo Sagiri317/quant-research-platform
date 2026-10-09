@@ -58,9 +58,7 @@ def comparison_schema(context: DatasetSession) -> dict[str, Any]:
     }
 
 
-def fingerprint_dataset_session(
-    context: DatasetSession, *, batch_observer=None
-) -> DatasetFingerprint:
+def fingerprint_dataset_session(context: DatasetSession) -> DatasetFingerprint:
     key_columns = tuple(str(column) for column in context.spec["primary_key"])
     hash_columns = tuple(dict.fromkeys((*key_columns, *context.logical_columns)))
     hash_physical_columns = read_columns_for_time_window(
@@ -81,7 +79,6 @@ def fingerprint_dataset_session(
             context,
             columns=hash_physical_columns,
             batch_rows=DEFAULT_BATCH_ROWS,
-            batch_observer=batch_observer,
         )
     ) as batches:
         for path, chunk in batches:

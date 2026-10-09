@@ -125,14 +125,7 @@ def test_l1_ofi_uses_exact_integer_tick_identity() -> None:
     assert l1_ofi((1000, 2.0), (1010, 3.0), (1020, 1.0), (1020, 2.0)) == 2.0
 
 
-def test_panel_frames_build_from_column_buffers(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        pd.DataFrame,
-        "from_records",
-        lambda *_args, **_kwargs: pytest.fail("hft_panel_row_graph_used"),
-    )
+def test_panel_frames_preserve_batch_rows_and_identity() -> None:
     frames = list(
         iter_panel_frames(
             [_state(0), _state(200)],

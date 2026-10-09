@@ -80,16 +80,6 @@ def make_helper_edges_dataset_frame(
     )
 
 
-def make_correctness_dataset_frame(
-    *, value_column: str = "value", market_id: str = "a_share"
-) -> pd.DataFrame:
-    return _make_dataset_frame(
-        value_column=value_column,
-        market_id=market_id,
-        defaults=_CORRECTNESS_DATASET_FRAME,
-    )
-
-
 def _make_dataset_frame(
     *,
     asset_ids: Sequence[str] | None = None,
@@ -121,11 +111,6 @@ _TIME_WINDOW_DATASET_FRAME = {
     "asset_ids": ("000001", "000001", "000001"),
     "dates": ("2014-01-02", "2015-01-05", "2016-01-04"),
     "values": (1.0, 2.0, 3.0),
-}
-_CORRECTNESS_DATASET_FRAME = {
-    "asset_ids": ("asset_a", "asset_b", "asset_a", "asset_b"),
-    "dates": ("2020-01-02", "2020-01-02", "2020-01-06", "2020-01-06"),
-    "values": (1.0, 2.0, 3.0, 4.0),
 }
 _HELPER_EDGES_DATASET_FRAME = {
     "asset_ids": ("asset_a", "asset_b"),

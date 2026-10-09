@@ -17,7 +17,6 @@ from quant_research_platform.catalog.processed import (
     InterimDataCatalog,
     ProcessedDataCatalog,
 )
-from quant_research_platform.contracts.data import DataFrequency
 from quant_research_platform.contracts.ids import MarketId
 from quant_research_platform.contracts.targets import ProducerBinding, ProducerKind
 from quant_research_platform.markets.implementations.crypto import ids as crypto_ids
@@ -67,7 +66,6 @@ from quant_research_platform.sources.reference.interim import (
 class ResearchProfile:
     profile_id: str
     market_id: MarketId
-    frequency: DataFrequency
     protocol: object
     factors: FactorCatalog
     labels: LabelCatalog
@@ -155,7 +153,6 @@ def _a_share_profile() -> ResearchProfile:
     return ResearchProfile(
         profile_id=A_SHARE_PROFILE_ID,
         market_id=MarketId("a_share"),
-        frequency=DataFrequency.DAILY,
         protocol=a_share.protocol,
         factors=a_share.factor_catalog(),
         labels=a_share.label_catalog(),
@@ -316,7 +313,6 @@ def _crypto_profile() -> ResearchProfile:
     return ResearchProfile(
         profile_id=CRYPTO_PROFILE_ID,
         market_id=MarketId("crypto"),
-        frequency=DataFrequency.TICK,
         protocol=crypto_hft.protocol,
         factors=crypto_hft.factor_catalog(),
         labels=crypto_hft.label_catalog(),

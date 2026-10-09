@@ -214,13 +214,6 @@ def test_atomic_long_paths_create_parents_keep_old_good_and_preserve_primary(
     }
 
 
-def test_directory_cleanup_regression_kills_noop_mutation(tmp_path, monkeypatch):
-    monkeypatch.setattr(atomic, "remove_owned_scratch", lambda _path: None)
-    with pytest.raises(AssertionError):
-        test_atomic_directory_writer_failure_removes_only_operation_temp(tmp_path)
-    assert tuple((tmp_path / "nested").glob(".a-[0-9a-f]*"))
-
-
 def test_atomic_chunk_failure_closes_source_and_preserves_primary(
     tmp_path, monkeypatch
 ):

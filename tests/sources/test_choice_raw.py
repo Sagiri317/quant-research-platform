@@ -265,6 +265,20 @@ def test_request_rejects_unsafe_or_implicit_cutoff(changes: dict[str, object]) -
         replace(_request("css"), **changes).payload()
 
 
+def test_long_legal_request_has_stable_identity() -> None:
+    request = replace(
+        _request("css"),
+        arguments=(
+            ",".join(f"{code:06d}.SH" for code in range(6600)),
+            "CASH",
+            "EndDate=2025-12-31",
+        ),
+    )
+    assert len(request.arguments[0]) > 65536
+    assert request.payload()["arguments"] == list(request.arguments)
+    assert request.identity() == replace(request).identity()
+
+
 @pytest.mark.parametrize("metadata", (0, None, "bad", []))
 def test_scalar_saved_metadata_preserves_primary_error_at_read_and_reuse(
     tmp_path, metadata

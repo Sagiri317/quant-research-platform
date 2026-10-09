@@ -38,6 +38,7 @@ from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_META
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.identity import (
     _hash_file_content,
+    content_hash_for_files,
     dataset_file_identity,
     filesystem_is_file,
 )
@@ -179,7 +180,18 @@ def materialize_interim_data(
             spec = fee_schedule_spec()
 
         def verify_source(_receipt):
-            if source_content_identity(root, data_id) != identity:
+            current = (
+                source_content_identity(root, data_id)
+                if data_id == A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
+                else content_hash_for_files(
+                    tuple(
+                        (name, root / "a_share_fee_schedule" / name)
+                        for name in (A_SHARE_FEE_CSV_NAME, A_SHARE_FEE_SIDECAR_NAME)
+                    ),
+                    error="reference_raw_identity_changed",
+                )
+            )
+            if current != identity:
                 raise ValueError("reference_raw_identity_changed")
 
         artifact_root = layout.target_root(

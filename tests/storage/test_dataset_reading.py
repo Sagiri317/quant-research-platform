@@ -101,7 +101,7 @@ def test_internal_physical_reader_uses_bounded_record_batches(tmp_path: Path) ->
     pd.testing.assert_frame_equal(projected, expected_projected)
 
 
-def test_internal_physical_reader_allows_single_row_over_soft_target(
+def test_internal_physical_reader_preserves_single_8kib_text_row(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(

@@ -211,6 +211,8 @@ class ProcessedDataSpec(DataSpec):
             ("processed_input_data_ids", self.processed_input_data_ids),
         ):
             _validate_string_tuple(values, field_name)
+            if len(values) != len(set(values)):
+                raise ValueError(f"{field_name}_must_be_unique")
 
 
 def _validate_string_tuple(values: object, field_name: str) -> None:

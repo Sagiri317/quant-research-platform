@@ -53,6 +53,38 @@ def qrp_json_object_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
     return _json_native_object(value, allow_frozen=True)
 
 
+def qrp_json_mapping_snapshot(value: Mapping[str, Any]) -> dict[str, Any]:
+    """Adapt general mappings without relaxing the persisted JSON boundary."""
+    if not isinstance(value, Mapping):
+        raise ValueError("qrp_json_top_level_object_required")
+    try:
+        return _json_native_mapping(
+            value, active=set(), allow_frozen=True, allow_mapping=True
+        )
+    except RecursionError as exc:
+        raise ValueError("qrp_json_recursion_limit") from exc
+
+
+def freeze_json_value(value: object) -> object:
+    """Freeze an already validated native JSON snapshot."""
+    if type(value) is dict:
+        return MappingProxyType(
+            {key: freeze_json_value(child) for key, child in value.items()}
+        )
+    if type(value) is list:
+        return tuple(freeze_json_value(child) for child in value)
+    return value
+
+
+def plain_json_value(value: object) -> object:
+    """Return fresh native containers from a validated frozen JSON value."""
+    if isinstance(value, Mapping):
+        return {key: plain_json_value(child) for key, child in value.items()}
+    if type(value) in {tuple, list}:
+        return [plain_json_value(child) for child in value]
+    return value
+
+
 def _qrp_json_snapshot_text(value: Mapping[str, Any]) -> tuple[dict[str, Any], str]:
     payload = qrp_json_object_snapshot(value)
     return payload, _render_native_json(payload)
@@ -172,6 +204,7 @@ def _json_native_mapping(
     *,
     active: set[int],
     allow_frozen: bool = False,
+    allow_mapping: bool = False,
 ) -> dict[str, Any]:
     identity = id(value)
     if identity in active:
@@ -188,6 +221,7 @@ def _json_native_mapping(
                 item,
                 active=active,
                 allow_frozen=allow_frozen,
+                allow_mapping=allow_mapping,
             )
         return result
     finally:
@@ -195,7 +229,11 @@ def _json_native_mapping(
 
 
 def _json_native_value(
-    value: object, *, active: set[int], allow_frozen: bool = False
+    value: object,
+    *,
+    active: set[int],
+    allow_frozen: bool = False,
+    allow_mapping: bool = False,
 ) -> Any:
     kind = type(value)
     if kind is str:
@@ -217,13 +255,24 @@ def _json_native_value(
         active.add(identity)
         try:
             return [
-                _json_native_value(item, active=active, allow_frozen=allow_frozen)
+                _json_native_value(
+                    item,
+                    active=active,
+                    allow_frozen=allow_frozen,
+                    allow_mapping=allow_mapping,
+                )
                 for item in value
             ]
         finally:
             active.remove(identity)
-    if kind is dict or (allow_frozen and kind is MappingProxyType):
-        return _json_native_mapping(value, active=active, allow_frozen=allow_frozen)
+    if (
+        kind is dict
+        or (allow_frozen and kind is MappingProxyType)
+        or (allow_mapping and isinstance(value, Mapping))
+    ):
+        return _json_native_mapping(
+            value, active=active, allow_frozen=allow_frozen, allow_mapping=allow_mapping
+        )
     raise ValueError("qrp_json_unsupported_value")
 
 

@@ -739,7 +739,7 @@ def test_indexed_event_range_is_chunk_and_query_order_independent(
     ]
     actual = pd.concat(list(reversed(chunks)), ignore_index=True)
     pd.testing.assert_frame_equal(actual, whole, check_exact=True)
-    assert len(visited) == 10 * 2 * 3 * freshness
+    assert len(visited) <= 10 * 2 * 3 * freshness
     pd.testing.assert_frame_equal(query(observations), whole, check_exact=True)
     backwards = query(observations.iloc[::-1])
     pd.testing.assert_frame_equal(

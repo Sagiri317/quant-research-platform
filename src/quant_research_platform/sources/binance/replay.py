@@ -189,40 +189,30 @@ class ObservationCoverageIndex:
             raw_handle = open_filesystem_file(self._path, "rb")
         except (FileNotFoundError, NotADirectoryError) as exc:
             raise ValueError("binance_replay_connection_intervals_invalid") from exc
-        digesting_handle = _DigestingReader(raw_handle)
-        try:
-            gzip_handle = gzip.GzipFile(fileobj=digesting_handle, mode="rb")
-        except BaseException as primary:
-            try:
-                raw_handle.close()
-            except BaseException as close_error:
-                primary.add_note(
-                    "Binance connection coverage raw handle close also failed: "
-                    f"{type(close_error).__name__}"
-                )
-            raise
-        count = 0
-        primary = None
-        try:
-            while True:
-                line: bytes | None = None
-                interval: dict[str, Any] | None = None
-                row = None
-                line = gzip_handle.readline()
-                if not line:
-                    break
-                try:
-                    interval = parse_qrp_json_object(line)
-                except (UnicodeError, ValueError) as exc:
-                    raise ValueError(
-                        "binance_replay_connection_intervals_invalid"
-                    ) from exc
-                row = self._decode_interval(interval, markets=markets)
-                if row[0] in self._rows:
-                    raise ValueError("binance_replay_connection_intervals_invalid")
-                self._rows[row[0]] = row
-                count += 1
-            gzip_handle.close()
+        with closing_iterator(raw_handle):
+            digesting_handle = _DigestingReader(raw_handle)
+            count = 0
+            with closing_iterator(
+                gzip.GzipFile(fileobj=digesting_handle, mode="rb")
+            ) as gzip_handle:
+                while True:
+                    line: bytes | None = None
+                    interval: dict[str, Any] | None = None
+                    row = None
+                    line = gzip_handle.readline()
+                    if not line:
+                        break
+                    try:
+                        interval = parse_qrp_json_object(line)
+                    except (UnicodeError, ValueError) as exc:
+                        raise ValueError(
+                            "binance_replay_connection_intervals_invalid"
+                        ) from exc
+                    row = self._decode_interval(interval, markets=markets)
+                    if row[0] in self._rows:
+                        raise ValueError("binance_replay_connection_intervals_invalid")
+                    self._rows[row[0]] = row
+                    count += 1
             digesting_handle.drain()
             if (
                 count != self._descriptor["record_count"]
@@ -230,38 +220,6 @@ class ObservationCoverageIndex:
             ):
                 raise ValueError("binance_replay_connection_intervals_invalid")
             _verify_raw_file_handle(raw_handle, expected_identity=self.identity)
-        except BaseException as body_error:
-            primary = body_error
-            raise
-        finally:
-            first_failure: BaseException | None = None
-            try:
-                gzip_handle.close()
-            except BaseException as close_error:
-                if primary is not None:
-                    primary.add_note(
-                        "Binance connection coverage gzip close also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-                else:
-                    first_failure = close_error
-            try:
-                raw_handle.close()
-            except BaseException as close_error:
-                if primary is not None:
-                    primary.add_note(
-                        "Binance connection coverage close also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-                elif first_failure is None:
-                    first_failure = close_error
-                else:
-                    first_failure.add_note(
-                        "Binance connection coverage close also failed: "
-                        f"{type(close_error).__name__}"
-                    )
-            if first_failure is not None:
-                raise first_failure
 
     def bounds(
         self,
@@ -1022,8 +980,7 @@ def _sha256_file(path: Path, identity: DatasetFileIdentity) -> str:
         handle = open_filesystem_file(path, "rb")
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("binance_replay_file_identity_mismatch") from exc
-    primary = None
-    try:
+    with closing_iterator(handle):
         _verify_raw_file_handle(handle, expected_identity=identity)
         digest = hashlib.sha256()
         buffer = bytearray(_HASH_BUFFER_BYTES)
@@ -1031,19 +988,6 @@ def _sha256_file(path: Path, identity: DatasetFileIdentity) -> str:
             digest.update(memoryview(buffer)[:count])
         _verify_raw_file_handle(handle, expected_identity=identity)
         return digest.hexdigest()
-    except BaseException as body_error:
-        primary = body_error
-        raise
-    finally:
-        try:
-            handle.close()
-        except BaseException as close_error:
-            if primary is None:
-                raise
-            primary.add_note(
-                "Binance replay file handle close also failed: "
-                f"{type(close_error).__name__}"
-            )
 
 
 def _overlapping_capture_groups(files: list[_RunFile]) -> Iterator[list[_RunFile]]:

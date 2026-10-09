@@ -4,10 +4,8 @@ from __future__ import annotations
 
 import math
 from collections.abc import Mapping
-from dataclasses import replace
 from datetime import date, datetime
 from decimal import Decimal, InvalidOperation
-from types import MappingProxyType
 from typing import Any
 
 import numpy as np
@@ -312,42 +310,6 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
         ResearchDatasetSpec,
     }:
         raise ValueError("dataset_spec_type_invalid")
-    _require_runtime_string(spec.data_id, "dataset_data_id_invalid")
-    if type(spec.frequency) is not DataFrequency:
-        raise ValueError("dataset_frequency_invalid")
-    if type(spec.grain) is not DataGrain:
-        raise ValueError("dataset_grain_invalid")
-    primary_key = _require_runtime_string_tuple(
-        spec.primary_key, "dataset_primary_key_invalid", allow_empty=False
-    )
-    _require_runtime_string_tuple(
-        spec.partition_columns, "dataset_partition_columns_invalid", allow_empty=True
-    )
-    column_roles_are_valid_mapping = type(spec.column_roles) is MappingProxyType
-    if not column_roles_are_valid_mapping or not spec.column_roles:
-        raise ValueError("dataset_column_roles_invalid")
-    if any(
-        (
-            type(column) is not str or not column or type(role) is not ColumnRole
-            for column, role in spec.column_roles.items()
-        )
-    ):
-        raise ValueError("dataset_column_roles_invalid")
-    if type(spec.required_columns) is not tuple or spec.required_columns != tuple(
-        spec.column_roles
-    ):
-        raise ValueError("dataset_required_columns_invalid")
-    if not set(primary_key).issubset(spec.column_roles):
-        raise ValueError("dataset_primary_key_invalid")
-    if spec.partition_columns not in {("year",), ()}:
-        raise ValueError("unsupported_partitioning")
-    _validate_dataset_spec_variant(spec)
-    try:
-        replace(spec)
-    except (TypeError, ValueError) as exc:
-        if type(spec) is ResearchDatasetSpec:
-            raise ValueError("dataset_research_spec_invalid") from exc
-        raise
     return next(
         (
             column
@@ -356,91 +318,6 @@ def validate_dataset_spec(spec: DataSpec) -> str | None:
         ),
         None,
     )
-
-
-def _validate_dataset_spec_variant(spec: DataSpec) -> None:
-    if type(spec) is DataSpec:
-        return
-    if type(spec) is InterimDataSpec:
-        _require_runtime_string(spec.source_id, "dataset_source_id_invalid")
-        return
-    if type(spec) is ProcessedDataSpec:
-        _require_runtime_string(spec.market_id, "dataset_market_id_invalid")
-        if type(spec.kind) is not ProcessedDataKind:
-            raise ValueError("dataset_kind_invalid")
-        _require_runtime_string_tuple(
-            spec.source_input_data_ids,
-            "dataset_source_input_data_ids_invalid",
-            allow_empty=True,
-        )
-        _require_runtime_string_tuple(
-            spec.processed_input_data_ids,
-            "dataset_processed_input_data_ids_invalid",
-            allow_empty=True,
-        )
-        return
-    _require_runtime_string(spec.market_id, "dataset_market_id_invalid")
-    input_data_ids = _require_runtime_string_tuple(
-        spec.input_data_ids, "dataset_input_data_ids_invalid", allow_empty=False
-    )
-    _require_runtime_string(
-        spec.base_input_data_id, "dataset_base_input_data_id_invalid"
-    )
-    for value, error, allow_empty in (
-        (spec.factor_columns, "dataset_factor_columns_invalid", True),
-        (spec.feature_columns, "dataset_feature_columns_invalid", True),
-        (spec.label_columns, "dataset_label_columns_invalid", False),
-        (spec.filter_columns, "dataset_filter_columns_invalid", True),
-        (spec.context_columns, "dataset_context_columns_invalid", True),
-    ):
-        _require_runtime_string_tuple(value, error, allow_empty=allow_empty)
-    if type(spec.feature_transforms) is not tuple:
-        raise ValueError("dataset_feature_transforms_invalid")
-    for transform in spec.feature_transforms:
-        _validate_runtime_feature_transform(transform)
-    if (
-        type(spec.key_coverage) is not MappingProxyType
-        or set(spec.key_coverage) != set(input_data_ids)
-        or any(
-            (
-                type(data_id) is not str
-                or not data_id
-                or type(policy) is not str
-                or (policy not in {"strict", "sparse"})
-                for data_id, policy in spec.key_coverage.items()
-            )
-        )
-    ):
-        raise ValueError("dataset_key_coverage_invalid")
-
-
-def _validate_runtime_feature_transform(value: object) -> None:
-    if type(value) is not FeatureTransformSpec:
-        raise ValueError("dataset_feature_transforms_invalid")
-    try:
-        FeatureTransformSpec(value.recipe_id, value.source_columns)
-    except (TypeError, ValueError) as exc:
-        raise ValueError("dataset_feature_transforms_invalid") from exc
-
-
-def _require_runtime_string(value: object, error: str) -> str:
-    if type(value) is not str or not value:
-        raise ValueError(error)
-    return value
-
-
-def _require_runtime_string_tuple(
-    value: object, error: str, *, allow_empty: bool
-) -> tuple[str, ...]:
-    if (
-        type(value) is not tuple
-        or (not value and (not allow_empty))
-        or any(type(item) is not str or not item for item in value)
-    ):
-        raise ValueError(error)
-    if len(value) != len(set(value)):
-        raise ValueError(error)
-    return value
 
 
 def arrow_type_has_null(data_type: pa.DataType) -> bool:

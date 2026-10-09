@@ -72,6 +72,7 @@ from quant_research_platform.storage.parquet import (
 from quant_research_platform.storage.semantic_artifacts import (
     _member_record,
     read_semantic_artifact_record,
+    semantic_artifact_read_session,
     verify_semantic_artifact_member,
     write_semantic_artifact,
 )
@@ -220,7 +221,9 @@ class PersistedQuarterlyModelArtifact:
         )
 
 
-def _persisted_model_metadata(result, *, fit_cutoff=None, fit_coverage_id=None):
+def _persisted_model_metadata(
+    result, *, fit_cutoff=None, fit_coverage_id=None, rank_calibration=False
+):
     cutoff = (
         None if fit_cutoff is None else time_value_isoformat(fit_cutoff, date_only=True)
     )
@@ -228,7 +231,9 @@ def _persisted_model_metadata(result, *, fit_cutoff=None, fit_coverage_id=None):
     if fit_cutoff is not None:
         metadata["fit_cutoff"] = cutoff
         metadata["fit_coverage_id"] = fit_coverage_id
-    metadata = validate_model_metadata_core(metadata, quarterly=fit_cutoff is not None)
+    metadata = validate_model_metadata_core(
+        metadata, quarterly=fit_cutoff is not None, rank_calibration=rank_calibration
+    )
     validate_model_state(result.prediction_model, metadata)
     return metadata
 
@@ -1525,7 +1530,9 @@ def write_crypto_model_artifact(
                     "training_asset_ids": list(training_assets),
                     "validation_asset_ids": list(training_assets),
                     "evaluation_asset_ids": list(evaluation_assets),
-                    "model_metadata": validate_model_metadata_core(metadata),
+                    "model_metadata": validate_model_metadata_core(
+                        metadata, rank_calibration=True
+                    ),
                 }
             )
             folders.setdefault(fold.fold_id, []).append(entry)
@@ -1570,12 +1577,22 @@ def write_crypto_model_artifact(
                         {
                             "training_asset_ids": list(member.training_assets),
                             "evaluation_asset_ids": list(member.evaluation_assets),
-                            "model_metadata": _persisted_model_metadata(member.result),
+                            "model_metadata": _persisted_model_metadata(
+                                member.result, rank_calibration=True
+                            ),
                         }
                     )
                     final_models.append(entry)
                     add_reference(member.refit_trial_reference)
+        model_order = {
+            spec["model_id"]: position
+            for position, spec in enumerate(
+                envelope.semantic_metadata["target_contract"]["model_specs"]
+            )
+        }
+        final_models.sort(key=lambda entry: model_order[entry["model_id"]])
         for fold_id, entries in folders.items():
+            entries.sort(key=lambda entry: model_order[entry["model_id"]])
             write_internal_artifact_manifest(
                 staging / "models" / fold_id / "metadata.json",
                 {"schema_id": CRYPTO_FOLD_MODEL_ARTIFACT_SCHEMA_ID, "models": entries},
@@ -1623,17 +1640,22 @@ def read_crypto_model_artifact(
     root = Path(root)
     member_identities = {}
     operational = {}
-    envelope, members = read_semantic_artifact_record(
+    with semantic_artifact_read_session(
         root,
         expected_identity=expected_identity,
         member_identities=member_identities,
         expected_member_identities=expected_member_identities,
         operational_metadata=operational,
-    )
-    refs = operational.get("model_trial_ledgers")
-    return _validate_crypto_model_payload(
-        root, envelope, members, refs, trial_layout, member_identities=member_identities
-    )
+    ) as (envelope, members):
+        refs = operational.get("model_trial_ledgers")
+        return _validate_crypto_model_payload(
+            root,
+            envelope,
+            members,
+            refs,
+            trial_layout,
+            member_identities=member_identities,
+        )
 
 
 def _crypto_model_scope(envelope):
@@ -1825,7 +1847,7 @@ def _validate_crypto_model_payload(
                 )
             ):
                 raise ValueError("crypto_model_trial_binding_invalid")
-            validate_model_metadata_core(entry["model_metadata"])
+            validate_model_metadata_core(entry["model_metadata"], rank_calibration=True)
             _validate_model_parameters(
                 entry["model_metadata"],
                 parameters,
@@ -1966,7 +1988,7 @@ def _validate_crypto_model_payload(
             )
         ):
             raise ValueError("crypto_model_refit_binding_invalid")
-        validate_model_metadata_core(metadata)
+        validate_model_metadata_core(metadata, rank_calibration=True)
         _validate_model_parameters(
             metadata, parameters, error="crypto_model_parameters_misaligned"
         )

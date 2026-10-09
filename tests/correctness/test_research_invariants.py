@@ -48,8 +48,6 @@ from quant_research_platform.research.protocols.a_share import (
     SCENARIO_IDS,
     protocol,
 )
-from quant_research_platform.sources.csmar.interim import interim_catalog
-from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.workflows import research
 from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
@@ -202,7 +200,7 @@ def test_execution_mask_is_a_separate_future_fact() -> None:
     assert bool(result.loc[0, "can_enter"]) is False
 
 
-def test_supervised_models_persist_a_training_only_scaler() -> None:
+def test_supervised_fit_uses_only_mature_training_rows_and_scaler() -> None:
     spec = ModelSpec(
         model_id="ridge",
         model_algorithm="ridge_regression",
@@ -234,6 +232,16 @@ def test_supervised_models_persist_a_training_only_scaler() -> None:
     assert fitted.metadata["scaler"]["columns"] == ["feature"]
     assert fitted.prediction_model.scaler.mean_ == (1.5,)
     assert fitted.prediction_model.scaler.scale_ == (0.5,)
+    assert fitted.metadata["rows_after_input_label_dropna"] == 2
+    assert fitted.metadata["train_end"] == "2024-01-01"
+    frame.loc[2:, ["feature", "model_target"]] = [[1e9, -1e9], [-1e9, 1e9]]
+    changed = _fit_model_result(
+        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02"),
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+    )
+    assert changed.metadata == fitted.metadata
+    assert changed.prediction_model.scaler == fitted.prediction_model.scaler
 
 
 @pytest.mark.parametrize(
@@ -280,40 +288,6 @@ def test_fixed_model_parameters_agree_with_fitting_and_metadata(algorithm):
     metadata["resolved_hyperparameters"] = {"fit_intercept": False}
     with pytest.raises(ValueError, match="^invalid_model_metadata$"):
         validate_model_metadata_core(metadata)
-
-
-def test_model_fitting_excludes_labels_unavailable_at_fitting_cutoff() -> None:
-    spec = ModelSpec(
-        model_id="cutoff",
-        model_algorithm="ridge_regression",
-        input_feature_columns=("feature",),
-        label_column="model_target",
-        hyperparameters={"alpha": 1.0},
-    )
-    preflight_model_specs((spec,))
-    frame = pd.DataFrame(
-        {
-            "timestamp": pd.to_datetime(
-                ["2024-01-01", "2024-01-01", "2024-01-02", "2024-01-02"]
-            ),
-            "asset_id": ["a", "b", "a", "b"],
-            "feature": [1.0, 2.0, 3.0, 4.0],
-            "model_target": [0.1, 0.2, 0.3, 0.4],
-            "model_target_available_at": pd.to_datetime(
-                ["2024-01-02", "2024-01-02", "2024-01-03", "2024-01-03"]
-            ),
-            "eligible": True,
-        }
-    )
-
-    result = _fit_model_result(
-        _collect_training_frame([frame], spec, fitting_cutoff="2024-01-02"),
-        spec,
-        estimator=build_estimator_from_model_spec(spec),
-    )
-    fitted = result
-    assert fitted.metadata["rows_after_input_label_dropna"] == 2
-    assert fitted.metadata["train_end"] == "2024-01-01"
 
 
 def test_rank_ensembles_learn_direction_and_keep_missing_neutral() -> None:
@@ -749,7 +723,7 @@ def test_ineligible_market_risk_still_rejects_invalid_nonnull_inputs(column, val
         MarketModelRiskState().observe(panel)
 
 
-def test_enhanced_risk_state_is_causal_and_produces_psd_risk() -> None:
+def test_enhanced_risk_state_uses_mature_estimates_and_produces_psd_risk() -> None:
     dates = pd.bdate_range("2022-01-03", periods=564)
     style_columns = (
         "log_float_market_cap",
@@ -1236,88 +1210,15 @@ def test_fundamental_value_factors_use_panel_total_cap() -> None:
 
 
 def test_missing_raw_identity_blocks_dataset_build(tmp_path) -> None:
-    sessions = pd.bdate_range("2020-01-01", periods=260)
-    prices = pd.Series(np.arange(10.0, 270.0), index=sessions)
-    bars = pd.DataFrame(
-        {
-            "source_asset_id": "000001",
-            "timestamp": sessions,
-            "trade_date": sessions,
-            "market_type": 1,
-            "trading_status_code": 0,
-            "filling_flag": 0,
-            "open": prices,
-            "high": prices + 1.0,
-            "low": prices - 1.0,
-            "close": prices,
-            "volume": 100.0,
-            "amount": 1_000.0,
-            "after_hours_volume": 0.0,
-            "after_hours_amount": 0.0,
-            "prev_close": prices - 1.0,
-            "limit_status": 0,
-            "period_return": prices.pct_change().fillna(0.0),
-            "adj_close": prices,
-            "adj_open": prices,
-            "float_market_cap": 1_000_000.0,
-            "total_market_cap": 1_200_000.0,
-            "turnover": np.nan,
-        }
-    )
-    stock = pd.DataFrame(
-        {
-            "source_asset_id": ["000001"],
-            "timestamp": [sessions[0]],
-            "stock_name": ["demo"],
-            "listing_date": [sessions[0] - pd.Timedelta(days=500)],
-            "delisting_date": [pd.NaT],
-            "status_change_date": [sessions[0] - pd.Timedelta(days=500)],
-            "company_status": ["normal"],
-            "industry_level1_code": ["A"],
-            "industry_level1_name": ["A"],
-        }
-    )
-    cap = pd.DataFrame(
-        {
-            "source_asset_id": ["000001"],
-            "timestamp": [sessions[0] - pd.Timedelta(days=500)],
-            "share_change_date": [sessions[0] - pd.Timedelta(days=500)],
-            "total_shares": [12_000.0],
-            "a_float_shares": [10_000.0],
-        }
-    )
-    calendar = pd.DataFrame(
-        {
-            "timestamp": sessions,
-            "calendar_date": sessions,
-            "source_market_type": 1,
-            "is_trading_day": True,
-            "source_day_of_week": sessions.dayofweek,
-            "source_state": "O",
-        }
-    )
-    layout = StorageLayout(project_root=tmp_path)
-    source_frames = {
-        "market_bars_1d": bars,
-        "stock_master": stock,
-        "market_cap": cap,
-        "trading_calendar": calendar,
-    }
-    for data_id, frame in source_frames.items():
-        spec = interim_catalog().get(data_id)
-        write_dataset(
-            layout.interim_data_root(spec.source_id, spec.data_id),
-            frame.loc[:, list(spec.required_columns)],
-            spec=spec,
-        )
     from quant_research_platform.profiles.research import research_profile
 
+    layout = StorageLayout(project_root=tmp_path)
     result = research.dataset_build(
         profile=research_profile(),
         layout=layout,
         dataset_id="pv_all",
-        start_date=sessions[0].date().isoformat(),
-        end_date=sessions[-1].date().isoformat(),
+        start_date="2020-01-01",
+        end_date="2020-12-31",
     )
     assert result["status"] == "BLOCKED"
     assert any(

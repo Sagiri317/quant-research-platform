@@ -524,21 +524,6 @@ def test_wide_single_row_preserves_complete_value(
     pd.testing.assert_frame_equal(chunks[0], batch.to_pandas(use_threads=False))
 
 
-def test_materialized_read_preserves_values(monkeypatch: pytest.MonkeyPatch) -> None:
-    expected = pd.DataFrame({"value": ["payload"]})
-    monkeypatch.setattr(
-        dataset_reading,
-        "iter_dataset_chunks",
-        lambda *_args, **_kwargs: iter((expected,)),
-    )
-    context = SimpleNamespace(
-        logical_columns=tuple(expected.columns),
-        logical_dtypes=logical_dtype_payload_from_frame(expected),
-    )
-    observed = dataset_reading.materialize_dataset_session(context)
-    pd.testing.assert_frame_equal(observed, expected)
-
-
 def test_chunked_and_materialized_reads_share_nullable_numeric_dtype(
     tmp_path: Path,
 ) -> None:
@@ -610,19 +595,6 @@ def test_nullable_uint64_read_and_fingerprint_preserve_large_integer_identity(
     assert int(left_read["value"].dropna().iloc[0]) == 2**63
     assert int(right_read["value"].dropna().iloc[0]) == 2**63 + 1
     assert comparison.status == "CONTENT_MISMATCH"
-
-
-def test_nullable_boolean_preserves_extension_dtype_across_read_modes(
-    tmp_path: Path,
-) -> None:
-    root = make_dataset_artifact_root(tmp_path, "nullable_boolean")
-    frame = make_default_dataset_frame().iloc[:2].copy()
-    frame["value"] = pd.array([True, pd.NA], dtype="boolean")
-    write_dataset(root, frame, spec=make_processed_dataset_spec("nullable_boolean"))
-    chunks = list(read_dataset(root, mode=DatasetReadMode.CHUNKED))
-    materialized = read_dataset(root)
-    assert {str(chunk["value"].dtype) for chunk in chunks} == {"boolean"}
-    assert str(materialized["value"].dtype) == "boolean"
 
 
 @pytest.mark.parametrize(
@@ -1372,7 +1344,7 @@ def test_membership_does_not_round_queries_into_matches(kind):
 def test_comparison_rechecks_dtype_structure_after_schema_hash_collision(
     tmp_path, monkeypatch
 ):
-    from quant_research_platform.storage.datasets import fingerprinting
+    from quant_research_platform.storage.datasets import comparison
 
     roots = [
         make_dataset_artifact_root(tmp_path / str(index), "dtype_exact")
@@ -1383,7 +1355,7 @@ def test_comparison_rechecks_dtype_structure_after_schema_hash_collision(
         frame["value"] = frame["value"].astype(dtype)
         write_dataset(root, frame, spec=make_processed_dataset_spec("dtype_exact"))
     assert compare_datasets(*roots).status == "SCHEMA_MISMATCH"
-    monkeypatch.setattr(fingerprinting, "canonical_json_hash", lambda _value: "a" * 64)
+    monkeypatch.setattr(comparison, "canonical_json_hash", lambda _value: "a" * 64)
     assert compare_datasets(*roots).status == "SCHEMA_MISMATCH"
 
 

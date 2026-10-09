@@ -209,8 +209,8 @@ def test_rank_training_keeps_nullable_raw_domains_and_first_undefined_factor():
     ).iloc[[2, 0, 3, 1]]
     for factory in (EqualWeightRankEnsembleFactory, ICWeightedRankEnsembleFactory):
         model = factory(("x0", "x1"), "label").fit(frame, frame.label.to_numpy())
-        assert model.label_calibration == (2.5, 2.0)
         np.testing.assert_array_equal(model.predict(frame), [-0.25, 0.0, 0.25, 0.0])
+        assert _label_calibration(model.predict(frame), frame.label, None) == (2.5, 2.0)
     invalid = frame.assign(x0=np.nan, x1="invalid")
     with pytest.raises(
         ValueError, match="^ensemble_direction_undefined:x0:no_valid_training_rankic$"

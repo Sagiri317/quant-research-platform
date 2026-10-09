@@ -752,8 +752,10 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
     assert any(row.get("test_id") == "psr" for row in report["sections"]["robustness"])
 
 
+@pytest.mark.parametrize("st_holding", (False, True))
 def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
     tmp_path,
+    st_holding,
 ):
     import numpy as np
 
@@ -803,6 +805,8 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         turnover=0.01,
     )
     styles = RISK_STYLE_COLUMNS
+    if st_holding:
+        panel.loc[panel.asset_id.eq(assets[0]), "is_st"] = True
     data = panel[["market_id", "timestamp", "asset_id"]].copy()
     for name in styles:
         data[name] = rng.normal(size=len(data))
@@ -891,6 +895,21 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
             first.fitted.asset_returns,
             expected.reindex(first.fitted.asset_returns.index),
         )
+        from quant_research_platform.research.portfolios.risk import holding_attribution
+
+        values, reasons, exposure = holding_attribution(
+            first,
+            after_notionals=pd.Series({assets[0]: 100.0}),
+            nav_before=100.0,
+            nav_post=100.0,
+            benchmark_id=None,
+            benchmark_return=None,
+            holding_returns=expected,
+        )
+        assert not reasons and not exposure.empty
+        assert sum(
+            values[name] for name in ("industry", "style", "residual_unexplained")
+        ) == pytest.approx(expected[assets[0]])
         first = None
 
     def first_for_styles(selected_styles, selected_layout):

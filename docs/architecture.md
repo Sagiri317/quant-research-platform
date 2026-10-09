@@ -35,6 +35,12 @@ research/protocols 持有配置选择校验、窗口、冻结及统计研究语�
 拟合、预测、缩放、排名、重要性和验证由 research 持有。字段名使用 model_algorithm，
 算法集合使用 model_algorithm_ids；只保留唯一合同入口，不保留兼容支路。
 
+规格构造及外部 JSON 读取验证合同，内部存储消费已构造的 frozen 规格时只做类型分派；
+不承诺检测调用者通过 `object.__setattr__` 绕过冻结机制后伪造的活动对象。
+持久化 schema、字段、PK、身份及非法输入仍由边界 owner 严格验证。
+业务 metadata 和模型参数继续接受一般 Mapping，并在构造时复制、校验与冻结；
+外部 JSON 仍只接受严格 JSON 对象，不增加受信哨兵或绕过独立构造验证的路径。
+
 factor 是信号来源，feature 是模型输入，label 是监督目标，prediction 是模型输出，
 signal 是评估/组合使用的排序、权重或交易意图，evaluation 是研究表现，portfolio 是构建与收益路径。
 多资产同一时点采用 cross_sectional；单资产 HFT 跨时间采用 single_asset_time_series。
@@ -103,7 +109,9 @@ A股因子评估和 `${scenario}_factor_statistics` 不依赖拟合模型；后�
 
 ## 计划、身份与持久化
 
-所有来源、数据集、评估、模型、预测、组合、统计和报告由同一目标 DAG 展开依赖。
+所有来源、数据集、评估、模型、预测、组合和统计由同一计算 DAG 展开依赖。
+报告在计算 DAG 之后，从指定不可变 run 的已落盘引用单独发布：先执行 `research run`，
+再执行 `report build --run-id`；通用目标构建不接受 report。
 业务目录、规格与生产器绑定分别有唯一来源，不能另存并行规划器或手工注册副本。
 公开 A 股窄窗口构建在同一规划器内区分目标的输出实例与历史依赖实例；
 因子按既有 lookback 定义使用 `DATA_START` 至请求末端的依赖包络，首次冷构建须物化该包络，
@@ -129,7 +137,8 @@ CLI 先输出原有结构化结果，再将顶层 `COMPLETE`、`FAILED`、`BLOCK
 ExperimentPlan.stage 是 selection/refit 阶段的唯一事实，TrialRecord 通过 plan/protocol_hash 绑定。
 数据角色统一为 train、validation、test；development 是访问阶段，不是第四角色。
 同一请求、同一折或最终 refit 阶段内，相同截止、输入列、标签成熟域、资格过滤、行数控制、
-输入类型和时间权重共享训练域及其一次性预处理。预处理在 trial 启动后首次求值；估计器各自持有
+输入类型和时间权重共享训练域及其一次性预处理；A 股与 Crypto 均遵循该规则，
+Crypto 还按训练资产集合区分域，不合并 refit 的两个离散窗口。预处理在 trial 启动后首次求值；估计器各自持有
 矩阵、标签和权重副本，冻结 scaler 保持一致。切换折或阶段释放共享域，不建立持久化缓存。
 原始行的格式、有限值、资格和成熟事实由 collector 统一验证一次；被过滤掉的非法行仍拒绝。
 
@@ -151,7 +160,9 @@ TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指�
 与合同不兼容的机器可读派生产物须从已验证上游重建，不保留字段别名或双写；raw、归档和历史报告保留。
 
 数据集身份包含 schema、dtype、PK、逻辑窗口、来源谱系和精确内容。
-指纹仅快速拒绝；只有精确比较才能给出 MATCH。
+`fingerprint_dataset` 独立提供既有指纹 API；`compare_datasets` 直接在一次读取中
+核对 schema、dtype、PK 和精确值，不额外计算逻辑指纹。比较摘要不再返回 `content_hash`；
+持久化 manifest 的原始成员内容身份保持不变。只有精确比较才能给出 MATCH。
 软件、协议、种子、后端、上游以及 trial/fold/asset/refit/季度谱系按现有合同绑定；
 持久化模型读取不重新发现主机参数。数据集身份不受下游模型或组合调参污染。影响数据计算的参数属于 ProcessedDataSpec，
 以严格 JSON 冻结并进入持久化规格及身份，例如辅助状态的 max_age_ms；改变 age 上限不能复用旧结果。
@@ -165,7 +176,10 @@ TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指�
 其代码变更保留在运行 provenance，不使科学产物失效；科学公式不得放入这两个 owner。
 分帧、来源解码、数值计算、合同、存储与校验代码仍进入产物依赖。
 统计、组合和模型的原生 reader 返回已经验证的业务封装，workflow 直接核对其目标身份，
-不在同一调用边界先重复扫描一次通用封装。新消费会话、引用绑定和迭代退出仍保留内容校验。
+不在同一调用边界先重复扫描一次通用封装；完整消费会话先验证内容，退出时核对捕获的
+manifest、成员集合、文件及目录身份，新消费会话重新验证内容；主异常保持优先。
+指定 run 的报告发现只读取全体报告 manifest 并核对结构及快照，随后由原生 reader 校验
+被选报告正文。无关 run 的正文损坏不阻塞指定报告；无效 manifest 和发现期间身份变化仍拒绝。
 完整且经原生 reader 验证的精确匹配节点直接 REUSE；真实输入、规格、窗口、计算依赖或上游身份
 变化仅沿对应 DAG 子图传播。留出复用资格比较精确科学产物身份、冻结输入及窗口，
 不因单独的操作 provenance 变化宣称科学证据发生修正；冻结模型、未访问留出与失败边界保持原合同。

@@ -9,15 +9,13 @@ from enum import StrEnum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from types import MappingProxyType
 
-from quant_research_platform.contracts.business_manifest import (
-    _freeze_json_value,
-    _plain_json_value,
-)
 from quant_research_platform.contracts.experiments import (
     validate_trial_ledger_reference,
 )
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
+    freeze_json_value,
+    plain_json_value,
     qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
@@ -418,7 +416,7 @@ class ResearchRunRecord:
         object.__setattr__(
             self,
             "operation_evidence",
-            _freeze_json_value(_operation_evidence(self.operation_evidence)),
+            freeze_json_value(_operation_evidence(self.operation_evidence)),
         )
         if type(self.trial_ledgers) is not tuple:
             raise ValueError("research_run_trial_references_invalid")
@@ -496,7 +494,7 @@ class ResearchRunRecord:
             or protocol.get("access_window") != window["access"]
         ):
             raise ValueError("research_run_protocol_request_mismatch")
-        object.__setattr__(self, "protocol", _freeze_json_value(protocol))
+        object.__setattr__(self, "protocol", freeze_json_value(protocol))
         object.__setattr__(self, "research_window", MappingProxyType(window))
         evidence = qrp_json_object_snapshot(dict(self.holdout_evidence))
         if window["access"] == "holdout" and not evidence:
@@ -547,17 +545,17 @@ class ResearchRunRecord:
                 != (not prior_ids)
             ):
                 raise ValueError("research_run_holdout_evidence_invalid")
-        object.__setattr__(self, "holdout_evidence", _freeze_json_value(evidence))
+        object.__setattr__(self, "holdout_evidence", freeze_json_value(evidence))
 
     def payload(self) -> dict[str, object]:
         return {
             "schema_id": "qrp-research-run",
             "trial_ledgers": [dict(reference) for reference in self.trial_ledgers],
-            "holdout_evidence": _plain_json_value(self.holdout_evidence),
+            "holdout_evidence": plain_json_value(self.holdout_evidence),
             "run_id": self.run_id,
             "profile_id": self.profile_id,
             "scenario_id": self.scenario_id,
-            "protocol": _plain_json_value(self.protocol),
+            "protocol": plain_json_value(self.protocol),
             "protocol_identity": self.protocol_identity,
             "research_window": dict(self.research_window),
             "software_identity": self.software_identity,
@@ -565,7 +563,7 @@ class ResearchRunRecord:
             "target_results": [result.payload() for result in self.target_results],
             "status": self.status.value,
             "failure_reason": self.failure_reason,
-            "operation_evidence": _plain_json_value(self.operation_evidence),
+            "operation_evidence": plain_json_value(self.operation_evidence),
         }
 
 

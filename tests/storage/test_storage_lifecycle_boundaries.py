@@ -1177,7 +1177,7 @@ def test_cleanup_scope_ignores_handled_outer(tmp_path, monkeypatch, operation):
             )
 
             records = iter_export_csv_records(path)
-            assert next(records)[0] == ["value"]
+            assert next(records) == ["value"]
             identity.filesystem_write_bytes(path, b"changed-content\n")
             with pytest.raises(ValueError, match="csmar_raw_export_identity_changed"):
                 records.close()

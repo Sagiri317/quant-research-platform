@@ -90,27 +90,19 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
         if validation_only
         else bundle_validation.read_prediction_output_bundle
     )
-    index_type = bundle_validation.ExactPrimaryKeyIndex
-    indexes = []
-
-    def capture_index(**kwargs):
-        index = index_type(**kwargs)
-        indexes.append(index)
-        return index
-
-    monkeypatch.setattr(bundle_validation, "ExactPrimaryKeyIndex", capture_index)
     _manifest, lookup = reader(
         root,
         expected_output_id=spec.prediction_id,
         time_window=TimeWindow(times[1], times[1]),
     )
-    assert len(indexes) == (1 if validation_only else 2)
     if validation_only:
         assert lookup is None
     else:
         values, found = lookup.values_for_frame(frame, mark_matched=True)
         assert list(found) == [0, 1, 0]
         assert values[1] == 2.0
+        assert lookup.row_count == 1
+        assert lookup.coverage_counts() == (0, 0)
     path = root / "prediction.parquet"
     if deep_root:
         assert len(str(path)) > 260

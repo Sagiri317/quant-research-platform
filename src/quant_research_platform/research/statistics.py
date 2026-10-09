@@ -497,7 +497,6 @@ def cscv_pbo(
     returns: object,
     *,
     slice_count: int,
-    max_combinations: int,
     return_roundoff: object = 0.0,
 ) -> PboResult:
     shape = getattr(returns, "shape", None)
@@ -512,8 +511,6 @@ def cscv_pbo(
     ):
         raise ValueError("cscv_slice_count_invalid")
     combination_count = comb(slice_count, slice_count // 2)
-    if type(max_combinations) is not int or combination_count > max_combinations:
-        raise ValueError("cscv_combination_budget_exceeded")
     matrix = _finite_matrix(returns, minimum_rows=4, minimum_columns=1)
     if matrix.shape[1] == 1:
         return _undefined_pbo(

@@ -14,7 +14,7 @@ import pandas as pd
 from numpy.lib.stride_tricks import sliding_window_view
 
 from quant_research_platform.compute.dataframe.cross_section import (
-    _pearson_correlation_result,
+    _CorrelationMoments,
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -137,6 +137,23 @@ def _calculate_values(
     if first >= stop:
         return output
 
+    if factor.endswith("_corr_20d"):
+        other = values[factor.removeprefix("return_").removesuffix("_corr_20d")]
+        begin = first - size + 1
+        finite = np.isfinite(source[begin:stop]) & np.isfinite(other[begin:stop])
+        moments = _CorrelationMoments()
+        for offset, position in enumerate(range(begin, stop)):
+            if offset >= size and finite[offset - size]:
+                moments.remove(
+                    float(source[position - size]), float(other[position - size])
+                )
+            if finite[offset]:
+                moments.update(float(source[position]), float(other[position]))
+            if position >= first and moments.count == size:
+                value, _reason = moments.result()
+                output[position - start] = np.nan if value is None else value
+        return output
+
     def window(column: np.ndarray) -> np.ndarray:
         return sliding_window_view(column, size)[
             first - size + 1 - shift : stop - size + 1 - shift
@@ -150,8 +167,6 @@ def _calculate_values(
         else ("amount",)
         if factor.startswith("amihud_")
         or factor in {"signed_amount_flow_20d", "return_amount_imbalance_20d"}
-        else (factor.removeprefix("return_").removesuffix("_corr_20d"),)
-        if factor.endswith("_corr_20d")
         else ()
     )
     extra = {name: window(values[name]) for name in extra_names}
@@ -163,11 +178,6 @@ def _calculate_values(
         valid &= (extra["close"] != 0).all(axis=1)
     if factor.startswith("amihud_"):
         valid &= (extra["amount"] > 0).all(axis=1)
-    if factor.endswith("_corr_20d"):
-        other = extra[extra_names[0]]
-        valid &= (np.min(matrix, axis=1) != np.max(matrix, axis=1)) & (
-            np.min(other, axis=1) != np.max(other, axis=1)
-        )
     if factor in {"skewness_20d", "skewness_60d", "kurtosis_60d"}:
         valid &= np.min(matrix, axis=1) != np.max(matrix, axis=1)
     if shift:
@@ -325,14 +335,6 @@ def _calculate_values(
         )
         normalized = np.ldexp(quotients, exponents - scale)
         result = np.ldexp(np.mean(normalized, axis=1), scale[:, 0])
-    elif factor.endswith("_corr_20d"):
-        result = np.fromiter(
-            (
-                _pearson_correlation_result(a, b)[0]
-                for a, b in zip(current, extra[extra_names[0]], strict=True)
-            ),
-            dtype=float,
-        )
     elif factor == "trend_efficiency_60d":
         _, exponent = np.frexp(np.max(np.abs(current), axis=1, keepdims=True))
         scaled = np.ldexp(current, -exponent)

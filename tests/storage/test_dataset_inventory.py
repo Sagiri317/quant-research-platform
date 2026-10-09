@@ -190,30 +190,6 @@ def test_private_writer_releases_result_when_publish_loses_race(
     assert staging_paths and all(not filesystem_exists(path) for path in staging_paths)
 
 
-def test_publish_race_cleanup_assertion_detects_retained_staging(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    from quant_research_platform.storage import atomic
-
-    remove = atomic.remove_owned_scratch
-    retained = []
-
-    def leave_staging(path):
-        retained.append(path)
-
-    monkeypatch.setattr(atomic, "remove_owned_scratch", leave_staging)
-    try:
-        with pytest.raises(AssertionError, match="publication_staging_not_cleaned"):
-            test_private_writer_releases_result_when_publish_loses_race(
-                tmp_path, monkeypatch
-            )
-        assert len(retained) == 1 and filesystem_exists(retained[0])
-    finally:
-        for path in retained:
-            remove(path)
-    assert all(not filesystem_exists(path) for path in retained)
-
-
 def test_bounded_metadata_reader_accepts_single_external_hardlink(
     tmp_path: Path,
 ) -> None:

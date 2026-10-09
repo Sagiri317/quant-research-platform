@@ -2,9 +2,7 @@
 
 import json
 from dataclasses import asdict
-from datetime import date
 from fractions import Fraction
-from math import comb
 from pathlib import Path
 
 import numpy as np
@@ -16,15 +14,6 @@ from quant_research_platform.contracts.models import (
     ModelSpec,
     TrainingWeighting,
     model_spec_payload,
-)
-from quant_research_platform.contracts.portfolios import (
-    ExecutionAssumptions,
-)
-from quant_research_platform.markets.implementations.a_share.execution import (
-    FeeRule,
-    FeeSchedule,
-    prepare_trade_cost,
-    trade_cost,
 )
 from quant_research_platform.profiles.research import (
     bind_research_configuration,
@@ -282,7 +271,7 @@ def test_single_candidate_keeps_psr_and_explains_dsr_pbo():
     )
     assert 0 <= result.psr <= 1
     assert result.dsr is None and result.dsr_reason == "insufficient_candidate_count"
-    pbo = cscv_pbo(returns[:, None], slice_count=10, max_combinations=comb(10, 5))
+    pbo = cscv_pbo(returns[:, None], slice_count=10)
     assert pbo.status == "UNDEFINED" and pbo.reason == "insufficient_candidate_count"
 
 
@@ -452,52 +441,6 @@ def test_neutralization_is_bit_exact_for_dyadic_inputs(with_size):
     expected = _reference_residuals(target, industry, sizes)
     actual = _industry_size_residuals(target, industry, sizes)
     np.testing.assert_array_equal(actual, expected)
-
-
-def test_prepared_costs_are_bit_exact_for_201_random_cases():
-    rng = np.random.default_rng(61)
-    schedule = FeeSchedule(
-        tuple(
-            FeeRule(
-                code,
-                date(2020, 1, 1),
-                date(2030, 1, 1),
-                "shanghai",
-                side,
-                "amount",
-                rate,
-                True,
-            )
-            for side in ("buy", "sell")
-            for code, rate in (
-                ("BROKER_COMMISSION", 0.0003),
-                ("TRANSFER_FEE", 0.00001),
-                ("STAMP_DUTY", 0.001),
-            )
-        ),
-        "a" * 64,
-    )
-    assumptions = ExecutionAssumptions(1e9, 5.0, 25.0, 0.05, (0.05,))
-    notionals = np.exp2(rng.uniform(-300, 300, 201))
-    adv = np.exp2(rng.uniform(-300, 300, 201))
-    for side in ("buy", "sell"):
-        prepared = prepare_trade_cost(
-            date(2026, 1, 1), "shanghai", side, schedule, assumptions
-        )
-        expected = [
-            trade_cost(
-                date(2026, 1, 1),
-                "shanghai",
-                side,
-                float(n),
-                float(a),
-                schedule,
-                assumptions,
-            )
-            for n, a in zip(notionals, adv, strict=True)
-        ]
-        totals = prepared.totals(notionals, adv)
-        np.testing.assert_array_equal(totals, [item.total_cost for item in expected])
 
 
 @pytest.mark.parametrize("count", [32, 1080])

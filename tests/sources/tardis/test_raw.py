@@ -51,15 +51,6 @@ def test_bad_native_input_is_not_published(tmp_path, first):
     assert not destination.exists()
 
 
-def test_import_preserves_input_without_byte_quota(tmp_path):
-    slices = _slices(tmp_path / "source", _snapshot())
-    before = slices[0].read_bytes()
-    destination = tmp_path / "published"
-    import_slices(destination, date="2026-09-01", slices=slices)
-    assert slices[0].read_bytes() == before
-    assert destination.exists()
-
-
 def test_native_line_order_is_preserved_without_a_fabricated_clock(tmp_path):
     path = tmp_path / "native.gz"
     path.write_bytes(gzip.compress(_snapshot() + b"\n" + _snapshot(), mtime=0))

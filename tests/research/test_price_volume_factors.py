@@ -467,6 +467,42 @@ def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
     pd.testing.assert_frame_equal(pd.read_parquet(path), result, check_exact=True)
 
 
+@pytest.mark.parametrize(
+    "case", ("normal", "subnormal", "adjacent", "mixed", "missing")
+)
+def test_rolling_correlations_match_exact_windows_and_warmup(case):
+    from quant_research_platform.compute.dataframe.cross_section import (
+        _pearson_correlation_result,
+    )
+    from quant_research_platform.research.factors.price_volume.calculations import (
+        _calculate_values,
+    )
+
+    rng = np.random.default_rng(719)
+    x, y = rng.normal(size=160), rng.normal(size=160)
+    if case == "subnormal":
+        x = np.arange(1.0, 161.0) * np.nextafter(0.0, 1.0)
+    elif case == "adjacent":
+        x = 1e200 + np.arange(160) * np.spacing(1e200)
+    elif case == "mixed":
+        x[0], y[1] = np.nextafter(0.0, 1.0), 1e300
+    elif case == "missing":
+        x[45], y[98] = np.nan, np.inf
+        x[60:82] = 1.0
+    expected = np.full(len(x), np.nan)
+    for index in range(19, len(x)):
+        value, _ = _pearson_correlation_result(
+            x[index - 19 : index + 1], y[index - 19 : index + 1]
+        )
+        expected[index] = np.nan if value is None else value
+    for kind in ("amount", "volume", "turnover"):
+        name = f"return_{kind}_corr_20d"
+        values = {"period_return": x, kind: y}
+        for start, stop in ((0, 160), (22, 41), (99, 160), (19, 20)):
+            actual = _calculate_values(values, {}, name, start, stop)
+            np.testing.assert_array_equal(actual, expected[start:stop])
+
+
 @pytest.mark.parametrize("scale", [1.0, 1e-200, 1e200])
 @pytest.mark.parametrize(
     "name",

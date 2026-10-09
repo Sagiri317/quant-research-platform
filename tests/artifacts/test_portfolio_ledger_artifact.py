@@ -1059,7 +1059,10 @@ def test_perpetual_terminal_marks_use_real_quote_or_cash_only(tmp_path, mode, ca
 
 
 @pytest.mark.parametrize("consumer", ("close", "keyboard"))
-def test_portfolio_reader_early_close_reports_identity_failures(tmp_path, consumer):
+@pytest.mark.parametrize("mutation", ("member", "manifest", "extra"))
+def test_portfolio_reader_early_close_reports_identity_failures(
+    tmp_path, consumer, mutation
+):
     import shutil
 
     from quant_research_platform.policy.lifecycle import closing_iterator
@@ -1089,7 +1092,12 @@ def test_portfolio_reader_early_close_reports_identity_failures(tmp_path, consum
     artifact = read_portfolio_ledger_artifact(copied, expected_identity=copied.name)
 
     def mutate_member():
-        path = artifact.root / "valuations.parquet"
+        if mutation == "extra":
+            filesystem_write_bytes(artifact.root / "extra.bin", b"extra")
+            return
+        path = artifact.root / (
+            "valuations.parquet" if mutation == "member" else "manifest.json"
+        )
         before = filesystem_stat(path)
         with open_filesystem_file(path, "ab") as handle:
             handle.write(b"x")
@@ -1113,7 +1121,13 @@ def test_portfolio_reader_early_close_reports_identity_failures(tmp_path, consum
         assert caught.value is primary
         assert any("ValueError" in note for note in getattr(primary, "__notes__", ()))
     else:
-        assert str(caught.value) == "dataset_file_identity_changed"
+        assert str(caught.value) == (
+            "dataset_file_identity_changed"
+            if mutation == "member"
+            else "semantic_artifact_member_identity_changed"
+            if mutation == "manifest"
+            else "semantic_artifact_member_set_changed"
+        )
     assert {
         path.name: filesystem_read_bytes(path) for path in filesystem_iterdir(root)
     } == original
@@ -1519,6 +1533,8 @@ def test_verified_member_identity_reaches_ledger_decoder(tmp_path, monkeypatch, 
     import pyarrow as pa
     import pyarrow.parquet as pq
 
+    from quant_research_platform.storage import semantic_artifacts
+
     frame = _session(
         "2019-01-01",
         "2019-01-02",
@@ -1533,7 +1549,7 @@ def test_verified_member_identity_reaches_ledger_decoder(tmp_path, monkeypatch, 
         tmp_path / "portfolio", envelope=_envelope(), ledger_chunks=(frame,)
     )
     artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
-    native = ledger_artifact.read_semantic_artifact_record
+    native = semantic_artifacts.read_semantic_artifact_record
 
     def replace_after_verification(*args, **kwargs):
         result = native(*args, **kwargs)
@@ -1553,7 +1569,7 @@ def test_verified_member_identity_reaches_ledger_decoder(tmp_path, monkeypatch, 
         return result
 
     monkeypatch.setattr(
-        ledger_artifact, "read_semantic_artifact_record", replace_after_verification
+        semantic_artifacts, "read_semantic_artifact_record", replace_after_verification
     )
     with pytest.raises(ValueError, match="identity_changed"):
         if entry == "read":
@@ -1597,3 +1613,135 @@ def _alpha_payload(calibration, envelope):
         "calibration": asdict(calibration),
         "observations": unmeasured_operation_evidence("test_calibration"),
     }
+
+
+@pytest.mark.parametrize("calibrated", (False, True))
+@pytest.mark.parametrize("mutation", (None, "manifest", "extra", "same_size"))
+def test_report_reuses_native_ledger_validation_and_checks_consumption_exit(
+    tmp_path, monkeypatch, calibrated, mutation
+):
+    from collections import Counter
+    from types import SimpleNamespace
+
+    from quant_research_platform.artifacts import research
+    from quant_research_platform.contracts.targets import ProducerKind, TargetStatus
+    from quant_research_platform.research.portfolios.accounting import (
+        alpha_calibration_intervals,
+        calibrate_expected_alpha,
+    )
+    from quant_research_platform.storage import semantic_artifacts
+    from quant_research_platform.storage.layout import StorageLayout
+
+    base = (_alpha_envelope("2019-01-03") if calibrated else _envelope()).payload()
+    envelope = build_business_manifest_envelope(
+        **{
+            **{
+                key: value
+                for key, value in base.items()
+                if key not in {"instance_identity", "status"}
+            },
+            "logical_artifact_id": "probe_synthetic_portfolio_ledger",
+        }
+    )
+    sessions = tuple(
+        _session(
+            f"2019-01-0{index + 1}",
+            f"2019-01-0{index + 2}",
+            pre_asset=100.0 if index else 0.0,
+            target_asset=100.0,
+            post_asset=100.0,
+            pre_cash=0.0 if index else 100.0,
+            target_cash=0.0,
+            post_cash=0.0,
+        )
+        for index in range(2)
+    )
+    intervals = alpha_calibration_intervals(
+        pd.bdate_range("2018-12-10", periods=10), "daily"
+    )
+    calibration = calibrate_expected_alpha(
+        pd.DataFrame(
+            {
+                "timestamp": np.repeat(intervals.timestamp.iloc[:1], 10),
+                "alpha_score": 0.0,
+                "holding_return": np.arange(10) / 10000,
+            }
+        ),
+        as_of=pd.Timestamp("2019-01-03"),
+        scheduled_intervals=intervals,
+    )
+    payload = _alpha_payload(calibration, envelope)
+    root = write_test_sessions(
+        tmp_path / "ledger",
+        envelope=envelope,
+        ledger_chunks=sessions,
+        **({"final_calibration": lambda: payload} if calibrated else {}),
+    )
+    expected = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    economics = ledger_artifact.summarize_portfolio_ledger(
+        expected.capital, expected.iter_chunks()
+    )
+    counts = Counter()
+    hash_file = semantic_artifacts._hash_file_content
+
+    def counted(path, *args, **kwargs):
+        counts[path.name] += 1
+        return hash_file(path, *args, **kwargs)
+
+    monkeypatch.setattr(semantic_artifacts, "_hash_file_content", counted)
+    summarize = research.summarize_portfolio_ledger
+
+    def consume_then_change(*args):
+        result = summarize(*args)
+        if mutation == "manifest":
+            path = root / "manifest.json"
+            filesystem_write_bytes(path, filesystem_read_bytes(path) + b"\n")
+        elif mutation == "extra":
+            filesystem_write_bytes(root / "extra.bin", b"extra")
+        elif mutation == "same_size":
+            path = root / "valuations.parquet"
+            other = tmp_path / "replacement"
+            filesystem_write_bytes(other, filesystem_read_bytes(path))
+            filesystem_replace(other, path)
+        return result
+
+    monkeypatch.setattr(research, "summarize_portfolio_ledger", consume_then_change)
+    protocol = {
+        "research_configuration": {"stage": "dataset"},
+        "portfolio_candidates": ("synthetic_portfolio",),
+    }
+    record = SimpleNamespace(
+        scenario_id="probe",
+        protocol=protocol,
+        payload=lambda: {"protocol": protocol},
+        trial_ledgers=(),
+        target_results=(
+            SimpleNamespace(
+                target_id=envelope.logical_artifact_id,
+                producer_kind=ProducerKind.PORTFOLIO,
+                status=TargetStatus.BUILT,
+                instance_identity=root.name,
+                schema_identity=envelope.schema_identity,
+                artifact_root="ledger",
+            ),
+        ),
+    )
+    evidence = research.load_a_share_run_evidence(
+        layout=StorageLayout(tmp_path), record=record, selections={}
+    )
+    assert counts == {
+        name: 1 for name in expected.member_identities if name != "manifest.json"
+    }
+    if mutation:
+        assert evidence["portfolios"] == []
+        assert any(
+            issue["reason"] == "portfolio_ledger_reference_invalid"
+            for issue in evidence["issues"]
+        )
+    else:
+        (row,) = evidence["portfolios"]
+        assert row["economics"] == economics
+        assert row["final_calibration"] == expected.final_alpha_calibration
+        assert row["calibration_observations"] == (
+            payload["observations"] if calibrated else None
+        )

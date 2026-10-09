@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from contextlib import ExitStack
 from fractions import Fraction
-from math import comb
 from statistics import mean
 
 import numpy as np
@@ -762,7 +761,9 @@ def iter_holding_factor_inputs(
                 entry = prices[1].set_index("asset_id").adj_open
                 endpoint = prices[2].set_index("asset_id").adj_open
                 if reason is None:
-                    holding_cross = risk.prepare_exposures(cross)
+                    holding_cross = risk.prepare_exposures(
+                        cross, include_ineligible=True
+                    )
                     decision_exposure_assets = frozenset(holding_cross.asset_id)
                     real_pairs = set(
                         panel_window[interval.entry_at].panel.asset_id
@@ -775,7 +776,9 @@ def iter_holding_factor_inputs(
                     )
                     try:
                         fitted = risk.fit_return_session(
-                            holding_cross, require_complete=True
+                            holding_cross,
+                            require_complete=True,
+                            project_ineligible=True,
                         )
                     except ValueError as error:
                         if str(error) != "holding_returns_incomplete":
@@ -1446,7 +1449,6 @@ def _portfolio_statistics_tables(
             result = cscv_pbo(
                 inference_matrix,
                 slice_count=blocks,
-                max_combinations=comb(blocks, blocks // 2),
                 return_roundoff=roundoff,
             )
             value, status, reason = (result.pbo, result.status, result.reason or "")

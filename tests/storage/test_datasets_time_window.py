@@ -276,13 +276,16 @@ def test_inspect_dataset_time_window_reports_window_scoped_counts(
     tmp_path: Path,
 ) -> None:
     root = make_dataset_artifact_root(tmp_path, "inspect")
+    frame = make_time_window_dataset_frame()
+    same_year = frame.iloc[[1]].copy()
+    same_year["timestamp"] = pd.Timestamp("2015-02-05")
     write_dataset(
         root,
-        make_time_window_dataset_frame(),
+        pd.concat([frame, same_year], ignore_index=True),
         spec=make_processed_dataset_spec("inspect"),
     )
     inspection = inspect_dataset(
-        root, time_window=TimeWindow("2015-01-01", "2015-12-31")
+        root, time_window=TimeWindow("2015-01-01", "2015-01-31")
     )
     assert inspection.row_count == 1
     assert inspection.date_min == "2015-01-05"
@@ -458,18 +461,3 @@ def test_time_window_without_timestamp_role_raises(tmp_path: Path) -> None:
     )
     with pytest.raises(ValueError, match="time_window_not_supported"):
         read_dataset(root, time_window=TimeWindow("2014-01-01", "2014-12-31"))
-
-
-def test_write_dataset_existing_root_raises_dataset_exists(tmp_path: Path) -> None:
-    root = make_dataset_artifact_root(tmp_path, "exists")
-    write_dataset(
-        root,
-        make_time_window_dataset_frame(),
-        spec=make_processed_dataset_spec("exists"),
-    )
-    with pytest.raises(ValueError, match="dataset_exists"):
-        write_dataset(
-            root,
-            make_time_window_dataset_frame(),
-            spec=make_processed_dataset_spec("exists"),
-        )

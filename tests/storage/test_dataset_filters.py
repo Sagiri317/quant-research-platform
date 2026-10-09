@@ -333,21 +333,6 @@ def test_dataset_prepared_in_filter_compacts_sorted_duplicates() -> None:
 @pytest.mark.parametrize(
     ("data_type", "values"),
     (
-        (pa.time32("s"), (time(0, 0), time(23, 59, 59))),
-        (pa.time64("us"), (time(0, 0, 0, 1), time(23, 59, 59, 999999))),
-    ),
-    ids=("time32", "time64"),
-)
-def test_dataset_prepared_in_filter_accepts_arrow_time_values(
-    data_type: pa.DataType, values: tuple[time, ...]
-) -> None:
-    prepared = _prepare_in_filter(pa.field("value", data_type), values)
-    assert prepared.values.to_pylist() == list(values)
-
-
-@pytest.mark.parametrize(
-    ("data_type", "values"),
-    (
         (pa.time32("s"), (time(0, 0), time(12, 34, 56), time(23, 59, 59))),
         (
             pa.time64("us"),

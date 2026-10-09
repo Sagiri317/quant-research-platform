@@ -604,16 +604,14 @@ def test_raw_export_discovery_contract_keeps_csv_only(
             tmp_path
         )
     ] == [csv_export]
-    assert raw_schemas.expected_metadata_sidecar_path(
-        csv_export
-    ) == csv_export.with_suffix(
-        ".metadata.json",
-    )
-    assert not raw_schemas.inspect_raw_export_file(csv_export).has_metadata
-    filesystem_write_text(
-        csv_export.with_suffix(".metadata.json"), "{}", encoding="utf-8"
-    )
-    assert raw_schemas.inspect_raw_export_file(csv_export).has_metadata
+    inspection = raw_schemas.inspect_raw_export_file(csv_export)
+    sidecar = csv_export.with_suffix(".metadata.json")
+    for payload in ("{}", "changed metadata"):
+        filesystem_write_text(sidecar, payload, encoding="utf-8")
+        assert raw_schemas.inspect_raw_export_file(csv_export) == inspection
+    sidecar.unlink()
+    sidecar.mkdir()
+    assert raw_schemas.inspect_raw_export_file(csv_export) == inspection
     with pytest.raises(ValueError, match="Invalid CSMAR raw filename"):
         raw_schemas.parse_raw_filename(xlsx_export)
     with pytest.raises(ValueError, match="Cannot infer CSMAR dataset"):
@@ -1139,8 +1137,7 @@ def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
         "000300,large,2014-01-03,2013-12-31,1000,blue chips,"
         ',4,7,5,9,"formula with embedded line\nbreak and ""quotes"""\n'
         "000905,mid,2014-01-06,2013-12-31,500,text continues\n"
-        "over physical line,1,2,3,4,5,formula after merge\n"
-        "000999,bad-enum,2014-01-07,2013-12-31,600,scope,8,9,10,6,10,formula\n",
+        "over physical line,1,2,3,4,5,formula after merge\n",
         encoding="utf-8",
     )
 
@@ -1148,7 +1145,7 @@ def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
     normalized = interim.normalize_raw_frame(raw, "index_info")
     pruned = normalized.loc[:, list(interim.INTERIM_COLUMNS_BY_DATA_ID["index_info"])]
 
-    assert len(raw) == len(pruned) == 4
+    assert len(raw) == len(pruned) == 3
     by_asset = pruned.set_index("source_asset_id")
     assert pd.isna(by_asset.loc["000985", "base_point"])
     assert by_asset.loc["000985", "calculation_formula"] == (
@@ -1162,11 +1159,70 @@ def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
         "calculation_formula",
     ].replace("\r\n", "\n")
     assert by_asset.loc["000905", "calculation_formula"] == "formula after merge"
-    assert pd.isna(by_asset.loc["000999", "weighting_method"])
-    assert pd.isna(by_asset.loc["000999", "publisher"])
-    assert pd.isna(by_asset.loc["000999", "index_category"])
-    assert pd.isna(by_asset.loc["000999", "index_type"])
-    assert pd.isna(by_asset.loc["000999", "market_belonging"])
+
+
+@pytest.mark.parametrize(
+    "column,maximum",
+    zip(
+        ("Idxinfo05", "Idxinfo06", "Idxinfo07", "Idxinfo08", "Idxinfo09"),
+        (4, 4, 7, 5, 9),
+        strict=True,
+    ),
+)
+def test_index_info_unknown_enum_rejects_and_preserves_published(
+    tmp_path, column, maximum
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw, parents=True)
+    row = dict(
+        Indexcd="000985",
+        Idxinfo01="benchmark",
+        Idxinfo11="2014-01-02",
+        Idxinfo02="2013-12-31",
+        Idxinfo03="1000",
+        Idxinfo04="scope",
+        Idxinfo05="1",
+        Idxinfo06="2",
+        Idxinfo07="3",
+        Idxinfo08="4",
+        Idxinfo09="5",
+        Idxinfo10="formula",
+    )
+    rows = [
+        dict(row, Indexcd=f"{number:06d}", **{column: value})
+        for number, value in enumerate(["", *map(str, range(1, maximum + 1))])
+    ]
+    extra = (
+        "Idxinfo03",
+        "Idxinfo04",
+        "Idxinfo05",
+        "Idxinfo06",
+        "Idxinfo07",
+        "Idxinfo08",
+        "Idxinfo09",
+        "Idxinfo10",
+    )
+    _write_csmar(raw, "index_info", rows, extra_columns=extra)
+    result = interim.materialize_interim_data(layout=layout, data_ids=("index_info",))
+    root = result.artifact_roots["index_info"]
+    before = _file_bytes(root)
+    assert len(read_dataset(root)) == maximum + 1
+    for invalid in (str(maximum + 1), "unknown"):
+        _write_csmar(
+            raw, "index_info", [dict(row, **{column: invalid})], extra_columns=extra
+        )
+        with pytest.raises(ValueError, match="^invalid_csmar_index_info_source_code$"):
+            interim.materialize_interim_data(
+                layout=StorageLayout(tmp_path / "candidate"),
+                raw_root=raw,
+                data_ids=("index_info",),
+            )
+        assert _file_bytes(root) == before
 
 
 @pytest.mark.parametrize(
@@ -1318,9 +1374,9 @@ def test_legal_provider_width_and_quoting_preserve_fields(
 
     records = raw_schemas.iter_export_csv_records(path)
     try:
-        header, _ = next(records)
+        header = next(records)
         assert raw_schemas.materialize_header_record(header) == fields
-        record, _ = next(records)
+        record = next(records)
         assert record == ["1"] * width
         with pytest.raises(StopIteration):
             next(records)
@@ -2109,7 +2165,7 @@ def test_csv_strict_grammar_matches_standard_parser(tmp_path, payload, expected)
             with pytest.raises(ValueError, match="^malformed_csmar_csv_row$"):
                 next(records)
         else:
-            for record, _ in records:
+            for record in records:
                 actual.append(record)
             assert actual == expected
     finally:
@@ -2293,9 +2349,9 @@ def test_large_cr_reader_early_close_releases_real_handles(tmp_path, real_csv_ha
     filesystem_write_bytes(path, payload)
     records = raw_schemas.iter_export_csv_records(path)
     try:
-        record, _ = next(records)
+        record = next(records)
         assert record == header.decode().split(",")
-        record, _ = next(records)
+        record = next(records)
         assert record == rows[0]
     finally:
         records.close()
@@ -2326,9 +2382,7 @@ def test_long_quoted_csv_record_preserves_embedded_newlines(tmp_path, ending):
     payload = buffer.getvalue().encode()
     path = tmp_path / "quoted.csv"
     filesystem_write_bytes(path, payload)
-    assert list(raw_schemas.iter_export_csv_records(path)) == [
-        ([value, "second"], len(payload))
-    ]
+    assert list(raw_schemas.iter_export_csv_records(path)) == [[value, "second"]]
 
 
 @pytest.mark.parametrize(

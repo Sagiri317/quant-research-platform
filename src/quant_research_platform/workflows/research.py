@@ -35,6 +35,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 )
 from quant_research_platform.artifacts.research import (
     _instance_root,
+    _report_manifest_metadata,
     read_research_report_artifact,
     read_research_run_record,
     read_validated_reference,
@@ -1096,17 +1097,27 @@ def _inspect_run_target(*, profile, layout, target_id, run_id):
     if target_id == f"{record.scenario_id}_report_artifact":
         logical = layout.semantic_artifact_root(profile.market_id, target_id)
         instances = []
-        for instance in discover_semantic_artifact_instances(logical):
-            envelope = read_semantic_artifact(instance, expected_identity=instance.name)
-            if envelope["semantic_metadata"].get("source_run_id") != run_id:
-                continue
+        selected = {}
+
+        def belongs_to_run(envelope):
+            metadata = _report_manifest_metadata(envelope)
+            if envelope["logical_artifact_id"] != target_id:
+                raise ValueError("research_report_semantics_invalid")
+            if metadata["source_run_id"] == run_id:
+                selected[envelope["instance_identity"]] = envelope
+                return True
+            return False
+
+        for instance in discover_semantic_artifact_instances(
+            logical, manifest_scope=belongs_to_run
+        ):
             report = read_research_report_artifact(
                 instance, expected_identity=instance.name, source_run=record
             )
             instances.append(
                 {
                     "instance_identity": instance.name,
-                    "schema_identity": envelope["schema_identity"],
+                    "schema_identity": selected[instance.name]["schema_identity"],
                     "report_status": report["report_status"],
                 }
             )

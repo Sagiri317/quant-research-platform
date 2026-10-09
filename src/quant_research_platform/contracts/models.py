@@ -280,6 +280,7 @@ def validate_model_metadata_core(
     value: object,
     *,
     quarterly: bool = False,
+    rank_calibration: bool = False,
 ) -> dict[str, object]:
     """Validate the shared persisted model metadata contract."""
 
@@ -539,22 +540,25 @@ def validate_model_metadata_core(
     rank_parameters = metadata.get("rank_parameters")
     if metadata["model_algorithm"] in rank_algorithms:
         expected = (
-            {"columns", "directions", "label_calibration"}
+            {"columns", "directions"}
             if metadata["model_algorithm"] == "equal_weight_rank_ensemble"
-            else {"columns", "weights", "label_calibration"}
+            else {"columns", "weights"}
         )
+        if rank_calibration:
+            expected.add("label_calibration")
         if type(rank_parameters) is not dict or set(rank_parameters) != expected:
             raise ValueError("invalid_model_metadata")
-        calibration = rank_parameters["label_calibration"]
-        if (
-            type(calibration) is not list
-            or len(calibration) != 2
-            or any(
-                type(value) not in {int, float} or not np.isfinite(value)
-                for value in calibration
-            )
-        ):
-            raise ValueError("invalid_model_metadata")
+        if rank_calibration:
+            calibration = rank_parameters["label_calibration"]
+            if (
+                type(calibration) is not list
+                or len(calibration) != 2
+                or any(
+                    type(value) not in {int, float} or not np.isfinite(value)
+                    for value in calibration
+                )
+            ):
+                raise ValueError("invalid_model_metadata")
         rank_columns = rank_parameters["columns"]
         if (
             type(rank_columns) is not list

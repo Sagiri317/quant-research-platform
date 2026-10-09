@@ -298,7 +298,9 @@ class FactorRiskState:
         self._residual_sessions: dict[str, array] = {}
         self._session_count = 0
 
-    def prepare_exposures(self, cross: pd.DataFrame) -> pd.DataFrame:
+    def prepare_exposures(
+        self, cross: pd.DataFrame, *, include_ineligible: bool = False
+    ) -> pd.DataFrame:
         required = {
             "timestamp",
             "asset_id",
@@ -321,7 +323,8 @@ class FactorRiskState:
                 or frame.eligible.isna().any()
             ):
                 raise ValueError("factor_risk_eligibility_invalid")
-            frame = frame.loc[frame.eligible].copy()
+            if not include_ineligible:
+                frame = frame.loc[frame.eligible].copy()
         frame["asset_id"] = frame.asset_id.astype("string")
         for column in (self.config.weight_column, *self.style_columns):
             frame[column] = strict_real_numeric_series(
@@ -339,11 +342,15 @@ class FactorRiskState:
         )
 
     def fit_return_session(
-        self, cross: pd.DataFrame, *, require_complete: bool = False
+        self,
+        cross: pd.DataFrame,
+        *,
+        require_complete: bool = False,
+        project_ineligible: bool = False,
     ) -> FactorReturnFit | None:
         if "asset_return" not in cross:
             raise ValueError("factor_risk_columns_invalid")
-        frame = self.prepare_exposures(cross)
+        frame = self.prepare_exposures(cross, include_ineligible=project_ineligible)
         frame["asset_return"] = strict_real_numeric_series(
             frame.asset_return, error="factor_risk_numeric_invalid"
         )
@@ -359,6 +366,12 @@ class FactorRiskState:
         if frame.empty:
             return
         frame = preprocess_risk_styles(frame, style_columns=self.style_columns)
+        projection = frame.iloc[:0]
+        if project_ineligible and "eligible" in frame:
+            projection = frame.loc[~frame.eligible]
+            frame = frame.loc[frame.eligible]
+        if frame.empty:
+            return None
         group_codes = _industry_group_codes(frame)
         current_industries = sorted(set(group_codes))
         industry_columns = tuple(f"industry_{code}" for code in current_industries)
@@ -478,6 +491,52 @@ class FactorRiskState:
             raise ValueError("factor_risk_fit_non_finite")
         self._industry_codes.update(current_industries)
         assets = pd.Index(frame["asset_id"].astype(str), name="asset_id")
+        if not projection.empty:
+            projection_codes = _industry_group_codes(projection)
+            identified = projection_codes.isin(current_industries)
+            projection = projection.loc[identified]
+            projection_codes = projection_codes.loc[identified]
+            projected_design = np.column_stack(
+                (
+                    pd.get_dummies(projection_codes, dtype="float64").reindex(
+                        columns=current_industries, fill_value=0.0
+                    ),
+                    projection.loc[:, list(self.style_columns)].to_numpy(
+                        dtype="float64"
+                    ),
+                )
+            )
+            projected_returns = projection.asset_return.to_numpy(dtype="float64")
+            exact_coefficients = [
+                Fraction(intercepts[code][1], intercepts[code][0] * scale)
+                for code in current_industries
+            ] + [Fraction(int(slope * style_scale), scale) for slope in slopes]
+            # Project with the eligible fit; these rows never enter risk history.
+            projected_residuals = np.asarray(
+                [
+                    float(
+                        Fraction.from_float(value)
+                        - sum(
+                            Fraction.from_float(float(exposure)) * coefficient
+                            for exposure, coefficient in zip(
+                                row, exact_coefficients, strict=True
+                            )
+                        )
+                    )
+                    for row, value in zip(
+                        projected_design, projected_returns, strict=True
+                    )
+                ],
+                dtype="float64",
+            )
+            if not np.isfinite(projected_residuals).all():
+                raise ValueError("factor_risk_fit_non_finite")
+            assets = assets.append(
+                pd.Index(projection.asset_id.astype(str), name="asset_id")
+            )
+            design = np.concatenate((design, projected_design))
+            residuals = np.concatenate((residuals, projected_residuals))
+            returns = np.concatenate((returns, projected_returns))
         return FactorReturnFit(
             pd.DataFrame(design, index=assets, columns=exposure_columns),
             pd.Series(coefficients, index=exposure_columns),

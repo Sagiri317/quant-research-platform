@@ -4,6 +4,7 @@ import json
 from contextlib import contextmanager
 from copy import deepcopy
 from pathlib import Path
+from types import SimpleNamespace
 
 import numpy as np
 import pandas as pd
@@ -32,7 +33,6 @@ from quant_research_platform.research import statistics_production
 from quant_research_platform.research.evaluations.runner import (
     build_evaluation_result_from_research_dataset,
 )
-from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.research.statistics_production import (
@@ -45,18 +45,15 @@ from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
     CORE6_FACTORS,
     PV25_FACTORS,
-    configured_models,
     research_configuration,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
 from tests.research.workflow_test_support import (
-    shared_model_case,
     shared_model_protocol,
-    shared_model_rows,
 )
 
 
-def _statistics_models(layout, spec, protocol, window):
+def _statistics_model_selection_fixture(spec, protocol, window):
     factor = spec.factor_columns[0]
     configuration = research_configuration(small_models=True)
     models = tuple(
@@ -104,17 +101,65 @@ def _statistics_models(layout, spec, protocol, window):
             "models": model_protocol["research_configuration"]["models"],
         },
     )
-    preflight_model_specs(models)
-    case = shared_model_case(
-        layout.project_root,
-        specs=models,
-        dataset=spec,
-        protocol=model_protocol,
-        development_end=development_end,
-        # The first mature fold needs enough rows for fractional RF bootstrapping.
-        frame=shared_model_rows(models, development_end=development_end, assets=12),
+    families = []
+    for model in models:
+        metrics = {
+            "model_id": model.model_id,
+            "validation_rows": 12,
+            "validation_ic": 0.1,
+            "validation_rankic": 0.1,
+            "validation_ic_reason": None,
+            "validation_rankic_reason": None,
+            "validation_mse": 1.0,
+            **{
+                f"validation_{key}": value
+                for prefix in ("ic", "rankic")
+                for key, value in (
+                    (f"std_{prefix}", 0.0),
+                    (f"{prefix}ir", None),
+                    (f"positive_{prefix}_rate", 1.0),
+                    (f"valid_{prefix}_count", 1),
+                    (f"{prefix}ir_reason", "insufficient_observations"),
+                )
+            },
+        }
+        families.append(
+            {
+                "family_id": model.model_id,
+                "selected_config_id": model.model_id,
+                "trial_metrics": [metrics],
+            }
+        )
+    selection = {"selected_family_id": models[0].model_id, "families": families}
+    quarters = tuple(
+        str(q) for q in pd.period_range(window.start, window.end, freq="Q")
     )
-    return case.artifact
+
+    def prediction_models(requested_window, **_kwargs):
+        return tuple(
+            {
+                "quarter_id": str(quarter),
+                "family_id": model.model_id,
+                "model_id": model.model_id,
+                "model_metadata": {
+                    "input_columns": [factor],
+                    "model_algorithm": model.model_algorithm,
+                },
+            }
+            for quarter in pd.period_range(
+                requested_window.start, requested_window.end, freq="Q"
+            )
+            for model in models
+        )
+
+    return SimpleNamespace(
+        selections={
+            "global": {"final": selection},
+            "quarterly": {q: selection for q in quarters},
+        },
+        prediction_models=prediction_models,
+        selection=lambda _group, _quarter, **_kwargs: selection,
+    )
 
 
 class _PredictionLookup:
@@ -483,7 +528,6 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
 ):
     from arch.bootstrap import MCS, SPA, StepM
 
-    preflight_model_specs(configured_models())
     layout = StorageLayout(tmp_path)
     protocol = deepcopy(a_share.protocol("pv_all").manifest())
     protocol["statistics"]["factor_fdr_families"] = {"fixture": ["x"]}
@@ -557,7 +601,9 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         }
     frame["total_market_cap"] = 1.0 + frame.groupby("timestamp").cumcount()
     write_dataset(layout.research_dataset_root("a_share", "pv_all"), frame, spec=spec)
-    model = _statistics_models(layout, spec, protocol, TimeWindow(dates[0], cutoff))
+    model = _statistics_model_selection_fixture(
+        spec, protocol, TimeWindow(dates[0], cutoff)
+    )
     envelope = build_business_manifest_envelope(
         logical_artifact_id="pv_all_global_statistics",
         schema_identity="a" * 64,
@@ -1160,7 +1206,6 @@ def test_empty_fama_macbeth_periods_do_not_invent_dates_or_coefficients(
 def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     tmp_path: Path,
 ) -> None:
-    preflight_model_specs(configured_models())
     outputs = []
     evaluation_summaries = []
     for name, immature_sign in (("first", 1.0), ("changed", -1.0), ("zero", 1.0)):
@@ -1258,7 +1303,9 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
             "price_volume": list(PV25_FACTORS)
         }
         protocol["statistics"]["fama_macbeth_core_factors"] = list(CORE6_FACTORS)
-        model = _statistics_models(layout, spec, protocol, TimeWindow(dates[0], cutoff))
+        model = _statistics_model_selection_fixture(
+            spec, protocol, TimeWindow(dates[0], cutoff)
+        )
         statistics_tables = build_a_share_statistics_tables(
             layout=layout,
             dataset_catalog=ResearchDatasetCatalog((spec,)),

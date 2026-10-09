@@ -180,8 +180,9 @@ def load_a_share_run_evidence(
     ]
     loaded: dict[str, ResearchRunTargetResult] = {}
     captured = {}
+    operations = {}
 
-    def load(target_id: str) -> ResearchRunTargetResult | None:
+    def load(target_id: str, *, native=False) -> ResearchRunTargetResult | None:
         if target_id in loaded:
             return loaded[target_id]
         result = references.get(target_id)
@@ -190,17 +191,27 @@ def load_a_share_run_evidence(
             return None
         if result.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}:
             return None
+        expected = (
+            None
+            if reference_member_identities is None
+            else reference_member_identities.get(target_id)
+        )
+        if native:
+            captured[target_id] = expected
+            loaded[target_id] = result
+            return result
         try:
             identities = {}
+            operational = {}
             read_validated_reference(
                 layout,
                 result,
                 member_identities=identities,
-                expected_member_identities=None
-                if reference_member_identities is None
-                else reference_member_identities.get(target_id),
+                expected_member_identities=expected,
+                operational_metadata=operational,
             )
             captured[target_id] = identities
+            operations[target_id] = operational
         except (FileNotFoundError, OSError, ValueError):
             issues.append(_issue(target_id, "FAILED", "target_reference_invalid"))
             return None
@@ -323,13 +334,7 @@ def load_a_share_run_evidence(
         model_ref = loaded.get(target.target_id) or load(target.target_id)
         if model_ref is None:
             continue
-        operational = {}
-        read_semantic_artifact_record(
-            _instance_root(layout, model_ref),
-            expected_identity=model_ref.instance_identity,
-            expected_member_identities=captured[model_ref.target_id],
-            operational_metadata=operational,
-        )
+        operational = operations[model_ref.target_id]
         if "model_phase_observations" in operational:
             model_costs.append(
                 {
@@ -351,7 +356,7 @@ def load_a_share_run_evidence(
                 _issue("model_trials", "FAILED", "trial_ledger_reference_invalid")
             )
     factor_target = f"{scenario}_factor_statistics"
-    factor_ref = load(factor_target) if factor_requested else None
+    factor_ref = load(factor_target, native=True) if factor_requested else None
     factor_statistics = (
         _unavailable(issues, factor_target)
         if factor_requested
@@ -364,6 +369,7 @@ def load_a_share_run_evidence(
                 expected_identity=str(factor_ref.instance_identity),
                 expected_member_identities=captured[factor_ref.target_id],
             )
+            _validate_reference_envelope(factor_ref, artifact.envelope)
             factor_statistics = {
                 "status": "DEFINED",
                 "identity": factor_ref.instance_identity,
@@ -383,7 +389,7 @@ def load_a_share_run_evidence(
     statistics = {}
     for group in ("global", "quarterly"):
         statistics_target = f"{scenario}_{group}_statistics"
-        statistics_ref = load(statistics_target) if full_research else None
+        statistics_ref = load(statistics_target, native=True) if full_research else None
         if statistics_ref is None:
             group_statistics = (
                 _unavailable(issues, statistics_target)
@@ -397,6 +403,7 @@ def load_a_share_run_evidence(
                     expected_identity=str(statistics_ref.instance_identity),
                     expected_member_identities=captured[statistics_ref.target_id],
                 )
+                _validate_reference_envelope(statistics_ref, artifact.envelope)
                 tables = {
                     name: table_records(artifact, name + ".parquet")
                     for name in (
@@ -425,7 +432,7 @@ def load_a_share_run_evidence(
         raise ValueError("research_run_protocol_portfolios_invalid")
     portfolios: list[dict[str, object]] = []
     portfolio_target = f"{scenario}_portfolio_statistics"
-    portfolio_ref = load(portfolio_target) if candidates else None
+    portfolio_ref = load(portfolio_target, native=True) if candidates else None
     portfolio_statistics = (
         (
             _unavailable(issues, portfolio_target)
@@ -442,6 +449,7 @@ def load_a_share_run_evidence(
                 expected_identity=portfolio_ref.instance_identity,
                 expected_member_identities=captured[portfolio_ref.target_id],
             )
+            _validate_reference_envelope(portfolio_ref, artifact.envelope)
             summaries = {
                 name: table_records(artifact, "portfolio_" + name + ".parquet")
                 for name in (
@@ -581,7 +589,7 @@ def load_a_share_run_evidence(
             portfolio_statistics = _unavailable(issues, portfolio_target)
     for candidate in candidates:
         target_id = f"{scenario}_{candidate}_ledger"
-        ledger_ref = load(target_id)
+        ledger_ref = load(target_id, native=True)
         metrics = [
             row
             for row in portfolio_statistics.get("performance", [])
@@ -607,20 +615,14 @@ def load_a_share_run_evidence(
                     result.update(summarize_portfolio_ledger(artifact.capital, batches))
                 ),
             )
-            ledger_operations = {}
-            read_semantic_artifact_record(
-                _instance_root(layout, ledger_ref),
-                expected_identity=ledger_ref.instance_identity,
-                expected_member_identities=captured[ledger_ref.target_id],
-                operational_metadata=ledger_operations,
-            )
+            _validate_reference_envelope(ledger_ref, ledger.envelope)
             portfolios.append(
                 {
                     "candidate_id": candidate,
                     "status": "DEFINED",
                     "ledger_identity": ledger_ref.instance_identity,
                     "final_calibration": ledger.final_alpha_calibration,
-                    "calibration_observations": ledger_operations.get(
+                    "calibration_observations": ledger.operational_metadata.get(
                         "final_alpha_observations"
                     ),
                     "economics": economics,
@@ -677,6 +679,7 @@ def read_validated_reference(
     *,
     member_identities=None,
     expected_member_identities=None,
+    operational_metadata=None,
 ):
     if result.instance_identity is None or result.schema_identity is None:
         raise ValueError("research_run_target_reference_invalid")
@@ -699,14 +702,19 @@ def read_validated_reference(
             expected_identity=result.instance_identity,
             member_identities=member_identities,
             expected_member_identities=expected_member_identities,
+            operational_metadata=operational_metadata,
         )
+    _validate_reference_envelope(result, envelope)
+    return (root, envelope)
+
+
+def _validate_reference_envelope(result, envelope):
     if (
         envelope["logical_artifact_id"] != result.target_id
         or envelope["instance_identity"] != result.instance_identity
         or envelope["schema_identity"] != result.schema_identity
     ):
         raise ValueError("research_run_target_reference_invalid")
-    return (root, envelope)
 
 
 def _instance_root(layout: StorageLayout, result: ResearchRunTargetResult) -> Path:
@@ -830,18 +838,29 @@ def _validate_report_payload(payload: object) -> None:
         raise ValueError("research_report_payload_invalid") from exc
 
 
-def _validate_report_semantics(
-    envelope: Mapping[str, object], payload: dict[str, object]
-) -> None:
+def _report_manifest_metadata(envelope: Mapping[str, object]) -> dict[str, object]:
     metadata = envelope.get("semantic_metadata")
     window = envelope.get("research_window")
     upstream = envelope.get("upstream_identities")
     if (
         type(metadata) is not dict
+        or set(metadata)
+        != {"target_contract", "source_run_id", "source_run_status", "report_status"}
         or type(window) is not dict
         or type(upstream) is not dict
     ):
         raise ValueError("research_report_semantics_invalid")
+    try:
+        validate_run_id(metadata["source_run_id"])
+    except (TypeError, ValueError) as exc:
+        raise ValueError("research_report_semantics_invalid") from exc
+    for field in ("source_run_status", "report_status"):
+        if type(metadata[field]) is not str or metadata[field] not in {
+            "COMPLETE",
+            "BLOCKED",
+            "FAILED",
+        }:
+            raise ValueError("research_report_semantics_invalid")
     contract = metadata.get("target_contract")
     if type(contract) is not dict or set(contract) != {
         "schema_id",
@@ -850,19 +869,28 @@ def _validate_report_semantics(
     }:
         raise ValueError("research_report_semantics_invalid")
     if (
+        contract["required_sections"]
+        != list(_report_contract(contract["schema_id"])[0])
+        or upstream != {"source_run": contract["source_run_identity"]}
+        or envelope["schema_identity"] != canonical_json_hash(contract)
+    ):
+        raise ValueError("research_report_semantics_invalid")
+    return metadata
+
+
+def _validate_report_semantics(
+    envelope: Mapping[str, object], payload: dict[str, object]
+) -> None:
+    metadata = _report_manifest_metadata(envelope)
+    contract = metadata["target_contract"]
+    if (
         envelope.get("logical_artifact_id")
         != f"{payload['scenario_id']}_report_artifact"
-        or window.get("access") != payload["access_window"]
+        or envelope["research_window"].get("access") != payload["access_window"]
         or metadata.get("source_run_id") != payload["run_id"]
         or (metadata.get("source_run_status") != payload["source_run_status"])
         or (metadata.get("report_status") != payload["report_status"])
         or (contract.get("schema_id") != payload["schema_id"])
-        or (
-            contract.get("required_sections")
-            != list(_report_contract(payload["schema_id"])[0])
-        )
-        or (upstream != {"source_run": contract.get("source_run_identity")})
-        or (envelope.get("schema_identity") != canonical_json_hash(contract))
     ):
         raise ValueError("research_report_semantics_invalid")
 
@@ -903,9 +931,23 @@ def produce_crypto_report(
     protocol = record.payload()["protocol"]
     final_test = record.research_window["access"] == "holdout"
     issues, references, captured = ([], {}, {})
+    native_targets = {
+        f"{record.scenario_id}_models",
+        *(item.calibration_target_id for item in calibration_candidates),
+        *(
+            target
+            for item in execution_targets
+            if final_test
+            for target in (item.target_id, item.statistics_target_id)
+        ),
+    }
     for result in record.target_results:
         if result.status in {TargetStatus.BLOCKED, TargetStatus.FAILED}:
             issues.append(_issue(result.target_id, result.status.value, result.reason))
+            continue
+        if result.target_id in native_targets:
+            references[result.target_id] = result
+            captured[result.target_id] = None
             continue
         try:
             identities = {}
@@ -1003,6 +1045,7 @@ def produce_crypto_report(
                 expected_member_identities=captured[reference.target_id],
                 trial_layout=layout,
             )
+            _validate_reference_envelope(reference, artifact.envelope)
             models = {
                 "status": "DEFINED",
                 "identity": reference.instance_identity,
@@ -1107,6 +1150,7 @@ def produce_crypto_report(
                     expected_member_identities=captured[reference.target_id],
                     validate_tables=validate_maker_calibration,
                 )
+                _validate_reference_envelope(reference, artifact.envelope)
                 with artifact.table("crypto_maker_calibration.parquet") as frame:
                     calibration = {
                         "status": "DEFINED"
@@ -1159,7 +1203,7 @@ def produce_crypto_report(
                 root = _instance_root(layout, reference)
                 if execution_target.execution_mode == "continuous":
                     economics = {}
-                    read_portfolio_ledger_artifact(
+                    ledger = read_portfolio_ledger_artifact(
                         root,
                         expected_identity=reference.instance_identity,
                         expected_member_identities=captured[reference.target_id],
@@ -1169,6 +1213,7 @@ def produce_crypto_report(
                             )
                         ),
                     )
+                    _validate_reference_envelope(reference, ledger.envelope)
                     result = {
                         "episode_id": "continuous",
                         "economics": economics,
@@ -1214,12 +1259,13 @@ def produce_crypto_report(
                         }
                         episode_rows.append(row)
 
-                    read_crypto_episode_artifact(
+                    artifact = read_crypto_episode_artifact(
                         root,
                         expected_identity=reference.instance_identity,
                         expected_member_identities=captured[reference.target_id],
                         consume_episode=consume_episode,
                     )
+                    _validate_reference_envelope(reference, artifact._envelope)
                     result = {
                         "episodes": episode_rows,
                         "return_policy": "per_episode_only",
@@ -1253,6 +1299,7 @@ def produce_crypto_report(
                 expected_identity=reference.instance_identity,
                 expected_member_identities=captured[reference.target_id],
             )
+            _validate_reference_envelope(reference, artifact.envelope)
             tables = {}
             for member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]:
                 with artifact.table(member) as frame:

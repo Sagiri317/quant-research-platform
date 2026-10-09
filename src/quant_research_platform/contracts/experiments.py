@@ -13,12 +13,13 @@ from typing import Literal
 
 import pandas as pd
 
-from quant_research_platform.contracts.business_manifest import _freeze_json_value
 from quant_research_platform.contracts.ids import MarketId, validate_market_id
 from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
     canonical_json_hash,
-    qrp_json_object_snapshot,
+    freeze_json_value,
+    plain_json_value,
+    qrp_json_mapping_snapshot,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
@@ -219,7 +220,7 @@ class ExperimentPlan:
             and re.fullmatch(r"[0-9a-f]{64}", self.research_protocol_identity) is None
         ):
             raise ValueError("experiment_research_protocol_identity_invalid")
-        parameters = qrp_json_object_snapshot(_thaw_json(self.candidate_parameters))
+        parameters = qrp_json_mapping_snapshot(self.candidate_parameters)
         if parameters and set(parameters) != set(self.candidate_ids):
             raise ValueError("experiment_candidate_parameters_mismatch")
         if self.stage == "refit" and (
@@ -228,7 +229,7 @@ class ExperimentPlan:
             or parameters[self.candidate_ids[0]].get("random_seed") != self.random_seed
         ):
             raise ValueError("experiment_refit_plan_invalid")
-        object.__setattr__(self, "candidate_parameters", _freeze_json_value(parameters))
+        object.__setattr__(self, "candidate_parameters", freeze_json_value(parameters))
         object.__setattr__(
             self, "backend_versions", _freeze_string_mapping(self.backend_versions)
         )
@@ -286,7 +287,7 @@ class ExperimentPlan:
             "thread_settings": dict(self.thread_settings),
             "cost_assumptions": dict(self.cost_assumptions),
             "risk_assumptions": dict(self.risk_assumptions),
-            "candidate_parameters": _thaw_json(self.candidate_parameters),
+            "candidate_parameters": plain_json_value(self.candidate_parameters),
             "research_protocol_identity": self.research_protocol_identity,
             "holdout_status": self.holdout_status,
         }
@@ -642,8 +643,8 @@ class TrialRecord:
             value = getattr(self, field_name)
             if not isinstance(value, Mapping):
                 raise ValueError("trial_mapping_invalid")
-            snapshot = qrp_json_object_snapshot(_thaw_json(value))
-            object.__setattr__(self, field_name, _freeze_json_value(snapshot))
+            snapshot = qrp_json_mapping_snapshot(value)
+            object.__setattr__(self, field_name, freeze_json_value(snapshot))
 
     def payload(self) -> dict[str, object]:
         return {
@@ -664,15 +665,15 @@ class TrialRecord:
             "factor_definition_ids": list(self.factor_definition_ids),
             "model_definition_id": self.model_definition_id,
             "portfolio_definition_id": self.portfolio_definition_id,
-            "normalized_parameters": _thaw_json(self.normalized_parameters),
+            "normalized_parameters": plain_json_value(self.normalized_parameters),
             "random_seed": self.random_seed,
-            "backend_versions": _thaw_json(self.backend_versions),
-            "thread_settings": _thaw_json(self.thread_settings),
+            "backend_versions": plain_json_value(self.backend_versions),
+            "thread_settings": plain_json_value(self.thread_settings),
             "status": self.status,
-            "metrics": _thaw_json(self.metrics),
-            "undefined_reasons": _thaw_json(self.undefined_reasons),
-            "cost_assumptions": _thaw_json(self.cost_assumptions),
-            "risk_assumptions": _thaw_json(self.risk_assumptions),
+            "metrics": plain_json_value(self.metrics),
+            "undefined_reasons": plain_json_value(self.undefined_reasons),
+            "cost_assumptions": plain_json_value(self.cost_assumptions),
+            "risk_assumptions": plain_json_value(self.risk_assumptions),
             "rebalance_assumption": self.rebalance_assumption,
             "artifact_lineage": list(self.artifact_lineage),
             "holdout_accessed": self.holdout_accessed,
@@ -727,9 +728,9 @@ def validate_trial_record_against_plan(
     if plan.stage == "refit" and record.random_seed != plan.random_seed:
         raise ValueError("trial_refit_seed_mismatch")
     if plan.candidate_parameters and canonical_identity_bytes(
-        _thaw_json(record.normalized_parameters)
+        plain_json_value(record.normalized_parameters)
     ) != canonical_identity_bytes(
-        _thaw_json(plan.candidate_parameters[record.candidate_id])
+        plain_json_value(plan.candidate_parameters[record.candidate_id])
     ):
         raise ValueError("trial_parameters_not_frozen")
     if record.fold_id not in plan.fold_ids:
@@ -782,11 +783,3 @@ def validate_trial_ledger_reference(value: object) -> dict[str, str]:
         if type(value[key]) is not str or _PROTOCOL_HASH.fullmatch(value[key]) is None:
             raise ValueError("trial_ledger_reference_invalid")
     return dict(value)
-
-
-def _thaw_json(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {key: _thaw_json(item) for key, item in value.items()}
-    if type(value) is tuple:
-        return [_thaw_json(item) for item in value]
-    return value

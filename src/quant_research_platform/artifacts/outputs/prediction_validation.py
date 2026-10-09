@@ -610,54 +610,48 @@ def _validate_crypto_lineage(metadata):
     folds = metadata["fold_models"]
     if type(folds) is not list or len(folds) != 1:
         raise ValueError("invalid_model_metadata")
-    seen = set()
-    previous = None
-    for fold in folds:
-        if type(fold) is not dict or set(fold) != {
-            "fold_id",
-            "prediction_window",
-            "fit_windows",
-            "fit_cutoff",
-            "training_asset_ids",
-            "evaluation_asset_ids",
-        }:
-            raise ValueError("invalid_model_metadata")
-        validate_run_id(fold["fold_id"])
-        if fold["fold_id"] in seen:
-            raise ValueError("invalid_model_metadata")
-        seen.add(fold["fold_id"])
-        window = fold["prediction_window"]
-        if type(window) is not dict or set(window) != {"start", "end"}:
-            raise ValueError("invalid_model_metadata")
-        start, end = (pd.Timestamp(window[key]) for key in ("start", "end"))
-        if start > end or (previous is not None and start <= previous):
-            raise ValueError("invalid_model_metadata")
-        previous = end
-        windows = fold["fit_windows"]
-        if type(windows) is not list or len(windows) != 2:
-            raise ValueError("invalid_model_metadata")
-        if any(
-            type(window) is not dict or set(window) != {"start", "end"}
-            for window in windows
-        ):
-            raise ValueError("invalid_model_metadata")
-        bounds = tuple(
-            (pd.Timestamp(window["start"]), pd.Timestamp(window["end"]))
-            for window in windows
+    (fold,) = folds
+    if type(fold) is not dict or set(fold) != {
+        "fold_id",
+        "prediction_window",
+        "fit_windows",
+        "fit_cutoff",
+        "training_asset_ids",
+        "evaluation_asset_ids",
+    }:
+        raise ValueError("invalid_model_metadata")
+    validate_run_id(fold["fold_id"])
+    window = fold["prediction_window"]
+    if type(window) is not dict or set(window) != {"start", "end"}:
+        raise ValueError("invalid_model_metadata")
+    start, end = (pd.Timestamp(window[key]) for key in ("start", "end"))
+    if start > end:
+        raise ValueError("invalid_model_metadata")
+    windows = fold["fit_windows"]
+    if type(windows) is not list or len(windows) != 2:
+        raise ValueError("invalid_model_metadata")
+    if any(
+        type(window) is not dict or set(window) != {"start", "end"}
+        for window in windows
+    ):
+        raise ValueError("invalid_model_metadata")
+    bounds = tuple(
+        (pd.Timestamp(window["start"]), pd.Timestamp(window["end"]))
+        for window in windows
+    )
+    cutoff = pd.Timestamp(fold["fit_cutoff"])
+    if (
+        any(pd.isna(value) for pair in bounds for value in pair)
+        or any(left > right for left, right in bounds)
+        or not bounds[0][1] < bounds[1][0]
+        or bounds[-1][1] != cutoff
+        or cutoff >= start
+    ):
+        raise ValueError("invalid_model_metadata")
+    for key in ("training_asset_ids", "evaluation_asset_ids"):
+        require_metadata_string_list(
+            fold, key, "invalid_model_metadata", allow_empty=True
         )
-        cutoff = pd.Timestamp(fold["fit_cutoff"])
-        if (
-            any(pd.isna(value) for pair in bounds for value in pair)
-            or any(left > right for left, right in bounds)
-            or not bounds[0][1] < bounds[1][0]
-            or bounds[-1][1] != cutoff
-            or cutoff >= start
-        ):
-            raise ValueError("invalid_model_metadata")
-        for key in ("training_asset_ids", "evaluation_asset_ids"):
-            require_metadata_string_list(
-                fold, key, "invalid_model_metadata", allow_empty=True
-            )
     return metadata
 
 

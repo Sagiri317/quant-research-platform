@@ -1,8 +1,6 @@
 from __future__ import annotations
 
 import ast
-import os
-import re
 from pathlib import Path
 
 SOURCE_ROOT = Path("src/quant_research_platform")
@@ -168,58 +166,6 @@ def test_configured_model_algorithms_use_the_single_capability_owner() -> None:
     assert configured == set(_MODEL_ALGORITHM_FACTS)
 
 
-def test_source_surfaces_have_no_retired_naming() -> None:
-    violations: list[str] = []
-    repository_root = Path(__file__).resolve().parents[2]
-    for relative_path in _source_surface_paths():
-        if _contains_retired_token(relative_path.as_posix()):
-            violations.append(f"{relative_path}:path")
-        path = repository_root / relative_path
-        if path.suffix == ".parquet":
-            continue
-        text = path.read_text(encoding="utf-8")
-        if _contains_retired_token(text):
-            violations.append(f"{relative_path}:text")
-
-    assert violations == []
-
-
-def test_retired_contract_separator_variants_are_detected() -> None:
-    for separator in ("_", "-", " "):
-        assert _contains_retired_token("current" + separator + "contract")
-
-
-def test_csmar_source_surface_has_one_root_without_retired_sibling_api() -> None:
-    retired_surface_tokens = (
-        "csmar" + "_" + "aux",
-        "source_root" + "_" + "resolver",
-        "resolve" + "_" + "source_root",
-    )
-    repository_root = Path(__file__).resolve().parents[2]
-    paths = set(_source_surface_paths())
-    violations = []
-    for relative_path in sorted(paths):
-        text = (
-            ""
-            if relative_path.suffix == ".parquet"
-            else (repository_root / relative_path).read_text(encoding="utf-8")
-        )
-        for token in retired_surface_tokens:
-            if (
-                token.casefold() in text.casefold()
-                or token.casefold() in relative_path.as_posix().casefold()
-            ):
-                violations.append(f"{relative_path}:{token}")
-    assert violations == []
-
-
-_RETIRED_TEXT = re.compile(
-    r"(?i)(?<![a-z0-9])(?:phase\s*[_-]?\s*[12]|"
-    "current" + r"[_ -]" + "contract|"
-    "unified" + r"[_-]" + "research)(?![a-z0-9])"
-)
-
-
 def _defined_symbols(tree: ast.AST) -> set[str]:
     symbols: set[str] = set()
     for node in ast.walk(tree):
@@ -244,31 +190,6 @@ def _imported_modules(tree: ast.AST) -> set[str]:
         elif isinstance(node, ast.ImportFrom) and node.module is not None:
             modules.add(node.module)
     return modules
-
-
-def _contains_retired_token(value: str) -> bool:
-    return _RETIRED_TEXT.search(value) is not None
-
-
-def _source_surface_paths() -> tuple[Path, ...]:
-    repository_root = Path(__file__).resolve().parents[2]
-    paths = [Path("README.md")]
-    for name in ("docs", "src", "tests"):
-        for directory, folders, files in os.walk(
-            repository_root / name, followlinks=False
-        ):
-            folders[:] = [
-                folder
-                for folder in folders
-                if folder
-                not in {"__pycache__", ".pytest_cache", ".ruff_cache", ".mypy_cache"}
-            ]
-            paths.extend(
-                (Path(directory) / name).relative_to(repository_root)
-                for name in files
-                if Path(name).suffix not in {".pyc", ".pyo"}
-            )
-    return tuple(sorted(path for path in paths if (repository_root / path).is_file()))
 
 
 def _imports_research_workflow(path: Path) -> bool:

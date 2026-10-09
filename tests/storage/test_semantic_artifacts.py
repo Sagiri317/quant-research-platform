@@ -475,28 +475,6 @@ def test_inventory_rejects_child_alias_before_scanning_external_content(
     assert filesystem_read_bytes(payload) == b"external synthetic content"
 
 
-def test_member_inventory_has_no_total_byte_quota(tmp_path):
-    root = _write_artifact(tmp_path)
-    old_good = _immediate_file_bytes(root)
-    candidate_fields = _envelope().payload()
-    del candidate_fields["instance_identity"], candidate_fields["status"]
-    candidate_fields["semantic_metadata"] = {"candidate": True}
-    candidate = build_business_manifest_envelope(**candidate_fields)
-
-    def writer(staging):
-        for index in range(257):
-            filesystem_write_bytes(staging / f"member-{index}.bin", b"small")
-
-    published = write_semantic_artifact(tmp_path / "model", candidate, writer)
-    from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact_record,
-    )
-
-    _envelope_payload, members = read_semantic_artifact_record(published)
-    assert len(members) == 257
-    assert _immediate_file_bytes(root) == old_good
-
-
 @pytest.mark.parametrize("operation", ("discovery", "publication"))
 def test_constant_directory_identity_cannot_hide_added_member(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, operation: str
@@ -644,7 +622,7 @@ def test_semantic_parquet_comparison_uses_exact_logical_rows(tmp_path, change):
     assert filesystem_read_bytes(old / "manifest.json") == before
 
 
-def test_identical_parquet_rebuild_compares_logical_values(tmp_path):
+def test_identical_parquet_copy_compares_exact_bytes(tmp_path):
     import shutil
 
     import pyarrow as pa
@@ -685,7 +663,15 @@ def test_member_inventory_round_trips_more_than_256_declared_members(tmp_path):
         for index in range(265):
             filesystem_write_bytes(staging / f"member-{index}.bin", str(index).encode())
 
-    root = write_semantic_artifact(tmp_path / "wide", _envelope(), writer)
+    old = _write_artifact(tmp_path)
+    old_good = _immediate_file_bytes(old)
+    fields = _envelope().payload()
+    del fields["instance_identity"], fields["status"]
+    fields["semantic_metadata"] = {"candidate": True}
+    root = write_semantic_artifact(
+        tmp_path / "model", build_business_manifest_envelope(**fields), writer
+    )
+    assert _immediate_file_bytes(old) == old_good
     _, members = storage.read_semantic_artifact_record(root)
     assert len(members) == 265
     assert {member["path"] for member in members} == {
@@ -694,6 +680,7 @@ def test_member_inventory_round_trips_more_than_256_declared_members(tmp_path):
     filesystem_write_bytes(root / "member-264.bin", b"changed")
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
         storage.read_semantic_artifact_record(root)
+    assert _immediate_file_bytes(old) == old_good
 
 
 @pytest.mark.parametrize(

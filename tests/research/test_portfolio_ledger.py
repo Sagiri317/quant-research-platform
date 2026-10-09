@@ -18,6 +18,7 @@ from quant_research_platform.markets.implementations.a_share.execution import (
     FeeRule,
     FeeSchedule,
     fee_schedule_from_frame,
+    prepare_trade_cost,
     require_fee_coverage,
     trade_cost,
 )
@@ -569,6 +570,23 @@ def test_fee_costs_are_side_aware_and_stamp_transition_is_exact(tmp_path: Path) 
             + cost.slippage_cost
             + cost.impact_cost
         )
+    for when, side, expected in (
+        (date(2023, 8, 28), "buy", (30.0, 0.0, 1.0, 0.0, 0.0)),
+        (date(2023, 8, 27), "sell", (30.0, 100.0, 1.0, 0.0, 0.0)),
+        (date(2023, 8, 28), "sell", (30.0, 50.0, 1.0, 0.0, 0.0)),
+        (date(2022, 4, 28), "buy", (30.0, 0.0, 2.0, 0.0, 0.0)),
+        (date(2022, 4, 29), "buy", (30.0, 0.0, 1.0, 0.0, 0.0)),
+    ):
+        prepared = prepare_trade_cost(when, "shanghai", side, schedule, assumptions)
+        notionals, adv = np.array([100000.0, 200000.0]), np.full(2, 10000000.0)
+        components = prepared.components(notionals, adv)
+        for actual, amount in zip(components, expected, strict=True):
+            np.testing.assert_allclose(actual, [amount, 2 * amount], rtol=1e-14, atol=0)
+        np.testing.assert_allclose(
+            prepared.totals(notionals, adv),
+            [sum(expected), 2 * sum(expected)],
+            rtol=1e-14,
+        )
 
 
 def test_zero_cost_sell_buy_transition_is_exact_and_normalized() -> None:
@@ -1029,21 +1047,15 @@ def test_simple_target_rejects_missing_eligible_signal(bad: float) -> None:
         )
 
 
-def test_cash_search_stops_at_float_stagnation_and_preserves_old_low_exactly():
+def test_cash_sizing_matches_independent_linear_fee_budget():
+    from fractions import Fraction
+
     assumptions = _assumptions()
     when = date(2023, 8, 28)
     actual_cost = _a_share_cost(_schedule(), {"a": "shanghai"})
-    low, high = (0.0, 1.0)
-    for _ in range(80):
-        middle = (low + high) / 2.0
-        amount = 100.0 * middle
-        cost = actual_cost(when, "a", "buy", amount, 1000.0, assumptions)
-        if amount + cost.total_cost <= 100.0:
-            low = middle
-        else:
-            high = middle
-    expected_amount = 100.0 * low
-    expected_cost = actual_cost(when, "a", "buy", expected_amount, 1000.0, assumptions)
+    expected_amount = float(
+        Fraction(100) / (1 + Fraction.from_float(0.0003) + Fraction.from_float(0.0001))
+    )
     calls = []
 
     def observed_cost(*args):
@@ -1062,10 +1074,12 @@ def test_cash_search_stops_at_float_stagnation_and_preserves_old_low_exactly():
         cost_for_trade=observed_cost,
         cost_source_identity="0" * 64,
     )
-    assert result.asset_ledger.executed_delta_notional.item() == expected_amount
-    assert result.post_trade_cash == max(
-        0.0, 100.0 - expected_amount - expected_cost.total_cost
+    amount = result.asset_ledger.executed_delta_notional.item()
+    assert amount == pytest.approx(
+        expected_amount, rel=0, abs=2 * np.spacing(expected_amount)
     )
+    assert amount > 0 and result.post_trade_cash >= 0
+    assert result.post_trade_cash == pytest.approx(0.0, abs=4 * np.spacing(100.0))
     assert len(calls) <= np.finfo(float).nmant + 3
 
 
@@ -1104,6 +1118,18 @@ def test_trade_cost_preserves_representable_scaled_costs(notional, adv, bps):
     )
     assert result.slippage_cost == pytest.approx(expected_slippage, rel=1e-14, abs=0)
     assert result.impact_cost == pytest.approx(expected_impact, rel=1e-14, abs=0)
+    prepared = prepare_trade_cost(
+        date(2023, 8, 28),
+        "shanghai",
+        "buy",
+        _schedule(broker_rate=0.0, transfer_rate=0.0, stamp_rate=0.0),
+        assumptions,
+    )
+    components = prepared.components(np.array([notional]), np.array([adv]))
+    for actual, expected in zip(
+        components, (0.0, 0.0, 0.0, expected_slippage, expected_impact), strict=True
+    ):
+        assert actual[0] == pytest.approx(expected, rel=1e-14, abs=0)
 
 
 @pytest.mark.parametrize("nav", (100000000.0, 1e307))

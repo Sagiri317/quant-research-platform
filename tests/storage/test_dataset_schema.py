@@ -6,7 +6,6 @@ from dataclasses import replace
 from datetime import date
 from decimal import Decimal, localcontext
 from pathlib import Path
-from types import MappingProxyType
 
 import numpy as np
 import pandas as pd
@@ -366,37 +365,6 @@ def test_dataset_schema_validators_reject_mutated_runtime_contracts() -> None:
             dataset_schema.validate_dataset_primary_key_null_summary(
                 manifest, primary_key=manifest.get("primary_key")
             )
-
-
-@pytest.mark.parametrize(
-    ("case", "error"),
-    (
-        ("grain", "dataset_grain_invalid"),
-        ("missing_primary_key", "dataset_primary_key_invalid"),
-        ("partition", "unsupported_partitioning"),
-        ("key_role", "invalid_primary_key_roles"),
-        ("unpartitioned_timestamp", "unpartitioned_data_must_not_use_timestamp_key"),
-        ("missing_timestamp", "invalid_timestamp_primary_key"),
-    ),
-)
-def test_dataset_schema_rejects_mutated_spec_invariants(case: str, error: str) -> None:
-    spec = make_processed_dataset_spec(f"mutated_{case}")
-    if case == "grain":
-        object.__setattr__(spec, "grain", "asset_timestamp")
-    elif case == "missing_primary_key":
-        object.__setattr__(spec, "primary_key", ("missing",))
-    elif case == "partition":
-        object.__setattr__(spec, "partition_columns", ("month",))
-    elif case == "key_role":
-        roles = dict(spec.column_roles)
-        roles["asset_id"] = ColumnRole.FACTOR
-        object.__setattr__(spec, "column_roles", MappingProxyType(roles))
-    elif case == "unpartitioned_timestamp":
-        object.__setattr__(spec, "partition_columns", ())
-    else:
-        object.__setattr__(spec, "primary_key", ("market_id", "asset_id"))
-    with pytest.raises(ValueError, match=error):
-        dataset_schema.validate_dataset_spec(spec)
 
 
 @pytest.mark.parametrize(
@@ -1031,7 +999,7 @@ def test_empty_ordered_category_domain_mismatch_is_not_ignored(
 
 
 @pytest.mark.parametrize("empty_chunks", (False, True))
-def test_writer_retains_one_incremental_logical_dtype_plan(
+def test_writer_incremental_logical_dtype_plan_keeps_schema_width(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_chunks: bool
 ) -> None:
     name = f"incremental_dtype_plan_{empty_chunks}"

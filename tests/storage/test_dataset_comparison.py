@@ -3,7 +3,6 @@ from __future__ import annotations
 import gc
 import os
 import sys
-from dataclasses import replace
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -97,16 +96,16 @@ def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
     changed = make_default_dataset_frame()
     changed.loc[changed.index[-1], "value"] = 99.0
     write_dataset(right, changed, spec=make_processed_dataset_spec("collision_right"))
-    collision = fingerprint_dataset(left)
 
-    original_fingerprint = dataset_comparison.fingerprint_dataset_session
-
-    def owned_collision(context, **kwargs):
-        actual = original_fingerprint(context, **kwargs)
-        return replace(actual, content_hash=collision.content_hash)
+    def collision_hashes(frame, **_kwargs):
+        yield np.zeros(len(frame), dtype="uint64")
 
     monkeypatch.setattr(
-        dataset_comparison, "fingerprint_dataset_session", owned_collision
+        dataset_fingerprinting, "_iter_fingerprint_hashes", collision_hashes
+    )
+    assert (
+        fingerprint_dataset(left).content_hash
+        == fingerprint_dataset(right).content_hash
     )
     comparison = dataset_comparison.compare_datasets(left, right)
     assert comparison.status == "CONTENT_MISMATCH"
@@ -117,7 +116,7 @@ def test_compare_requires_exact_proof_after_forced_fingerprint_collision(
     }
 
 
-def test_compare_treats_partition_and_file_boundaries_as_layout_only(
+def test_compare_treats_file_boundaries_as_layout_only(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     left = make_dataset_artifact_root(tmp_path, "layout_left")
@@ -128,34 +127,15 @@ def test_compare_treats_partition_and_file_boundaries_as_layout_only(
         (frame.iloc[:1], frame.iloc[1:]),
         spec=make_processed_dataset_spec("layout_left"),
     )
-    write_dataset(right, frame, spec=make_processed_dataset_spec("layout_right"))
-    fingerprint = fingerprint_dataset(left)
-    right_fingerprint = replace(
-        fingerprint,
-        partition_fingerprints=(
-            {
-                "partition": "layout-only",
-                "row_count": fingerprint.row_count,
-                "content_hash": fingerprint.content_hash,
-            },
-        ),
-        file_count=1,
-    )
-    fingerprints = iter((fingerprint, right_fingerprint))
-
-    original_fingerprint = dataset_comparison.fingerprint_dataset_session
-
-    def owned_fingerprint(context, **kwargs):
-        original_fingerprint(context, **kwargs)
-        return next(fingerprints)
-
-    monkeypatch.setattr(
-        dataset_comparison, "fingerprint_dataset_session", owned_fingerprint
+    write_dataset(
+        right,
+        frame,
+        spec=make_processed_dataset_spec("layout_right"),
     )
     comparison = compare_datasets(left, right)
     assert comparison.status == "MATCH"
     assert comparison.matches
-    assert comparison.layout_delta["file_count"] == {"left": 3, "right": 1}
+    assert comparison.layout_delta["file_count"] == {"left": 3, "right": 2}
     assert comparison.layout_delta["partitions"]["left"]
     assert comparison.layout_delta["partitions"]["right"]
     assert all(
@@ -165,7 +145,7 @@ def test_compare_treats_partition_and_file_boundaries_as_layout_only(
     )
     assert (
         comparison.layout_delta["partitions"]["left"]
-        != comparison.layout_delta["partitions"]["right"]
+        == comparison.layout_delta["partitions"]["right"]
     )
 
 
@@ -195,12 +175,12 @@ def test_compare_rejects_mutation_after_both_decoded_sources(
     frame = make_default_dataset_frame()
     write_dataset(left, frame, spec=make_processed_dataset_spec("mutation_left"))
     write_dataset(right, frame, spec=make_processed_dataset_spec("mutation_right"))
-    fingerprint = dataset_comparison.fingerprint_dataset_session
+    batches = dataset_comparison.iter_dataset_file_batches
     calls = 0
 
     def changing_identity(context, **kwargs):
         nonlocal calls
-        result = fingerprint(context, **kwargs)
+        yield from batches(context, **kwargs)
         calls += 1
         if calls == 2:
             part = next(filesystem_glob(left / "data", "**/*.parquet"))
@@ -209,10 +189,9 @@ def test_compare_rejects_mutation_after_both_decoded_sources(
                 native_filesystem_path(part),
                 ns=(stat.st_atime_ns, stat.st_mtime_ns + 10000000),
             )
-        return result
 
     monkeypatch.setattr(
-        dataset_comparison, "fingerprint_dataset_session", changing_identity
+        dataset_comparison, "iter_dataset_file_batches", changing_identity
     )
     comparison = compare_datasets(left, right)
     assert comparison.status == "INSPECTION_FAILED"
@@ -232,7 +211,7 @@ def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
         write_dataset(
             root, frame, spec=make_processed_dataset_spec(f"final_barrier_{side}")
         )
-    batches = dataset_fingerprinting.iter_dataset_file_batches
+    batches = dataset_comparison.iter_dataset_file_batches
     injected = False
 
     def index_then_mutate(context, **kwargs: object):
@@ -249,7 +228,7 @@ def test_compare_best_effort_observed_stage_drift_rejects_post_index_mutation(
         )
 
     monkeypatch.setattr(
-        dataset_fingerprinting, "iter_dataset_file_batches", index_then_mutate
+        dataset_comparison, "iter_dataset_file_batches", index_then_mutate
     )
     comparison = compare_datasets(roots["left"], roots["right"])
     assert injected

@@ -44,6 +44,8 @@ def test_write_dataset_writes_complete_artifact_root(tmp_path: Path) -> None:
         filesystem_read_text(root / "spec.json", encoding="utf-8")
     )
     assert result.root == root
+    assert result.data_root == root / "data"
+    assert result.manifest["row_count"] == result.row_count
     assert result.row_count == 3
     assert filesystem_is_file(root / "data" / "year=2014" / "part-000.parquet")
     assert filesystem_is_file(root / "data" / "year=2015" / "part-000.parquet")
@@ -1099,8 +1101,8 @@ def test_spec_semantics_checked_once_per_write_and_read_boundary(tmp_path, monke
     monkeypatch.setattr(DataSpec, "__post_init__", validate)
     root = make_dataset_artifact_root(tmp_path)
     write_dataset(root, make_default_dataset_frame(), spec=spec)
-    # The incoming frozen object and the staged persisted wire are separate boundaries.
-    assert calls == [spec.data_id, spec.data_id]
+    # The constructed spec is trusted; the staged wire remains a validation boundary.
+    assert calls == [spec.data_id]
     calls.clear()
     session = open_dataset_session(root, columns=None, time_window=None)
     assert calls == [spec.data_id]

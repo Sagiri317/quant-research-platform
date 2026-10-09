@@ -139,6 +139,35 @@ def envelope():
     )
 
 
+@pytest.mark.parametrize("mutation", ("manifest", "extra"))
+@pytest.mark.parametrize("primary_failure", (False, True))
+def test_table_rechecks_artifact_snapshot_on_consumption_exit(
+    tmp_path, tables, envelope, mutation, primary_failure
+):
+    root = statistics.write_statistics_artifact(
+        tmp_path, envelope=envelope, tables=tables
+    )
+    artifact = statistics.read_statistics_artifact(root, expected_identity=root.name)
+    primary = KeyboardInterrupt("consumer_primary")
+    with pytest.raises(KeyboardInterrupt if primary_failure else ValueError) as caught:
+        with artifact.table("model_trials.parquet") as frame:
+            assert not frame.empty
+            path = root / ("manifest.json" if mutation == "manifest" else "extra.bin")
+            filesystem_write_bytes(
+                path,
+                filesystem_read_bytes(path) + b"\n"
+                if mutation == "manifest"
+                else b"extra",
+            )
+            if primary_failure:
+                raise primary
+    if primary_failure:
+        assert caught.value is primary
+        assert any("ValueError" in note for note in primary.__notes__)
+    else:
+        assert str(caught.value).startswith("semantic_artifact_member_")
+
+
 @pytest.fixture
 def maker_calibration_tables():
     from quant_research_platform.markets.implementations.crypto.execution import (

@@ -390,22 +390,9 @@ def test_persisted_ic_rank_keeps_only_defined_weight_columns(tmp_path):
         assert entry["model_metadata"]["input_columns"] == ["x", "y"]
         metadata = entry["model_metadata"]
         parameters = metadata["rank_parameters"]
-        assert set(parameters) == {"columns", "weights", "label_calibration"}
+        assert set(parameters) == {"columns", "weights"}
         assert parameters["columns"] == ["x"]
         assert parameters["weights"] == [1.0]
-        trained = frame.loc[
-            frame.timestamp.between(
-                pd.Timestamp(metadata["train_start"]),
-                pd.Timestamp(metadata["train_end"]),
-            )
-        ]
-        expected_intercept = trained.groupby("timestamp").label.mean().mean()
-        np.testing.assert_allclose(
-            parameters["label_calibration"],
-            [expected_intercept, 0.24],
-            rtol=0,
-            atol=1e-14,
-        )
 
 
 @pytest.mark.parametrize("bad", ([], {}))

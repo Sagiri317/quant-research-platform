@@ -5,6 +5,7 @@ from __future__ import annotations
 import os
 import stat
 from collections.abc import Callable, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -329,7 +330,76 @@ def read_semantic_artifact_record(
     member_identities: dict[str, DatasetFileIdentity] | None = None,
     expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
     operational_metadata: dict[str, object] | None = None,
+    directory_identities: dict[str, tuple[int, int, int, int]] | None = None,
 ) -> tuple[dict[str, object], tuple[dict[str, object], ...]]:
+    root = Path(instance_root)
+    envelope, members, manifest_identity, operational = _read_artifact_manifest(
+        root,
+        expected_identity=expected_identity,
+        expected_member_identities=expected_member_identities,
+    )
+    if members != _member_inventory(
+        root,
+        expected_paths={str(member["path"]) for member in members},
+        verified_identities=member_identities,
+        expected_identities=expected_member_identities,
+        directory_identities=directory_identities,
+    ):
+        raise ValueError("semantic_artifact_member_integrity_invalid")
+    if _member_identity(root / "manifest.json") != manifest_identity:
+        raise ValueError("semantic_artifact_member_identity_changed")
+    if member_identities is not None:
+        member_identities["manifest.json"] = manifest_identity
+    if operational_metadata is not None:
+        operational_metadata.update(operational)
+    return (envelope, members)
+
+
+@contextmanager
+def semantic_artifact_read_session(
+    instance_root: Path,
+    *,
+    expected_identity: str | None = None,
+    member_identities: dict[str, DatasetFileIdentity],
+    expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
+    operational_metadata: dict[str, object] | None = None,
+    directory_identities: dict[str, tuple[int, int, int, int]] | None = None,
+):
+    """Bind one full content check to consumption and its exit identity barrier."""
+    directories = {} if directory_identities is None else directory_identities
+    record = read_semantic_artifact_record(
+        instance_root,
+        expected_identity=expected_identity,
+        member_identities=member_identities,
+        expected_member_identities=expected_member_identities,
+        operational_metadata=operational_metadata,
+        directory_identities=directories,
+    )
+    primary = None
+    try:
+        yield record
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            verify_semantic_artifact_snapshot(
+                instance_root, member_identities, directories
+            )
+        except BaseException as error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "semantic artifact verification also failed: " + type(error).__name__
+            )
+
+
+def _read_artifact_manifest(
+    instance_root: Path,
+    *,
+    expected_identity: str | None,
+    expected_member_identities: Mapping[str, DatasetFileIdentity] | None = None,
+):
     root = require_unaliased_path(
         Path(instance_root), error="semantic_artifact_root_invalid"
     )
@@ -369,20 +439,7 @@ def read_semantic_artifact_record(
         *(str(member["path"]) for member in members),
     }:
         raise ValueError("semantic_artifact_member_set_changed")
-    if members != _member_inventory(
-        root,
-        expected_paths={str(member["path"]) for member in members},
-        verified_identities=member_identities,
-        expected_identities=expected_member_identities,
-    ):
-        raise ValueError("semantic_artifact_member_integrity_invalid")
-    if _member_identity(root / "manifest.json") != manifest_identity:
-        raise ValueError("semantic_artifact_member_identity_changed")
-    if member_identities is not None:
-        member_identities["manifest.json"] = manifest_identity
-    if operational_metadata is not None:
-        operational_metadata.update(operational)
-    return (envelope, members)
+    return envelope, members, manifest_identity, operational
 
 
 def read_semantic_artifact_operational_metadata(
@@ -475,7 +532,11 @@ def _operational_metadata(value: object) -> dict[str, object]:
     return snapshot
 
 
-def discover_semantic_artifact_instances(logical_root: Path) -> tuple[Path, ...]:
+def discover_semantic_artifact_instances(
+    logical_root: Path,
+    *,
+    manifest_scope: Callable[[dict[str, object]], bool] | None = None,
+) -> tuple[Path, ...]:
     root = require_unaliased_path(
         Path(logical_root), error="semantic_artifact_root_invalid"
     )
@@ -501,6 +562,7 @@ def discover_semantic_artifact_instances(logical_root: Path) -> tuple[Path, ...]
 
     names = instance_names()
     result: list[Path] = []
+    snapshots = []
     for name in names:
         entry = instances_root / name
         if path_is_filesystem_alias(entry) or not filesystem_is_dir(entry):
@@ -511,8 +573,27 @@ def discover_semantic_artifact_instances(logical_root: Path) -> tuple[Path, ...]
             validate_instance_identity(name)
         except ValueError as exc:
             raise ValueError("semantic_artifact_instance_child_invalid") from exc
-        read_semantic_artifact(entry, expected_identity=name)
-        result.append(entry)
+        if manifest_scope is None:
+            read_semantic_artifact(entry, expected_identity=name)
+            result.append(entry)
+        else:
+            envelope, members, manifest_identity, _operational = (
+                _read_artifact_manifest(entry, expected_identity=name)
+            )
+            identities = {"manifest.json": manifest_identity}
+            directories = _visit_member_paths(
+                entry,
+                lambda relative, path, identities=identities: identities.update(
+                    {relative: _member_identity(path)}
+                ),
+            )
+            if set(identities) != {"manifest.json", *(m["path"] for m in members)}:
+                raise ValueError("semantic_artifact_member_set_changed")
+            snapshots.append((entry, identities, directories))
+            if manifest_scope(envelope):
+                result.append(entry)
+    for entry, identities, directories in snapshots:
+        verify_semantic_artifact_snapshot(entry, identities, directories)
     if instance_names() != names:
         raise ValueError("semantic_artifact_instance_identity_changed")
     return tuple(result)
@@ -534,6 +615,7 @@ def _member_inventory(
     expected_paths: set[str] | None = None,
     verified_identities: dict[str, DatasetFileIdentity] | None = None,
     expected_identities: Mapping[str, DatasetFileIdentity] | None = None,
+    directory_identities: dict[str, tuple[int, int, int, int]] | None = None,
 ) -> tuple[dict[str, object], ...]:
     members: list[dict[str, object]] = []
     identities: dict[str, DatasetFileIdentity] = {}
@@ -550,7 +632,7 @@ def _member_inventory(
         member = _member_record(relative, child, identity=identity)
         members.append(member)
 
-    _visit_member_paths(root, record)
+    directories = _visit_member_paths(root, record)
     remaining = {str(member["path"]) for member in members}
 
     def verify(relative: str, _child: Path) -> None:
@@ -560,21 +642,46 @@ def _member_inventory(
         if _member_identity(_child) != identities[relative]:
             raise ValueError("semantic_artifact_member_identity_changed")
 
-    _visit_member_paths(root, verify)
-    if remaining:
+    if _visit_member_paths(root, verify) != directories or remaining:
         raise ValueError("semantic_artifact_member_set_changed")
     if verified_identities is not None:
         verified_identities.update(identities)
+    if directory_identities is not None:
+        directory_identities.update(directories)
     return tuple(sorted(members, key=lambda item: str(item["path"])))
 
 
-def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
+def verify_semantic_artifact_snapshot(
+    root: Path,
+    identities: Mapping[str, DatasetFileIdentity],
+    directories: Mapping[str, tuple[int, int, int, int]],
+) -> None:
+    """Recheck captured files and directories without hashing their content again."""
+    remaining = set(identities) - {"manifest.json"}
+
+    def verify(relative: str, path: Path) -> None:
+        if relative not in remaining:
+            raise ValueError("semantic_artifact_member_set_changed")
+        remaining.remove(relative)
+        if _member_identity(path) != identities[relative]:
+            raise ValueError("semantic_artifact_member_identity_changed")
+
+    if _visit_member_paths(root, verify) != directories or remaining:
+        raise ValueError("semantic_artifact_member_set_changed")
+    if _member_identity(root / "manifest.json") != identities["manifest.json"]:
+        raise ValueError("semantic_artifact_member_identity_changed")
+
+
+def _visit_member_paths(
+    root: Path, visit: Callable[[str, Path], None]
+) -> dict[str, tuple[int, int, int, int]]:
     root = require_unaliased_path(Path(root), error="semantic_artifact_root_invalid")
     try:
         root_identity = _directory_identity(root)
     except ValueError as exc:
         raise ValueError("semantic_artifact_root_invalid") from exc
     pending = []
+    directories = {"": root_identity}
     try:
         try:
             pending.append((root, "", root_identity, filesystem_scandir(root)))
@@ -598,11 +705,13 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
                     require_unaliased_path(
                         child, error="semantic_artifact_member_invalid"
                     )
+                    identity = _directory_identity(child)
+                    directories[relative] = identity
                     pending.append(
                         (
                             child,
                             relative,
-                            _directory_identity(child),
+                            identity,
                             filesystem_scandir(child),
                         )
                     )
@@ -625,6 +734,7 @@ def _visit_member_paths(root: Path, visit: Callable[[str, Path], None]) -> None:
             raise
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("semantic_artifact_member_invalid") from exc
+    return directories
 
 
 def _member_record(

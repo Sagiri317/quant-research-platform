@@ -21,8 +21,8 @@ from quant_research_platform.contracts.validation import (
 @dataclass(frozen=True)
 class RankEnsemblePredictor:
     columns: tuple[str, ...]
-    label_calibration: tuple[float, float]
     directions: tuple[float, ...] = ()
+    label_calibration: tuple[float, float] | None = None
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         directions = self.directions or (1.0,) * len(self.columns)
@@ -47,17 +47,9 @@ class EqualWeightRankEnsembleFactory:
             label_column=self.label_column,
             sample_weight=sample_weight,
         )
-        scores = (
-            _rank_frame_columns(frame, self.columns)
-            @ np.asarray(directions)
-            / len(self.columns)
-        )
         return RankEnsemblePredictor(
             columns=self.columns,
             directions=directions,
-            label_calibration=_label_calibration(
-                scores, frame[self.label_column], sample_weight
-            ),
         )
 
 
@@ -81,7 +73,7 @@ class ICWeightedRankEnsembleFactory:
 class ICWeightedRankEnsemble:
     columns: tuple[str, ...]
     weights: tuple[float, ...]
-    label_calibration: tuple[float, float]
+    label_calibration: tuple[float, float] | None = None
 
     @classmethod
     def fit(
@@ -109,13 +101,9 @@ class ICWeightedRankEnsemble:
         normalized = np.asarray(
             [float(value / normalizer) for value in weights], dtype="float64"
         )
-        scores = _rank_frame_columns(frame, columns) @ normalized
         return cls(
             columns=columns,
             weights=tuple(float(value) for value in normalized),
-            label_calibration=_label_calibration(
-                scores, frame[label_column], sample_weight
-            ),
         )
 
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
@@ -126,10 +114,9 @@ class ICWeightedRankEnsemble:
 def rank_model_parameters(
     predictor: RankEnsemblePredictor | ICWeightedRankEnsemble,
 ) -> dict[str, list]:
-    parameters = {
-        "columns": list(predictor.columns),
-        "label_calibration": list(predictor.label_calibration),
-    }
+    parameters = {"columns": list(predictor.columns)}
+    if predictor.label_calibration is not None:
+        parameters["label_calibration"] = list(predictor.label_calibration)
     key = "directions" if isinstance(predictor, RankEnsemblePredictor) else "weights"
     parameters[key] = list(getattr(predictor, key))
     return parameters

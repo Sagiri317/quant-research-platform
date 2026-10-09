@@ -48,7 +48,6 @@ def test_hft_models_use_generic_specs_with_exact_training_admission_bound() -> N
     }
     assert all(model.max_train_rows == 100 for model in models)
     assert all(not hasattr(model, "purge_gap_steps") for model in models)
-    assert all(not model.model_id.startswith("hft_model_framework") for model in models)
 
 
 def test_ridge_asset_scopes_share_dimensionless_inputs_and_new_spec_identity():

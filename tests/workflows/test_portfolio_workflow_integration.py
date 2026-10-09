@@ -591,7 +591,6 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
     return ResearchProfile(
         profile_id=A_SHARE_PROFILE_ID,
         market_id=base.market_id,
-        frequency=base.frequency,
         protocol=a_share.protocol,
         factors=FactorCatalog(),
         labels=LabelCatalog(),

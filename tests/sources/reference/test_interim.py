@@ -716,26 +716,6 @@ def test_industry_future_bad_row_precedes_date_projection(tmp_path, publication)
         )
 
 
-def test_fee_materialization_parses_once_then_rechecks_at_publication(
-    tmp_path, monkeypatch
-):
-    raw_root = _write_reference_root(tmp_path / "raw")
-    original = interim.load_a_share_fee_source
-    calls = []
-
-    def load(**kwargs):
-        calls.append(1)
-        return original(**kwargs)
-
-    monkeypatch.setattr(interim, "load_a_share_fee_source", load)
-    interim.materialize_interim_data(
-        layout=StorageLayout(tmp_path),
-        raw_root=raw_root / "reference",
-        data_ids=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
-    )
-    assert len(calls) == 2
-
-
 @pytest.mark.parametrize("terminator", ("\n", "\r\n", "\r", "mixed"))
 def test_fee_csv_native_newlines_and_unrestricted_metadata(tmp_path, terminator):
     import io

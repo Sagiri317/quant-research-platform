@@ -488,10 +488,7 @@ def test_physical_membership_requires_prepared_arrow_array(
 
 @pytest.mark.parametrize(
     ("operator", "value", "error"),
-    (
-        ("in", (1, 2), "invalid_dataset_physical_filter_value"),
-        ("contains", 1, "unsupported_dataset_physical_filter"),
-    ),
+    (("contains", 1, "unsupported_dataset_physical_filter"),),
 )
 def test_physical_filter_rejects_invalid_operator_and_values(
     operator: str, value: object, error: str

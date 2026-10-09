@@ -31,14 +31,10 @@ def is_ids_contract_import(module: str) -> bool:
 
 def python_files_under(
     roots: Iterable[Path],
-    *,
-    missing_ok: bool = False,
 ) -> tuple[Path, ...]:
     files: list[Path] = []
     for root in roots:
         if not root.exists():
-            if missing_ok:
-                continue
             raise AssertionError(f"python_scan_root_missing: {root}")
         if root.is_file():
             files.append(root)

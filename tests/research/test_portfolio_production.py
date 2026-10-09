@@ -2723,3 +2723,96 @@ def test_cash_exposure_is_post_execution_ledger_cash(
     daily.loc[0, "cash_weight_post"] += 0.01
     with pytest.raises(ValueError, match="statistics_cash_exposure_invalid"):
         _validated_frame(daily, member="portfolio_daily.parquet")
+
+
+@pytest.mark.parametrize("styles", (RISK_STYLE_COLUMNS[:-1], RISK_STYLE_COLUMNS))
+def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles):
+    from quant_research_platform.research.portfolios.risk import (
+        HoldingFactorInputs,
+        holding_attribution,
+    )
+
+    rng = np.random.default_rng(198)
+    cross = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2023-01-03"),
+            "asset_id": [f"asset_{i}" for i in range(120)],
+            "industry_standard_id": "CSRC2012",
+            "industry_level1_code": ["A"] * 60 + ["B"] * 60,
+            "float_market_cap": np.geomspace(100.0, 100000.0, 120),
+            "eligible": True,
+            "asset_return": rng.normal(0, 0.02, 120),
+            **{name: rng.normal(size=120) for name in styles},
+        }
+    )
+    state = FactorRiskState(style_columns=styles)
+    expected = state.fit_return_session(cross)
+    state.observe_return_session(cross)
+    for extreme in (-1e100, 1e100):
+        held = cross.iloc[[0]].assign(
+            asset_id="held_st",
+            eligible=False,
+            asset_return=0.07,
+            float_market_cap=abs(extreme),
+            **dict.fromkeys(styles, extreme),
+        )
+        extended = pd.concat((cross, held), ignore_index=True)
+        changed = FactorRiskState(style_columns=styles)
+        actual = changed.fit_return_session(
+            extended, require_complete=True, project_ineligible=True
+        )
+        pd.testing.assert_series_equal(
+            actual.factor_returns, expected.factor_returns, check_exact=True
+        )
+        pd.testing.assert_frame_equal(
+            actual.exposures.loc[expected.exposures.index],
+            expected.exposures,
+            check_exact=True,
+        )
+        pd.testing.assert_series_equal(
+            actual.residuals.loc[expected.residuals.index],
+            expected.residuals,
+            check_exact=True,
+        )
+        changed.observe_return_session(extended)
+        assert changed._factor_rows == state._factor_rows
+        assert changed._residuals == state._residuals
+        assert changed._residual_sessions == state._residual_sessions
+        inputs = HoldingFactorInputs(
+            pd.Timestamp("2023-01-03"),
+            pd.Timestamp("2023-01-04"),
+            pd.Timestamp("2023-01-05"),
+            actual,
+            pd.Series(100.0, index=actual.exposures.index),
+            pd.Series(100.0, index=actual.exposures.index),
+            pd.DataFrame(),
+        )
+        values, reasons, _ = holding_attribution(
+            inputs,
+            after_notionals=pd.Series({"held_st": 100.0}),
+            nav_before=100.0,
+            nav_post=100.0,
+            benchmark_id=None,
+            benchmark_return=None,
+            holding_returns=actual.asset_returns,
+        )
+        assert not reasons
+        assert sum(
+            values[k] for k in ("industry", "style", "residual_unexplained")
+        ) == pytest.approx(0.07)
+        for fault in ("missing_style", "unknown_industry", "unidentified_industry"):
+            invalid = extended.copy()
+            field, value = {
+                "missing_style": (styles[0], np.nan),
+                "unknown_industry": ("industry_level1_code", None),
+                "unidentified_industry": ("industry_level1_code", "never_fitted"),
+            }[fault]
+            invalid.loc[invalid.asset_id.eq("held_st"), field] = value
+            unavailable = changed.fit_return_session(invalid, project_ineligible=True)
+            assert "held_st" not in unavailable.exposures.index
+            pd.testing.assert_series_equal(
+                unavailable.factor_returns, expected.factor_returns, check_exact=True
+            )
+        deficient = extended.copy()
+        deficient.loc[deficient.eligible, styles[0]] = 0.0
+        assert changed.fit_return_session(deficient, project_ineligible=True) is None

@@ -217,7 +217,7 @@ def test_persisted_trial_correlations_obey_exact_bounds(field, sign):
         validate_completed_model_trial_metrics("model", metrics)
 
 
-def test_ordered_single_asset_coverage_streams_without_window_concat(monkeypatch):
+def test_ordered_single_asset_coverage_releases_consumed_metric_frames(monkeypatch):
     from quant_research_platform.research.models.trial_selection import (
         ModelSampleCoverage,
     )
@@ -252,14 +252,25 @@ def test_ordered_single_asset_coverage_streams_without_window_concat(monkeypatch
         finally:
             closed.append(True)
 
-    def forbidden(*args, **kwargs):
-        pytest.fail("ordered single-asset validation materialized the window")
+    import weakref
 
-    monkeypatch.setattr(pd, "concat", forbidden)
+    from quant_research_platform.research.models import trial_selection
+
+    references = []
+    original = trial_selection._metric_chunk
+
+    def observed(*args, **kwargs):
+        assert sum(ref() is not None for ref in references) <= 2
+        values = original(*args, **kwargs)
+        references.append(weakref.ref(values))
+        return values
+
+    monkeypatch.setattr(trial_selection, "_metric_chunk", observed)
     actual = evaluate_model_trial_metrics_from_chunks(
         chunks(), expected_coverage=coverage, **kwargs
     )
     assert actual == expected and closed == [True]
+    assert all(ref() is None for ref in references)
     with pytest.raises(ValueError, match="model_coverage_key_order_invalid"):
         evaluate_model_trial_metrics_from_chunks(
             (frame.iloc[4:], frame.iloc[:4]), expected_coverage=coverage, **kwargs

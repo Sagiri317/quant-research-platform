@@ -131,9 +131,9 @@ def test_nanosecond_evaluation_diagnostics_survive_actual_writer_roundtrip(
     assert diagnostics["max_timestamp"] == times[-1].isoformat()
 
 
-def test_evaluation_chunk_producer_does_not_terminal_concat(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+def test_evaluation_chunk_producer_releases_consumed_frames(monkeypatch) -> None:
+    import weakref
+
     spec = EvaluationSpec(
         evaluation_id="eval_stream",
         market_id=MarketId("a_share"),
@@ -142,39 +142,52 @@ def test_evaluation_chunk_producer_does_not_terminal_concat(
         label_columns=("label",),
         n_groups=2,
     )
-    monkeypatch.setattr(
-        pd,
-        "concat",
-        lambda *_args, **_kwargs: pytest.fail(
-            "single_label_managed_evaluation_must_not_concat"
-        ),
-    )
-    chunks = evaluation_engine._iter_evaluation_output_chunks(
-        (_evaluation_frame(),),
-        spec=spec,
-        asset_column="asset_id",
-    )
-    owned = next(chunks)
-    metrics, grouped, _ = owned
-    chunks.close()
-    assert list(metrics.columns) == [
-        "timestamp",
-        "signal",
-        "label",
-        "ic",
-        "rankic",
-        "n_obs",
-        "ic_reason",
-        "rankic_reason",
-    ]
-    assert list(grouped.columns) == [
-        "timestamp",
-        "signal",
-        "label",
-        "group",
-        "mean_label_value",
-        "n_obs",
-    ]
+    references = []
+    original = evaluation_engine._iter_evaluation_work_frames
+
+    def observed(*args, **kwargs):
+        with evaluation_engine.closing_iterator(original(*args, **kwargs)) as source:
+            for frame in source:
+                assert sum(ref() is not None for ref in references) <= 2
+                references.append(weakref.ref(frame))
+                yield frame
+                del frame
+
+    monkeypatch.setattr(evaluation_engine, "_iter_evaluation_work_frames", observed)
+
+    def frames():
+        for day in range(16):
+            frame = _evaluation_frame()
+            frame["timestamp"] += pd.Timedelta(days=day)
+            yield frame
+
+    count = 0
+    for metrics, grouped, _ in evaluation_engine._iter_evaluation_output_chunks(
+        frames(), spec=spec, asset_column="asset_id"
+    ):
+        count += 1
+        assert list(metrics.columns) == [
+            "timestamp",
+            "signal",
+            "label",
+            "ic",
+            "rankic",
+            "n_obs",
+            "ic_reason",
+            "rankic_reason",
+        ]
+        assert list(grouped.columns) == [
+            "timestamp",
+            "signal",
+            "label",
+            "group",
+            "mean_label_value",
+            "n_obs",
+        ]
+        assert metrics["n_obs"].tolist() == [2]
+        assert metrics["ic"].tolist() == [1.0]
+    assert count == 16
+    assert all(ref() is None for ref in references)
 
 
 def test_single_asset_time_series_evaluation_is_exact_across_chunks() -> None:

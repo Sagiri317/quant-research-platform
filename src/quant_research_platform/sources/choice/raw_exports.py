@@ -92,7 +92,7 @@ class ChoiceRequest:
         ):
             raise ValueError("choice_request_invalid")
         for text in (*self.arguments, self.sdk_version):
-            if len(text) > 65536 or evidence_text_unsafe_reason(text) not in {
+            if evidence_text_unsafe_reason(text) not in {
                 None,
                 "stock_sample",
             }:

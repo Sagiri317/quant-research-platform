@@ -39,6 +39,12 @@ from quant_research_platform.research.models.fitting import (
     model_training_read_columns,
     training_scope_chunks,
 )
+from quant_research_platform.research.models.rank_ensemble import (
+    ICWeightedRankEnsemble,
+    RankEnsemblePredictor,
+    _label_calibration,
+    rank_model_parameters,
+)
 from quant_research_platform.research.models.supervised import (
     build_estimator_from_model_spec,
 )
@@ -274,15 +280,7 @@ def _build_a_share_models(
     prepared_domains = {}
 
     def prepare_domain(spec, cutoff):
-        domain = (
-            cutoff,
-            spec.input_columns,
-            spec.label_column,
-            spec.sample_filter_mode,
-            spec.max_train_rows,
-            spec.training_weighting,
-            _model_algorithm_facts(spec.model_algorithm).input_kind,
-        )
+        domain = (cutoff, *_training_domain(spec))
         if domain not in prepared_domains:
             prepared_domains[domain] = _prepare_training(
                 dataset_spec,
@@ -692,6 +690,18 @@ def _crypto_model_chronology(protocol_manifest, time_window):
     )
 
 
+def _training_domain(spec):
+    return (
+        spec.input_factor_columns,
+        spec.input_feature_columns,
+        spec.label_column,
+        spec.sample_filter_mode,
+        spec.max_train_rows,
+        spec.training_weighting,
+        _model_algorithm_facts(spec.model_algorithm).input_kind,
+    )
+
+
 def build_crypto_fold_models(
     *,
     layout,
@@ -718,6 +728,28 @@ def build_crypto_fold_models(
         build_hft_prediction_catalog,
     )
 
+    def fit_prepared(prepared, spec, *, on_fit_start=None):
+        result = fitting._fit_model_result(
+            prepared,
+            spec,
+            estimator=build_estimator_from_model_spec(spec),
+            on_fit_start=on_fit_start,
+        )
+        predictor = result.prediction_model
+        if isinstance(predictor, (RankEnsemblePredictor, ICWeightedRankEnsemble)):
+            result.prediction_model = replace(
+                predictor,
+                label_calibration=_label_calibration(
+                    predictor.predict(prepared.training),
+                    prepared.training[spec.label_column],
+                    prepared.preprocessing[0],
+                ),
+            )
+            result.metadata["rank_parameters"] = rank_model_parameters(
+                result.prediction_model
+            )
+        return result
+
     folds, holdout = _crypto_model_chronology(protocol_manifest, time_window)
     if not folds:
         return
@@ -730,259 +762,267 @@ def build_crypto_fold_models(
             test_start=fold.validation.start.isoformat(),
             test_end=fold.validation.end.isoformat(),
         )
+        domains = {}
+        # One source session and fold fix identity, windows and cutoffs for each group.
         for model_id in model_ids:
-            spec = replace(
-                model_catalog.get(model_id),
-                random_seed=derive_seed(
-                    ROOT_SEED, "crypto_model", fold.fold_id, model_id
-                ),
-            )
+            spec = model_catalog.get(model_id)
             prediction = prediction_catalog.get(f"{model_id}_prediction")
-            plan = ExperimentPlan(
-                stage="selection",
-                experiment_id=f"experiment_{uuid4().hex}",
-                market_id=dataset.market_id,
-                research_dataset_id=dataset_id,
-                target_id=model_target_id,
-                candidate_family_id=model_id,
-                data_snapshot_id=identity,
-                input_lineage=(identity,),
-                research_protocol_identity=research_protocol_identity,
-                folds=(fold,),
-                test=holdout,
-                selection_metric="validation_mse",
-                selection_direction="minimize",
-                candidate_ids=(model_id,),
-                trial_budget=1,
-                random_seed=spec.random_seed,
-                tie_break_order=(model_id,),
-                backend_versions=backend_versions,
-                thread_settings={"blas_threads": 1},
-                candidate_parameters={model_id: model_spec_payload(spec)},
-            )
-            recorder = TrialRecorder(layout, run_id, plan)
-
-            metrics = training_metadata = None
-
-            def chunks(window, spec=spec, prediction=prediction):
-                source = _model_input_chunks(
-                    dataset_session,
-                    dataset_spec=dataset,
-                    time_window=window,
-                    columns=(
-                        *model_training_read_columns(
-                            dataset.primary_key,
-                            spec.input_columns,
-                            label_column=spec.label_column,
-                            sample_filter_mode=spec.sample_filter_mode,
-                        ),
-                        *HFT_EXECUTION_CONTEXT_COLUMNS,
+            domain = (prediction.training_asset_ids, *_training_domain(spec))
+            domains.setdefault(domain, []).append(model_id)
+        for model_group in domains.values():
+            prepared_train = prepared_refit = None
+            for model_id in model_group:
+                spec = replace(
+                    model_catalog.get(model_id),
+                    random_seed=derive_seed(
+                        ROOT_SEED, "crypto_model", fold.fold_id, model_id
                     ),
                 )
-                with closing_iterator(
-                    training_scope_chunks(
-                        iter_validated_research_input_chunks(
-                            source,
-                            dataset_spec=dataset,
-                            input_columns=spec.input_columns,
-                        ),
-                        asset_ids=prediction.training_asset_ids,
-                    )
-                ) as delegated_chunks:
-                    for yielded_value in delegated_chunks:
-                        try:
-                            yield yielded_value
-                        except GeneratorExit:
-                            return
-
-            validation_coverage = ModelSampleCoverage(
-                crypto_validation_coverage_scope(
-                    plan, spec, prediction.training_asset_ids
+                prediction = prediction_catalog.get(f"{model_id}_prediction")
+                plan = ExperimentPlan(
+                    stage="selection",
+                    experiment_id=f"experiment_{uuid4().hex}",
+                    market_id=dataset.market_id,
+                    research_dataset_id=dataset_id,
+                    target_id=model_target_id,
+                    candidate_family_id=model_id,
+                    data_snapshot_id=identity,
+                    input_lineage=(identity,),
+                    research_protocol_identity=research_protocol_identity,
+                    folds=(fold,),
+                    test=holdout,
+                    selection_metric="validation_mse",
+                    selection_direction="minimize",
+                    candidate_ids=(model_id,),
+                    trial_budget=1,
+                    random_seed=spec.random_seed,
+                    tie_break_order=(model_id,),
+                    backend_versions=backend_versions,
+                    thread_settings={"blas_threads": 1},
+                    candidate_parameters={model_id: model_spec_payload(spec)},
                 )
-            )
-            with closing_iterator(chunks(fold.validation)) as validation_source:
-                for frame in validation_source:
-                    legal = legal_training_rows(
-                        frame,
-                        fitting_cutoff=fold.validation.end,
-                        availability_column=training_availability_columns(
-                            spec.label_column
-                        )[0],
-                        feature_columns=model_input_validity_columns(
-                            spec.input_columns, spec.model_algorithm
+                recorder = TrialRecorder(layout, run_id, plan)
+
+                metrics = training_metadata = None
+
+                def chunks(window, spec=spec, prediction=prediction):
+                    source = _model_input_chunks(
+                        dataset_session,
+                        dataset_spec=dataset,
+                        time_window=window,
+                        columns=(
+                            *model_training_read_columns(
+                                dataset.primary_key,
+                                spec.input_columns,
+                                label_column=spec.label_column,
+                                sample_filter_mode=spec.sample_filter_mode,
+                            ),
+                            *HFT_EXECUTION_CONTEXT_COLUMNS,
                         ),
-                        target_column=spec.label_column,
                     )
-                    validation_coverage.add(legal)
+                    with closing_iterator(
+                        training_scope_chunks(
+                            iter_validated_research_input_chunks(
+                                source,
+                                dataset_spec=dataset,
+                                input_columns=spec.input_columns,
+                            ),
+                            asset_ids=prediction.training_asset_ids,
+                        )
+                    ) as delegated_chunks:
+                        for yielded_value in delegated_chunks:
+                            try:
+                                yield yielded_value
+                            except GeneratorExit:
+                                return
 
-            if validation_coverage.row_count == 0:
-                raise PortfolioTargetBlocked(
-                    "crypto_model_validation_legal_rows_missing"
+                validation_coverage = ModelSampleCoverage(
+                    crypto_validation_coverage_scope(
+                        plan, spec, prediction.training_asset_ids
+                    )
                 )
-            attempt = recorder.begin(
-                spec, common_coverage_id=validation_coverage.semantic_identity
-            )
+                with closing_iterator(chunks(fold.validation)) as validation_source:
+                    for frame in validation_source:
+                        legal = legal_training_rows(
+                            frame,
+                            fitting_cutoff=fold.validation.end,
+                            availability_column=training_availability_columns(
+                                spec.label_column
+                            )[0],
+                            feature_columns=model_input_validity_columns(
+                                spec.input_columns, spec.model_algorithm
+                            ),
+                            target_column=spec.label_column,
+                        )
+                        validation_coverage.add(legal)
 
-            finished = False
-            refit_recorder = refit_attempt = fit_coverage = None
-            refit_finished = False
+                if validation_coverage.row_count == 0:
+                    raise PortfolioTargetBlocked(
+                        "crypto_model_validation_legal_rows_missing"
+                    )
+                attempt = recorder.begin(
+                    spec, common_coverage_id=validation_coverage.semantic_identity
+                )
 
-            def begin_crypto_refit(
-                actual_spec,
-                training,
-                *,
-                recorder=recorder,
-                fold=fold,
-                prediction=prediction,
-            ):
-                nonlocal refit_recorder, refit_attempt, fit_coverage
-                fit_coverage = _refit_sample_coverage(
-                    recorder.plan,
+                finished = False
+                refit_recorder = refit_attempt = fit_coverage = None
+                refit_finished = False
+
+                def begin_crypto_refit(
                     actual_spec,
                     training,
-                    fitting_cutoff=fold.validation.end,
-                    fit_windows=(fold.train, fold.validation),
-                    asset_ids=prediction.training_asset_ids,
-                )
-                refit_recorder, refit_attempt = recorder.begin_refit(
-                    actual_spec,
-                    common_coverage_id=fit_coverage.semantic_identity,
-                    fit_windows=(fold.train, fold.validation),
-                    fit_cutoff=fold.validation.end,
-                    selection_groups=(),
-                    selection_ledger_semantic_identities=(
-                        recorder.reference()["semantic_identity"],
-                    ),
-                )
-
-            try:
-                trained = fitting._fit_model_result(
-                    fitting._collect_training_frame(
-                        chunks(fold.train), spec, fitting_cutoff=fold.train.end
-                    ),
-                    spec,
-                    estimator=build_estimator_from_model_spec(spec),
-                )
-                training_metadata = dict(trained.metadata)
-                validation = iter_validation_prediction_chunks(
-                    lambda fold=fold: chunks(fold.validation),
-                    candidate_spec=spec,
-                    model_result=trained,
-                    validation_start=pd.Timestamp(fold.validation.start),
-                    validation_end=pd.Timestamp(fold.validation.end),
-                    extra_output_columns=HFT_EXECUTION_CONTEXT_COLUMNS,
-                )
-
-                def observed_validation(
-                    validation=validation, model_id=model_id, fold=fold, spec=spec
+                    *,
+                    recorder=recorder,
+                    fold=fold,
+                    prediction=prediction,
                 ):
-                    with closing_iterator(iter(validation)) as validation_source:
-                        for item in validation_source:
-                            frame = item
-                            mature = frame.loc[
-                                label_maturity_mask(
-                                    frame,
-                                    fitting_cutoff=fold.validation.end,
-                                    availability_column="label_available_at",
-                                    target_column=spec.label_column,
-                                )
-                            ]
-                            on_validation(fold, spec, mature)
-                            try:
-                                yield mature
-                            except GeneratorExit:
-                                return
+                    nonlocal refit_recorder, refit_attempt, fit_coverage
+                    fit_coverage = _refit_sample_coverage(
+                        recorder.plan,
+                        actual_spec,
+                        training,
+                        fitting_cutoff=fold.validation.end,
+                        fit_windows=(fold.train, fold.validation),
+                        asset_ids=prediction.training_asset_ids,
+                    )
+                    refit_recorder, refit_attempt = recorder.begin_refit(
+                        actual_spec,
+                        common_coverage_id=fit_coverage.semantic_identity,
+                        fit_windows=(fold.train, fold.validation),
+                        fit_cutoff=fold.validation.end,
+                        selection_groups=(),
+                        selection_ledger_semantic_identities=(
+                            recorder.reference()["semantic_identity"],
+                        ),
+                    )
 
-                metrics = evaluate_model_trial_metrics_from_chunks(
-                    observed_validation(),
-                    model_id=model_id,
-                    label_column=spec.label_column,
-                    prediction_column=prediction.prediction_column,
-                    expected_coverage=validation_coverage,
-                    validation_axis=validation_coverage.scope["validation_axis"],
-                    label_calibration=training_metadata.get("rank_parameters", {}).get(
-                        "label_calibration"
-                    ),
-                )
-                if metrics["validation_rows"] <= 0 or not pd.notna(
-                    metrics["validation_mse"]
-                ):
-                    raise ValueError("crypto_validation_sample_empty")
-
-                recorder.finish(
-                    attempt, metrics=metrics, model_metadata=training_metadata
-                )
-                finished = True
-                selection_reference = recorder.reference()
-                on_selection(
-                    fold,
-                    spec,
-                    training_metadata,
-                    prediction.training_asset_ids,
-                    prediction.evaluation_asset_ids,
-                    selection_reference,
-                )
-                if (
-                    fold.fold_id
-                    != protocol_manifest["research_plan"]["folds"][-1]["fold_id"]
-                ):
-                    continue
-
-                def refit_chunks(fold=fold):
-                    with closing_iterator(chunks(fold.train)) as delegated_chunks:
-                        for yielded_value in delegated_chunks:
-                            try:
-                                yield yielded_value
-                            except GeneratorExit:
-                                return
-                    with closing_iterator(chunks(fold.validation)) as delegated_chunks:
-                        for yielded_value in delegated_chunks:
-                            try:
-                                yield yielded_value
-                            except GeneratorExit:
-                                return
-
-                result = fitting._fit_model_result(
-                    fitting._collect_training_frame(
-                        refit_chunks(), spec, fitting_cutoff=fold.validation.end
-                    ),
-                    spec,
-                    estimator=build_estimator_from_model_spec(spec),
-                    on_fit_start=begin_crypto_refit,
-                )
-                refit_recorder.finish(refit_attempt, model_metadata=result.metadata)
-                refit_finished = True
-                member = CryptoFoldModelResult(
-                    fold,
-                    spec,
-                    result,
-                    prediction.training_asset_ids,
-                    prediction.evaluation_asset_ids,
-                    recorder.reference(),
-                    refit_recorder.reference(),
-                    fit_coverage.semantic_identity,
-                )
-                yield member
-            except BaseException as error:
-                if refit_attempt is not None and (not refit_finished):
-                    try:
-                        refit_recorder.finish(refit_attempt, error=error)
-                    except BaseException as secondary:
-                        error.add_note(
-                            "refit failure record also failed: "
-                            + type(secondary).__name__
+                try:
+                    if prepared_train is None:
+                        prepared_train = fitting._collect_training_frame(
+                            chunks(fold.train), spec, fitting_cutoff=fold.train.end
                         )
-                if not finished:
-                    try:
-                        recorder.finish(
-                            attempt,
-                            metrics=metrics,
-                            model_metadata=training_metadata,
-                            error=error,
+                    trained = fit_prepared(prepared_train, spec)
+                    training_metadata = dict(trained.metadata)
+                    validation = iter_validation_prediction_chunks(
+                        lambda fold=fold: chunks(fold.validation),
+                        candidate_spec=spec,
+                        model_result=trained,
+                        validation_start=pd.Timestamp(fold.validation.start),
+                        validation_end=pd.Timestamp(fold.validation.end),
+                        extra_output_columns=HFT_EXECUTION_CONTEXT_COLUMNS,
+                    )
+
+                    def observed_validation(
+                        validation=validation, model_id=model_id, fold=fold, spec=spec
+                    ):
+                        with closing_iterator(iter(validation)) as validation_source:
+                            for item in validation_source:
+                                frame = item
+                                mature = frame.loc[
+                                    label_maturity_mask(
+                                        frame,
+                                        fitting_cutoff=fold.validation.end,
+                                        availability_column="label_available_at",
+                                        target_column=spec.label_column,
+                                    )
+                                ]
+                                on_validation(fold, spec, mature)
+                                try:
+                                    yield mature
+                                except GeneratorExit:
+                                    return
+
+                    metrics = evaluate_model_trial_metrics_from_chunks(
+                        observed_validation(),
+                        model_id=model_id,
+                        label_column=spec.label_column,
+                        prediction_column=prediction.prediction_column,
+                        expected_coverage=validation_coverage,
+                        validation_axis=validation_coverage.scope["validation_axis"],
+                        label_calibration=training_metadata.get(
+                            "rank_parameters", {}
+                        ).get("label_calibration"),
+                    )
+                    if metrics["validation_rows"] <= 0 or not pd.notna(
+                        metrics["validation_mse"]
+                    ):
+                        raise ValueError("crypto_validation_sample_empty")
+
+                    recorder.finish(
+                        attempt, metrics=metrics, model_metadata=training_metadata
+                    )
+                    finished = True
+                    selection_reference = recorder.reference()
+                    on_selection(
+                        fold,
+                        spec,
+                        training_metadata,
+                        prediction.training_asset_ids,
+                        prediction.evaluation_asset_ids,
+                        selection_reference,
+                    )
+                    if (
+                        fold.fold_id
+                        != protocol_manifest["research_plan"]["folds"][-1]["fold_id"]
+                    ):
+                        continue
+
+                    def refit_chunks(fold=fold):
+                        with closing_iterator(chunks(fold.train)) as delegated_chunks:
+                            for yielded_value in delegated_chunks:
+                                try:
+                                    yield yielded_value
+                                except GeneratorExit:
+                                    return
+                        with closing_iterator(
+                            chunks(fold.validation)
+                        ) as delegated_chunks:
+                            for yielded_value in delegated_chunks:
+                                try:
+                                    yield yielded_value
+                                except GeneratorExit:
+                                    return
+
+                    if prepared_refit is None:
+                        prepared_refit = fitting._collect_training_frame(
+                            refit_chunks(), spec, fitting_cutoff=fold.validation.end
                         )
-                    except BaseException as secondary:
-                        error.add_note(
-                            "trial failure record also failed: "
-                            f"{type(secondary).__name__}"
-                        )
-                raise
+                    result = fit_prepared(
+                        prepared_refit, spec, on_fit_start=begin_crypto_refit
+                    )
+                    refit_recorder.finish(refit_attempt, model_metadata=result.metadata)
+                    refit_finished = True
+                    member = CryptoFoldModelResult(
+                        fold,
+                        spec,
+                        result,
+                        prediction.training_asset_ids,
+                        prediction.evaluation_asset_ids,
+                        recorder.reference(),
+                        refit_recorder.reference(),
+                        fit_coverage.semantic_identity,
+                    )
+                    yield member
+                except BaseException as error:
+                    if refit_attempt is not None and (not refit_finished):
+                        try:
+                            refit_recorder.finish(refit_attempt, error=error)
+                        except BaseException as secondary:
+                            error.add_note(
+                                "refit failure record also failed: "
+                                + type(secondary).__name__
+                            )
+                    if not finished:
+                        try:
+                            recorder.finish(
+                                attempt,
+                                metrics=metrics,
+                                model_metadata=training_metadata,
+                                error=error,
+                            )
+                        except BaseException as secondary:
+                            error.add_note(
+                                "trial failure record also failed: "
+                                f"{type(secondary).__name__}"
+                            )
+                    raise

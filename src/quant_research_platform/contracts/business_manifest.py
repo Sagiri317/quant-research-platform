@@ -9,6 +9,9 @@ from types import MappingProxyType
 
 from quant_research_platform.contracts.json_codec import (
     canonical_json_hash,
+    freeze_json_value,
+    plain_json_value,
+    qrp_json_mapping_snapshot,
     qrp_json_object_snapshot,
 )
 from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
@@ -48,7 +51,7 @@ class BusinessManifestEnvelope:
         object.__setattr__(
             self,
             "research_window",
-            _freeze_json_mapping(_normalise_research_window(self.research_window)),
+            MappingProxyType(_normalise_research_window(self.research_window)),
         )
         object.__setattr__(
             self,
@@ -58,9 +61,9 @@ class BusinessManifestEnvelope:
         object.__setattr__(
             self,
             "semantic_metadata",
-            _freeze_json_mapping(self.semantic_metadata),
+            freeze_json_value(qrp_json_mapping_snapshot(self.semantic_metadata)),
         )
-        validate_business_manifest_envelope(self.payload())
+        _validate_envelope_identity(self.payload())
 
     def payload(self) -> dict[str, object]:
         """Return the strict JSON-shaped envelope payload."""
@@ -71,10 +74,10 @@ class BusinessManifestEnvelope:
             "schema_identity": self.schema_identity,
             "protocol_or_spec_identity": self.protocol_or_spec_identity,
             "software_identity": self.software_identity,
-            "research_window": _plain_json_value(self.research_window),
-            "upstream_identities": _plain_json_value(self.upstream_identities),
+            "research_window": plain_json_value(self.research_window),
+            "upstream_identities": plain_json_value(self.upstream_identities),
             "status": self.status,
-            "semantic_metadata": _plain_json_value(self.semantic_metadata),
+            "semantic_metadata": plain_json_value(self.semantic_metadata),
         }
 
 
@@ -88,11 +91,11 @@ def build_business_manifest_envelope(
     upstream_identities: Mapping[str, str],
     semantic_metadata: Mapping[str, object],
 ) -> BusinessManifestEnvelope:
-    """Build an envelope and derive its instance identity exactly once."""
+    """Build an envelope with a validated content-derived instance identity."""
 
-    frozen_window = _freeze_json_mapping(_normalise_research_window(research_window))
-    frozen_upstreams = _freeze_identity_mapping(upstream_identities)
-    frozen_metadata = _freeze_json_mapping(semantic_metadata)
+    frozen_window = _normalise_research_window(research_window)
+    frozen_upstreams = qrp_json_mapping_snapshot(upstream_identities)
+    frozen_metadata = qrp_json_mapping_snapshot(semantic_metadata)
     identity_payload = _identity_payload(
         logical_artifact_id=logical_artifact_id,
         schema_identity=schema_identity,
@@ -123,6 +126,12 @@ def validate_business_manifest_envelope(value: object) -> dict[str, object]:
     if type(value) is not dict or set(value) != _ENVELOPE_FIELDS:
         raise ValueError("business_manifest_envelope_fields_invalid")
     payload = qrp_json_object_snapshot(value)
+    _validate_research_window(payload["research_window"])
+    _validate_envelope_identity(payload)
+    return {key: payload[key] for key in sorted(payload)}
+
+
+def _validate_envelope_identity(payload):
     _require_identifier(payload["logical_artifact_id"], "logical_artifact_id_invalid")
     _require_hash(payload["instance_identity"], "instance_identity_invalid")
     _require_hash(payload["schema_identity"], "schema_identity_invalid")
@@ -131,8 +140,6 @@ def validate_business_manifest_envelope(value: object) -> dict[str, object]:
         "protocol_or_spec_identity_invalid",
     )
     _require_hash(payload["software_identity"], "software_identity_invalid")
-    _validate_research_window(payload["research_window"])
-    payload["research_window"] = _normalise_research_window(payload["research_window"])
     _validate_upstream_identities(payload["upstream_identities"])
     payload["upstream_identities"] = dict(
         sorted(payload["upstream_identities"].items())
@@ -152,7 +159,6 @@ def validate_business_manifest_envelope(value: object) -> dict[str, object]:
     )
     if canonical_json_hash(expected) != payload["instance_identity"]:
         raise ValueError("business_manifest_instance_identity_mismatch")
-    return {key: payload[key] for key in sorted(payload)}
 
 
 def _identity_payload(
@@ -170,22 +176,10 @@ def _identity_payload(
         "schema_identity": schema_identity,
         "protocol_or_spec_identity": protocol_or_spec_identity,
         "software_identity": software_identity,
-        "research_window": _plain_json_value(research_window),
-        "upstream_identities": _plain_json_value(upstream_identities),
-        "semantic_metadata": _plain_json_value(semantic_metadata),
+        "research_window": research_window,
+        "upstream_identities": upstream_identities,
+        "semantic_metadata": semantic_metadata,
     }
-
-
-def _freeze_json_mapping(value: Mapping[str, object]) -> Mapping[str, object]:
-    if not isinstance(value, Mapping):
-        raise ValueError("business_manifest_json_mapping_invalid")
-    native = _json_value(value)
-    if type(native) is not dict:
-        raise ValueError("business_manifest_json_mapping_invalid")
-    bounded = qrp_json_object_snapshot(native)
-    return MappingProxyType(
-        {key: _freeze_json_value(child) for key, child in bounded.items()}
-    )
 
 
 def _freeze_identity_mapping(value: Mapping[str, str]) -> Mapping[str, str]:
@@ -194,39 +188,6 @@ def _freeze_identity_mapping(value: Mapping[str, str]) -> Mapping[str, str]:
     result = dict(value)
     _validate_upstream_identities(result)
     return MappingProxyType({key: result[key] for key in sorted(result)})
-
-
-def _freeze_json_value(value: object) -> object:
-    if type(value) is dict:
-        return MappingProxyType(
-            {key: _freeze_json_value(child) for key, child in value.items()}
-        )
-    if type(value) is list:
-        return tuple(_freeze_json_value(child) for child in value)
-    return value
-
-
-def _plain_json_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _plain_json_value(child) for key, child in value.items()}
-    if type(value) in {list, tuple}:
-        return [_plain_json_value(child) for child in value]
-    return value
-
-
-def _json_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        result: dict[str, object] = {}
-        for key, child in value.items():
-            if type(key) is not str:
-                raise ValueError("business_manifest_json_key_invalid")
-            result[key] = _json_value(child)
-        return result
-    if type(value) in {list, tuple}:
-        return [_json_value(child) for child in value]
-    if value is None or type(value) in {bool, int, float, str}:
-        return value
-    raise ValueError("business_manifest_json_value_invalid")
 
 
 def _validate_research_window(value: object) -> None:
@@ -238,7 +199,7 @@ def _validate_research_window(value: object) -> None:
 def _normalise_research_window(value: object) -> dict[str, str]:
     if not isinstance(value, Mapping):
         raise ValueError("business_manifest_research_window_invalid")
-    native = _json_value(value)
+    native = qrp_json_mapping_snapshot(value)
     if type(native) is not dict or set(native) != {"start", "end", "access"}:
         raise ValueError("business_manifest_research_window_invalid")
     access = native["access"]

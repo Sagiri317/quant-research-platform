@@ -201,6 +201,116 @@ def test_report_reader_preserves_valid_published_markdown_from_another_renderer(
     assert _files(root) == before
 
 
+@pytest.mark.parametrize(
+    "fault",
+    (
+        "unrelated_body",
+        "selected_body",
+        "manifest_json",
+        "manifest_run_id",
+        "manifest_missing_run",
+        "manifest_status",
+        "manifest_contract",
+        "manifest_after_filter",
+        "extra_member",
+        "new_instance",
+        "instance_file",
+        "instance_alias",
+    ),
+)
+def test_run_scoped_discovery_validates_envelopes_and_captured_members(
+    tmp_path,
+    fault,
+):
+    from quant_research_platform.artifacts.research import _report_manifest_metadata
+    from quant_research_platform.storage.semantic_artifacts import (
+        discover_semantic_artifact_instances,
+    )
+
+    envelope, payload = _report()
+    logical = tmp_path / "reports"
+    selected = write_research_report_artifact(
+        logical, envelope=envelope, payload=payload
+    )
+    metadata = {**envelope.payload()["semantic_metadata"], "source_run_id": "run_other"}
+    for key, value in {
+        "manifest_run_id": ("source_run_id", 42),
+        "manifest_status": ("source_run_status", []),
+        "manifest_contract": ("target_contract", {}),
+    }.items():
+        if fault == key:
+            metadata[value[0]] = value[1]
+    if fault == "manifest_missing_run":
+        del metadata["source_run_id"]
+    other = build_business_manifest_envelope(
+        **{
+            k: v
+            for k, v in envelope.payload().items()
+            if k not in {"instance_identity", "status", "semantic_metadata"}
+        },
+        semantic_metadata=metadata,
+    )
+    unrelated = write_semantic_artifact(
+        logical,
+        other,
+        lambda staging: (
+            write_json_evidence(
+                staging / "report.json", {**payload, "run_id": "run_other"}
+            ),
+            write_markdown_evidence(staging / "report.md", "other"),
+        ),
+    )
+    if fault in {"unrelated_body", "selected_body", "manifest_json"}:
+        path = (
+            unrelated / "manifest.json"
+            if fault == "manifest_json"
+            else (unrelated if fault == "unrelated_body" else selected) / "report.md"
+        )
+        path.write_bytes(
+            path.read_bytes() + (b"{" if fault == "manifest_json" else b"\n")
+        )
+    if fault == "instance_file":
+        (logical / "instances" / ("f" * 64)).write_bytes(b"not a directory")
+    if fault == "instance_alias":
+        try:
+            (logical / "instances" / ("f" * 64)).symlink_to(
+                selected, target_is_directory=True
+            )
+        except OSError:
+            pytest.skip("symlink_not_available")
+
+    injected = False
+
+    def scope(value):
+        nonlocal injected
+        metadata = _report_manifest_metadata(value)
+        if not injected:
+            injected = True
+            if fault == "manifest_after_filter":
+                path = unrelated / "manifest.json"
+                path.write_bytes(path.read_bytes() + b"\n")
+            elif fault == "extra_member":
+                (unrelated / "unexpected").write_bytes(b"extra")
+            elif fault == "new_instance":
+                (logical / "instances" / ("f" * 64)).mkdir()
+        return metadata["source_run_id"] == payload["run_id"]
+
+    def read_selected():
+        roots = discover_semantic_artifact_instances(logical, manifest_scope=scope)
+        assert roots == (selected,)
+        return read_research_report_artifact(selected, expected_identity=selected.name)
+
+    if fault == "unrelated_body":
+        assert read_selected() == payload
+        with pytest.raises(
+            ValueError, match="semantic_artifact_member_integrity_invalid"
+        ):
+            discover_semantic_artifact_instances(logical)
+    else:
+        with pytest.raises(ValueError):
+            read_selected()
+
+
 def test_report_markdown_lists_every_formal_result_without_json_walls(tmp_path):
     envelope, payload = _report()
     payload["sections"]["risk"] = {
