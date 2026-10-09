@@ -614,7 +614,7 @@ def test_panel_calendar_rejects_missing_requested_trade_dates_including_endpoint
 def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     tmp_path, monkeypatch
 ):
-    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 192)
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 24)
     dates = pd.bdate_range("2020-01-02", periods=400).as_unit("ns")
     source = _synthetic_interim_frames(dates)
     bars = source["market_bars_1d"]

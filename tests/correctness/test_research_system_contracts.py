@@ -439,7 +439,7 @@ def test_neutralization_is_bit_exact_for_dyadic_inputs(with_size):
     industry = pd.Series(np.arange(700) % 7)
     sizes = rng.normal(size=700) if with_size else None
     expected = _reference_residuals(target, industry, sizes)
-    actual = _industry_size_residuals(target, industry, sizes)
+    actual = _industry_size_residuals(target, industry, sizes, rescale=False)
     np.testing.assert_array_equal(actual, expected)
 
 

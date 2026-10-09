@@ -429,7 +429,7 @@ def test_compare_datasets_statuses_for_semantic_and_schema_differences(
     assert not schema_comparison.matches
 
 
-def test_compare_datasets_ignores_allowed_instance_metadata_for_same_content(
+def test_compare_datasets_reports_input_metadata_difference_for_same_content(
     tmp_path: Path,
 ) -> None:
     left_root = make_dataset_artifact_root(tmp_path, "left_metadata")
@@ -450,8 +450,8 @@ def test_compare_datasets_ignores_allowed_instance_metadata_for_same_content(
         },
     )
     comparison = compare_datasets(left_root, right_root)
-    assert comparison.status == "MATCH"
-    assert comparison.matches
+    assert comparison.status == "METADATA_MISMATCH"
+    assert not comparison.matches
 
 
 def test_empty_materialized_and_chunked_reads_preserve_stored_dtypes(

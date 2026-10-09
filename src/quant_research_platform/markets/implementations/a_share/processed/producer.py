@@ -280,6 +280,9 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
         )
     asset_count = max(1, len(asset_types))
     block_sessions = max(1, DEFAULT_BATCH_ROWS // asset_count)
+    if panel_source:
+        # Amortize per-issuer lifecycle preparation over a wider panel slab.
+        block_sessions *= 8
     if any(definition.family == "market_model" for definition in definitions):
         (
             _source_dates,
