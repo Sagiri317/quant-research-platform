@@ -65,7 +65,7 @@ from quant_research_platform.research.factors.expectations.calculations import (
 )
 from quant_research_platform.research.labels import engine as label_engine
 from quant_research_platform.research.protocols import a_share
-from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
+from quant_research_platform.runtime import resources
 from quant_research_platform.storage.datasets.reading import (
     _iter_dataset_session_frames,
     _prepare_in_filter,
@@ -75,6 +75,10 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.identity import filesystem_exists
 from quant_research_platform.storage.layout import StorageLayout
+
+# Amortize per-issuer preparation across panel and downstream session blocks.
+DEFAULT_BATCH_ROWS = 8 * resources.DEFAULT_BATCH_ROWS
+
 
 _OPTIONAL_SOURCE_IDS = frozenset(
     {
@@ -280,9 +284,6 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
         )
     asset_count = max(1, len(asset_types))
     block_sessions = max(1, DEFAULT_BATCH_ROWS // asset_count)
-    if panel_source:
-        # Amortize per-issuer lifecycle preparation over a wider panel slab.
-        block_sessions *= 8
     if any(definition.family == "market_model" for definition in definitions):
         (
             _source_dates,
