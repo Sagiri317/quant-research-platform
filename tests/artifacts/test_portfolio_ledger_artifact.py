@@ -1745,3 +1745,148 @@ def test_report_reuses_native_ledger_validation_and_checks_consumption_exit(
         assert row["calibration_observations"] == (
             payload["observations"] if calibrated else None
         )
+
+
+@pytest.mark.parametrize(
+    "mutation", (None, "source", "manifest", "member", "directory", "primary")
+)
+def test_source_backed_reuse_binds_one_content_check_to_native_consumption(
+    tmp_path, monkeypatch, mutation
+):
+    from collections import Counter
+    from types import SimpleNamespace
+
+    from quant_research_platform.contracts.targets import (
+        ProducerBinding,
+        ProducerKind,
+        TargetPlan,
+        TargetSpec,
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage import semantic_artifacts
+    from quant_research_platform.storage.layout import StorageLayout
+    from quant_research_platform.workflows import research
+
+    payload = _envelope().payload()
+    envelope = build_business_manifest_envelope(
+        **{
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"instance_identity", "status"}
+            },
+            "semantic_metadata": {
+                **payload["semantic_metadata"],
+                "raw_content_identity": "d" * 64,
+            },
+        }
+    )
+    layout = StorageLayout(tmp_path)
+    target_id = envelope.logical_artifact_id
+    root = write_test_sessions(
+        layout.semantic_artifact_root("a_share", target_id),
+        envelope=envelope,
+        ledger_chunks=(
+            _session(
+                "2019-01-01",
+                "2019-01-02",
+                pre_asset=0.0,
+                target_asset=100.0,
+                post_asset=100.0,
+                pre_cash=100.0,
+                target_cash=0.0,
+                post_cash=0.0,
+            ),
+        ),
+    )
+    source = ["d" * 64]
+    profile = replace(
+        research_profile(),
+        producer_bindings={
+            target_id: ProducerBinding(
+                ProducerKind.PORTFOLIO,
+                lambda **kwargs: None,
+                source_identity=lambda *_: source[0],
+            ),
+        },
+    )
+    counts = Counter()
+    native_hash = semantic_artifacts._hash_file_content
+
+    def counted(path, *args, **kwargs):
+        counts[path.name] += 1
+        return native_hash(path, *args, **kwargs)
+
+    monkeypatch.setattr(semantic_artifacts, "_hash_file_content", counted)
+    assert research._matching_instance(
+        profile=profile,
+        layout=layout,
+        target_id=target_id,
+        requested_identity=root.name,
+    ) == (root.name, None)
+    planned_counts = counts.copy()
+    assert planned_counts and set(planned_counts.values()) == {1}
+    planned = TargetPlan(
+        target_id=target_id,
+        decision="REUSE",
+        requested_identity=root.name,
+        matching_instance_identity=root.name,
+        upstream_target_ids=(),
+        upstream_identities={},
+    )
+
+    def reuse():
+        return research._reuse_target(
+            profile=profile,
+            protocol=SimpleNamespace(protocol_id="a_share"),
+            layout=layout,
+            spec=TargetSpec(target_id),
+            planned=planned,
+            raw_root=tmp_path,
+            time_window=TimeWindow("2019-01-01", "2019-01-02"),
+        )
+
+    primary = KeyboardInterrupt("primary_native_read")
+    if mutation == "source":
+        source[0] = "e" * 64
+        result = reuse()
+        assert (
+            result.status.value == "BLOCKED"
+            and result.reason == "source_identity_changed"
+        )
+    elif mutation in {"manifest", "member"}:
+        path = root / (
+            "manifest.json" if mutation == "manifest" else "valuations.parquet"
+        )
+        filesystem_write_bytes(path, filesystem_read_bytes(path) + b"broken")
+        with pytest.raises(ValueError):
+            reuse()
+        assert research._matching_instance(
+            profile=profile,
+            layout=layout,
+            target_id=target_id,
+            requested_identity=root.name,
+        ) == (None, "persisted_instance_invalid")
+    elif mutation in {"directory", "primary"}:
+        native_batches = ledger_artifact._iter_batches
+
+        def changed_batches(*args, **kwargs):
+            yield from native_batches(*args, **kwargs)
+            (root / "extra-directory").mkdir()
+            if mutation == "primary":
+                raise primary
+
+        monkeypatch.setattr(ledger_artifact, "_iter_batches", changed_batches)
+        with pytest.raises(
+            KeyboardInterrupt if mutation == "primary" else ValueError
+        ) as caught:
+            reuse()
+        if mutation == "primary":
+            assert caught.value is primary
+            assert primary.__notes__
+    else:
+        assert reuse().status.value == "REUSED"
+        assert counts == {name: 2 for name in planned_counts}
+        assert reuse().status.value == "REUSED"
+        assert counts == {name: 3 for name in planned_counts}

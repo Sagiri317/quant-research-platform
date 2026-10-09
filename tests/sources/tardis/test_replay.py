@@ -850,7 +850,7 @@ def test_archive_tail_shares_native_scan_and_preserves_replay(tmp_path, monkeypa
     assert handles and all(handle.closed for handle in handles)
 
 
-def test_archive_cursors_release_decoded_payloads_and_close_buffers(
+def test_cursor_spool_releases_payloads_with_native_decoder_replaced(
     tmp_path, monkeypatch
 ):
     import tracemalloc

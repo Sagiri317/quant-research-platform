@@ -127,13 +127,17 @@ def _label_calibration(scores, labels, sample_weight) -> tuple[float, float]:
 
     weights = _weights(sample_weight, len(scores))
     labels = np.asarray(labels, dtype="float64")
-    total = sx = sy = xx = xy = Fraction()
-    for score, label, weight in zip(scores, labels, weights, strict=True):
-        x, y, mass = (
-            Fraction(float(score)),
-            Fraction(float(label)),
-            Fraction(float(weight)),
+    columns = []
+    units = []
+    for values in (scores, labels, weights):
+        ratios = [float(value).as_integer_ratio() for value in values]
+        unit = max((denominator for _, denominator in ratios), default=1)
+        columns.append(
+            [numerator * (unit // denominator) for numerator, denominator in ratios]
         )
+        units.append(unit)
+    total = sx = sy = xx = xy = 0
+    for x, y, mass in zip(*columns, strict=True):
         weighted_x = mass * x
         total += mass
         sx += weighted_x
@@ -141,7 +145,13 @@ def _label_calibration(scores, labels, sample_weight) -> tuple[float, float]:
         xx += weighted_x * x
         xy += weighted_x * y
     variance = total * xx - sx * sx
-    slope = Fraction() if variance == 0 else (total * xy - sx * sy) / variance
+    slope = (
+        Fraction()
+        if variance == 0
+        else Fraction((total * xy - sx * sy) * units[0], variance * units[1])
+    )
+    sx = Fraction(sx, units[0])
+    sy = Fraction(sy, units[1])
     try:
         result = (float((sy - slope * sx) / total), float(slope))
     except OverflowError:

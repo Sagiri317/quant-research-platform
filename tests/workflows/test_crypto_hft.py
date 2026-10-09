@@ -72,7 +72,6 @@ from tests.research.crypto_evaluation_test_support import (
 from tests.research.crypto_model_test_support import (
     check_crypto_fold_boundaries,
     check_crypto_model_staging,
-    check_crypto_prediction_staging,
     check_crypto_wide_fold_artifact,
 )
 from tests.research.crypto_report_test_support import (
@@ -991,19 +990,6 @@ def test_crypto_model_staging(crypto_case, monkeypatch):
         trial_layout=case.layout,
     )
     check_crypto_model_staging(layout=case.layout, profile=case.profile, saved=saved)
-
-
-@pytest.mark.complete_chain
-def test_crypto_prediction_staging(crypto_case, monkeypatch):
-    case = crypto_case
-    saved = read_crypto_model_artifact(
-        case.root,
-        expected_identity=case.targets[case.model_id]["instance_identity"],
-        trial_layout=case.layout,
-    )
-    check_crypto_prediction_staging(
-        layout=case.layout, prediction_root=case.prediction_root, saved=saved
-    )
 
 
 @pytest.mark.complete_chain

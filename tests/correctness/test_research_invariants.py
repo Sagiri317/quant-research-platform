@@ -177,6 +177,7 @@ def test_execution_mask_is_a_separate_future_fact() -> None:
     sessions = pd.bdate_range("2024-01-01", periods=3)
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
             "asset_id": "asset",
             "timestamp": sessions,

@@ -285,6 +285,7 @@ def test_execution_mask_is_independent_and_uses_signal_row_legality() -> None:
     sessions = pd.bdate_range("2024-01-01", periods=3)
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
             "asset_id": "asset",
             "timestamp": sessions,
@@ -310,6 +311,7 @@ def test_execution_mask_and_label_consumer_share_signal_row_timing() -> None:
     sessions = pd.bdate_range("2024-01-01", periods=4)
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
             "asset_id": "asset",
             "timestamp": sessions,

@@ -319,20 +319,13 @@ def test_calendar_direct_boolean_is_not_an_integer(column):
         ("Feps", "infinite"),
     ),
 )
-def test_invalid_analyst_raw_preserves_published_dataset(tmp_path, column, value):
-    from quant_research_platform.storage.datasets.reading import read_dataset
+def test_invalid_analyst_raw_does_not_publish_candidate(tmp_path, column, value):
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
 
     layout = StorageLayout(tmp_path)
     raw = layout.raw_source_root("csmar")
     filesystem_mkdir(raw, parents=True)
-    _write_csmar(raw, "analyst_forecast", _analyst_rows()[:1])
-    result = interim.materialize_interim_data(
-        layout=layout, data_ids=("analyst_forecast",)
-    )
-    root = result.artifact_roots["analyst_forecast"]
-    before = read_dataset(root)
     rows = _analyst_rows()[:1]
     rows[0][column] = value
     rows[0]["InstitutionID"] = ""
@@ -343,7 +336,15 @@ def test_invalid_analyst_raw_preserves_published_dataset(tmp_path, column, value
             raw_root=raw,
             data_ids=("analyst_forecast",),
         )
-    pd.testing.assert_frame_equal(before, read_dataset(root))
+    assert not tuple(
+        filesystem_glob(
+            StorageLayout(tmp_path / "candidate").interim_data_root(
+                "csmar", "analyst_forecast"
+            ),
+            "instances/*",
+        )
+    )
+    assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
 
 
 @pytest.mark.parametrize(
@@ -356,9 +357,34 @@ def test_invalid_analyst_raw_preserves_published_dataset(tmp_path, column, value
         ("Markettype", "True"),
     ),
 )
-def test_calendar_raw_rejects_nonintegers_and_preserves_old_good(
-    tmp_path, column, value
-):
+def test_calendar_raw_rejects_nonintegers_without_publication(tmp_path, column, value):
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw, parents=True)
+    row = {"Markettype": "4", "Clddt": "2025-01-03", "Daywk": "5", "State": "O"}
+    row[column] = value
+    _write_csmar(raw, "trading_calendar", [row])
+    with pytest.raises(ValueError, match="invalid_"):
+        interim.materialize_interim_data(
+            layout=StorageLayout(tmp_path / "candidate"),
+            raw_root=raw,
+            data_ids=("trading_calendar",),
+        )
+    assert not tuple(
+        filesystem_glob(
+            StorageLayout(tmp_path / "candidate").interim_data_root(
+                "csmar", "trading_calendar"
+            ),
+            "instances/*",
+        )
+    )
+    assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
+
+
+def test_calendar_raw_preserves_integer_codes(tmp_path):
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
@@ -376,15 +402,6 @@ def test_calendar_raw_rejects_nonintegers_and_preserves_old_good(
     assert before.source_market_type.tolist() == [4]
     assert before.source_day_of_week.tolist() == [5]
     assert before.is_trading_day.tolist() == [True]
-    row[column] = value
-    _write_csmar(raw, "trading_calendar", [row])
-    with pytest.raises(ValueError, match="invalid_"):
-        interim.materialize_interim_data(
-            layout=StorageLayout(tmp_path / "candidate"),
-            raw_root=raw,
-            data_ids=("trading_calendar",),
-        )
-    pd.testing.assert_frame_equal(before, read_dataset(root))
 
 
 @pytest.mark.parametrize("state", ("SYNTHETIC_PRIVATE_STATE", None))
@@ -485,6 +502,15 @@ def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> 
             data_ids=("market_bars_1d",),
         )
     assert _file_bytes(root) == before
+    assert not tuple(
+        filesystem_glob(
+            StorageLayout(tmp_path / "candidate").interim_data_root(
+                "csmar", "market_bars_1d"
+            ),
+            "instances/*",
+        )
+    )
+    assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
 
 
 def _collect_raw_export(
@@ -1139,10 +1165,12 @@ def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize(
     "column,maximum",
-    zip(
-        ("Idxinfo05", "Idxinfo06", "Idxinfo07", "Idxinfo08", "Idxinfo09"),
-        (4, 4, 7, 5, 9),
-        strict=True,
+    tuple(
+        zip(
+            ("Idxinfo05", "Idxinfo06", "Idxinfo07", "Idxinfo08", "Idxinfo09"),
+            (4, 4, 7, 5, 9),
+            strict=True,
+        )
     ),
 )
 def test_index_info_unknown_enum_rejects_and_preserves_published(
@@ -1199,6 +1227,15 @@ def test_index_info_unknown_enum_rejects_and_preserves_published(
                 data_ids=("index_info",),
             )
         assert _file_bytes(root) == before
+        assert not tuple(
+            filesystem_glob(
+                StorageLayout(tmp_path / "candidate").interim_data_root(
+                    "csmar", "index_info"
+                ),
+                "instances/*",
+            )
+        )
+        assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
 
 
 @pytest.mark.parametrize(

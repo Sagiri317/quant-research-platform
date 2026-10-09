@@ -38,6 +38,7 @@ def _panel():
         [
             pd.DataFrame(
                 dict(
+                    listing_date=pd.Timestamp("2000-01-01"),
                     market_id="a_share",
                     asset_id=asset,
                     timestamp=dates,

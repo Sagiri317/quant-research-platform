@@ -128,8 +128,10 @@ from quant_research_platform.storage.experiments import research_run_trial_refer
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_stat,
+    open_filesystem_file,
     require_unaliased_path,
     validate_instance_identity,
+    verified_file_handle,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
@@ -138,6 +140,7 @@ from quant_research_platform.storage.rebuild import (
     rebuild_candidate_workspace,
 )
 from quant_research_platform.storage.semantic_artifacts import (
+    _read_artifact_manifest,
     compare_semantic_artifacts,
     read_semantic_artifact,
     read_semantic_artifact_record,
@@ -2152,32 +2155,45 @@ def _reuse_target(
     data_spec = _catalog_data_spec(profile, spec.target_id)
     if data_spec is None:
         binding = profile.producer_bindings[spec.target_id]
-        if binding.source_identity is not None:
-            envelope = read_semantic_artifact(
-                root, expected_identity=requested_identity
+        with ExitStack() as operation:
+            if binding.source_identity is not None:
+                envelope, _members, manifest_identity, _operational = (
+                    _read_artifact_manifest(root, expected_identity=requested_identity)
+                )
+                manifest_path = root / "manifest.json"
+                handle = operation.enter_context(
+                    open_filesystem_file(manifest_path, "rb")
+                )
+                operation.enter_context(
+                    verified_file_handle(
+                        manifest_path,
+                        handle,
+                        expected_identity=manifest_identity,
+                        error="semantic_artifact_member_identity_changed",
+                    )
+                )
+                try:
+                    raw_identity = binding.source_identity(
+                        binding.raw_root or raw_root, spec.target_id
+                    )
+                    if (
+                        raw_identity
+                        != envelope["semantic_metadata"]["raw_content_identity"]
+                    ):
+                        raise PortfolioTargetBlocked("source_identity_changed")
+                except PortfolioTargetBlocked as exc:
+                    return TargetResult(
+                        spec.target_id, TargetStatus.BLOCKED, reason=str(exc)
+                    )
+                except ValueError:
+                    return TargetResult(
+                        spec.target_id,
+                        TargetStatus.BLOCKED,
+                        reason="source_identity_invalid",
+                    )
+            _validate_semantic_target_root(
+                profile, protocol, spec, root, requested_identity, trial_layout=layout
             )
-            try:
-                raw_identity = binding.source_identity(
-                    binding.raw_root or raw_root, spec.target_id
-                )
-                if (
-                    raw_identity
-                    != envelope["semantic_metadata"]["raw_content_identity"]
-                ):
-                    raise PortfolioTargetBlocked("source_identity_changed")
-            except PortfolioTargetBlocked as exc:
-                return TargetResult(
-                    spec.target_id, TargetStatus.BLOCKED, reason=str(exc)
-                )
-            except ValueError:
-                return TargetResult(
-                    spec.target_id,
-                    TargetStatus.BLOCKED,
-                    reason="source_identity_invalid",
-                )
-        _validate_semantic_target_root(
-            profile, protocol, spec, root, requested_identity, trial_layout=layout
-        )
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.REUSED,

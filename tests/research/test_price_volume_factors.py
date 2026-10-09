@@ -753,6 +753,7 @@ def test_batched_volatility_matches_scalar_reference_across_units_and_windows():
 
 @pytest.mark.parametrize("extreme", (False, True))
 def test_rolling_means_match_exact_scalar_windows(extreme):
+    from fractions import Fraction
     from statistics import mean
 
     values = (
@@ -793,7 +794,15 @@ def test_rolling_means_match_exact_scalar_windows(extreme):
             if np.isfinite(window).all() and np.isfinite(values[stop - 1]):
                 average = mean(window)
                 expected[stop - 1] = (
-                    (values[stop - 1] / average - 1.0 if average != 0 else np.nan)
+                    (
+                        float(
+                            Fraction(float(values[stop - 1]))
+                            / (sum(map(Fraction, window)) / size)
+                            - 1
+                        )
+                        if sum(map(Fraction, window)) != 0
+                        else np.nan
+                    )
                     if shift
                     else (np.log(average) if average > 0 else np.nan)
                     if name == "log_avg_amount_20d"
@@ -1287,3 +1296,29 @@ def test_path_factors_complete_windows_zero_path_and_future_isolation():
         .isna()
         .all()
     )
+
+
+@pytest.mark.parametrize("scale", (1.0, np.nextafter(0.0, 1.0)))
+def test_shock_and_log_preserve_exact_positive_window_mean(scale):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+
+    amounts = [scale] * 10 + [0.0] * 10 + [scale]
+    panel = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "timestamp": pd.bdate_range("2020-01-01", periods=21),
+            "amount": amounts,
+            "volume": amounts,
+        }
+    )
+    names = ("amount_shock_20d", "volume_shock_20d", "log_avg_amount_20d")
+    actual = calculate_price_volume_factors(panel, factor_columns=names)
+    center = sum(map(Fraction, amounts[:20])) / 20
+    expected = float(Fraction(scale) / center - 1)
+    assert actual.amount_shock_20d.iloc[-1] == expected
+    assert actual.volume_shock_20d.iloc[-1] == expected
+    with localcontext() as context:
+        context.prec = 100
+        log_mean = float((Decimal(center.numerator) / Decimal(center.denominator)).ln())
+    assert actual.log_avg_amount_20d.iloc[19] == pytest.approx(log_mean, abs=1e-12)

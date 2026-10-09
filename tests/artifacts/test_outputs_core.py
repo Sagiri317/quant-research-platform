@@ -514,3 +514,43 @@ def test_prediction_writer_enforces_stream_window_before_publication(tmp_path, c
     with pytest.raises(OutputAlreadyExistsError):
         write_prediction_outputs(layout=StorageLayout(tmp_path / "good"), **kwargs)
     assert {path.name: path.read_bytes() for path in root.iterdir()} == original
+
+
+@pytest.mark.parametrize("kind", ("string", "date", "ns", "us"))
+def test_prediction_writer_normalizes_time_before_native_readback(tmp_path, kind):
+    import pandas as pd
+    import pyarrow as pa
+    import pyarrow.parquet as pq
+
+    from quant_research_platform.artifacts.outputs import write_prediction_outputs
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        read_prediction_output_bundle,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    _, spec, output_spec, frame, model, prediction = _native_prediction_bundle(
+        tmp_path / "original"
+    )
+    if kind == "string":
+        frame["timestamp"] = frame.timestamp.dt.strftime("%Y-%m-%d")
+    elif kind == "date":
+        frame["timestamp"] = frame.timestamp.dt.date
+    else:
+        frame["timestamp"] = frame.timestamp.dt.as_unit(kind)
+    before = frame.copy(deep=True)
+    root = write_prediction_outputs(
+        layout=StorageLayout(tmp_path / "normalized"),
+        spec=spec,
+        output_spec=output_spec,
+        output_chunks=(frame.iloc[:1], frame.iloc[1:]),
+        model_metadata=model,
+        prediction_metadata_factory=lambda: prediction,
+    )
+    _, lookup = read_prediction_output_bundle(
+        root, expected_output_id=spec.prediction_id
+    )
+    assert lookup.row_count == len(frame)
+    assert pa.types.is_timestamp(
+        pq.read_schema(root / "prediction.parquet").field("timestamp").type
+    )
+    pd.testing.assert_frame_equal(frame, before)

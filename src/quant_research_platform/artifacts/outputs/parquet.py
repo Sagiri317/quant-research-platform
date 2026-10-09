@@ -73,6 +73,7 @@ def write_parquet_chunks(
                         selected["timestamp"],
                         error="prediction_metadata_inconsistent",
                     )
+                    selected = selected.assign(timestamp=timestamps)
                     current_end = time_value_isoformat(
                         pd.Timestamp(timestamps.max()), date_only=date_only
                     )

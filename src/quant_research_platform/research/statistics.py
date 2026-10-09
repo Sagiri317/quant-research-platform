@@ -919,20 +919,21 @@ def _finite_matrix(
 def _loss_inputs(
     benchmark_losses: object, model_losses: object
 ) -> AlignedCandidateMatrix:
-    benchmark = (
-        benchmark_losses.rename("__benchmark_loss__")
-        if isinstance(benchmark_losses, pd.Series)
-        else pd.Series(benchmark_losses, name="__benchmark_loss__")
-    )
     if not isinstance(model_losses, pd.DataFrame):
         raise ValueError("loss_matrix_candidate_id_invalid")
     models = model_losses
+    benchmark_id = "__benchmark_loss__"
+    while benchmark_id in models.columns:
+        benchmark_id += "_"
+    benchmark = (
+        benchmark_losses.rename(benchmark_id)
+        if isinstance(benchmark_losses, pd.Series)
+        else pd.Series(benchmark_losses, name=benchmark_id)
+    )
     if not isinstance(benchmark_losses, pd.Series):
         if len(benchmark) != len(models):
             raise ValueError("loss_matrix_length_mismatch")
         benchmark.index = models.index
-    if "__benchmark_loss__" in models.columns:
-        raise ValueError("loss_matrix_candidate_id_invalid")
     if models.columns.has_duplicates or not all(
         type(column) is str and column for column in models.columns
     ):

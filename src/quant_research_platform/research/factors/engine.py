@@ -22,6 +22,7 @@ def calculate_factors_for_panel(
     *,
     definitions: Sequence[FactorDefinition],
     output_window: TimeWindow | None = None,
+    history_keys: tuple[str, ...] = ("asset_id",),
 ) -> pd.DataFrame:
     requested = tuple(definitions)
     _require_factor_input_columns(panel_frame, requested)
@@ -53,6 +54,7 @@ def calculate_factors_for_panel(
         panel_frame,
         factor_columns=tuple(definition.output_column for definition in requested),
         output_window=output_window,
+        history_keys=history_keys,
     )
     return _with_keys(
         output_source,

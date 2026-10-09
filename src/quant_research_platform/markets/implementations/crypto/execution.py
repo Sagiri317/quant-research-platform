@@ -1246,6 +1246,11 @@ class MakerCalibration:
         history_scale,
         events,
     ):
+        if replace_quantity == 0 and active_order is None and not commands:
+            # Validate native history coordinates before skipping economic replay.
+            with closing_iterator(events) as events:
+                next(events, None)
+            return
         side = new_order.side
         start = int(sample["decision_at"])
         end = start + lifetime_ns

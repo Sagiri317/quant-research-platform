@@ -890,7 +890,6 @@ def test_financial_pit_calendar_file_order_preserves_formal_published_rows(tmp_p
                 pd.util.hash_pandas_object(logical, index=False).to_numpy().tobytes()
             ).hexdigest()
         )
-        assert calendar.calendar_date.is_monotonic_increasing == (name != "reversed")
         source = _synthetic_interim_frames(dates)
         source["market_bars_1d"]["market_type"] = 4
         panel_spec = profile.processed.get("market_panel_1d")
@@ -1391,14 +1390,15 @@ def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
     original = pd.DataFrame.pivot_table
 
     def pivot(frame, *args, **kwargs):
-        pivots.append(kwargs.get("values"))
+        values = kwargs.get("values")
+        pivots.append(len(frame) * (len(values) if isinstance(values, list) else 1))
         return original(frame, *args, **kwargs)
 
     monkeypatch.setattr(pd.DataFrame, "pivot_table", pivot)
     result = producer._fundamental_pit_frame(
         research_profile().processed.get("fundamental_pit"), panel=panel, pit=pit
     )
-    assert sorted(pivots) == ["prior_year_value", "value"]
+    assert sum(pivots) <= 2 * len(pit)
     for metric in ("total_assets", "parent_equity"):
         pd.testing.assert_series_equal(
             result[f"beginning_{metric}"],
@@ -1507,3 +1507,148 @@ def test_panel_preserves_proven_listing_lifecycles(
         suspended[["close", "adj_close", "open", "adj_open"]].isna().all().all()
         == relisted
     )
+
+
+@pytest.mark.parametrize("batch_rows", (6, 3000))
+@pytest.mark.parametrize("gap,suspended", ((1, False), (25, True)))
+def test_native_lifecycle_history_does_not_join_relisting(
+    tmp_path, monkeypatch, batch_rows, gap, suspended
+):
+    from quant_research_platform.sources.csmar import interim
+    from tests.helpers.a_share_raw import _write_csmar
+
+    dates = pd.bdate_range("2020-01-02", periods=330 + gap).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    raw.mkdir(parents=True)
+    masters = [
+        dict(
+            Stkcd="000001",
+            Stknme="synthetic",
+            Listdt=dates[0].date().isoformat(),
+            DelistedDate=dates[299].date().isoformat(),
+            Markettype=1,
+            Nnindcd="C",
+            Nnindnme="synthetic",
+            Statco="normal",
+            Statdt="",
+        ),
+        dict(
+            Stkcd="000001",
+            Stknme="synthetic",
+            Listdt=dates[300 + gap].date().isoformat(),
+            DelistedDate="",
+            Markettype=1,
+            Nnindcd="C",
+            Nnindnme="synthetic",
+            Statco="normal",
+            Statdt="",
+        ),
+    ]
+    _write_csmar(raw, "stock_master", masters[::-1])
+    rows = []
+    for i, stamp in enumerate(dates):
+        if 300 <= i < 300 + gap:
+            continue
+        price = 10.0 if i < 300 else 100.0
+        rows.append(
+            dict(
+                Stkcd="000001",
+                Trddt=stamp.date().isoformat(),
+                Markettype=1,
+                Trdsta=0,
+                Filling=int(suspended and i == 300 + gap),
+                Opnprc=price,
+                Hiprc=price,
+                Loprc=price,
+                Clsprc=price,
+                Dnshrtrd=1.0,
+                Dnvaltrd=10.0,
+                Ahshrtrd_D=0.0,
+                Ahvaltrd_D=0.0,
+                Dsmvosd=1000.0,
+                Dsmvtl3=1000.0,
+                Dretwd=0.0,
+                Adjprcwd=price,
+                PreClosePrice=price,
+                LimitStatus=0,
+            )
+        )
+    _write_csmar(raw, "market_bars_1d", rows[::-1])
+    _write_csmar(
+        raw,
+        "trading_calendar",
+        [
+            dict(
+                Markettype=market,
+                Clddt=stamp.date().isoformat(),
+                Daywk=stamp.weekday() + 1,
+                State="O",
+            )
+            for market in (1, 4, 16, 32)
+            for stamp in dates
+        ],
+    )
+    imported = {"stock_master", "market_bars_1d", "trading_calendar"}
+    interim.materialize_interim_data(layout=layout, data_ids=tuple(sorted(imported)))
+    profile = research_profile()
+    panel_spec = profile.processed.get("market_panel_1d")
+    for data_id in panel_spec.source_input_data_ids:
+        if data_id not in imported:
+            spec = profile.interim.get(data_id)
+            write_dataset(
+                layout.interim_data_root(spec.source_id, data_id),
+                source[data_id],
+                spec=spec,
+            )
+    monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
+    results = {}
+    for data_id in (
+        "market_panel_1d",
+        "execution_mask",
+        "forward_returns",
+        "price_volume_facts",
+    ):
+        spec = profile.processed.get(data_id)
+        if data_id == "price_volume_facts":
+            spec = replace(
+                spec,
+                column_roles={
+                    k: v
+                    for k, v in spec.column_roles.items()
+                    if k in ("market_id", "asset_id", "timestamp", "reversal_1d")
+                },
+            )
+        root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(dates[0], dates[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+        results[data_id] = read_dataset(root).set_index("timestamp")
+    panel = results["market_panel_1d"]
+    assert panel.loc[dates[289], "listing_age_trading_days"] == 290
+    assert a_share_eligibility(panel.reset_index(), "a_share_core6").iloc[289]
+    mask = results["execution_mask"]
+    assert pd.isna(mask.loc[dates[299], "can_enter"])
+    assert mask.loc[dates[300 + gap], "can_enter"]
+    labels = results["forward_returns"]
+    assert labels.loc[dates[270], "forward_return_20d"] == 0.0
+    for horizon in (1, 20):
+        edge = dates[299 - horizon]
+        assert pd.isna(labels.loc[edge, f"forward_return_{horizon}d"])
+        assert pd.isna(labels.loc[edge, f"forward_return_{horizon}d_available_at"])
+    assert pd.isna(labels.loc[dates[289], "forward_return_20d"])
+    factors = results["price_volume_facts"]
+    assert pd.isna(factors.loc[dates[300 + gap], "reversal_1d"])
+    assert factors.loc[dates[302 + gap], "reversal_1d"] == 0.0

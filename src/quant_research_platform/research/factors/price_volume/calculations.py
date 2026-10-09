@@ -33,6 +33,7 @@ def calculate_price_volume_factors(
     *,
     factor_columns: Iterable[str] | None = None,
     output_window: TimeWindow | None = None,
+    history_keys: tuple[str, ...] = ("asset_id",),
 ) -> pd.DataFrame:
     """Calculate only requested columns and output rows, preserving warmup inputs."""
     requested = tuple(
@@ -50,21 +51,24 @@ def calculate_price_volume_factors(
             for name in _PRICE_VOLUME_INPUT_WINDOWS[factor][0]
         )
     )
-    missing = [name for name in ("asset_id", "timestamp", *names) if name not in panel]
+    keys = tuple(dict.fromkeys(("asset_id", *history_keys, "timestamp")))
+    missing = [name for name in (*keys, *names) if name not in panel]
     if missing:
         raise ValueError("price_volume_inputs_missing: " + ", ".join(missing))
-    ordered = panel.loc[:, ("asset_id", "timestamp", *names)].copy()
+    ordered = panel.loc[:, (*keys, *names)].copy()
     ordered["timestamp"] = strict_timestamp_series(
         ordered["timestamp"], error="price_volume_timestamp_invalid"
     )
     if ordered.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("price_volume_key_duplicate")
-    ordered = ordered.sort_values(["asset_id", "timestamp"], kind="mergesort")
+    ordered = ordered.sort_values([*history_keys, "timestamp"], kind="mergesort")
     output: dict[str, list[np.ndarray]] = {factor: [] for factor in requested}
     bounds = (
         None if output_window is None else time_window_timestamp_interval(output_window)
     )
-    for _asset_id, group in ordered.groupby("asset_id", sort=False):
+    for _identity, group in ordered.groupby(
+        list(history_keys), sort=False, dropna=False
+    ):
         values = {
             name: strict_finite_numeric_series(
                 group[name],
@@ -193,26 +197,33 @@ def _calculate_values(
         if source_name not in sums:
             sums[source_name] = _binary_prefix(source)
         totals, unit = sums[source_name]
-        result = np.fromiter(
-            (
-                (totals[position + 1 - shift] - totals[position + 1 - shift - size])
-                / (size * unit)
-                for position in range(first, stop)
-            ),
-            dtype=float,
-        )[valid]
-        if shift:
-            result = (
-                np.divide(
-                    source[first:stop][valid],
-                    result,
-                    out=np.full(len(result), np.nan),
-                    where=result != 0,
-                )
-                - 1.0
-            )
-        elif factor == "log_avg_amount_20d":
-            result = _log(result)
+        result = np.full(np.count_nonzero(valid), np.nan)
+        for index, position in enumerate(np.flatnonzero(valid) + first):
+            total = totals[position + 1 - shift] - totals[position + 1 - shift - size]
+            if shift:
+                if total:
+                    numerator, denominator = float(source[position]).as_integer_ratio()
+                    numerator = numerator * size * unit - denominator * total
+                    denominator *= total
+                    try:
+                        result[index] = numerator / denominator
+                    except OverflowError:
+                        result[index] = (
+                            np.inf if (numerator > 0) == (denominator > 0) else -np.inf
+                        )
+            elif factor == "log_avg_amount_20d":
+                if total > 0:
+                    mean = total / (size * unit)
+                    if mean:
+                        result[index] = np.log(mean)
+                    else:
+                        with localcontext() as context:
+                            context.prec = 80
+                            result[index] = float(
+                                (Decimal(total) / Decimal(size * unit)).ln()
+                            )
+            else:
+                result[index] = total / (size * unit)
         output[first - start :][valid] = result
         return output
     if factor in {"amount_cv_126d", "turnover_cv_126d"}:

@@ -11,13 +11,6 @@ from quant_research_platform.research.models.rank_ensemble import (
 )
 
 
-def linear_regression_estimator(
-    spec: ModelSpec,
-    params: dict[str, object],
-) -> object:
-    return object()
-
-
 def ridge_regression_estimator(spec: ModelSpec, params: dict[str, object]) -> object:
     from sklearn.linear_model import Ridge
 
@@ -92,7 +85,6 @@ def _set_random_state(params: dict[str, object], spec: ModelSpec) -> None:
 _MODEL_ESTIMATOR_FACTORIES: dict[
     str, Callable[[ModelSpec, dict[str, object]], object]
 ] = {
-    "linear_regression": linear_regression_estimator,
     "ridge_regression": ridge_regression_estimator,
     "lasso_regression": lasso_regression_estimator,
     "huber_regression": huber_regression_estimator,

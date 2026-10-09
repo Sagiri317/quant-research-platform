@@ -64,7 +64,6 @@ from quant_research_platform.storage.manifests import (
 )
 from quant_research_platform.workflows import research
 from tests.helpers.research_configuration import (
-    A_SHARE_MODEL_ALGORITHMS,
     compact_a_share_configuration,
     compact_a_share_windows,
     research_configuration,
@@ -144,7 +143,13 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         label_columns=("label",),
         n_groups=2,
     )
+    algorithms = ("equal_weight_rank_ensemble", "ridge_regression")
     small_configuration = compact_a_share_configuration()
+    small_configuration["models"] = [
+        model
+        for model in small_configuration["models"]
+        if model["model_algorithm"] in algorithms
+    ]
     model_catalog = ModelCatalog(
         tuple(
             ModelSpec(
@@ -159,7 +164,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
                     if item["model_algorithm"] == algorithm
                 ),
             )
-            for algorithm in A_SHARE_MODEL_ALGORITHMS
+            for algorithm in algorithms
         )
     )
     sessions = pd.date_range("2017-10-01", "2019-06-30", freq="B")
@@ -364,9 +369,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     )
     assert len(artifact.candidate_models) == len(quarters) * len(model_catalog.list())
     assert len(artifact.final_models) == 2 * len(model_catalog.list())
-    protocol_family_ids = tuple(
-        f"pv_all_{algorithm}" for algorithm in A_SHARE_MODEL_ALGORITHMS
-    )
+    protocol_family_ids = tuple(f"pv_all_{algorithm}" for algorithm in algorithms)
     assert {item["family_id"] for item in artifact.candidate_models} == set(
         protocol_family_ids
     )

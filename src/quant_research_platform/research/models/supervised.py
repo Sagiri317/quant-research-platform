@@ -21,9 +21,11 @@ def preflight_model_specs(specs: Iterable[ModelSpec]) -> None:
         build_estimator_from_model_spec(spec)
 
 
-def build_estimator_from_model_spec(spec: ModelSpec) -> object:
+def build_estimator_from_model_spec(spec: ModelSpec) -> object | None:
     params = resolved_model_hyperparameters(spec)
     dependencies.require_model_dependency(spec.model_algorithm)
+    if spec.model_algorithm == "linear_regression":
+        return None
     factory = estimators._MODEL_ESTIMATOR_FACTORIES.get(spec.model_algorithm)
     if factory is None:
         raise ValueError("unsupported_model_algorithm")

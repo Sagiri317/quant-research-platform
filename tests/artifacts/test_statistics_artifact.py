@@ -1985,3 +1985,49 @@ def test_crypto_statistics_bind_candidate_mode_and_window(
         table_group="crypto_portfolio",
         error=error,
     )
+
+
+def test_legal_internal_model_name_survives_joint_test_publication(
+    tmp_path, tables, envelope
+):
+    import numpy as np
+
+    from quant_research_platform.research.statistics_production import _model_comparison
+
+    family = "__benchmark_loss__"
+    dates = pd.bdate_range("2023-01-02", periods=40)
+    rank = pd.DataFrame(
+        {
+            "baseline": 0.2 + 0.1 * np.sin(np.arange(40)),
+            family: 0.3 + 0.1 * np.cos(np.arange(40)),
+        },
+        index=dates,
+    )
+    comparison, checks, robustness = _model_comparison(
+        rank,
+        family_ids=("baseline", family),
+        benchmark_id="baseline",
+        access_window="development",
+        inference_blocker=None,
+        max_lags=2,
+        block_size=3,
+        repetitions=99,
+        root_seed=42,
+        dataset_id="probe",
+    )
+    assert robustness.status.eq("DEFINED").all()
+    assert family in set(checks.family_id)
+    tables.update(
+        model_comparison=comparison, model_reality_checks=checks, robustness=robustness
+    )
+    root = statistics.write_statistics_artifact(
+        tmp_path / "joint", envelope=envelope, tables=tables
+    )
+    artifact = statistics.read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with artifact.table("model_reality_checks.parquet") as actual:
+        pd.testing.assert_frame_equal(
+            actual, checks.assign(reason=checks.reason.fillna("")), check_dtype=False
+        )
+        assert family in set(actual.family_id)

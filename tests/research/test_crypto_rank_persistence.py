@@ -767,3 +767,75 @@ def test_crypto_prepares_each_training_domain_once_without_changing_fits(
             fitting.prediction_callable(columns, model)(shared.frame),
             fitting.prediction_callable(columns, reference)(shared.frame),
         )
+
+
+def test_crypto_prediction_staging_uses_native_minimal_lineage(tmp_path):
+    from quant_research_platform.artifacts.outputs import write_prediction_outputs
+    from quant_research_platform.storage.semantic_artifacts import (
+        write_semantic_artifact,
+    )
+    from quant_research_platform.workflows.research import _output_spec_for_target
+    from tests.research.crypto_model_test_support import check_crypto_prediction_staging
+
+    case = crypto_rank_case(
+        tmp_path,
+        algorithms=("linear_regression",),
+        training_assets=("eth_usdt",),
+        model_updates={
+            "linear_regression": {
+                "model_id": "probe_leave_btc_out",
+                "evaluation_asset_ids": ["btc_usdt"],
+            }
+        },
+    )
+    protocol = case.profile.protocol(case.dataset.data_id, access_window="holdout")
+    target = next(
+        item
+        for item in protocol.target_specs("research run")
+        if item.target_id == case.dataset.data_id + "_predictions"
+    )
+    envelope = _target_envelope_for_spec(
+        profile=case.profile,
+        protocol=protocol,
+        target_spec=target,
+        data_spec=None,
+        research_window={
+            "start": case.holdout.start.isoformat(),
+            "end": case.holdout.end.isoformat(),
+            "access": "holdout",
+        },
+        upstream_identities={
+            case.dataset.data_id: "a" * 64,
+            case.dataset.data_id + "_models": case.saved.envelope["instance_identity"],
+        },
+        software_identity=production_software_identity(),
+        raw_content_identity=None,
+    )
+
+    def write(staging):
+        with closing_iterator(
+            build_crypto_predictions(
+                layout=case.layout,
+                dataset_catalog=case.profile.research_datasets,
+                persisted_model=case.saved,
+                time_window=case.holdout,
+                access_window="holdout",
+            )
+        ) as results:
+            for result in results:
+                with result:
+                    write_prediction_outputs(
+                        spec=result.spec,
+                        output_spec=_output_spec_for_target(
+                            result.spec.prediction_id, "crypto", "prediction"
+                        ),
+                        layout=StorageLayout(staging),
+                        output_chunks=result.output_chunks,
+                        model_metadata=result.model_metadata,
+                        prediction_metadata_factory=result.prediction_metadata_factory,
+                    )
+
+    root = write_semantic_artifact(tmp_path / "predictions", envelope, write)
+    check_crypto_prediction_staging(
+        layout=case.layout, prediction_root=root, saved=case.saved
+    )

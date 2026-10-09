@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import importlib
+from graphlib import CycleError, TopologicalSorter
 from pathlib import Path
 
 import pytest
@@ -366,3 +367,41 @@ def test_ids_contract_symbols_are_legal_but_owner_implementation_is_not(module):
     assert is_ids_contract_import(module)
     assert not is_ids_contract_import(module.replace(".ids.VALUE", ".replay.VALUE"))
     assert not is_ids_contract_import(module + ".member")
+
+
+def _module_graph_order(modules, edges):
+    graph = {module: set() for module in modules}
+    for edge in edges:
+        source = (
+            ".".join(edge.path.with_suffix("").parts)
+            .removeprefix("src.")
+            .removesuffix(".__init__")
+        )
+        target = edge.module
+        while target and target not in graph:
+            target = target.rpartition(".")[0]
+        if source in graph and target and source != target:
+            graph[source].add(target)
+    return tuple(TopologicalSorter(graph).static_order())
+
+
+def test_active_modules_have_no_import_cycles(import_edges):
+    _module_graph_order(_active_module_names(), import_edges)
+
+
+@pytest.mark.parametrize("relative", (False, True))
+def test_module_graph_rejects_nontrivial_cycles(relative):
+    root = Path("src/quant_research_platform")
+    trees = {
+        root / "a.py": ast.parse(
+            "from .b import value" if relative else "import quant_research_platform.b"
+        ),
+        root / "b.py": ast.parse(
+            "from .a import value" if relative else "import quant_research_platform.a"
+        ),
+    }
+    with pytest.raises(CycleError):
+        _module_graph_order(
+            ("quant_research_platform.a", "quant_research_platform.b"),
+            _import_edges_from_trees(trees),
+        )

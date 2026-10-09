@@ -722,3 +722,47 @@ def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monke
         assert fresh.select(**query) == answer
     # Eleven replacements and four nonempty KEEP queries each replay two samples.
     assert decoded == {"book": 0, "trade": 2 * (11 + 4)}
+
+
+def test_zero_quantity_without_live_orders_validates_history_before_skipping_replay(
+    monkeypatch,
+):
+    state = _state(0)
+    paths = [([state], [_trade(100, price="99.5", quantity="5", maker_buyer=True)])] * 3
+    samples, events = calibration_inputs(paths, [0.0] * 3)
+    model = MakerCalibration(samples, events, price_unit="0.1")
+    order = _maker_new_order(
+        0,
+        "buy",
+        0.0,
+        state,
+        _quote(0, book_segment_id="s1"),
+        _maker_config().latency_ms,
+    )
+    kwargs = dict(
+        state=state,
+        decision_ns=0,
+        new_order=order,
+        active_order=None,
+        commands=(),
+        lifetime_ns=500000000,
+        prediction=0.0,
+        fee_bps=0.0,
+        funding=[(100, 0.01)],
+    )
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("zero order replayed economic events")
+
+    monkeypatch.setattr(
+        "quant_research_platform.markets.implementations.crypto.execution._maker_next_time",
+        forbidden,
+    )
+    assert model.select(**kwargs) == (False, 0.0, 0.0)
+    with pytest.raises(ValueError, match="hft_prediction_price_invalid"):
+        model.select(**{**kwargs, "prediction": float("nan")})
+    model._native["buy"][0]["event_end"] = len(model._native["events"]) + 1
+    with pytest.raises(
+        ValueError, match="crypto_calibration_event_coordinates_invalid"
+    ):
+        model.select(**kwargs)

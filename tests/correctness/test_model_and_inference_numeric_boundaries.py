@@ -276,3 +276,130 @@ def test_exact_zero_rank_correlation_stays_zero():
     )
     with pytest.raises(ValueError, match="all_ensemble_correlations_zero"):
         ICWeightedRankEnsemble.fit(frame, input_columns=("x",), label_column="y")
+
+
+@pytest.mark.parametrize("coefficient", (0.0, 1e-308))
+def test_linear_prediction_keeps_finite_affine_result_after_scaler_overflow(
+    coefficient,
+):
+    import pickle
+
+    from quant_research_platform.research.models.scaler import LinearScaledPredictor
+
+    scaler = ModelMatrixScaler.fit(pd.DataFrame({"x": [1e-308, 2e-308]}))
+    model = pickle.loads(
+        pickle.dumps(LinearScaledPredictor((0.0, coefficient), scaler))
+    )
+    value = 10.0
+    expected = float(
+        Fraction(coefficient)
+        * (Fraction(value) - Fraction(scaler.origin_[0]) - scaler.offset_[0])
+        / Fraction(scaler.scale_[0])
+    )
+    assert model.predict(pd.DataFrame({"x": [value]}))[0] == expected
+
+
+def test_joint_loss_tests_preserve_legal_internal_looking_model_name():
+    from quant_research_platform.research.statistics import (
+        spa_reality_check,
+        stepm_superior_models,
+    )
+
+    axis = pd.date_range("2020-01-01", periods=32)
+    benchmark = pd.Series(1.0 + np.sin(np.arange(32)), index=axis)
+    models = pd.DataFrame({"challenger": np.cos(np.arange(32))}, index=axis)
+    renamed = models.rename(columns={"challenger": "__benchmark_loss__"})
+    options = dict(block_size=3, repetitions=99, seed=17)
+    assert spa_reality_check(benchmark, models, **options) == spa_reality_check(
+        benchmark, renamed, **options
+    )
+    expected = stepm_superior_models(benchmark, models, **options)
+    actual = stepm_superior_models(benchmark, renamed, **options)
+    assert actual.superior_models == tuple(
+        "__benchmark_loss__" for _ in expected.superior_models
+    )
+    assert (actual.observation_count, actual.status, actual.reason) == (
+        expected.observation_count,
+        expected.status,
+        expected.reason,
+    )
+
+
+@pytest.mark.parametrize("mode", ("ordinary", "tiny", "large", "constant"))
+def test_rank_label_calibration_matches_full_fraction_accumulation(mode):
+    rng = np.random.default_rng(193)
+    scores = rng.normal(size=37)
+    labels = rng.normal(size=37)
+    weights = rng.uniform(0.01, 2, size=37)
+    if mode == "tiny":
+        weights[:18] = np.nextafter(0.0, 1.0)
+        labels *= np.nextafter(0.0, 1.0)
+    elif mode == "large":
+        labels = 1e308 + np.arange(37) * np.spacing(1e308)
+        weights *= 1e307
+    elif mode == "constant":
+        scores[:] = 0.125
+    triples = [
+        (Fraction(x), Fraction(y), Fraction(w))
+        for x, y, w in zip(scores, labels, weights, strict=True)
+    ]
+    mass = sum(w for x, y, w in triples)
+    xbar = sum(x * w for x, y, w in triples) / mass
+    ybar = sum(y * w for x, y, w in triples) / mass
+    variance = sum(w * (x - xbar) ** 2 for x, y, w in triples)
+    slope = (
+        sum(w * (x - xbar) * (y - ybar) for x, y, w in triples) / variance
+        if variance
+        else Fraction()
+    )
+    assert _label_calibration(scores, labels, weights) == (
+        float(ybar - slope * xbar),
+        float(slope),
+    )
+
+
+@pytest.mark.parametrize("identity", (False, True))
+def test_native_linear_fit_and_reload_preserves_finite_extrapolation(
+    tmp_path, identity
+):
+    import pickle
+
+    from quant_research_platform.contracts.models import ModelSpec
+    from quant_research_platform.research.models.fitting import (
+        _collect_training_frame,
+        _fit_model_result,
+        prediction_callable,
+        validate_model_state,
+    )
+    from quant_research_platform.research.models.supervised import (
+        build_estimator_from_model_spec,
+    )
+
+    stamps = pd.to_datetime(["2020-01-01", "2020-01-02"])
+    frame = pd.DataFrame(
+        dict(
+            timestamp=stamps,
+            asset_id=["a", "a"],
+            eligible=True,
+            label_available_at=stamps,
+            x=[1e-308, 2e-308],
+            y=[1e-308, 2e-308] if identity else [0.0, 0.0],
+        )
+    )
+    spec = ModelSpec(
+        model_id="probe",
+        model_algorithm="linear_regression",
+        input_factor_columns=("x",),
+        label_column="y",
+    )
+    result = _fit_model_result(
+        _collect_training_frame((frame,), spec, fitting_cutoff="2020-01-03"),
+        spec,
+        estimator=build_estimator_from_model_spec(spec),
+    )
+    path = tmp_path / "model.pkl"
+    path.write_bytes(pickle.dumps(result.prediction_model))
+    predictor = pickle.loads(path.read_bytes())
+    validate_model_state(predictor, result.metadata)
+    scores = prediction_callable(("x",), predictor)(pd.DataFrame({"x": [10.0]}))
+    np.testing.assert_allclose(scores, [10.0 if identity else 0.0], rtol=1e-14)

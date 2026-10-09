@@ -175,7 +175,27 @@ class LinearScaledPredictor:
     def predict(self, frame: pd.DataFrame) -> np.ndarray:
         values = self.scaler.transform(frame).to_numpy(dtype="float64")
         coefficients = np.asarray(self.coefficients, dtype="float64")
-        return coefficients[0] + values @ coefficients[1:]
+        with np.errstate(over="ignore", invalid="ignore"):
+            predictions = coefficients[0] + values @ coefficients[1:]
+        for row in np.flatnonzero(~np.isfinite(predictions)):
+            exact = Fraction(self.coefficients[0]) + sum(
+                Fraction(coefficient)
+                * (Fraction(float(value)) - Fraction(origin) - offset)
+                / Fraction(scale)
+                for coefficient, value, origin, offset, scale in zip(
+                    self.coefficients[1:],
+                    frame.iloc[row],
+                    self.scaler.origin_,
+                    self.scaler.offset_,
+                    self.scaler.scale_,
+                    strict=True,
+                )
+            )
+            try:
+                predictions[row] = float(exact)
+            except OverflowError:
+                predictions[row] = np.inf if exact > 0 else -np.inf
+        return predictions
 
     @property
     def coef_(self) -> np.ndarray:

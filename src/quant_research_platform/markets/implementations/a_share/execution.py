@@ -17,6 +17,7 @@ from quant_research_platform.contracts.portfolios import (
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
     strict_finite_numeric_series,
+    strict_timestamp_series,
 )
 
 _CHARGE_CODES = frozenset({"BROKER_COMMISSION", "STAMP_DUTY", "TRANSFER_FEE"})
@@ -373,6 +374,7 @@ def derive_execution_mask(panel: pd.DataFrame) -> pd.DataFrame:
         "asset_id",
         "timestamp",
         "is_trading",
+        "listing_date",
         "limit_status",
         "open",
         "high",
@@ -409,7 +411,10 @@ def derive_execution_mask(panel: pd.DataFrame) -> pd.DataFrame:
     )
     result["one_word_limit_up"] = (status.eq(1) & equal_price).where(known_prices)
     result["one_word_limit_down"] = (status.eq(-1) & equal_price).where(known_prices)
-    grouped = result.groupby("asset_id", sort=False)
+    result["listing_date"] = strict_timestamp_series(
+        result["listing_date"], error="execution_listing_date_invalid"
+    )
+    grouped = result.groupby(["asset_id", "listing_date"], sort=False)
     next_trading = grouped["is_trading"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
     next_up = grouped["one_word_limit_up"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)
     next_down = grouped["one_word_limit_down"].shift(-EXECUTION_LOOKAHEAD_SESSIONS)

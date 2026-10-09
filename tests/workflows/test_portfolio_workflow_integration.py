@@ -5,6 +5,7 @@ import shutil
 from contextlib import contextmanager
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import pandas as pd
@@ -704,23 +705,34 @@ def test_portfolio_statistics_target_identity_tracks_its_consumed_contract(
     )
 
 
-@compact_a_share_windows()
-@patch.multiple(
-    a_share,
-    DATA_END=pd.Timestamp("2019-10-31").date(),
-    FORMAL_DATASET_END=pd.Timestamp("2019-10-31").date(),
-    DEVELOPMENT_END=pd.Timestamp("2019-08-30").date(),
-    HOLDOUT_START=pd.Timestamp("2019-09-02").date(),
-    HOLDOUT_END=pd.Timestamp("2019-10-31").date(),
-)
-def test_holdout_freezes_models_and_alpha_across_observation_quarters(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import numpy as np
+@contextmanager
+def _holdout_windows():
+    with (
+        compact_a_share_windows(),
+        patch.multiple(
+            a_share,
+            DATA_END=pd.Timestamp("2019-10-31").date(),
+            FORMAL_DATASET_END=pd.Timestamp("2019-10-31").date(),
+            DEVELOPMENT_END=pd.Timestamp("2019-08-30").date(),
+            HOLDOUT_START=pd.Timestamp("2019-09-02").date(),
+            HOLDOUT_END=pd.Timestamp("2019-10-31").date(),
+        ),
+    ):
+        yield
 
-    from quant_research_platform.research.models import fitting, production
-    from quant_research_platform.research.portfolios import production as portfolios
+
+@contextmanager
+def _both_groups_windows():
+    with (
+        compact_a_share_windows(),
+        patch.multiple(a_share, DEVELOPMENT_END=pd.Timestamp("2019-03-01").date()),
+    ):
+        yield
+
+
+@_holdout_windows()
+def _build_holdout_development(tmp_path):
+    import numpy as np
 
     # Model backends have their own real ladder tests; the raw complete chain
     # retains the 252-by-100 risk gate. This test keeps all ten live portfolios.
@@ -935,6 +947,188 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         ),
         error="model_hash_invalid",
     )
+    return SimpleNamespace(
+        configuration=configuration,
+        profile=profile,
+        layout=layout,
+        frames=frames,
+        development=development,
+        development_record=development_record,
+        source_model=source_model,
+        model_root=model_root,
+        model_hash=model_hash,
+        model_count=model_count,
+    )
+
+
+@_holdout_windows()
+def _build_holdout_baseline(case, monkeypatch):
+    configuration = case.configuration
+    profile = case.profile
+    layout = case.layout
+    frames = case.frames
+    development = case.development
+    development_record = case.development_record
+    source_model = case.source_model
+    model_root = case.model_root
+    model_hash = case.model_hash
+    model_count = case.model_count
+    from quant_research_platform.research.models import fitting, production
+    from quant_research_platform.research.portfolios import production as portfolios
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("holdout attempted supervised learning")
+
+    monkeypatch.setattr(fitting, "_fit_model_result", forbidden)
+    monkeypatch.setattr(production, "_build_a_share_models", forbidden)
+    monkeypatch.setattr(portfolios, "calibrate_expected_alpha", forbidden)
+    from quant_research_platform.research.predictions import runner as predictions
+
+    loaded_sources = []
+    original_predictor_reader = predictions.read_quarterly_predictor
+
+    def counted_predictor(artifact, selection_group, family, **kwargs):
+        loaded_sources.append((selection_group, family))
+        return original_predictor_reader(artifact, selection_group, family, **kwargs)
+
+    monkeypatch.setattr(predictions, "read_quarterly_predictor", counted_predictor)
+    request = dict(
+        profile=profile,
+        layout=layout,
+        research_plan=configuration,
+        holdout=True,
+        development_run_id=development["run_id"],
+    )
+    planned = research.research_run(**request, plan=True)
+    model_plan = next(
+        item
+        for item in planned["targets"]
+        if item["target_id"] == source_model.target_id
+    )
+    assert model_plan["decision"] == "REUSE"
+    assert model_plan["upstream_target_ids"] == []
+    assert model_plan["requested_identity"] == source_model.instance_identity
+    holdout = research.research_run(**request)
+    assert holdout["status"] == "COMPLETE", holdout
+    assert len(loaded_sources) == 2 * model_count
+    assert len(set(loaded_sources)) == len(loaded_sources)
+    record = read_research_run_record(layout.research_run_path(holdout["run_id"]))
+    assert record.trial_ledgers == ()
+    expected_sources = {"global": [], "quarterly": []}
+    for candidate in profile.protocol("pv_all").portfolio_candidates():
+        if candidate.construction != "benchmark_enhanced":
+            continue
+        reference = next(
+            item
+            for item in development_record.target_results
+            if item.target_id == f"pv_all_{candidate.candidate_id}_ledger"
+        )
+        expected_sources[candidate.selection_group].append(
+            {
+                "selection_group": candidate.selection_group,
+                "reference": reference.payload(),
+                "observed_at": development_record.research_window["end"],
+            }
+        )
+    assert all(len(values) == 2 for values in expected_sources.values())
+    assert (
+        record.payload()["protocol"]["frozen_development"]["alpha_sources"]
+        == expected_sources
+    )
+    results = {item.target_id: item for item in record.target_results}
+    assert (
+        results[source_model.target_id].instance_identity
+        == source_model.instance_identity
+    )
+    prediction_ids = profile.protocol("pv_all").prediction_target_ids
+    prediction_id = prediction_ids[0]
+    prediction_root = layout.instance_root(
+        layout.semantic_artifact_root("a_share", prediction_id),
+        results[prediction_id].instance_identity,
+    )
+    for group, current_prediction_id in zip(
+        ("global", "quarterly"), prediction_ids, strict=True
+    ):
+        current_root = layout.instance_root(
+            layout.semantic_artifact_root("a_share", current_prediction_id),
+            results[current_prediction_id].instance_identity,
+        )
+        current_manifest, _ = validate_output_bundle(
+            current_root / "outputs" / current_prediction_id,
+            expected_output_id=current_prediction_id,
+            expected_run_id=f"run_{current_prediction_id}",
+        )
+        metadata = current_manifest["metadata"]["model_metadata"]
+        assert metadata["selection_group"] == group
+        assert {item["quarter_id"] for item in metadata["quarterly_models"]} == {
+            str(period) for period in pd.period_range("2019Q3", "2019Q4", freq="Q")
+        }
+        assert len(metadata["quarterly_models"]) == 2 * model_count
+        assert all(
+            item["prediction_source"] == "final"
+            for item in metadata["quarterly_models"]
+        )
+    current_manifest = metadata = _ = None
+    return SimpleNamespace(
+        configuration=configuration,
+        profile=profile,
+        layout=layout,
+        frames=frames,
+        development=development,
+        development_record=development_record,
+        source_model=source_model,
+        model_root=model_root,
+        model_hash=model_hash,
+        model_count=model_count,
+        request=request,
+        planned=planned,
+        holdout=holdout,
+        record=record,
+        results=results,
+        prediction_ids=prediction_ids,
+        prediction_id=prediction_id,
+        prediction_root=prediction_root,
+    )
+
+
+@pytest.fixture(scope="module")
+def holdout_development_baseline(tmp_path_factory):
+    case = _build_holdout_development(tmp_path_factory.mktemp("holdout-development"))
+    before = _fixture_hashes(case.layout.project_root)
+    yield case
+    assert _fixture_hashes(case.layout.project_root) == before
+
+
+@pytest.fixture(scope="module")
+def holdout_baseline(holdout_development_baseline, tmp_path_factory):
+    case = _linked_workflow_case(
+        holdout_development_baseline, tmp_path_factory.mktemp("holdout") / "project"
+    )
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        case = _build_holdout_baseline(case, monkeypatch)
+    before = _fixture_hashes(case.layout.project_root)
+    yield case
+    assert _fixture_hashes(case.layout.project_root) == before
+
+
+@pytest.fixture
+def holdout_case(holdout_baseline, tmp_path):
+    return _linked_workflow_case(holdout_baseline, tmp_path / "project")
+
+
+@_holdout_windows()
+def test_holdout_preflight_rejects_invalid_frozen_development(
+    holdout_development_baseline, tmp_path, monkeypatch
+):
+    case = _linked_workflow_case(holdout_development_baseline, tmp_path / "project")
+    configuration = case.configuration
+    profile = case.profile
+    layout = case.layout
+    development = case.development
+    development_record = case.development_record
+    source_model = case.source_model
+    from quant_research_platform.research.models import fitting, production
+    from quant_research_platform.research.portfolios import production as portfolios
 
     def forbidden(*args, **kwargs):
         raise AssertionError("holdout attempted supervised learning")
@@ -1040,76 +1234,19 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     assert (
         blocked_record.protocol["frozen_development"]["run_id"] == development["run_id"]
     )
-    planned = research.research_run(**request, plan=True)
-    model_plan = next(
-        item
-        for item in planned["targets"]
-        if item["target_id"] == source_model.target_id
-    )
-    assert model_plan["decision"] == "REUSE"
-    assert model_plan["upstream_target_ids"] == []
-    assert model_plan["requested_identity"] == source_model.instance_identity
-    holdout = research.research_run(**request)
-    assert holdout["status"] == "COMPLETE", holdout
-    assert len(loaded_sources) == 2 * model_count
-    assert len(set(loaded_sources)) == len(loaded_sources)
-    record = read_research_run_record(layout.research_run_path(holdout["run_id"]))
-    assert record.trial_ledgers == ()
-    expected_sources = {"global": [], "quarterly": []}
-    for candidate in profile.protocol("pv_all").portfolio_candidates():
-        if candidate.construction != "benchmark_enhanced":
-            continue
-        reference = next(
-            item
-            for item in development_record.target_results
-            if item.target_id == f"pv_all_{candidate.candidate_id}_ledger"
-        )
-        expected_sources[candidate.selection_group].append(
-            {
-                "selection_group": candidate.selection_group,
-                "reference": reference.payload(),
-                "observed_at": development_record.research_window["end"],
-            }
-        )
-    assert all(len(values) == 2 for values in expected_sources.values())
-    assert (
-        record.payload()["protocol"]["frozen_development"]["alpha_sources"]
-        == expected_sources
-    )
-    results = {item.target_id: item for item in record.target_results}
-    assert (
-        results[source_model.target_id].instance_identity
-        == source_model.instance_identity
-    )
-    prediction_ids = profile.protocol("pv_all").prediction_target_ids
-    prediction_id = prediction_ids[0]
-    prediction_root = layout.instance_root(
-        layout.semantic_artifact_root("a_share", prediction_id),
-        results[prediction_id].instance_identity,
-    )
-    for group, current_prediction_id in zip(
-        ("global", "quarterly"), prediction_ids, strict=True
-    ):
-        current_root = layout.instance_root(
-            layout.semantic_artifact_root("a_share", current_prediction_id),
-            results[current_prediction_id].instance_identity,
-        )
-        current_manifest, _ = validate_output_bundle(
-            current_root / "outputs" / current_prediction_id,
-            expected_output_id=current_prediction_id,
-            expected_run_id=f"run_{current_prediction_id}",
-        )
-        metadata = current_manifest["metadata"]["model_metadata"]
-        assert metadata["selection_group"] == group
-        assert {item["quarter_id"] for item in metadata["quarterly_models"]} == {
-            str(period) for period in pd.period_range("2019Q3", "2019Q4", freq="Q")
-        }
-        assert len(metadata["quarterly_models"]) == 2 * model_count
-        assert all(
-            item["prediction_source"] == "final"
-            for item in metadata["quarterly_models"]
-        )
-    current_manifest = metadata = _ = None
+
+
+@_holdout_windows()
+def test_holdout_prediction_and_statistics_rebuild_match_publication(
+    holdout_baseline, tmp_path, monkeypatch
+):
+    profile = holdout_baseline.profile
+    layout = holdout_baseline.layout
+    development = holdout_baseline.development
+    source_model = holdout_baseline.source_model
+    planned = holdout_baseline.planned
+    record = holdout_baseline.record
+    prediction_ids = holdout_baseline.prediction_ids
     from quant_research_platform.storage.semantic_artifacts import (
         compare_semantic_artifacts,
     )
@@ -1176,6 +1313,15 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     assert not filesystem_exists(
         rebuild_layout.semantic_artifact_root("a_share", source_model.target_id)
     )
+
+
+@_holdout_windows()
+def test_holdout_frozen_alpha_schedules_and_report(holdout_case, tmp_path, monkeypatch):
+    profile = holdout_case.profile
+    layout = holdout_case.layout
+    development_record = holdout_case.development_record
+    record = holdout_case.record
+    results = holdout_case.results
     sources = {"global": [], "quarterly": []}
     for candidate in profile.protocol("pv_all").portfolio_candidates():
         target_id = f"pv_all_{candidate.candidate_id}_ledger"
@@ -1240,6 +1386,49 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         report["report"]["sections"]["development vs holdout"]["requested_access"]
         == "holdout"
     )
+
+
+@_holdout_windows()
+def test_holdout_reuse_survives_operational_and_future_data_changes(
+    holdout_case, tmp_path, monkeypatch
+):
+    from quant_research_platform.research.models import fitting, production
+    from quant_research_platform.research.portfolios import production as portfolios
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("holdout attempted supervised learning")
+
+    monkeypatch.setattr(fitting, "_fit_model_result", forbidden)
+    monkeypatch.setattr(production, "_build_a_share_models", forbidden)
+    monkeypatch.setattr(portfolios, "calibrate_expected_alpha", forbidden)
+    configuration = holdout_case.configuration
+    profile = holdout_case.profile
+    layout = holdout_case.layout
+    frames = holdout_case.frames
+    development = holdout_case.development
+    model_root = holdout_case.model_root
+    model_hash = holdout_case.model_hash
+    request = holdout_case.request
+    record = holdout_case.record
+    prediction_id = holdout_case.prediction_id
+    prediction_root = holdout_case.prediction_root
+    frames = {**frames, "pv_all": frames["pv_all"].copy()}
+    source_bindings = _profile(frames).producer_bindings
+    profile = replace(
+        profile,
+        producer_bindings={
+            key: replace(
+                binding,
+                producer=source_bindings[
+                    "price_volume_facts" if key == "forward_returns" else key
+                ].producer,
+            )
+            if binding.producer.__module__ == __name__
+            else binding
+            for key, binding in profile.producer_bindings.items()
+        },
+    )
+    request = {**request, "profile": profile}
     reused = research.research_run(**request)
     assert reused["status"] == "COMPLETE", reused
     reused_record = read_research_run_record(layout.research_run_path(reused["run_id"]))
@@ -1347,12 +1536,8 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     )
 
 
-@compact_a_share_windows()
-@patch.multiple(a_share, DEVELOPMENT_END=pd.Timestamp("2019-03-01").date())
-def test_both_groups_build_and_reuse_one_real_persisted_chain(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
+@_both_groups_windows()
+def _build_both_groups_baseline(tmp_path, monkeypatch):
     import numpy as np
 
     # This integration proves persisted seams; backend and portfolio matrices
@@ -1467,12 +1652,6 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
     assert result["status"] == "COMPLETE", result["target_results"]
     record = read_research_run_record(layout.research_run_path(result["run_id"]))
     assert record.status.value == "COMPLETE"
-    forged = record.payload()
-    next(target for target in forged["target_results"] if target["path"] is not None)[
-        "path"
-    ] = "../outside"
-    with pytest.raises(ValueError, match="research_run_record_invalid"):
-        research_run_record_from_payload(forged)
     protocol = profile.protocol(scenario_id="pv_all", access_window="development")
     prediction_id = protocol.prediction_target_ids[0]
     statistics_id = protocol.statistics_target_ids[0]
@@ -1535,40 +1714,85 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         assert mature_dates == 23
         assert table.observation_count.eq(mature_dates).all()
     statistics_artifact = None
-    from quant_research_platform.artifacts.outputs.bundle_validation import (
-        read_prediction_output_bundle,
-    )
-    from quant_research_platform.contracts.business_manifest import (
-        BusinessManifestEnvelope,
-    )
-    from quant_research_platform.research.statistics_production import (
-        build_a_share_statistics_tables,
-    )
-    from quant_research_platform.storage.semantic_artifacts import (
-        read_semantic_artifact,
-        write_semantic_artifact,
-    )
-
-    bundle = champion_root / "outputs" / prediction_id
-    damaged = tmp_path / "missing_family"
-    shutil.copytree(native_filesystem_path(bundle), native_filesystem_path(damaged))
-    values = pd.read_parquet(native_filesystem_path(damaged / "prediction.parquet"))
-    missing_family = "pv_all_ridge_regression"
-    values = values.loc[~values.family_id.eq(missing_family)]
-    values.to_parquet(
-        native_filesystem_path(damaged / "prediction.parquet"), index=False
-    )
-    manifest = json.loads(
-        filesystem_read_text(damaged / "manifest.json", encoding="utf-8")
-    )
-    manifest["metadata"]["prediction_metadata"]["prediction_rows"] = len(values)
-    filesystem_write_text(
-        damaged / "manifest.json", json.dumps(manifest), encoding="utf-8"
-    )
     model_root = layout.instance_root(
         layout.semantic_artifact_root("a_share", protocol.model_selection_target_id),
         results[protocol.model_selection_target_id]["instance_identity"],
     )
+    data_layout = layout.with_target_roots(
+        {
+            "pv_all": layout.instance_root(
+                layout.research_dataset_root("a_share", "pv_all"),
+                results["pv_all"]["instance_identity"],
+            )
+        }
+    )
+    return SimpleNamespace(
+        configuration=configuration,
+        profile=profile,
+        layout=layout,
+        request=request,
+        planned=planned,
+        result=result,
+        results=results,
+        record=record,
+        protocol=protocol,
+        prediction_id=prediction_id,
+        statistics_id=statistics_id,
+        portfolio_ids=portfolio_ids,
+        champion_identity=champion_identity,
+        champion_root=champion_root,
+        statistics_root=statistics_root,
+        model_root=model_root,
+        data_layout=data_layout,
+    )
+
+
+@pytest.fixture(scope="module")
+def both_groups_baseline(tmp_path_factory):
+    with pytest.MonkeyPatch.context() as monkeypatch:
+        case = _build_both_groups_baseline(
+            tmp_path_factory.mktemp("both-groups"), monkeypatch
+        )
+    before = _fixture_hashes(case.layout.project_root)
+    yield case
+    assert _fixture_hashes(case.layout.project_root) == before
+
+
+@pytest.fixture
+def both_groups_case(both_groups_baseline, tmp_path, monkeypatch):
+    from quant_research_platform.profiles import research as profile_module
+
+    case = _linked_workflow_case(both_groups_baseline, tmp_path / "project")
+    monkeypatch.setattr(
+        profile_module,
+        "bind_research_configuration",
+        lambda selected, configuration, **kwargs: selected,
+    )
+    if hasattr(case, "request"):
+        case.request = {**case.request, "layout": case.layout}
+    return case
+
+
+@_both_groups_windows()
+def test_native_run_record_rejects_escaping_target(
+    both_groups_baseline, tmp_path, monkeypatch
+):
+    record = both_groups_baseline.record
+    forged = record.payload()
+    next(target for target in forged["target_results"] if target["path"] is not None)[
+        "path"
+    ] = "../outside"
+    with pytest.raises(ValueError, match="research_run_record_invalid"):
+        research_run_record_from_payload(forged)
+
+
+@_both_groups_windows()
+def test_native_model_selection_chronology(both_groups_baseline, tmp_path, monkeypatch):
+    layout = both_groups_baseline.layout
+    model_ids = {
+        item["model_id"] for item in both_groups_baseline.configuration["models"]
+    }
+    model_root = both_groups_baseline.model_root
     model = read_quarterly_model_artifact(model_root, trial_layout=layout)
     global_decision = model.selections["global"]["final"]
     quarterly_decision = model.selections["quarterly"]["2019Q1"]
@@ -1591,17 +1815,89 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
             entry["validation_window"]["start"]
         )
     model = global_decision = quarterly_decision = None
-    data_layout = layout.with_target_roots(
-        {
-            "pv_all": layout.instance_root(
-                layout.research_dataset_root("a_share", "pv_all"),
-                results["pv_all"]["instance_identity"],
-            )
-        }
+
+
+@_both_groups_windows()
+def test_native_prediction_missing_family_is_rejected(
+    both_groups_baseline, tmp_path, monkeypatch
+):
+    profile = both_groups_baseline.profile
+    layout = both_groups_baseline.layout
+    request = both_groups_baseline.request
+    protocol = both_groups_baseline.protocol
+    prediction_id = both_groups_baseline.prediction_id
+    statistics_id = both_groups_baseline.statistics_id
+    champion_root = both_groups_baseline.champion_root
+    model_root = both_groups_baseline.model_root
+    data_layout = both_groups_baseline.data_layout
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        read_prediction_output_bundle,
+    )
+    from quant_research_platform.research.statistics_production import (
+        build_a_share_statistics_tables,
+    )
+
+    bundle = champion_root / "outputs" / prediction_id
+    damaged = tmp_path / "missing_family"
+    shutil.copytree(native_filesystem_path(bundle), native_filesystem_path(damaged))
+    values = pd.read_parquet(native_filesystem_path(damaged / "prediction.parquet"))
+    missing_family = "pv_all_ridge_regression"
+    values = values.loc[~values.family_id.eq(missing_family)]
+    values.to_parquet(
+        native_filesystem_path(damaged / "prediction.parquet"), index=False
+    )
+    manifest = json.loads(
+        filesystem_read_text(damaged / "manifest.json", encoding="utf-8")
+    )
+    manifest["metadata"]["prediction_metadata"]["prediction_rows"] = len(values)
+    filesystem_write_text(
+        damaged / "manifest.json", json.dumps(manifest), encoding="utf-8"
+    )
+    model = read_quarterly_model_artifact(model_root, trial_layout=layout)
+    (_manifest, lookup) = read_prediction_output_bundle(
+        damaged,
+        expected_output_id=prediction_id,
+        time_window=TimeWindow(request["start"], request["end"]),
+    )
+    with pytest.raises(ValueError, match="missing_required_prediction_keys"):
+        build_a_share_statistics_tables(
+            layout=data_layout,
+            dataset_catalog=profile.research_datasets,
+            dataset_id="pv_all",
+            prediction_id=prediction_id,
+            persisted_model=model,
+            protocol_manifest=protocol.target_manifest(statistics_id, "STATISTIC"),
+            time_window=TimeWindow(request["start"], request["end"]),
+            prediction_lookup=lookup,
+            global_statistics=None,
+        )
+    model = None
+
+
+@_both_groups_windows()
+def test_native_statistics_short_and_zero_maturity_windows(
+    both_groups_baseline, tmp_path, monkeypatch
+):
+    configuration = both_groups_baseline.configuration
+    profile = both_groups_baseline.profile
+    layout = both_groups_baseline.layout
+    results = both_groups_baseline.results
+    protocol = both_groups_baseline.protocol
+    statistics_root = both_groups_baseline.statistics_root
+    model_root = both_groups_baseline.model_root
+    data_layout = both_groups_baseline.data_layout
+    from quant_research_platform.artifacts.outputs.bundle_validation import (
+        read_prediction_output_bundle,
     )
     from quant_research_platform.artifacts.statistics import write_statistics_artifact
     from quant_research_platform.contracts.business_manifest import (
         build_business_manifest_envelope,
+    )
+    from quant_research_platform.research.statistics_production import (
+        build_a_share_statistics_tables,
+    )
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact,
     )
 
     for end_date in ("2019-01-15", "2019-02-15"):
@@ -1720,25 +2016,28 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
                         assert saved.reason.eq("no_common_observations").all()
         model = narrow_global = saved_quarter = None
         narrow_envelope = quarter_envelope = narrow_payload = None
-    model = read_quarterly_model_artifact(model_root, trial_layout=layout)
-    (_manifest, lookup) = read_prediction_output_bundle(
-        damaged,
-        expected_output_id=prediction_id,
-        time_window=TimeWindow(request["start"], request["end"]),
+
+
+@_both_groups_windows()
+def test_native_prediction_lineage_is_bound_to_model(
+    both_groups_baseline, tmp_path, monkeypatch
+):
+    profile = both_groups_baseline.profile
+    layout = both_groups_baseline.layout
+    protocol = both_groups_baseline.protocol
+    prediction_id = both_groups_baseline.prediction_id
+    champion_identity = both_groups_baseline.champion_identity
+    champion_root = both_groups_baseline.champion_root
+    from quant_research_platform.contracts.business_manifest import (
+        BusinessManifestEnvelope,
     )
-    with pytest.raises(ValueError, match="missing_required_prediction_keys"):
-        build_a_share_statistics_tables(
-            layout=data_layout,
-            dataset_catalog=profile.research_datasets,
-            dataset_id="pv_all",
-            prediction_id=prediction_id,
-            persisted_model=model,
-            protocol_manifest=protocol.target_manifest(statistics_id, "STATISTIC"),
-            time_window=TimeWindow(request["start"], request["end"]),
-            prediction_lookup=lookup,
-            global_statistics=None,
-        )
-    model = None
+    from quant_research_platform.storage.semantic_artifacts import (
+        read_semantic_artifact,
+        write_semantic_artifact,
+    )
+
+    bundle = champion_root / "outputs" / prediction_id
+    missing_family = "pv_all_ridge_regression"
 
     def forged_writer(staging):
         shutil.copytree(
@@ -1775,6 +2074,21 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
             champion_identity,
             trial_layout=layout,
         )
+
+
+@_both_groups_windows()
+def test_native_prediction_interruption_preserves_primary_and_publication(
+    both_groups_baseline, tmp_path, monkeypatch
+):
+    profile = both_groups_baseline.profile
+    layout = both_groups_baseline.layout
+    request = both_groups_baseline.request
+    protocol = both_groups_baseline.protocol
+    prediction_id = both_groups_baseline.prediction_id
+    champion_root = both_groups_baseline.champion_root
+    model_root = both_groups_baseline.model_root
+    data_layout = both_groups_baseline.data_layout
+    bundle = champion_root / "outputs" / prediction_id
     from quant_research_platform.artifacts.outputs import (
         prediction as prediction_writer,
     )
@@ -1843,6 +2157,92 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         Path(native_filesystem_path(bundle / "prediction.parquet")).read_bytes()
         == original_bytes
     )
+
+
+@_both_groups_windows()
+def test_both_groups_reuse_and_changed_plan_identity(
+    both_groups_case, tmp_path, monkeypatch
+):
+    configuration = both_groups_case.configuration
+    profile = both_groups_case.profile
+    layout = both_groups_case.layout
+    planned = both_groups_case.planned
+    result = both_groups_case.result
+    protocol = both_groups_case.protocol
+    prediction_id = both_groups_case.prediction_id
+    portfolio_ids = both_groups_case.portfolio_ids
+    reused = research.research_run(
+        profile=profile,
+        layout=layout,
+        research_plan=configuration,
+    )
+    reused_results = {item["target_id"]: item for item in reused["target_results"]}
+    assert result["run_id"] != reused["run_id"]
+    assert all(
+        reused_results[target_id]["status"] == "REUSED"
+        for target_id in (
+            *portfolio_ids,
+            *protocol.prediction_target_ids,
+        )
+    )
+
+    assert {
+        item["target_id"]: item["instance_identity"]
+        for item in result["target_results"]
+    } == {
+        item["target_id"]: item["instance_identity"]
+        for item in reused["target_results"]
+    }
+    changed = research.plan_targets(
+        profile=profile,
+        action="research run",
+        terminal_targets=protocol.terminal_targets("research run"),
+        layout=layout,
+        scenario_id="pv_all",
+        research_window={
+            "start": "2019-01-03",
+            "end": "2019-03-01",
+            "access": "development",
+        },
+    )
+    first = {item["target_id"]: item for item in planned["targets"]}
+    second = {item["target_id"]: item for item in changed["targets"]}
+    for target_id in (
+        "trading_calendar",
+        "market_panel_1d",
+        "execution_mask",
+        "a_share_fee_schedule",
+        "pv_all",
+    ):
+        assert (
+            first[target_id]["requested_identity"]
+            == second[target_id]["requested_identity"]
+        )
+    for target_id in portfolio_ids:
+        assert (
+            first[target_id]["requested_identity"]
+            != second[target_id]["requested_identity"]
+        )
+    assert (
+        first[prediction_id]["requested_identity"]
+        == second[prediction_id]["requested_identity"]
+    )
+
+
+@_both_groups_windows()
+def test_native_ledger_report_and_published_views(
+    both_groups_case, tmp_path, monkeypatch
+):
+    profile = both_groups_case.profile
+    layout = both_groups_case.layout
+    result = both_groups_case.result
+    results = both_groups_case.results
+    record = both_groups_case.record
+    protocol = both_groups_case.protocol
+    portfolio_ids = both_groups_case.portfolio_ids
+    statistics_root = both_groups_case.statistics_root
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
     requested_years = {}
     for target_id in portfolio_ids:
         identity = results[target_id]["instance_identity"]
@@ -1884,29 +2284,6 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
                 for chunk in chunks
             )
         artifact = None
-
-    reused = research.research_run(
-        profile=profile,
-        layout=layout,
-        research_plan=configuration,
-    )
-    reused_results = {item["target_id"]: item for item in reused["target_results"]}
-    assert result["run_id"] != reused["run_id"]
-    assert all(
-        reused_results[target_id]["status"] == "REUSED"
-        for target_id in (
-            *portfolio_ids,
-            *protocol.prediction_target_ids,
-        )
-    )
-
-    assert {
-        item["target_id"]: item["instance_identity"]
-        for item in result["target_results"]
-    } == {
-        item["target_id"]: item["instance_identity"]
-        for item in reused["target_results"]
-    }
     from quant_research_platform.artifacts import portfolio_ledger
 
     scanned = []
@@ -2052,8 +2429,12 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
 
     report = partial_report = coverage = retained = capacity = defined_capacity = (
         undefined_capacity
-    ) = model = None
+    ) = None
 
+    other_record = replace(record, run_id="run_published_views", trial_ledgers=())
+    research.write_research_run_record(
+        layout.research_run_path(other_record.run_id), other_record
+    )
     from tests.interfaces.published_research_test_support import (
         check_published_evidence_views,
     )
@@ -2062,7 +2443,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         layout=layout,
         profile=profile,
         run_id=result["run_id"],
-        other_run_id=reused["run_id"],
+        other_run_id=other_record.run_id,
         report_identity=report_identity,
         monkeypatch=monkeypatch,
     )
@@ -2074,7 +2455,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         damaged_report = research.report_build(
             profile=profile,
             layout=layout,
-            run_id=reused["run_id"],
+            run_id=other_record.run_id,
         )
     finally:
         filesystem_rename(saved_statistics_manifest, statistics_manifest)
@@ -2087,37 +2468,37 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         == "DEFINED"
     )
 
-    changed = research.plan_targets(
-        profile=profile,
-        action="research run",
-        terminal_targets=protocol.terminal_targets("research run"),
-        layout=layout,
-        scenario_id="pv_all",
-        research_window={
-            "start": "2019-01-03",
-            "end": "2019-03-01",
-            "access": "development",
-        },
-    )
-    first = {item["target_id"]: item for item in planned["targets"]}
-    second = {item["target_id"]: item for item in changed["targets"]}
-    for target_id in (
-        "trading_calendar",
-        "market_panel_1d",
-        "execution_mask",
-        "a_share_fee_schedule",
-        "pv_all",
-    ):
-        assert (
-            first[target_id]["requested_identity"]
-            == second[target_id]["requested_identity"]
+
+def _fixture_hashes(root):
+    from hashlib import sha256
+
+    return {
+        p.relative_to(root): sha256(p.read_bytes()).hexdigest()
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+
+
+def _linked_workflow_case(baseline, project):
+    import os
+
+    shutil.copytree(baseline.layout.project_root, project, copy_function=os.link)
+    case = SimpleNamespace(**vars(baseline))
+    for name, value in vars(case).items():
+        if isinstance(value, Path) and value.is_relative_to(
+            baseline.layout.project_root
+        ):
+            setattr(
+                case, name, project / value.relative_to(baseline.layout.project_root)
+            )
+    case.layout = StorageLayout(project)
+    if hasattr(case, "data_layout"):
+        case.data_layout = case.layout.with_target_roots(
+            {
+                name: project / path.relative_to(baseline.layout.project_root)
+                for name, path in baseline.data_layout._target_roots.items()
+            }
         )
-    for target_id in portfolio_ids:
-        assert (
-            first[target_id]["requested_identity"]
-            != second[target_id]["requested_identity"]
-        )
-    assert (
-        first[prediction_id]["requested_identity"]
-        == second[prediction_id]["requested_identity"]
-    )
+    if hasattr(case, "request"):
+        case.request = {**case.request, "layout": case.layout}
+    return case

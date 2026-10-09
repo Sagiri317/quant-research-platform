@@ -170,6 +170,7 @@ def produce_a_share_processed_data(
             requested = {
                 *factor_engine.factor_panel_input_columns(factor_definitions),
                 "has_legal_fundamental_pit",
+                "listing_date",
             }
             if any(
                 definition.family == "expectations" for definition in factor_definitions
@@ -183,9 +184,10 @@ def produce_a_share_processed_data(
                 column for column in dependency.required_columns if column in requested
             )
         elif spec.kind is ProcessedDataKind.LABEL:
-            requested = set(
-                label_engine.label_panel_input_columns(a_share.label_catalog().list())
-            )
+            requested = {
+                *label_engine.label_panel_input_columns(a_share.label_catalog().list()),
+                "listing_date",
+            }
             columns = tuple(
                 column for column in dependency.required_columns if column in requested
             )
@@ -719,6 +721,7 @@ def _compute_processed_frame(
         calculated = factor_engine.calculate_factors_for_panel(
             input_frame,
             definitions=definitions,
+            history_keys=("asset_id", "listing_date"),
             output_window=None
             if panel_sessions is None
             else TimeWindow(panel_sessions[0], panel_sessions[-1]),
@@ -750,7 +753,9 @@ def _compute_processed_frame(
                 if asset_sessions is None
                 else asset_sessions[asset],
             )
-            for asset, group in panel.groupby("asset_id", sort=False)
+            for (asset, _listing_date), group in panel.groupby(
+                ["asset_id", "listing_date"], sort=False
+            )
         ]
         return pd.concat(pieces, ignore_index=True).loc[:, list(spec.required_columns)]
     raise ValueError(f"unsupported_a_share_processed_kind: {spec.kind}")
