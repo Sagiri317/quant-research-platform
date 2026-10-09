@@ -2541,3 +2541,185 @@ def test_half_step_rebalance_uses_existing_ledger_and_preserves_residual_cash(
         )
         == batches
     )
+
+
+@pytest.mark.parametrize(
+    "construction",
+    ("top20_equal_weight", "top20_float_cap", "top20_equal_weight_half_step"),
+)
+@pytest.mark.parametrize("empty_reason", ("ineligible", "structural"))
+@pytest.mark.parametrize("state", ("cash", "sellable", "blocked", "closed", "unknown"))
+def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
+    construction, empty_reason, state
+):
+    frames, fee_frame, _ = _inputs()
+    stamp, entry, end = pd.to_datetime(["2023-01-03", "2023-01-04", "2023-01-05"])
+    dataset = frames["dataset"].loc[frames["dataset"].timestamp.eq(stamp)].copy()
+    dataset["feature_x"] = np.nan if empty_reason == "structural" else 1.0
+    dataset["eligible"] = empty_reason != "ineligible"
+    lookup = _PredictionLookup(missing=True)
+    alpha = production._prediction_alpha(dataset, lookup, ("feature_x",))
+    assert lookup.matched == []
+    candidate = PortfolioCandidateSpec(
+        selection_group="global",
+        prediction_selector="champion",
+        candidate_id="empty",
+        construction=construction,
+        prediction_target_id="prediction",
+        rebalance_schedule="daily",
+        top_quantile=0.5,
+        benchmark_id=None,
+        benchmark_weights_target_id=None,
+        research_dataset_id="dataset",
+        market_panel_target_id="panel",
+        execution_mask_target_id="execution",
+        trading_calendar_target_id="calendar",
+        fee_schedule_target_id="fee",
+    )
+
+    def panel(at):
+        return (
+            frames["panel"]
+            .loc[frames["panel"].timestamp.eq(at)]
+            .assign(adj_open=100.0, adj_close=100.0)
+        )
+
+    execution = (
+        frames["execution"]
+        .loc[frames["execution"].timestamp.eq(stamp)]
+        .assign(execution_at=entry)
+    )
+    execution["can_exit"] = pd.Series(
+        state not in {"blocked", "unknown"}, index=execution.index, dtype="boolean"
+    )
+    if state == "unknown":
+        execution["can_exit"] = pd.Series(pd.NA, index=execution.index, dtype="boolean")
+    kwargs = dict(
+        candidate=candidate,
+        decision_timestamp=stamp,
+        next_timestamp=entry,
+        panel=panel(stamp),
+        next_panel=panel(entry),
+        endpoint_panel=panel(end),
+        closed_assets=frozenset({"b"}) if state == "closed" else frozenset(),
+        dataset=dataset,
+        execution=execution,
+        holdings=pd.Series(dtype="float64")
+        if state == "cash"
+        else pd.Series({"b": 50.0}),
+        cash=100.0 if state == "cash" else 50.0,
+        nav=100.0,
+        initialize_at_execution=False,
+        amount_history={asset: deque([1000.0] * 20, maxlen=20) for asset in ("a", "b")},
+        alpha=alpha,
+        enhanced_decision=None,
+        target_override=None,
+        decision_reason=PORTFOLIO_DECISION_REASON_SIMPLE,
+        assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+        fee_schedule=fee_schedule_from_frame(fee_frame, content_identity="f" * 64),
+        fee_identity="f" * 64,
+        prepare_trade_cost=prepare_trade_cost,
+        market_name_for_type=lambda _: "shanghai",
+    )
+    if state == "unknown":
+        with pytest.raises(PortfolioTargetBlocked, match="unknown"):
+            production._build_session(**kwargs)
+        return
+    account, *_ = production._build_session(**kwargs)
+    ledger = account.asset_ledger
+    assert ledger.target_notional.eq(0.0).all()
+    if state == "cash":
+        assert ledger.empty
+    elif state == "sellable":
+        assert ledger.executed_delta_notional.tolist() == [-50.0]
+        assert ledger.post_trade_notional.tolist() == [0.0]
+        assert ledger[list(PORTFOLIO_LEDGER_COST_COLUMNS)].to_numpy().sum() > 0.0
+    else:
+        assert ledger.executed_delta_notional.eq(0.0).all()
+        assert ledger.post_trade_notional.tolist() == [50.0]
+
+
+@pytest.mark.parametrize("problem", ("missing", "nan", "infinite"))
+def test_nonempty_selection_still_requires_valid_predictions(problem):
+    frame = pd.DataFrame(
+        {
+            "asset_id": ["a"],
+            "timestamp": pd.Timestamp("2023-01-03"),
+            "eligible": True,
+            "x": 1.0,
+        }
+    )
+
+    class Lookup:
+        def values_for_frame(self, frame, *, mark_matched):
+            return (
+                [np.inf if problem == "infinite" else np.nan],
+                [problem != "missing"],
+            )
+
+    with pytest.raises(
+        ValueError,
+        match="missing_required_prediction_keys|portfolio_prediction_values_invalid",
+    ):
+        production._prediction_alpha(frame, Lookup(), ("x",))
+
+
+@pytest.mark.parametrize(
+    "construction", ("top20_equal_weight", "top20_equal_weight_half_step")
+)
+@pytest.mark.parametrize("fees", (False, True))
+@pytest.mark.parametrize("blocked", (False, True))
+def test_cash_exposure_is_post_execution_ledger_cash(
+    tmp_path, monkeypatch, construction, fees, blocked
+):
+    from quant_research_platform.artifacts.statistics import (
+        STATISTICS_TABLE_COLUMNS,
+        _validated_frame,
+    )
+
+    frames, fee_frame, window = _inputs()
+    if not fees:
+        fee_frame["rate"] = 0.0
+    if blocked:
+        frames["execution"]["can_enter"] = False
+    output, _ = _build_producer(
+        tmp_path,
+        monkeypatch,
+        frames=frames,
+        fee_frame=fee_frame,
+        output_window=window,
+        construction=construction,
+        typed_batches=True,
+    )
+    batches = list(output)
+    first = batches[0]
+    values = {
+        value.asset_id: value.value
+        for value in first.valuations
+        if value.phase == "after"
+    }
+    row = accounting.portfolio_interval_economics(first)
+    assert row["cash_post"] == values["__cash__"]
+    assert row["cash_weight_post"] == values["__cash__"] / sum(values.values())
+    if blocked:
+        assert row["cash_weight_post"] == 1.0
+    elif not fees:
+        assert row["cash_weight_post"] == (
+            0.5 if construction.endswith("half_step") else 0.0
+        )
+    row.update(
+        candidate_id="cash_probe",
+        benchmark_return=np.nan,
+        active_return=np.nan,
+        relative_wealth=np.nan,
+        benchmark_status="UNDEFINED",
+        benchmark_reason="not_requested",
+        access_window="development",
+    )
+    daily = pd.DataFrame(
+        [row], columns=STATISTICS_TABLE_COLUMNS["portfolio_daily.parquet"]
+    )
+    _validated_frame(daily, member="portfolio_daily.parquet")
+    daily.loc[0, "cash_weight_post"] += 0.01
+    with pytest.raises(ValueError, match="statistics_cash_exposure_invalid"):
+        _validated_frame(daily, member="portfolio_daily.parquet")

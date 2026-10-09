@@ -551,7 +551,7 @@ def test_decisions_reuse_captured_sample_origins_and_read_history_once(monkeypat
         assert not keep and quantity == 0.3
         assert gain == pytest.approx(0.15 + 30 * prediction)
     assert reads == [True]
-    assert decoded == {"book": 0, "trade": 12}
+    assert decoded == {"book": 0, "trade": 2 * 3}
 
 
 def test_unknown_historical_visible_quantity_blocks_maker_without_faking_fill():
@@ -720,4 +720,5 @@ def test_native_history_is_shared_by_sides_and_recomputes_economic_queries(monke
     for answer, query in zip(answers, queries, strict=True):
         fresh = MakerCalibration(sample_source, event_source, price_unit="0.1")
         assert fresh.select(**query) == answer
-    assert decoded == {"book": 0, "trade": 44}
+    # Eleven replacements and four nonempty KEEP queries each replay two samples.
+    assert decoded == {"book": 0, "trade": 2 * (11 + 4)}

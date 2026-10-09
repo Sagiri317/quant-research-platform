@@ -155,6 +155,9 @@ def build_a_share_report(
             "issues": issues,
         },
     }
+    sections["portfolio"]["cash_exposure"] = portfolio_statistics.get(
+        "cash_exposure", {}
+    )
     sections["portfolio"]["nav_path"] = portfolio_statistics.get("nav_path", {})
     sections["portfolio"]["paired_comparison"] = portfolio_statistics.get(
         "group_comparison", []

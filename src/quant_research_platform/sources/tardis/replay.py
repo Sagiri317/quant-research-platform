@@ -487,8 +487,6 @@ class TardisArchive:
                     active_observation = identity
                     snapshot_ready = False
                 if record["data_kind"] == "depth_snapshot":
-                    if snapshot_ready:
-                        continue
                     try:
                         yield record
                     except GeneratorExit:

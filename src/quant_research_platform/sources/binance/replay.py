@@ -1282,6 +1282,7 @@ class DepthReconstructor:
         self._bids: dict[int, float] = {}
         self._asks: dict[int, float] = {}
         self._segment_id: str | None = None
+        self._source_segment_id: str | None = None
         self._observation_id: str | None = None
         self._last_update_id: int | None = None
         self._last_times: tuple[int, int | None, int] | None = None
@@ -1320,7 +1321,7 @@ class DepthReconstructor:
         self._asks = asks
         self._known_bid_floor_tick = min(bids)
         self._known_ask_ceiling_tick = max(asks)
-        self._segment_id = segment_id
+        self._segment_id = self._source_segment_id = segment_id
         self._observation_id = observation_id
         self._last_update_id = strict_non_negative_integer(
             payload.get("lastUpdateId"),
@@ -1340,7 +1341,10 @@ class DepthReconstructor:
         if record.get("market_type") != self.market_type:
             raise ValueError("binance_replay_market_type_mismatch")
         segment_id, observation_id = _record_identity(record)
-        if segment_id != self._segment_id or observation_id != self._observation_id:
+        if (
+            segment_id != self._source_segment_id
+            or observation_id != self._observation_id
+        ):
             raise ValueError("binance_replay_segment_identity_mismatch")
         payload = record.get("payload")
         if not isinstance(payload, dict):
@@ -1502,7 +1506,7 @@ class DepthReconstructor:
             record,
             market_type=self.market_type,
         )
-        segment_id, observation_id = _record_identity(record)
+        segment_id, observation_id = self._segment_id, self._observation_id
         self._close_coverage(observed_time)
         self._invalid = True
         self._bootstrapped = False
@@ -1586,6 +1590,7 @@ def iter_reconstructed_depth(
     active_stats = stats if stats is not None else ReconstructionStats()
     reconstructor: DepthReconstructor | None = None
     active_segment: str | None = None
+    reconstruction_segment: str | None = None
     pending_reconnect: tuple[str, str] | None = None
     pending_invalid_reason: str | None = None
     records = run.iter_market_records(
@@ -1600,10 +1605,13 @@ def iter_reconstructed_depth(
             if record["data_kind"] == "depth_snapshot":
                 if reconstructor is not None:
                     if active_segment == segment_id:
-                        raise ValueError("binance_replay_snapshot_identity_duplicate")
+                        if reconstructor._observation_id != observation_id:
+                            raise ValueError("binance_replay_segment_identity_mismatch")
+                        if reconstructor.valid:
+                            continue
                     if reconstructor.valid:
                         pending_reconnect = (
-                            active_segment or segment_id,
+                            reconstructor._segment_id or segment_id,
                             reconstructor._observation_id or "",
                         )
                     reconstructor = None
@@ -1626,10 +1634,16 @@ def iter_reconstructed_depth(
                     connection_close_ns=bounds[1],
                     stats=active_stats,
                 )
+                reconstruction_segment = (
+                    f"{segment_id}:snapshot:{record['source_sequence']}"
+                    if active_segment == segment_id
+                    else segment_id
+                )
                 active_segment = segment_id
                 pending_invalid_reason = None
                 try:
                     reconstructor.bootstrap(record)
+                    reconstructor._segment_id = reconstruction_segment
                 except ValueError as error:
                     reason = str(error)
                     prefix = "binance_replay_snapshot_"
@@ -1663,7 +1677,7 @@ def iter_reconstructed_depth(
                             observed_time_ns=observed_time,
                             receive_time=record["receive_time"],
                             receive_monotonic_ns=record["receive_monotonic_ns"],
-                            segment_id=active_segment or segment_id,
+                            segment_id=reconstructor._segment_id or segment_id,
                             observation_id=reconstructor._observation_id or "",
                             market_type=market_type,
                             reason="reconnect_boundary",
@@ -1714,7 +1728,7 @@ def iter_reconstructed_depth(
                     observed_time_ns=observed_time,
                     receive_time=record["receive_time"],
                     receive_monotonic_ns=record["receive_monotonic_ns"],
-                    segment_id=segment_id,
+                    segment_id=reconstruction_segment,
                     observation_id=observation_id,
                     market_type=market_type,
                     reason=pending_invalid_reason,

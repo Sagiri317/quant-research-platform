@@ -509,3 +509,33 @@ def test_persisted_identity_rejects_same_statistics_member_replacement(
     with pytest.raises(ValueError, match="dataset_content_identity_changed"):
         operation(root)
     assert filesystem_read_bytes(manifest_path) == manifest
+
+
+@pytest.mark.parametrize("changed", (False, True))
+def test_session_validates_each_distinct_consecutive_logical_schema_once(
+    tmp_path, monkeypatch, changed
+):
+    root = make_dataset_artifact_root(tmp_path, "category_scan")
+    frames = []
+    for index in range(4):
+        frame = make_default_dataset_frame(
+            asset_ids=["a"], dates=[f"2020-01-{index + 1:02}"], values=["v0"]
+        )
+        frame["value"] = pd.Categorical(
+            frame["value"],
+            categories=[f"v{i}" for i in range(20 + (changed and index >= 2))],
+        )
+        frames.append(frame)
+    write_dataset(root, iter(frames), spec=make_processed_dataset_spec("category_scan"))
+    original = dataset_reading.validate_persisted_logical_schema
+    calls = []
+
+    def checked(*args):
+        calls.append(1)
+        return original(*args)
+
+    monkeypatch.setattr(dataset_reading, "validate_persisted_logical_schema", checked)
+    session = dataset_reading.open_dataset_session(root, columns=None, time_window=None)
+    assert len(session.all_paths) == 4
+    assert len(calls) == (2 if changed else 1)
+    session.verify()

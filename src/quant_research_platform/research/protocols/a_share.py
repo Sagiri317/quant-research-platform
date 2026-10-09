@@ -384,7 +384,9 @@ class AShareProtocol:
             self.configuration_json is not None
             and "stage_selection" in self.configuration()
         ):
-            base["stage_selection"] = self.configuration()["stage_selection"]
+            base["stage_selection"] = {
+                "sources": self.configuration()["stage_selection"]["sources"]
+            }
         if producer_kind == "MODEL":
             base.update(
                 {

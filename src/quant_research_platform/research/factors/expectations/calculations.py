@@ -90,7 +90,14 @@ def _prepare_expectations(
 
     return partial(
         _expectations_for_observations,
-        forecast,
+        {
+            asset_id: (
+                pd.DatetimeIndex(group["declare_date"]),
+                pd.DatetimeIndex(group["available_at"]),
+                group,
+            )
+            for asset_id, group in forecast.groupby("asset_id", sort=False)
+        },
         freshness_days=freshness_days,
         minimum_institutions=minimum_institutions,
     )
@@ -118,15 +125,26 @@ def _expectations_for_observations(
     if output.duplicated(["asset_id", "timestamp"]).any():
         raise ValueError("expectations_observation_key_duplicate")
     rows: list[dict[str, object] | None] = [None] * len(output)
-    forecast_groups = forecast.groupby("asset_id", sort=False).indices
     observation_times = output["timestamp"].array
     observation_closes = output["close"].array
     for asset_id, positions in output.groupby("asset_id", sort=False).indices.items():
-        asset_forecast = forecast.iloc[forecast_groups.get(asset_id, [])]
-        events = iter(asset_forecast.itertuples(index=False))
+        positions = sorted(positions, key=observation_times.__getitem__)
+        source = forecast.get(asset_id)
+        if source is None:
+            events = iter(())
+        else:
+            declarations, available, asset_forecast = source
+            first = declarations.searchsorted(
+                observation_times[positions[0]] - pd.Timedelta(days=freshness_days),
+                side="left",
+            )
+            last = available.searchsorted(
+                observation_times[positions[-1]], side="right"
+            )
+            events = iter(asset_forecast.iloc[first:last].itertuples(index=False))
         event = next(events, None)
         active = {}
-        for position in sorted(positions, key=observation_times.__getitem__):
+        for position in positions:
             timestamp = observation_times[position]
             while event is not None and event.available_at <= timestamp:
                 active[(event.forecast_end_date, event.institution_id)] = event

@@ -691,3 +691,57 @@ def test_same_value_report_updates_age_and_new_institution_share():
         actual.forward_earnings_yield_fy1.iloc[1:],
         pd.Series([0.2] * 4, index=range(1, 5), name="forward_earnings_yield_fy1"),
     )
+
+
+@pytest.mark.parametrize("freshness", (90, 180))
+def test_indexed_event_range_is_chunk_and_query_order_independent(
+    monkeypatch, freshness
+):
+    sessions = pd.date_range("2023-01-01", periods=401)
+    records = pd.DataFrame(
+        [
+            dict(
+                asset_id=asset,
+                declare_date=stamp,
+                forecast_end_date=pd.Timestamp("2024-12-31"),
+                institution_id=str(i),
+                forecast_eps=float(day + i),
+            )
+            for asset in ("a", "b")
+            for day, stamp in enumerate(sessions[:-1])
+            for i in range(3)
+        ]
+    )
+    observations = pd.DataFrame(
+        [
+            dict(asset_id=asset, timestamp=stamp, close=10.0)
+            for stamp in sessions[301:311]
+            for asset in ("b", "a")
+        ]
+    )
+    query = _prepare_expectations(
+        records, trading_sessions=sessions, freshness_days=freshness
+    )
+    whole = query(observations)
+    visited = []
+    original = pd.DataFrame.itertuples
+
+    def counted(frame, *args, **kwargs):
+        for event in original(frame, *args, **kwargs):
+            if "available_at" in frame:
+                visited.append(event)
+            yield event
+
+    monkeypatch.setattr(pd.DataFrame, "itertuples", counted)
+    chunks = [
+        query(observations.iloc[i : i + 2])
+        for i in reversed(range(0, len(observations), 2))
+    ]
+    actual = pd.concat(list(reversed(chunks)), ignore_index=True)
+    pd.testing.assert_frame_equal(actual, whole, check_exact=True)
+    assert len(visited) == 10 * 2 * 3 * freshness
+    pd.testing.assert_frame_equal(query(observations), whole, check_exact=True)
+    backwards = query(observations.iloc[::-1])
+    pd.testing.assert_frame_equal(
+        backwards.iloc[::-1].reset_index(drop=True), whole, check_exact=True
+    )

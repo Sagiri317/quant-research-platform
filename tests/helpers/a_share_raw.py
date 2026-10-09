@@ -255,7 +255,7 @@ def write_a_share_raw_fixture(
         "index_info",
         info,
         extra_columns=tuple(
-            f"Idxinfo{index:02}" for index in range(1, 11) if index != 2
+            f"Idxinfo{index:02}" for index in range(1, 11) if index not in (1, 2)
         ),
     )
     _write_csmar(

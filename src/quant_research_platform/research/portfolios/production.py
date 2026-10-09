@@ -1064,8 +1064,8 @@ def _build_session(
     elif is_rebalance_session(
         decision_timestamp, next_timestamp, candidate.rebalance_schedule
     ):
-        if dataset.empty:
-            target = pd.Series(dtype="float64")
+        if not prediction_eligible.any():
+            target = pd.Series(0.0, index=dataset.index, dtype="float64")
         else:
             target = build_simple_target_weights(
                 alpha,

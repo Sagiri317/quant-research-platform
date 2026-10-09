@@ -392,15 +392,15 @@ def label_maturity_mask(
     return keep
 
 
-def legal_training_rows(
+def legal_training_mask(
     frame: pd.DataFrame,
     *,
     fitting_cutoff: object,
     availability_column: str | None = "label_available_at",
     feature_columns: tuple[str, ...] = (),
     target_column: str | None = None,
-) -> pd.DataFrame:
-    """Select eligible finite inputs with mature labels."""
+) -> pd.Series:
+    """Validate raw rows and identify eligible finite inputs with mature labels."""
     missing = sorted({"eligible", *feature_columns}.difference(frame.columns))
     if missing:
         raise ValueError("legal_training_columns_missing: " + ", ".join(missing))
@@ -421,7 +421,27 @@ def legal_training_rows(
             frame[column], error=f"invalid_training_value: {column}", allow_null=True
         )
         keep &= values.notna()
-    return frame.loc[keep].copy()
+    return keep
+
+
+def legal_training_rows(
+    frame: pd.DataFrame,
+    *,
+    fitting_cutoff: object,
+    availability_column: str | None = "label_available_at",
+    feature_columns: tuple[str, ...] = (),
+    target_column: str | None = None,
+) -> pd.DataFrame:
+    """Select eligible finite inputs with mature labels."""
+    return frame.loc[
+        legal_training_mask(
+            frame,
+            fitting_cutoff=fitting_cutoff,
+            availability_column=availability_column,
+            feature_columns=feature_columns,
+            target_column=target_column,
+        )
+    ].copy()
 
 
 def training_availability_columns(label_column: str) -> tuple[str, ...]:

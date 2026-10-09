@@ -271,7 +271,29 @@ def _build_a_share_models(
     }
     last_recorders = {}
     last_specs = {}
+    prepared_domains = {}
+
+    def prepare_domain(spec, cutoff):
+        domain = (
+            cutoff,
+            spec.input_columns,
+            spec.label_column,
+            spec.sample_filter_mode,
+            spec.max_train_rows,
+            spec.training_weighting,
+            _model_algorithm_facts(spec.model_algorithm).input_kind,
+        )
+        if domain not in prepared_domains:
+            prepared_domains[domain] = _prepare_training(
+                dataset_spec,
+                spec,
+                chunks=chunks,
+                train_end=cutoff,
+            )
+        return prepared_domains[domain]
+
     for fold in folds:
+        prepared_domains.clear()
         quarter_id = quarter_id_for_fold(fold)
         if ("quarterly", quarter_id) in selection_windows:
             select_models(
@@ -317,13 +339,8 @@ def _build_a_share_models(
             parameters = configuration.get(
                 "parameter_candidates", [configuration["hyperparameters"]]
             )
-            prepared_training = _prepare_training(
-                dataset_spec,
-                base,
-                chunks=chunks,
-                train_end=fold.train.end,
-            )
-            n_train = len(prepared_training[0])
+            prepared_training = prepare_domain(base, fold.train.end)
+            n_train = len(prepared_training.training)
             candidates = _selection_model_specs(
                 base,
                 parameters,
@@ -405,6 +422,7 @@ def _build_a_share_models(
         for family in decision["families"]:
             key = (family["family_id"], family["selected_config_id"])
             final_choices.setdefault(key, []).append(group)
+    prepared_domains.clear()
     for (family_id, selected_id), selected_groups in final_choices.items():
         groups = tuple(selected_groups)
         parents = tuple(
@@ -457,10 +475,8 @@ def _build_a_share_models(
             observation = {}
             with record_run_observations(observation):
                 model_result = _fit_selected_model_result(
-                    dataset_spec=dataset_spec,
+                    prepared_training=prepare_domain(selected, cutoff.isoformat()),
                     selected_spec=selected,
-                    chunks=chunks,
-                    fitting_cutoff=cutoff.isoformat(),
                     quarter_id="final",
                     root_seed=root_seed,
                     candidate_parameters=selected_parameters,
@@ -538,22 +554,14 @@ def _refit_sample_coverage(
 
 def _fit_selected_model_result(
     *,
-    dataset_spec,
+    prepared_training,
     selected_spec,
-    chunks,
-    fitting_cutoff: str,
     quarter_id: str,
     root_seed: int,
     candidate_parameters,
     on_fit_start=None,
 ) -> fitting.ModelFitResult:
-    prepared_training = _prepare_training(
-        dataset_spec,
-        selected_spec,
-        chunks=chunks,
-        train_end=fitting_cutoff,
-    )
-    n_refit = len(prepared_training[0])
+    n_refit = len(prepared_training.training)
     refit_spec = _refit_model_spec(
         selected_spec,
         n_train=n_refit,
@@ -562,7 +570,7 @@ def _fit_selected_model_result(
         candidate_parameters=candidate_parameters,
     )
     if on_fit_start is not None:
-        on_fit_start(refit_spec, prepared_training[0])
+        on_fit_start(refit_spec, prepared_training.training)
     return fitting._fit_model_result(
         prepared_training,
         refit_spec,
@@ -640,37 +648,17 @@ def _prepare_training(dataset_spec, model_spec, *, chunks, train_end):
         sample_filter_mode=model_spec.sample_filter_mode,
     )
 
-    def checked_frames():
-        with closing_iterator(
-            chunks(
-                read_columns,
-                input_columns=model_spec.input_columns,
-                start=None,
-                end=train_end,
-            )
-        ) as source:
-            for chunk in source:
-                # Selection previously validated these rows in its counting pass.
-                legal_training_rows(
-                    chunk,
-                    fitting_cutoff=train_end,
-                    availability_column=training_availability_columns(
-                        model_spec.label_column
-                    )[0],
-                    feature_columns=model_input_validity_columns(
-                        model_spec.input_columns, model_spec.model_algorithm
-                    ),
-                    target_column=model_spec.label_column,
-                )
-                try:
-                    yield chunk
-                except GeneratorExit:
-                    return
-
     prepared = fitting._collect_training_frame(
-        checked_frames(), model_spec, fitting_cutoff=train_end
+        chunks(
+            read_columns,
+            input_columns=model_spec.input_columns,
+            start=None,
+            end=train_end,
+        ),
+        model_spec,
+        fitting_cutoff=train_end,
     )
-    if prepared[0].empty:
+    if prepared.training.empty:
         raise ValueError("model_training_sample_empty")
     return prepared
 

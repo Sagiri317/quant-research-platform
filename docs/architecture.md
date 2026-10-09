@@ -87,6 +87,8 @@ Crypto 的训练、验证和OOS时段必须由 `research_plan` 声明；A股不�
 完整选择保存在冻结配置/run 和报告中；所选配置产生的新训练仍遵守各自成熟截止。
 A 股开发期看过阶段结果后形成的选择注明 `development_stage_selection_exploratory`，
 不把选后的开发期联合推断当作预先确定的检验。holdout 不参与选择，仍需匹配已完成完整开发运行。
+完整选择记录进入冻结 run 和报告；计算身份只绑定 `sources` 等真实科学依赖与选择带来的推断资格，
+不把 `reason` 或 `selected_by` 的说明性变更作为重算原因。来源引用仍按原合同核验。
 
 报告重建从指定 run 记录中的冻结 JSON 重新绑定完整目录，不沿用调用者上一次裁剪的选择。
 配置绑定由既有市场 protocol/catalog owner 完成；artifact reader 只消费绑定后的选择与持久化证据。
@@ -126,6 +128,11 @@ CLI 先输出原有结构化结果，再将顶层 `COMPLETE`、`FAILED`、`BLOCK
 不自动重试、不改写旧事件，也不因此解锁 HOLDOUT_LOCKED。
 ExperimentPlan.stage 是 selection/refit 阶段的唯一事实，TrialRecord 通过 plan/protocol_hash 绑定。
 数据角色统一为 train、validation、test；development 是访问阶段，不是第四角色。
+同一请求、同一折或最终 refit 阶段内，相同截止、输入列、标签成熟域、资格过滤、行数控制、
+输入类型和时间权重共享训练域及其一次性预处理。预处理在 trial 启动后首次求值；估计器各自持有
+矩阵、标签和权重副本，冻结 scaler 保持一致。切换折或阶段释放共享域，不建立持久化缓存。
+原始行的格式、有限值、资格和成熟事实由 collector 统一验证一次；被过滤掉的非法行仍拒绝。
+
 selection fold 只声明互不重叠的 train/validation，Plan 唯一声明锁定 test。
 refit 使用空 folds 与显式 fit_windows/fit_cutoff、selection_group 及来源选择集合：
 A 股最终拟合为一个合法历史窗，Crypto 保留最后 fold 的两个真实窗口。

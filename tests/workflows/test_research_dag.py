@@ -3319,3 +3319,60 @@ def test_stage_choice_validates_published_source_and_never_uses_holdout(tmp_path
     (root / "value.json").write_text('{"status":"CHANGED"}')
     with pytest.raises(ValueError):
         research._validate_stage_selection(profile, layout, protocol)
+
+
+def test_stage_selection_prose_does_not_change_computation_contracts():
+    from copy import deepcopy
+
+    from quant_research_platform.profiles.research import bind_research_configuration
+
+    config = research_configuration()
+    config["stage_selection"] = {
+        "selected_by": "agent",
+        "reason": "first explanation",
+        "sources": [
+            {
+                "run_id": "run_source",
+                "target_id": "pv_all_factor_statistics",
+                "instance_identity": "a" * 64,
+            }
+        ],
+    }
+    changed = deepcopy(config)
+    changed["stage_selection"].update(selected_by="user", reason="reworded explanation")
+
+    def projection(value):
+        profile = bind_research_configuration(research_profile(), value)
+        protocol = profile.protocol(value["scenario_id"])
+        return protocol, {
+            target.target_id: research._semantic_target_payload(
+                profile=profile,
+                protocol=protocol,
+                target_spec=target,
+                binding=profile.producer_bindings[target.target_id],
+            )
+            for target in protocol.target_specs("research run")
+            if profile.producer_bindings[target.target_id].kind
+            is not ProducerKind.REPORT
+        }
+
+    original_protocol, original = projection(config)
+    changed_protocol, reworded = projection(changed)
+    assert original == reworded
+    assert original_protocol.manifest() != changed_protocol.manifest()
+    assert (
+        a_share._inference_blocker(next(iter(original.values()))["protocol"])
+        == "development_stage_selection_exploratory"
+    )
+    changed.pop("stage_selection")
+    _, unselected = projection(changed)
+    assert original != unselected
+    changed = deepcopy(config)
+    changed["models"][0]["input_factor_columns"] = list(
+        reversed(changed["models"][0]["input_factor_columns"])
+    )
+    if (
+        changed["models"][0]["input_factor_columns"]
+        != config["models"][0]["input_factor_columns"]
+    ):
+        assert projection(changed)[1] != original

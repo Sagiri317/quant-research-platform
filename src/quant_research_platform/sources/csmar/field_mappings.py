@@ -96,7 +96,7 @@ RAW_TABLE_CONTRACTS = MappingProxyType(
         ),
         "index_info": _RawTableContract(
             table_code="IDX_Idxinfo",
-            required_columns=("Indexcd", "Idxinfo11", "Idxinfo02"),
+            required_columns=("Indexcd", "Idxinfo01", "Idxinfo11", "Idxinfo02"),
         ),
         "index_membership": _RawTableContract(
             table_code="IDX_Chgsmp",

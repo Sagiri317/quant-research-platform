@@ -232,6 +232,8 @@ _ARROW_SCHEMAS = {
             pa.field("end_at", pa.timestamp("ns")),
             pa.field("nav_before", pa.float64()),
             pa.field("nav_post", pa.float64()),
+            pa.field("cash_post", pa.float64()),
+            pa.field("cash_weight_post", pa.float64()),
             pa.field("nav_end", pa.float64()),
             pa.field("gross_return", pa.float64()),
             pa.field("net_return", pa.float64()),
@@ -1171,6 +1173,13 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
                 or result.loc[~defined, "reason"].eq("").any()
             ):
                 raise ValueError("statistics_table_status_value_invalid")
+        if member == "portfolio_daily.parquet" and (
+            result[["cash_post", "cash_weight_post", "nav_post"]].isna().any().any()
+            or result.nav_post.le(0).any()
+            or not result.cash_post.between(0, result.nav_post).all()
+            or not result.cash_weight_post.eq(result.cash_post / result.nav_post).all()
+        ):
+            raise ValueError("statistics_cash_exposure_invalid")
         if "end_at" in result and (not result.entry_at.lt(result.end_at).all()):
             raise ValueError("statistics_holding_interval_invalid")
         if "decision_at" in result and (

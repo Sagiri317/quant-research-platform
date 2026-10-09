@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import csv
 import hashlib
+import io
 import json
 import math
 import os
 import re
+import sys
 from dataclasses import dataclass
 from datetime import date
 from pathlib import Path
@@ -55,9 +57,6 @@ _FEE_CODES = frozenset(
     }
 )
 _INCLUDED_CODES = frozenset({"BROKER_COMMISSION", "STAMP_DUTY", "TRANSFER_FEE"})
-_MAX_SIDECAR_BYTES = 128 * 1024
-_MAX_ROWS = 128
-_MAX_FIELD_CHARS = 16 * 1024
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
@@ -140,17 +139,13 @@ def _sha256_file(path: Path):
 
 def _read_sidecar(path: Path, expected) -> dict[str, object]:
     try:
-        if expected.size > _MAX_SIDECAR_BYTES:
-            raise ValueError("a_share_fee_sidecar_too_large")
         with closing_iterator(open_filesystem_file(path)) as handle:
             if dataset_file_identity_from_stat(os.fstat(handle.fileno())) != expected:
                 raise ValueError("a_share_fee_source_identity_changed")
-            raw = handle.read(_MAX_SIDECAR_BYTES + 1)
+            raw = handle.read()
             final = dataset_file_identity_from_stat(os.fstat(handle.fileno()))
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("a_share_fee_source_unavailable") from exc
-    if len(raw) > _MAX_SIDECAR_BYTES:
-        raise ValueError("a_share_fee_sidecar_too_large")
     if final != expected or _file_identity(path) != expected:
         raise ValueError("a_share_fee_source_identity_changed")
     try:
@@ -184,48 +179,26 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
     seen: set[tuple[object, ...]] = set()
     data_row_count = 0
     try:
-        with closing_iterator(open_filesystem_file(path)) as binary:
+        with (
+            closing_iterator(open_filesystem_file(path)) as binary,
+            closing_iterator(
+                io.TextIOWrapper(binary, encoding="utf-8-sig", newline="")
+            ) as text,
+        ):
             if dataset_file_identity_from_stat(os.fstat(binary.fileno())) != expected:
                 raise ValueError("a_share_fee_source_identity_changed")
-            first_line = True
-            record_bytes = 0
-            record_limit = len(FEE_CSV_COLUMNS) * (8 * _MAX_FIELD_CHARS + 3) + 3
-
-            def lines():
-                nonlocal first_line, record_bytes
-                while binary.tell() < expected.size:
-                    limit = min(
-                        expected.size - binary.tell(),
-                        record_limit - record_bytes,
-                    )
-                    if limit <= 0:
-                        raise ValueError("a_share_fee_source_record_exceeds_capacity")
-                    raw = binary.readline(limit + 1)
-                    if not raw:
-                        raise ValueError("a_share_fee_source_identity_changed")
-                    if len(raw) > limit:
-                        raise ValueError("a_share_fee_source_record_exceeds_capacity")
-                    record_bytes += len(raw)
-                    text = raw.decode("utf-8-sig" if first_line else "utf-8")
-                    first_line = False
-                    raw = None
-                    yield text
-                    text = None
-
-            reader = csv.DictReader(lines(), strict=True)
+            csv.field_size_limit(sys.maxsize)
+            reader = csv.DictReader(text, strict=True)
             if tuple(reader.fieldnames or ()) != FEE_CSV_COLUMNS:
                 raise ValueError("a_share_fee_source_schema_invalid")
-            record_bytes = 0
-            for row_number, row in enumerate(reader, start=2):
+            for row in reader:
                 data_row_count += 1
-                if row_number > _MAX_ROWS + 1:
-                    raise ValueError("a_share_fee_source_row_count_invalid")
                 if set(row) != set(FEE_CSV_COLUMNS) or None in row:
                     raise ValueError("a_share_fee_source_schema_invalid")
                 values = {}
                 for key in FEE_CSV_COLUMNS:
                     value = row[key]
-                    if not isinstance(value, str) or len(value) > _MAX_FIELD_CHARS:
+                    if not isinstance(value, str):
                         raise ValueError("a_share_fee_source_schema_invalid")
                     values[key] = value
                 fee_code = values["费用代码"]
@@ -278,7 +251,6 @@ def _read_rows(path: Path, expected) -> tuple[tuple[FeeSourceRow, ...], int]:
                         )
                     )
                 row = values = value = None
-                record_bytes = 0
             final = dataset_file_identity_from_stat(os.fstat(binary.fileno()))
     except csv.Error as exc:
         raise ValueError("a_share_fee_source_schema_invalid") from exc

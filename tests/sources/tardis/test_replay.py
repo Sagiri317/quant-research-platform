@@ -1362,3 +1362,112 @@ def test_archive_actual_spans_sort_equivalent_cross_midnight_slices(tmp_path):
         with pytest.raises(ValueError, match=reason):
             with open_market_source(tmp_path, archive_paths=paths):
                 pass
+
+
+@pytest.mark.parametrize(
+    "failure", ("depth_exhausted", "first_bridge", "healthy", "disconnect", "no_bridge")
+)
+def test_real_midnight_snapshot_recovers_book_without_inventing_observation(
+    tmp_path, failure
+):
+    import gzip
+
+    from quant_research_platform.contracts.order_book import BookBoundary
+
+    base = pd.Timestamp("2026-12-31T23:59:57Z")
+
+    def line(second, channel, payload):
+        stamp = base + pd.Timedelta(seconds=second)
+        payload = dict(payload)
+        for key in ("E", "T"):
+            if key in payload:
+                payload[key] = stamp.value // 1000000
+        row = {"stream": "btcusdt@" + channel, "data": payload}
+        if channel == "depthSnapshot":
+            row["generated"] = True
+        return (
+            stamp.isoformat().replace("+00:00", "Z") + " " + json.dumps(row) + "\n"
+        ).encode()
+
+    def delta(second, first, last, previous, bids):
+        return line(
+            second,
+            "depth@0ms",
+            {
+                "e": "depthUpdate",
+                "E": 0,
+                "T": 0,
+                "s": "BTCUSDT",
+                "st": 1,
+                "ps": "BTCUSDT",
+                "U": first,
+                "u": last,
+                "pu": previous,
+                "b": bids,
+                "a": [],
+            },
+        )
+
+    bids = [[str(100 - i), "2"] for i in range(12)]
+    asks = [[str(101 + i), "2"] for i in range(12)]
+    removes = [[price, "0"] for price, _ in bids]
+    broken = failure in {"depth_exhausted", "no_bridge"}
+    first_day = (
+        line(0, "depthSnapshot", dict(lastUpdateId=100, bids=bids, asks=asks))
+        + delta(1, 101 if failure == "first_bridge" else 100, 101, 99, [])
+        + delta(2, 102, 102, 101, removes if broken else [])
+    )
+    next_bids = [[str(88 - i), "2"] for i in range(12)] if broken else bids
+    second_day = (
+        (b"\n" if failure == "disconnect" else b"")
+        + line(3, "depthSnapshot", dict(lastUpdateId=102, bids=next_bids, asks=asks))
+        + delta(4, 103 if failure == "no_bridge" else 102, 103, 102, [])
+        + delta(5, 104, 104, 103, [])
+    )
+    paths = []
+    for index, content in enumerate((first_day, second_day)):
+        path = tmp_path / f"native-{index}.gz"
+        path.write_bytes(gzip.compress(content))
+        paths.append(path)
+    published = tmp_path / "published"
+    import_slices(published, date="2026-12-31", offset_minutes=1430, slices=paths)
+    with open_market_source(published) as source:
+        stats = ReconstructionStats()
+        events = list(
+            iter_reconstructed_depth(
+                source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+            )
+        )
+        states = [event for event in events if isinstance(event, BookState)]
+        expected = {
+            "depth_exhausted": [101, 103, 104],
+            "first_bridge": [103, 104],
+            "healthy": [101, 102, 103, 104],
+            "disconnect": [101, 102, 103, 104],
+            "no_bridge": [101],
+        }
+        assert [state.update_id for state in states] == expected[failure]
+        assert len({state.observation_id for state in states}) == (
+            2 if failure == "disconnect" else 1
+        )
+        assert len(stats.coverage_segments) == (
+            2 if failure in {"depth_exhausted", "disconnect"} else 1
+        )
+        if failure == "depth_exhausted":
+            assert states[0].segment_id != states[1].segment_id
+            assert states[1].segment_id == states[2].segment_id
+            assert states[1].best_bid[0] == 88
+            boundary = next(
+                event for event in events if isinstance(event, BookBoundary)
+            )
+            assert boundary.segment_id == states[0].segment_id
+            assert (
+                stats.coverage_segments[states[0].segment_id][1]
+                == (base + pd.Timedelta(seconds=2)).value
+            )
+            assert (
+                stats.coverage_segments[states[1].segment_id][0]
+                == (base + pd.Timedelta(seconds=4)).value
+            )
+        if failure == "healthy":
+            assert len({state.segment_id for state in states}) == 1

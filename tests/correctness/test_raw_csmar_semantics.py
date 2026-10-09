@@ -2329,3 +2329,84 @@ def test_long_quoted_csv_record_preserves_embedded_newlines(tmp_path, ending):
     assert list(raw_schemas.iter_export_csv_records(path)) == [
         ([value, "second"], len(payload))
     ]
+
+
+@pytest.mark.parametrize(
+    "omitted",
+    (
+        None,
+        "Idxinfo03",
+        "Idxinfo04",
+        "Idxinfo05",
+        "Idxinfo06",
+        "Idxinfo07",
+        "Idxinfo08",
+        "Idxinfo09",
+        "Idxinfo10",
+    ),
+)
+@pytest.mark.parametrize("reordered", (False, True))
+def test_index_info_projects_extra_text_and_persists_optional_columns(
+    tmp_path, omitted, reordered
+):
+    from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
+    from quant_research_platform.storage.datasets import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    raw.mkdir(parents=True)
+    row = dict(
+        zip(
+            COLUMN_MAPPINGS["index_info"],
+            (
+                "000300",
+                "CSI 300",
+                "2014-01-02",
+                "2013-12-31",
+                "1000",
+                "scope",
+                "1",
+                "2",
+                "3",
+                "4",
+                "5",
+                "formula",
+            ),
+            strict=True,
+        )
+    )
+    if omitted:
+        row.pop(omitted)
+    row["VendorDescription"] = "unused provider text"
+    fields = list(row)
+    if reordered:
+        fields.reverse()
+    path = raw / "csmar__index_info__synthetic__full__export-20260101.csv"
+    with path.open("w", encoding="utf-8-sig", newline="") as stream:
+        writer = csv.DictWriter(stream, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow(row)
+    original = path.read_bytes()
+    result = interim.materialize_interim_data(layout=layout, data_ids=("index_info",))
+    saved = read_dataset(result.artifact_roots["index_info"])
+    assert tuple(saved.columns) == interim.INDEX_INFO_INTERIM_COLUMNS
+    assert saved.source_asset_id.tolist() == ["000300"]
+    assert saved.index_name.tolist() == ["CSI 300"]
+    assert "VendorDescription" not in saved
+    if omitted:
+        column = COLUMN_MAPPINGS["index_info"][omitted]
+        assert saved[column].isna().all()
+        assert str(saved[column].dtype) == (
+            "Float64" if column == "base_point" else "string"
+        )
+    assert path.read_bytes() == original
+
+
+def test_index_info_name_is_a_required_source_fact(tmp_path):
+    path = tmp_path / "index.csv"
+    path.write_text("Indexcd,Idxinfo11,Idxinfo02\n000300,2014-01-02,2013-12-31\n")
+    with pytest.raises(ValueError, match="missing CSMAR columns"):
+        interim.normalize_raw_frame(
+            _collect_raw_export(path, "index_info"), "index_info"
+        )

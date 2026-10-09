@@ -1090,6 +1090,8 @@ def portfolio_interval_economics(batch: PortfolioLedgerBatch) -> dict[str, objec
         "end_at": endpoint,
         "nav_before": b,
         "nav_post": a,
+        "cash_post": after[PORTFOLIO_CASH_ASSET_ID],
+        "cash_weight_post": after[PORTFOLIO_CASH_ASSET_ID] / a,
         "nav_end": e,
         "gross_return": (e - a) / b,
         "net_return": (e - b) / b,

@@ -7,6 +7,7 @@ from collections import deque
 from collections.abc import Iterable
 from dataclasses import dataclass, field
 from fractions import Fraction
+from functools import cached_property
 
 import numpy as np
 import pandas as pd
@@ -18,7 +19,7 @@ import quant_research_platform.research.models.estimators as estimators
 import quant_research_platform.research.models.feature_importance as feature_importance
 import quant_research_platform.research.models.supervised as supervised
 from quant_research_platform.contracts.experiments import (
-    legal_training_rows,
+    legal_training_mask,
     resolve_training_availability_column,
     training_availability_columns,
 )
@@ -26,6 +27,7 @@ from quant_research_platform.contracts.filtering import required_filter_columns
 from quant_research_platform.contracts.json_codec import canonical_identity_bytes
 from quant_research_platform.contracts.models import (
     ModelSpec,
+    TrainingWeighting,
     _thaw_model_hyperparameters,
 )
 from quant_research_platform.contracts.time import time_value_isoformat
@@ -54,6 +56,28 @@ from quant_research_platform.runtime.dataframes import iter_complete_time_frames
 class ModelFitResult:
     metadata: dict[str, object]
     prediction_model: object = field(repr=False, compare=False)
+
+
+@dataclass(frozen=True)
+class PreparedTraining:
+    training: pd.DataFrame
+    row_counts: dict[str, object]
+    filter_metadata: dict[str, object]
+    input_columns: tuple[str, ...]
+    training_weighting: TrainingWeighting
+    rank_inputs: bool
+
+    @cached_property
+    def preprocessing(self):
+        # Begin the trial before learning; candidates share only immutable fit facts.
+        weights = equal_timestamp_sample_weights(
+            self.training["timestamp"], self.training_weighting
+        )
+        if self.rank_inputs:
+            return weights, None, self.training
+        matrix = self.training.loc[:, self.input_columns]
+        scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
+        return weights, scaler, scaler.transform(matrix)
 
 
 def prediction_callable(input_columns: tuple[str, ...], prediction_model: object):
@@ -183,8 +207,6 @@ def _fit_model_result(
     estimator: object,
     on_fit_start=None,
 ) -> ModelFitResult:
-    training, row_counts, filter_metadata = prepared_training
-    prepared_training = (training.copy(deep=True), row_counts, filter_metadata)
     if spec.model_algorithm == "linear_regression":
         return _fit_linear_model_result(
             prepared_training, spec, on_fit_start=on_fit_start
@@ -203,17 +225,15 @@ def _fit_linear_model_result(
     *,
     on_fit_start=None,
 ) -> ModelFitResult:
-    training, row_counts, filter_metadata = prepared_training
+    training = prepared_training.training
+    row_counts = prepared_training.row_counts
+    filter_metadata = prepared_training.filter_metadata
     if training.empty:
         raise ValueError("model_training_sample_empty")
     if on_fit_start is not None:
         on_fit_start(spec, training)
-    weights = equal_timestamp_sample_weights(
-        training["timestamp"], spec.training_weighting
-    )
-    matrix = training.loc[:, spec.input_columns]
-    scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
-    transformed = scaler.transform(matrix).to_numpy(dtype="float64")
+    weights, scaler, matrix = prepared_training.preprocessing
+    transformed = matrix.to_numpy(dtype="float64")
     design = np.column_stack((np.ones(len(transformed)), transformed))
     weighted = np.sqrt(weights)
     target = training[spec.label_column].to_numpy(dtype="float64")
@@ -296,15 +316,16 @@ def _fit_estimator_model_result(
     estimator: object,
     on_fit_start=None,
 ) -> ModelFitResult:
-    training, row_counts, filter_metadata = prepared_training
+    training = prepared_training.training
+    row_counts = prepared_training.row_counts
+    filter_metadata = prepared_training.filter_metadata
     if training.empty:
         raise ValueError("model_training_sample_empty")
     threads = supervised.model_thread_count(spec)
     if on_fit_start is not None:
         on_fit_start(spec, training)
-    y = training.loc[:, spec.label_column].to_numpy(dtype="float64", copy=False)
     predictor = _fit_predictor(
-        spec, training=training, y=y, estimator=estimator, threads=threads
+        spec, prepared_training=prepared_training, estimator=estimator, threads=threads
     )
 
     resolved_hyperparameters = supervised.resolved_model_hyperparameters(spec)
@@ -331,7 +352,7 @@ def _fit_estimator_model_result(
 
 def _collect_training_frame(
     frames: Iterable[pd.DataFrame], spec: ModelSpec, *, fitting_cutoff: object
-) -> tuple[pd.DataFrame, dict[str, object], dict[str, object]]:
+) -> PreparedTraining:
     validity_columns = model_input_validity_columns(
         spec.input_columns, spec.model_algorithm
     )
@@ -366,6 +387,16 @@ def _collect_training_frame(
         )
     ) as work_frames:
         for chunk in work_frames:
+            chunk = chunk.reset_index(drop=True)
+            keep = legal_training_mask(
+                chunk,
+                fitting_cutoff=fitting_cutoff,
+                availability_column=resolve_training_availability_column(
+                    chunk, label_column=spec.label_column
+                ),
+                feature_columns=validity_columns,
+                target_column=spec.label_column,
+            )
             filtered, metadata = apply_filter_mode(
                 chunk, mode=spec.sample_filter_mode, metadata_key="sample_filter_mode"
             )
@@ -381,16 +412,7 @@ def _collect_training_frame(
                 *spec.input_columns,
                 spec.label_column,
             ]
-            availability_column = resolve_training_availability_column(
-                filtered, label_column=spec.label_column
-            )
-            usable = legal_training_rows(
-                filtered,
-                fitting_cutoff=fitting_cutoff,
-                availability_column=availability_column,
-                feature_columns=validity_columns,
-                target_column=spec.label_column,
-            ).loc[:, selected_columns]
+            usable = filtered.loc[keep.loc[filtered.index], selected_columns].copy()
             if usable.empty:
                 continue
             if spec.max_train_rows is not None:
@@ -433,27 +455,35 @@ def _collect_training_frame(
         "rows_input": rows_input,
         "rows_after_filter_mode": rows_after_filter,
     }
-    return (training, row_counts, filter_metadata)
+    return PreparedTraining(
+        training,
+        row_counts,
+        filter_metadata,
+        spec.input_columns,
+        spec.training_weighting,
+        spec.model_algorithm
+        in {"equal_weight_rank_ensemble", "ic_weighted_rank_ensemble"},
+    )
 
 
 def _fit_predictor(
     spec: ModelSpec,
     *,
-    training: pd.DataFrame,
-    y: np.ndarray,
+    prepared_training: PreparedTraining,
     estimator: object,
     threads: int,
 ) -> object:
+    y = prepared_training.training[spec.label_column].to_numpy(
+        dtype="float64", copy=True
+    )
+    weights, scaler, matrix = prepared_training.preprocessing
+    weights = weights.copy()
     if spec.model_algorithm in {
         "equal_weight_rank_ensemble",
         "ic_weighted_rank_ensemble",
     }:
         return estimator.fit(
-            training,
-            y,
-            sample_weight=equal_timestamp_sample_weights(
-                training["timestamp"], spec.training_weighting
-            ),
+            prepared_training.training.copy(deep=True), y, sample_weight=weights
         )
     from sklearn.exceptions import ConvergenceWarning
 
@@ -467,12 +497,7 @@ def _fit_predictor(
         if spec.model_algorithm in {"xgboost_regressor", "lightgbm_regressor"}
         else 1
     )
-    matrix = training.loc[:, spec.input_columns]
-    weights = equal_timestamp_sample_weights(
-        training["timestamp"], spec.training_weighting
-    )
-    scaler = ModelMatrixScaler.fit(matrix, sample_weight=weights)
-    scaled_matrix = scaler.transform(matrix)
+    scaled_matrix = matrix.copy(deep=True)
     try:
         with warnings.catch_warnings():
             warnings.simplefilter("error", ConvergenceWarning)

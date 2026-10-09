@@ -1264,6 +1264,9 @@ def _portfolio_statistics_tables(
                 * np.sqrt(252)
             ),
             "max_drawdown": float((wealth / wealth.cummax().clip(lower=1) - 1).min()),
+            "mean_cash_weight_post": float(selected.cash_weight_post.mean()),
+            "terminal_cash_weight_post": float(selected.cash_weight_post.iloc[-1]),
+            "terminal_cash_post": float(selected.cash_post.iloc[-1]),
             "target_turnover": float(selected.target_turnover.mean()),
             "requested_turnover": float(selected.requested_turnover.mean()),
             "realized_turnover": float(selected.realized_turnover.mean()),

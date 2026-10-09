@@ -215,3 +215,92 @@ def test_persisted_trial_correlations_obey_exact_bounds(field, sign):
     metrics[field] = sign * math.nextafter(1.0, math.inf)
     with pytest.raises(ValueError, match="invalid_model_metadata"):
         validate_completed_model_trial_metrics("model", metrics)
+
+
+def test_ordered_single_asset_coverage_streams_without_window_concat(monkeypatch):
+    from quant_research_platform.research.models.trial_selection import (
+        ModelSampleCoverage,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=8),
+            "asset_id": "a",
+            "label": [1.0, 5.0, -2.0, 6.0, 3.0, -4.0, 7.0, 8.0],
+            "prediction": [2.0, 3.0, -4.0, 5.0, 1.0, -3.0, 9.0, 7.0],
+        }
+    )
+    kwargs = dict(
+        model_id="probe",
+        label_column="label",
+        prediction_column="prediction",
+        validation_axis="single_asset_time_series",
+    )
+    expected = evaluate_model_trial_metrics_from_chunks((frame,), **kwargs)
+    unordered = evaluate_model_trial_metrics_from_chunks(
+        (frame.iloc[4:], frame.iloc[:4]), **kwargs
+    )
+    assert unordered == expected
+    coverage = ModelSampleCoverage({"asset_ids": ["a"]})
+    coverage.add(frame)
+    closed = []
+
+    def chunks():
+        try:
+            for offset in range(0, len(frame), 2):
+                yield frame.iloc[offset : offset + 2]
+        finally:
+            closed.append(True)
+
+    def forbidden(*args, **kwargs):
+        pytest.fail("ordered single-asset validation materialized the window")
+
+    monkeypatch.setattr(pd, "concat", forbidden)
+    actual = evaluate_model_trial_metrics_from_chunks(
+        chunks(), expected_coverage=coverage, **kwargs
+    )
+    assert actual == expected and closed == [True]
+    with pytest.raises(ValueError, match="model_coverage_key_order_invalid"):
+        evaluate_model_trial_metrics_from_chunks(
+            (frame.iloc[4:], frame.iloc[:4]), expected_coverage=coverage, **kwargs
+        )
+    with pytest.raises(ValueError, match="model_trial_common_coverage_mismatch"):
+        evaluate_model_trial_metrics_from_chunks(
+            (frame.iloc[:4],), expected_coverage=coverage, **kwargs
+        )
+
+
+def test_streaming_metric_failure_closes_source():
+    from quant_research_platform.research.models.trial_selection import (
+        ModelSampleCoverage,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.date_range("2020-01-01", periods=2),
+            "asset_id": "a",
+            "label": [1.0, 2.0],
+            "prediction": [2.0, np.inf],
+        }
+    )
+    coverage = ModelSampleCoverage({"asset_ids": ["a"]})
+    coverage.add(frame)
+    closed = []
+
+    def chunks():
+        try:
+            yield frame.iloc[:1]
+            yield frame.iloc[1:]
+        finally:
+            closed.append(True)
+
+    with pytest.raises(ValueError, match="invalid_trial_metric_values"):
+        evaluate_model_trial_metrics_from_chunks(
+            chunks(),
+            model_id="probe",
+            label_column="label",
+            prediction_column="prediction",
+            validation_axis="single_asset_time_series",
+            expected_coverage=coverage,
+        )
+    assert closed == [True]

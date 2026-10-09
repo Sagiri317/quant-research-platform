@@ -351,8 +351,7 @@ def _build_dataset_session(
             current_dtypes = parse_logical_dtype_metadata(
                 metadata.logical_dtype_payload
             )
-        validate_persisted_logical_schema(metadata.schema, current_dtypes)
-        if changed_dtypes:
+            validate_persisted_logical_schema(metadata.schema, current_dtypes)
             logical_dtypes = (
                 merge_logical_dtype_payloads([current_dtypes])
                 if logical_dtypes is None

@@ -102,12 +102,13 @@ class ICWeightedRankEnsemble:
                 weights.append(correlation)
         if not weights:
             raise ValueError("all_ensemble_correlations_undefined")
-        values = np.asarray(weights, dtype="float64")
-        normalizer = float(np.sum(np.abs(values)))
+        normalizer = sum(map(abs, weights), Fraction())
         if normalizer == 0.0:
             raise ValueError("all_ensemble_correlations_zero")
         columns = tuple(defined_columns)
-        normalized = values / normalizer
+        normalized = np.asarray(
+            [float(value / normalizer) for value in weights], dtype="float64"
+        )
         scores = _rank_frame_columns(frame, columns) @ normalized
         return cls(
             columns=columns,
@@ -277,18 +278,16 @@ def _training_rank_correlations(frame, columns, label_column, sample_weight):
         yield (
             column,
             (
-                float(
-                    sum(
-                        (
-                            Fraction(float(value)) * Fraction(weight)
-                            for value, weight in zip(
-                                correlations, period_weights, strict=True
-                            )
-                        ),
-                        Fraction(),
-                    )
-                    / sum((Fraction(weight) for weight in period_weights), Fraction())
+                sum(
+                    (
+                        Fraction(float(value)) * Fraction(weight)
+                        for value, weight in zip(
+                            correlations, period_weights, strict=True
+                        )
+                    ),
+                    Fraction(),
                 )
+                / sum((Fraction(weight) for weight in period_weights), Fraction())
                 if correlations
                 else None
             ),

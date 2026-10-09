@@ -218,3 +218,61 @@ def test_rank_training_keeps_nullable_raw_domains_and_first_undefined_factor():
         EqualWeightRankEnsembleFactory(("x0", "x1"), "label").fit(
             invalid, invalid.label.to_numpy()
         )
+
+
+@pytest.mark.parametrize("direction", (-1, 1))
+def test_rank_fit_preserves_underflowed_correlation_and_reload(direction):
+    import pickle
+
+    from quant_research_platform.research.models.rank_ensemble import (
+        EqualWeightRankEnsembleFactory,
+        ICWeightedRankEnsemble,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(
+                ["2020-01-01"] * 2 + ["2020-01-02"] * 3 + ["2020-01-03"] * 3
+            ),
+            "x": [1.0, 2.0, 1.0, 2.0, 3.0, 1.0, 2.0, 3.0],
+            "y": [1.0, 2.0, 1.0, 3.0, 2.0, 3.0, 1.0, 2.0],
+        }
+    )
+    frame.loc[:1, "y"] *= direction
+    frame["opposite"] = -frame["x"]
+    tiny = np.nextafter(0.0, 1.0)
+    weights = [tiny, tiny, 1.0, 1.0, 1.0, 1.0, 1.0, 1.0]
+    correlation = dict(_training_rank_correlations(frame, ("x",), "y", weights))["x"]
+    assert correlation * direction > 0
+    assert float(correlation) == 0
+    ew = EqualWeightRankEnsembleFactory(("x",), "y").fit(
+        frame, frame["y"].to_numpy(), sample_weight=weights
+    )
+    assert ew.directions == (float(direction),)
+    for columns, expected in (
+        (("x",), (float(direction),)),
+        (("x", "opposite"), (0.5 * direction, -0.5 * direction)),
+    ):
+        model = ICWeightedRankEnsemble.fit(
+            frame, input_columns=columns, label_column="y", sample_weight=weights
+        )
+        assert model.weights == expected
+        np.testing.assert_array_equal(
+            pickle.loads(pickle.dumps(model)).predict(frame), model.predict(frame)
+        )
+
+
+def test_exact_zero_rank_correlation_stays_zero():
+    from quant_research_platform.research.models.rank_ensemble import (
+        ICWeightedRankEnsemble,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2020-01-01"] * 2 + ["2020-01-02"] * 2),
+            "x": [1.0, 2.0, 1.0, 2.0],
+            "y": [1.0, 2.0, 2.0, 1.0],
+        }
+    )
+    with pytest.raises(ValueError, match="all_ensemble_correlations_zero"):
+        ICWeightedRankEnsemble.fit(frame, input_columns=("x",), label_column="y")

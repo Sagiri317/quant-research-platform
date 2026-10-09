@@ -322,12 +322,16 @@ def test_prepared_training_rows_are_exact_and_cutoff_scoped():
             len(
                 _prepare_training(
                     dataset, model, chunks=chunks, train_end="2020-01-02"
-                )[0]
+                ).training
             )
             == 2
         )
     assert (
-        len(_prepare_training(dataset, model, chunks=chunks, train_end="2020-01-01")[0])
+        len(
+            _prepare_training(
+                dataset, model, chunks=chunks, train_end="2020-01-01"
+            ).training
+        )
         == 1
     )
 
@@ -375,7 +379,7 @@ def test_training_preparation_failure_closes_borrowed_dataset_source(
     def fail_filter(*args, **kwargs):
         raise primary
 
-    monkeypatch.setattr(fitting, "legal_training_rows", fail_filter)
+    monkeypatch.setattr(fitting, "legal_training_mask", fail_filter)
     session = open_dataset_session(root, columns=None, time_window=None)
 
     def chunks(columns, **kwargs):

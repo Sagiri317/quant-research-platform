@@ -491,6 +491,17 @@ def iter_private_export_chunks(
                 pending.append(row)
             if not pending:
                 return
+            if dataset == "index_info":
+                from .field_mappings import COLUMN_MAPPINGS, validate_raw_column_names
+
+                validate_raw_column_names(tuple(header), dataset)
+                positions = [
+                    i
+                    for i, name in enumerate(header)
+                    if name in COLUMN_MAPPINGS[dataset]
+                ]
+                header = [header[i] for i in positions]
+                pending = [[row[i] for i in positions] for row in pending]
             frame = _raw_frame(pending, header)
             if dataset == "index_info":
                 frame = _clean_index_info_source_codes(frame)

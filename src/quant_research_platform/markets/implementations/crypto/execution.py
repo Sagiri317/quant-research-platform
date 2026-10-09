@@ -1426,6 +1426,8 @@ class MakerCalibration:
                 error = sample["forecast_error"]
                 funded = [0.0] * len(funding)
                 for replacement in (None, limit):
+                    if replacement is None and active_order is None and not commands:
+                        continue
                     cumulative = 0.0
                     response = self._response(
                         sample,

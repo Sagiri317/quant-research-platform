@@ -221,25 +221,47 @@ def evaluate_model_trial_metrics_from_chunks(
         if expected_coverage is None
         else ModelSampleCoverage(expected_coverage.scope)
     )
-    parts = []
-    with closing_iterator(iter(chunks)) as source:
-        for frame in source:
-            if frame.empty:
-                continue
-            if coverage is not None:
-                coverage.add(frame)
-            parts.append(
-                _metric_chunk(
+
+    def metric_chunks():
+        with closing_iterator(iter(chunks)) as source:
+            for frame in source:
+                if frame.empty:
+                    continue
+                if coverage is not None:
+                    coverage.add(frame)
+                yield _metric_chunk(
                     frame,
                     label_column=label_column,
                     prediction_column=prediction_column,
                 )
+        if coverage is not None and (
+            coverage.semantic_identity != expected_coverage.semantic_identity
+            or coverage.row_count != expected_coverage.row_count
+        ):
+            raise ValueError("model_trial_common_coverage_mismatch")
+
+    with closing_iterator(metric_chunks()) as source:
+        if (
+            validation_axis == "single_asset_time_series"
+            and expected_coverage is not None
+            and len(expected_coverage._assets) == 1
+        ):
+            # One-asset coverage enforces the same timestamp order used by sorting.
+            summary = _cross_sectional_metric_summary(
+                (
+                    (timestamp, label, prediction, 0.0, 0.0)
+                    for values in source
+                    for timestamp, label, prediction in values.itertuples(
+                        index=False, name=None
+                    )
+                ),
+                validation_axis=validation_axis,
+                label_calibration=label_calibration,
             )
-    if coverage is not None and (
-        coverage.semantic_identity != expected_coverage.semantic_identity
-        or coverage.row_count != expected_coverage.row_count
-    ):
-        raise ValueError("model_trial_common_coverage_mismatch")
+            if summary["validation_rows"] == 0:
+                raise ValueError("empty_model_selection_validation_window")
+            return {"model_id": model_id, **summary}
+        parts = list(source)
     if not parts:
         raise ValueError("empty_model_selection_validation_window")
     values = pd.concat(parts, ignore_index=True)
@@ -306,7 +328,8 @@ def _cross_sectional_metric_summary(
         if not np.isfinite(residual):
             raise ValueError("model_selection_mse_unrepresentable")
         timestamp_state.ic.update(label, prediction)
-        timestamp_state.rank.update(float(label_rank), float(prediction_rank))
+        if validation_axis == "cross_sectional":
+            timestamp_state.rank.update(float(label_rank), float(prediction_rank))
         squared_errors.add(residual)
     if timestamp_state is not None:
         row_count += timestamp_state.ic.count

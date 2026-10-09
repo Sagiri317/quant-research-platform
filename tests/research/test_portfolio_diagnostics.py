@@ -481,6 +481,8 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         assert np.prod(1 + rows.net_return) == pytest.approx(1.035)
         np.testing.assert_allclose(rows.gross_return - rows.cost_drag, rows.net_return)
         assert rows.nav_post.tolist() == [990.0, 1020.0, 1005.0]
+        assert rows.cash_post.eq(0.0).all()
+        assert rows.cash_weight_post.eq(0.0).all()
         assert (
             (rows.nav_end - rows.nav_post).sum(),
             (rows.nav_end - rows.nav_before).sum(),
@@ -681,6 +683,17 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         "portfolio_statistics"
     ]
     assert evidence["portfolio_statistics"]["artifact_status"] == "DEFINED"
+    cash = report["sections"]["portfolio"]["cash_exposure"]
+    assert cash["artifact_identity"] == envelope.instance_identity
+    assert cash["weight_column"] == "cash_weight_post"
+    assert cash["table"] == "portfolio_daily.parquet"
+    assert len(cash["latest"]) == len(candidates)
+    assert all(row["cash_weight_post"] == 0.0 for row in cash["latest"])
+    assert {row["metric_id"] for row in cash["summary"]} == {
+        "mean_cash_weight_post",
+        "terminal_cash_weight_post",
+        "terminal_cash_post",
+    }
     capacity_detail = report["sections"]["capacity"]["detail"]
     assert capacity_detail == {
         "artifact_identity": envelope.instance_identity,

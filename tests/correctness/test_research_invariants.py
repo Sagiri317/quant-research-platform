@@ -1640,7 +1640,7 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
             "feature_observed_x": [1, 0, 0],
         }
     )
-    training, _, _ = _collect_training_frame(
+    prepared = _collect_training_frame(
         [frame],
         ModelSpec(
             model_id="flags",
@@ -1651,4 +1651,5 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
         ),
         fitting_cutoff=pd.Timestamp("2024-01-02"),
     )
+    training = prepared.training
     assert training.asset_id.tolist() == ["a", "b"]

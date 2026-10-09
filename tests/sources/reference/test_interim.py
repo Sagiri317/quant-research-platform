@@ -311,8 +311,8 @@ def test_fee_reader_rejects_early_eof_after_real_truncation(tmp_path, monkeypatc
     class Handle(io.FileIO):
         reads = 0
 
-        def readline(self, *args):
-            raw = super().readline(*args)
+        def read(self, *args):
+            raw = super().read(*args)
             self.reads += 1
             if self.reads == 1:
                 with open(native_filesystem_path(path), "r+b") as writer:
@@ -669,7 +669,7 @@ def test_malformed_fee_csv_is_source_local_and_preserves_old_good(
     assert opened and all(handle.closed for handle in opened)
 
 
-def test_fee_csv_bounded_decoder_preserves_quoted_multiline_fields(tmp_path):
+def test_fee_csv_decoder_preserves_quoted_multiline_fields(tmp_path):
     raw = _write_reference_root(tmp_path / "raw") / "reference"
     source = raw / "a_share_fee_schedule"
     path = source / A_SHARE_FEE_CSV_NAME
@@ -734,3 +734,43 @@ def test_fee_materialization_parses_once_then_rechecks_at_publication(
         data_ids=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
     )
     assert len(calls) == 2
+
+
+@pytest.mark.parametrize("terminator", ("\n", "\r\n", "\r", "mixed"))
+def test_fee_csv_native_newlines_and_unrestricted_metadata(tmp_path, terminator):
+    import io
+    from datetime import date, timedelta
+
+    raw = _write_reference_root(tmp_path / "raw") / "reference"
+    root = raw / "a_share_fee_schedule"
+    path = root / A_SHARE_FEE_CSV_NAME
+    rows = []
+    for day in range(129):
+        stamp = (date(2020, 1, 1) + timedelta(days=day)).isoformat()
+        rows.append(_row("BROKER_COMMISSION", stamp, stamp, "沪深", "买入", 0.0003))
+    rows[0]["说明"] = "x" * 16800 + '\rquoted "text"\nnext\r\nline'
+    output = io.StringIO(newline="")
+    for index, record in enumerate(
+        [dict(zip(FEE_CSV_COLUMNS, FEE_CSV_COLUMNS, strict=True)), *rows]
+    ):
+        ending = (
+            ("\n", "\r", "\r\n")[index % 3] if terminator == "mixed" else terminator
+        )
+        csv.DictWriter(
+            output, fieldnames=FEE_CSV_COLUMNS, lineterminator=ending
+        ).writerow(record)
+    payload = output.getvalue().encode("utf-8-sig")
+    path.write_bytes(payload)
+    metadata = dict(
+        file_bytes=len(payload),
+        file_sha256=hashlib.sha256(payload).hexdigest(),
+        row_count=len(rows),
+        fields_raw=list(FEE_CSV_COLUMNS),
+        notes="x" * 140000,
+    )
+    (root / A_SHARE_FEE_SIDECAR_NAME).write_text(json.dumps(metadata), encoding="utf-8")
+    result = load_a_share_fee_source(reference_root=raw)
+    assert len(result.rows) == 129
+    assert result.csv_sha256 == metadata["file_sha256"]
+    assert result.rows[0].rate == 0.0003
+    assert path.read_bytes() == payload

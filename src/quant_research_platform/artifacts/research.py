@@ -453,6 +453,18 @@ def load_a_share_run_evidence(
             }
             with artifact.table("portfolio_attribution.parquet") as attribution:
                 with artifact.table("portfolio_daily.parquet") as daily:
+                    latest_cash = daily.loc[
+                        daily.entry_at.eq(
+                            daily.groupby("candidate_id").entry_at.transform("max")
+                        ),
+                        [
+                            "candidate_id",
+                            "entry_at",
+                            "cash_post",
+                            "nav_post",
+                            "cash_weight_post",
+                        ],
+                    ]
                     merged = attribution.merge(
                         daily[["candidate_id", "entry_at", "end_at", "nav_before"]],
                         on=["candidate_id", "entry_at", "end_at"],
@@ -530,6 +542,28 @@ def load_a_share_run_evidence(
                 "robustness": summaries["robustness"],
                 "attribution": attribution_summary,
                 "exposures": exposure_evidence,
+                "cash_exposure": {
+                    "artifact_identity": portfolio_ref.instance_identity,
+                    "table": "portfolio_daily.parquet",
+                    "key_columns": ["candidate_id", "entry_at"],
+                    "cash_column": "cash_post",
+                    "weight_column": "cash_weight_post",
+                    "definition": (
+                        "Cash / NAV at the execution open "
+                        "after completed trades and fees."
+                    ),
+                    "latest": _report_rows(latest_cash),
+                    "summary": [
+                        row
+                        for row in summaries["performance"]
+                        if row["metric_id"]
+                        in {
+                            "mean_cash_weight_post",
+                            "terminal_cash_weight_post",
+                            "terminal_cash_post",
+                        }
+                    ],
+                },
                 "nav_path": {
                     "table": "portfolio_daily.parquet",
                     "post_nav": "nav_post",
