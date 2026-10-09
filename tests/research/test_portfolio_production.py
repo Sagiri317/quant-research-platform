@@ -268,6 +268,9 @@ def _build_producer(
     frozen_calibration: production.AlphaCalibration | None = None,
     typed_batches: bool = False,
     construction: str = "top20_equal_weight",
+    shared_alpha_facts=None,
+    shared_risk_fits=None,
+    identity_overrides=None,
 ):
     final_calibrations = [] if final_calibrations is None else final_calibrations
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
@@ -320,6 +323,7 @@ def _build_producer(
             "stock_master",
         )
     }
+    identities.update(identity_overrides or {})
     roots = {}
     for target_id, identity in identities.items():
         root = tmp_path / target_id / identity
@@ -500,6 +504,8 @@ def _build_producer(
             market_name_for_type=lambda _value: "shanghai",
             unified_trading_sessions=unified_trading_sessions,
             on_final_calibration=final_calibrations.append,
+            shared_alpha_facts=shared_alpha_facts,
+            shared_risk_fits=shared_risk_fits,
         )
         for batch in chunks:
             yield (batch if typed_batches else session_frame(batch))
@@ -867,9 +873,9 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
     risk_dates = []
     observe_return_session = production.FactorRiskState.observe_return_session
 
-    def observe(state, frame):
+    def observe(state, frame, **kwargs):
         risk_dates.append(pd.Timestamp(frame.timestamp.iloc[0]))
-        return observe_return_session(state, frame)
+        return observe_return_session(state, frame, **kwargs)
 
     def reject_recalibration(*args, **kwargs):
         pytest.fail("holdout must retain its frozen alpha calibration")
@@ -891,6 +897,8 @@ def test_enhanced_holdout_reads_research_sessions_from_prediction_start(
         access_window="holdout",
         frozen_calibration=calibration,
         final_calibrations=final_calibrations,
+        shared_alpha_facts={},
+        shared_risk_fits={},
     )
     if missing_session is not None:
         with pytest.raises(
@@ -2172,6 +2180,8 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
         output_window=window,
         candidate=candidate,
         final_calibrations=final,
+        shared_alpha_facts={},
+        shared_risk_fits={},
     )
     batches = list(chunks)
     assert len(final) == 1
@@ -2676,6 +2686,7 @@ def test_cash_exposure_is_post_execution_ledger_cash(
         STATISTICS_TABLE_COLUMNS,
         _validated_frame,
     )
+    from tests.helpers.statistics_artifacts import statistics_envelope
 
     frames, fee_frame, window = _inputs()
     if not fees:
@@ -2719,10 +2730,30 @@ def test_cash_exposure_is_post_execution_ledger_cash(
     daily = pd.DataFrame(
         [row], columns=STATISTICS_TABLE_COLUMNS["portfolio_daily.parquet"]
     )
-    _validated_frame(daily, member="portfolio_daily.parquet")
+    envelope = statistics_envelope(
+        build_business_manifest_envelope(
+            logical_artifact_id="cash_probe_statistics",
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity="c" * 64,
+            research_window={
+                "start": window.start.isoformat(),
+                "end": window.end.isoformat(),
+                "access": "development",
+            },
+            upstream_identities={},
+            semantic_metadata={},
+        ),
+        group="portfolio",
+        protocol={
+            "access_window": "development",
+            "portfolio_candidates": [row["candidate_id"]],
+        },
+    ).payload()
+    _validated_frame(daily, member="portfolio_daily.parquet", envelope=envelope)
     daily.loc[0, "cash_weight_post"] += 0.01
     with pytest.raises(ValueError, match="statistics_cash_exposure_invalid"):
-        _validated_frame(daily, member="portfolio_daily.parquet")
+        _validated_frame(daily, member="portfolio_daily.parquet", envelope=envelope)
 
 
 @pytest.mark.parametrize("styles", (RISK_STYLE_COLUMNS[:-1], RISK_STYLE_COLUMNS))
@@ -2816,3 +2847,150 @@ def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles)
         deficient = extended.copy()
         deficient.loc[deficient.eligible, styles[0]] = 0.0
         assert changed.fit_return_session(deficient, project_ineligible=True) is None
+
+
+def test_enhanced_candidates_share_only_common_fits_and_preserve_ledgers(
+    tmp_path, monkeypatch
+):
+    frames, fee, window = _inputs()
+    rng = np.random.default_rng(121)
+    assets = [f"a{i:03}" for i in range(200)]
+    for name in ("panel", "dataset", "execution"):
+        seed = frames[name].loc[frames[name].asset_id.eq("a")].drop(columns="asset_id")
+        frames[name] = seed.merge(pd.DataFrame({"asset_id": assets}), how="cross")
+    panel = frames["panel"]
+    panel["period_return"] = rng.normal(0, 0.01, len(panel))
+    panel["float_market_cap"] = 1000.0
+    panel["industry_standard_id"] = "CSRC2012"
+    panel["industry_level1_code"] = "A01"
+    panel["is_nonfinancial_industry"] = True
+    for column in RISK_STYLE_COLUMNS:
+        frames["dataset"][column] = rng.normal(size=len(panel))
+    frames["benchmark"] = pd.DataFrame(
+        [
+            {
+                "benchmark_id": benchmark,
+                "asset_id": asset,
+                "timestamp": date,
+                "weight": 1 / 100,
+            }
+            for benchmark, selected in (
+                ("csi500", assets[:100]),
+                ("csi1000", assets[100:]),
+            )
+            for date in pd.bdate_range(window.start, window.end)
+            for asset in selected
+        ]
+    )
+
+    class Lookup(_PredictionLookup):
+        def values_for_frame(self, frame, *, mark_matched):
+            return np.array(
+                [int(asset[1:]) / 200 for asset in frame.asset_id]
+            ), bytearray([1] * len(frame))
+
+    base = PortfolioCandidateSpec(
+        selection_group="global",
+        prediction_selector="champion",
+        candidate_id="shared_500",
+        construction="benchmark_enhanced",
+        prediction_target_id="prediction",
+        rebalance_schedule="daily",
+        top_quantile=None,
+        benchmark_id="csi500",
+        benchmark_weights_target_id="benchmark",
+        risk_style_columns=RISK_STYLE_COLUMNS,
+        risk_context_target_ids=("risk_context",),
+        research_dataset_id="dataset",
+        market_panel_target_id="panel",
+        execution_mask_target_id="execution",
+        trading_calendar_target_id="calendar",
+        fee_schedule_target_id="fee",
+    )
+    candidates = (
+        base,
+        replace(base, candidate_id="shared_1000", benchmark_id="csi1000"),
+    )
+    counts = {"alpha": 0, "risk": 0}
+    original_alpha, original_fit = (
+        production.calibrate_expected_alpha,
+        FactorRiskState._fit_return_session,
+    )
+
+    def alpha(*args, **kwargs):
+        counts["alpha"] += 1
+        return original_alpha(*args, **kwargs)
+
+    def fit(*args, **kwargs):
+        counts["risk"] += 1
+        return original_fit(*args, **kwargs)
+
+    monkeypatch.setattr(production, "calibrate_expected_alpha", alpha)
+    monkeypatch.setattr(FactorRiskState, "_fit_return_session", fit)
+    expected = []
+    for candidate in candidates:
+        chunks, _ = _build_producer(
+            tmp_path / candidate.candidate_id,
+            monkeypatch,
+            frames=frames,
+            fee_frame=fee,
+            output_window=window,
+            candidate=candidate,
+            prediction_lookup=Lookup(),
+        )
+        expected.append(list(chunks))
+    baseline_counts = counts.copy()
+    counts.update(alpha=0, risk=0)
+    alpha_facts, risk_fits = {}, {}
+    for candidate, baseline in zip(candidates, expected, strict=True):
+        final = []
+        chunks, _ = _build_producer(
+            tmp_path / (candidate.candidate_id + "_shared"),
+            monkeypatch,
+            frames=frames,
+            fee_frame=fee,
+            output_window=window,
+            candidate=candidate,
+            prediction_lookup=Lookup(),
+            shared_alpha_facts=alpha_facts,
+            shared_risk_fits=risk_fits,
+            final_calibrations=final,
+        )
+        actual = list(chunks)
+        assert len(actual) == len(baseline)
+        for left, right in zip(actual, baseline, strict=True):
+            pd.testing.assert_frame_equal(left, right, check_exact=True)
+        assert final[0]["cutoff"] == window.end.isoformat()
+    assert counts["alpha"] * 2 == baseline_counts["alpha"]
+    assert counts["risk"] * 2 == baseline_counts["risk"]
+    assert alpha_facts and risk_fits
+
+    for label, candidate, identities, changed_alpha, changed_risk in (
+        ("selector", replace(base, prediction_selector="family"), None, True, False),
+        (
+            "schedule",
+            replace(base, rebalance_schedule="weekly-last-trading-day"),
+            None,
+            True,
+            False,
+        ),
+        ("dataset", base, {"dataset": "d" * 64}, True, False),
+        ("risk", base, {"risk_context": "e" * 64}, False, True),
+        ("panel", base, {"panel": "c" * 64}, True, True),
+    ):
+        before = counts.copy()
+        chunks, _ = _build_producer(
+            tmp_path / label,
+            monkeypatch,
+            frames=frames,
+            fee_frame=fee,
+            output_window=window,
+            candidate=candidate,
+            prediction_lookup=Lookup(),
+            shared_alpha_facts=alpha_facts,
+            shared_risk_fits=risk_fits,
+            identity_overrides=identities,
+        )
+        assert list(chunks)
+        assert (counts["alpha"] > before["alpha"]) is changed_alpha
+        assert (counts["risk"] > before["risk"]) is changed_risk

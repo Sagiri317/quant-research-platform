@@ -504,3 +504,41 @@ def test_report_markdown_read_preserves_primary_and_closes_native_handle(
     assert opened[0].close_calls == 1
     assert opened[0].native.closed
     assert _files(root) == before
+
+
+@pytest.mark.parametrize("mutation", ("manifest", "member", "replace", "body"))
+def test_report_consumption_rechecks_snapshot(tmp_path, monkeypatch, mutation):
+    from quant_research_platform.artifacts import research
+
+    envelope, payload = _report()
+    root = write_research_report_artifact(
+        tmp_path / "report", envelope=envelope, payload=payload
+    )
+    original = research.read_json_evidence
+
+    def read(*args, **kwargs):
+        result = original(*args, **kwargs)
+        if mutation in {"manifest", "body"}:
+            path = root / "manifest.json"
+            filesystem_write_bytes(path, filesystem_read_bytes(path) + b"\n")
+        elif mutation == "member":
+            filesystem_write_bytes(root / "unexpected", b"")
+        else:
+            path = root / "report.md"
+            replacement = root / "replacement"
+            filesystem_write_bytes(replacement, filesystem_read_bytes(path))
+            replacement.replace(path)
+        if mutation == "body":
+            filesystem_write_bytes(root / "report.md", b"changed")
+        return result
+
+    monkeypatch.setattr(research, "read_json_evidence", read)
+    with pytest.raises(
+        ValueError,
+        match="research_report_markdown_identity_changed"
+        if mutation == "body"
+        else "(identity_changed|member_set_changed)",
+    ):
+        read_research_report_artifact(
+            root, expected_identity=root.name, include_markdown=True
+        )

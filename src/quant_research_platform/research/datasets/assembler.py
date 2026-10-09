@@ -136,7 +136,7 @@ def _iter_joined_processed_chunks(
     time_window: TimeWindow,
     diagnostics: dict | None = None,
 ) -> Iterator[pd.DataFrame]:
-    base_data_id = _base_input_data_id(dataset_spec)
+    base_data_id = dataset_spec.base_input_data_id
     chunk_windows = _iter_research_chunk_windows_from_base_input(
         replace(
             sessions[base_data_id],
@@ -155,7 +155,6 @@ def _iter_joined_processed_chunks(
                 dataset_spec=dataset_spec,
                 sessions=sessions,
                 time_window=chunk_window,
-                base_data_id=base_data_id,
                 diagnostics=diagnostics,
             )
             validate_research_dataset(chunk, dataset_spec)
@@ -173,22 +172,17 @@ def _join_processed_inputs(
     dataset_spec: ResearchDatasetSpec,
     sessions: Mapping[str, DatasetSession],
     time_window: TimeWindow,
-    base_data_id: str | None = None,
     diagnostics: dict | None = None,
 ) -> pd.DataFrame:
-    assembled: pd.DataFrame | None = None
-    base_keys: pd.DataFrame | None = None
-    for input_data_id in _ordered_input_data_ids(
-        dataset_spec, base_data_id=base_data_id
-    ):
+    base = dataset_spec.base_input_data_id
+    assembled = materialize_dataset_session(sessions[base].filtered_view(time_window))
+    base_keys = assembled.loc[:, list(dataset_spec.primary_key)].copy()
+    for input_data_id in dataset_spec.input_data_ids:
+        if input_data_id == base:
+            continue
         input_frame = materialize_dataset_session(
             sessions[input_data_id].filtered_view(time_window)
         )
-        if assembled is None:
-            assembled = input_frame
-            base_keys = input_frame.loc[:, list(dataset_spec.primary_key)].copy()
-            continue
-        assert base_keys is not None
         _validate_input_key_coverage(
             base_keys,
             input_frame,
@@ -201,8 +195,6 @@ def _join_processed_inputs(
             how="left",
             validate="one_to_one",
         )
-    if assembled is None:
-        raise ValueError("empty_research_dataset_inputs")
     assembled = _add_a_share_semantic_columns(assembled, dataset_spec)
     if dataset_spec.feature_transforms:
         assembled = apply_feature_transforms(
@@ -258,20 +250,10 @@ def _iter_research_chunk_windows_from_base_input(
     yield TimeWindow(pending.start, time_window.end)
 
 
-def _base_input_data_id(dataset_spec: ResearchDatasetSpec) -> str:
-    if not dataset_spec.input_data_ids:
-        raise ValueError("empty_research_dataset_inputs")
-    if dataset_spec.base_input_data_id not in dataset_spec.input_data_ids:
-        raise ValueError(
-            f"base_input_data_id_not_in_inputs: {dataset_spec.base_input_data_id}"
-        )
-    return dataset_spec.base_input_data_id
-
-
 def _ordered_input_data_ids(
-    dataset_spec: ResearchDatasetSpec, *, base_data_id: str | None
+    dataset_spec: ResearchDatasetSpec,
 ) -> tuple[str, ...]:
-    base = base_data_id or _base_input_data_id(dataset_spec)
+    base = dataset_spec.base_input_data_id
     return (
         base,
         *(data_id for data_id in dataset_spec.input_data_ids if data_id != base),
@@ -333,7 +315,6 @@ def _processed_input_columns(
 def _validate_research_input_specs(
     dataset_spec: ResearchDatasetSpec, processed_catalog: ProcessedDataCatalog
 ) -> None:
-    _base_input_data_id(dataset_spec)
     processed_specs = {
         data_id: processed_catalog.get(data_id)
         for data_id in dataset_spec.input_data_ids
@@ -366,20 +347,6 @@ def _validate_research_input_specs(
         allowed_roles={ColumnRole.FACTOR},
         allowed_kinds={ProcessedDataKind.FACTOR},
         error_name="invalid_research_factor_columns",
-    )
-    generated_feature_columns = set(_generated_feature_columns(dataset_spec))
-    stored_feature_columns = tuple(
-        column
-        for column in dataset_spec.feature_columns
-        if column not in generated_feature_columns
-    )
-    _require_columns_from_roles_or_kinds(
-        stored_feature_columns,
-        role_by_column=role_by_column,
-        kind_by_column=kind_by_column,
-        allowed_roles={ColumnRole.FEATURE},
-        allowed_kinds=set(),
-        error_name="invalid_research_feature_columns",
     )
     _require_columns_from_roles_or_kinds(
         tuple(
@@ -444,7 +411,7 @@ def _require_no_duplicate_output_columns(
     requested = (
         set(_ordered_output_columns(dataset_spec))
         .difference(dataset_spec.primary_key)
-        .difference(_generated_feature_columns(dataset_spec))
+        .difference(dataset_spec.feature_columns)
     )
     producers: dict[str, list[str]] = {}
     for data_id, processed_spec in processed_specs.items():
@@ -471,8 +438,7 @@ def _require_research_required_columns_available(
         set(_ordered_output_columns(dataset_spec))
         .difference(available)
         .difference(
-            _generated_feature_columns(dataset_spec)
-            + _generated_semantic_columns(dataset_spec)
+            dataset_spec.feature_columns + _generated_semantic_columns(dataset_spec)
         )
     )
     if missing:
@@ -491,14 +457,6 @@ def _ordered_output_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...
                 *dataset_spec.context_columns,
             )
         )
-    )
-
-
-def _generated_feature_columns(dataset_spec: ResearchDatasetSpec) -> tuple[str, ...]:
-    return tuple(
-        column
-        for transform in dataset_spec.feature_transforms
-        for column in transform.output_columns
     )
 
 
@@ -578,7 +536,7 @@ def _open_input_dataset_sessions(
 ) -> dict[str, DatasetSession]:
     sessions: dict[str, DatasetSession] = {}
     existing_columns: tuple[str, ...] = ()
-    for data_id in _ordered_input_data_ids(dataset_spec, base_data_id=None):
+    for data_id in _ordered_input_data_ids(dataset_spec):
         processed_spec = processed_catalog.get(data_id)
         columns = _processed_input_columns(
             dataset_spec, processed_spec, existing_columns=existing_columns

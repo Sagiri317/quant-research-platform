@@ -992,7 +992,7 @@ def test_empty_legal_financial_event_domain_persists_unknown_panel_rows(tmp_path
 
 
 @pytest.mark.parametrize("size", [64, 128])
-def test_ttm_annual_revisions_use_constant_time_known_period_lookup(size, monkeypatch):
+def test_ttm_annual_revisions_keep_latest_known_period_state(size, monkeypatch):
     from quant_research_platform.markets.implementations.a_share import fundamentals
 
     events = pd.DataFrame(

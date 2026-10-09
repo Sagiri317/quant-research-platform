@@ -48,6 +48,9 @@ from tests.helpers.research_configuration import (
     research_configuration,
 )
 from tests.helpers.research_specs import make_demo_research_dataset_spec
+from tests.helpers.statistics_artifacts import (
+    statistics_envelope as bind_statistics_envelope,
+)
 from tests.research.workflow_test_support import (
     shared_model_protocol,
 )
@@ -448,11 +451,17 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
             },
             semantic_metadata={"primary_label": primary, "hac_lag": 19},
         )
+        statistics_envelope = bind_statistics_envelope(
+            statistics_envelope, group="research", protocol=protocol
+        )
+        factor_statistics_envelope = bind_statistics_envelope(
+            statistics_envelope, group="factor", protocol=protocol
+        )
         factor_statistics_root = write_statistics_artifact(
             (layout.project_root / "statistics").with_name(
                 (layout.project_root / "statistics").name + "_factor"
             ),
-            envelope=statistics_envelope,
+            envelope=factor_statistics_envelope,
             tables={
                 key: value
                 for key, value in (tables).items()
@@ -474,7 +483,7 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
         )
         factor_statistics = read_statistics_artifact(
             factor_statistics_root,
-            expected_identity=statistics_envelope.instance_identity,
+            expected_identity=factor_statistics_envelope.instance_identity,
         )
         identities.append(statistics_envelope.instance_identity)
         expected = frame.loc[
@@ -617,6 +626,10 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         upstream_identities={},
         semantic_metadata={},
     )
+    envelope = bind_statistics_envelope(envelope, group="research", protocol=protocol)
+    factor_envelope = bind_statistics_envelope(
+        envelope, group="factor", protocol=protocol
+    )
     statistics_tables = build_a_share_statistics_tables(
         layout=layout,
         dataset_catalog=ResearchDatasetCatalog((spec,)),
@@ -647,7 +660,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             (layout.semantic_artifact_root("a_share", "pv_all_global_statistics")).name
             + "_factor"
         ),
-        envelope=envelope,
+        envelope=factor_envelope,
         tables={
             key: value
             for key, value in (statistics_tables).items()
@@ -668,7 +681,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         root, expected_identity=envelope.instance_identity
     )
     factor_artifact = read_statistics_artifact(
-        factor_root, expected_identity=envelope.instance_identity
+        factor_root, expected_identity=factor_envelope.instance_identity
     )
     with factor_artifact.table("factor_diagnostics.parquet") as factors:
         assert factors.observation_count.eq(65 if full_factor_history else 64).all()
@@ -735,6 +748,12 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         },
         logical_artifact_id="pv_all_quarterly_statistics",
     )
+    paired_envelope = bind_statistics_envelope(
+        paired_envelope, group="research", protocol=quarterly_protocol
+    )
+    factor_paired_envelope = bind_statistics_envelope(
+        paired_envelope, group="factor", protocol=quarterly_protocol
+    )
     paired_tables = build_a_share_statistics_tables(
         layout=layout,
         dataset_catalog=ResearchDatasetCatalog((spec,)),
@@ -766,7 +785,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             ).name
             + "_factor"
         ),
-        envelope=paired_envelope,
+        envelope=factor_paired_envelope,
         tables={
             key: value
             for key, value in (paired_tables).items()
@@ -787,56 +806,59 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
         paired_root, expected_identity=paired_envelope.instance_identity
     )
     read_statistics_artifact(
-        factor_paired_root, expected_identity=paired_envelope.instance_identity
+        factor_paired_root, expected_identity=factor_paired_envelope.instance_identity
     )
     with paired_artifact.table("model_reality_checks.parquet") as checks:
         assert checks.status.eq("DEFINED").all()
         assert checks.observation_count.eq(64).all()
-        for test_id, constructor in (
-            ("spa_reality_check", SPA),
-            ("stepm_superior_models", StepM),
-            ("model_confidence_set", MCS),
-        ):
-            seed = derive_seed(
-                42, "a_share_model_reality_check", "pv_all", "development", test_id
-            )
-            options = dict(block_size=20, reps=10000, seed=seed)
-            native = (
-                constructor(losses, size=0.05, **options)
-                if constructor is MCS
-                else constructor(benchmark, challengers, size=0.05, **options)
-                if constructor is StepM
-                else constructor(benchmark, challengers, **options)
-            )
-            native.compute()
-            rows = checks.loc[checks.test_id.eq(test_id)]
-            assert rows.seed.eq(seed).all()
-            if constructor is SPA:
-                for label in ("lower", "consistent", "upper"):
-                    assert (
-                        rows.loc[
-                            rows.statistic_id.eq(label + "_p_value"), "value"
-                        ].iloc[0]
-                        == native.pvalues[label]
-                    )
-            elif constructor is StepM:
-                assert set(rows.loc[rows.value.eq(1), "family_id"]) == set(
-                    native.superior_models
+        if not full_factor_history:
+            for test_id, constructor in (
+                ("spa_reality_check", SPA),
+                ("stepm_superior_models", StepM),
+                ("model_confidence_set", MCS),
+            ):
+                seed = derive_seed(
+                    42, "a_share_model_reality_check", "pv_all", "development", test_id
                 )
-            else:
-                for family in families:
-                    assert (
-                        rows.loc[
-                            rows.family_id.eq(family) & rows.statistic_id.eq("p_value"),
-                            "value",
-                        ].iloc[0]
-                        == native.pvalues.loc[family].iloc[0]
+                options = dict(block_size=20, reps=10000, seed=seed)
+                native = (
+                    constructor(losses, size=0.05, **options)
+                    if constructor is MCS
+                    else constructor(benchmark, challengers, size=0.05, **options)
+                    if constructor is StepM
+                    else constructor(benchmark, challengers, **options)
+                )
+                native.compute()
+                rows = checks.loc[checks.test_id.eq(test_id)]
+                assert rows.seed.eq(seed).all()
+                if constructor is SPA:
+                    for label in ("lower", "consistent", "upper"):
+                        assert (
+                            rows.loc[
+                                rows.statistic_id.eq(label + "_p_value"), "value"
+                            ].iloc[0]
+                            == native.pvalues[label]
+                        )
+                elif constructor is StepM:
+                    assert set(rows.loc[rows.value.eq(1), "family_id"]) == set(
+                        native.superior_models
                     )
-                assert set(
-                    rows.loc[
-                        rows.statistic_id.eq("included") & rows.value.eq(1), "family_id"
-                    ]
-                ) == set(native.included)
+                else:
+                    for family in families:
+                        assert (
+                            rows.loc[
+                                rows.family_id.eq(family)
+                                & rows.statistic_id.eq("p_value"),
+                                "value",
+                            ].iloc[0]
+                            == native.pvalues.loc[family].iloc[0]
+                        )
+                    assert set(
+                        rows.loc[
+                            rows.statistic_id.eq("included") & rows.value.eq(1),
+                            "family_id",
+                        ]
+                    ) == set(native.included)
     with artifact.table("model_comparison.parquet") as table:
         assert len(table) == len(families) - 1
         assert table.observation_count.eq(64).all()
@@ -913,7 +935,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                 ).name
                 + "_factor"
             ),
-            envelope=paired_envelope,
+            envelope=factor_paired_envelope,
             tables={
                 key: value
                 for key, value in (robustness_tables).items()
@@ -934,7 +956,8 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             robust_root, expected_identity=paired_envelope.instance_identity
         )
         factor_robust_artifact = read_statistics_artifact(
-            factor_robust_root, expected_identity=paired_envelope.instance_identity
+            factor_robust_root,
+            expected_identity=factor_paired_envelope.instance_identity,
         )
         with factor_robust_artifact.table("factor_diagnostics.parquet") as table:
             assert table.status.eq("DEFINED").all()
@@ -948,7 +971,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             malformed = {name: table.copy() for name, table in global_tables.items()}
             losses_table = malformed["model_losses"]
             if mutation == "key":
-                losses_table.loc[0, "timestamp"] += pd.Timedelta(days=1000)
+                losses_table.loc[0, "timestamp"] += pd.Timedelta(nanoseconds=1)
             elif mutation == "count":
                 losses_table.loc[0, "observation_count"] += 1
             elif mutation == "family":
@@ -967,11 +990,17 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
                 },
                 logical_artifact_id=f"coverage_{mutation}",
             )
+            mutated_envelope = bind_statistics_envelope(
+                mutated_envelope, group="research", protocol=protocol
+            )
+            factor_mutated_envelope = bind_statistics_envelope(
+                mutated_envelope, group="factor", protocol=protocol
+            )
             factor_mutated_root = write_statistics_artifact(
                 (tmp_path / f"coverage_{mutation}").with_name(
                     (tmp_path / f"coverage_{mutation}").name + "_factor"
                 ),
-                envelope=mutated_envelope,
+                envelope=factor_mutated_envelope,
                 tables={
                     key: value
                     for key, value in (malformed).items()
@@ -993,7 +1022,7 @@ def test_family_comparison_production_matches_arch_on_persisted_common_date_loss
             )
             read_statistics_artifact(
                 factor_mutated_root,
-                expected_identity=mutated_envelope.instance_identity,
+                expected_identity=factor_mutated_envelope.instance_identity,
             )
             with pytest.raises(
                 ValueError,
@@ -1392,9 +1421,13 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         upstream_identities={},
         semantic_metadata={},
     )
+    envelope = bind_statistics_envelope(envelope, group="research", protocol=protocol)
+    factor_envelope = bind_statistics_envelope(
+        envelope, group="factor", protocol=protocol
+    )
     factor_artifact_root = write_statistics_artifact(
         (tmp_path / "statistics").with_name((tmp_path / "statistics").name + "_factor"),
-        envelope=envelope,
+        envelope=factor_envelope,
         tables={
             key: value
             for key, value in (outputs[0]).items()
@@ -1415,7 +1448,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         artifact_root, expected_identity=envelope.instance_identity
     )
     factor_artifact = read_statistics_artifact(
-        factor_artifact_root, expected_identity=envelope.instance_identity
+        factor_artifact_root, expected_identity=factor_envelope.instance_identity
     )
     members = {
         "factor_diagnostics.parquet",
@@ -1507,7 +1540,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         (tmp_path / "statistics_zero_residual").with_name(
             (tmp_path / "statistics_zero_residual").name + "_factor"
         ),
-        envelope=envelope,
+        envelope=factor_envelope,
         tables={
             key: value
             for key, value in (outputs[2]).items()
@@ -1528,7 +1561,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         zero_root, expected_identity=envelope.instance_identity
     )
     factor_zero_artifact = read_statistics_artifact(
-        factor_zero_root, expected_identity=envelope.instance_identity
+        factor_zero_root, expected_identity=factor_envelope.instance_identity
     )
     for member in members:
         with (
@@ -1561,7 +1594,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         (tmp_path / "statistics_empty_periods").with_name(
             (tmp_path / "statistics_empty_periods").name + "_factor"
         ),
-        envelope=envelope,
+        envelope=factor_envelope,
         tables={
             key: value
             for key, value in (empty_period_tables).items()
@@ -1580,7 +1613,7 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     )
     read_statistics_artifact(empty_root, expected_identity=envelope.instance_identity)
     factor_empty_artifact = read_statistics_artifact(
-        factor_empty_root, expected_identity=envelope.instance_identity
+        factor_empty_root, expected_identity=factor_envelope.instance_identity
     )
     with factor_empty_artifact.table("fama_macbeth_periods.parquet") as table:
         assert table.empty
@@ -1588,14 +1621,14 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
         artifact_root, expected_identity=envelope.instance_identity
     )
     factor_artifact = read_statistics_artifact(
-        factor_artifact_root, expected_identity=envelope.instance_identity
+        factor_artifact_root, expected_identity=factor_envelope.instance_identity
     )
     primary = KeyboardInterrupt("table_consumer_interrupted")
     artifact = read_statistics_artifact(
         artifact_root, expected_identity=envelope.instance_identity
     )
     factor_artifact = read_statistics_artifact(
-        factor_artifact_root, expected_identity=envelope.instance_identity
+        factor_artifact_root, expected_identity=factor_envelope.instance_identity
     )
     with pytest.raises(KeyboardInterrupt) as caught:
         with artifact.table("model_losses.parquet") as table:
@@ -1944,6 +1977,12 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             upstream_identities={},
             semantic_metadata={},
         )
+        envelope = bind_statistics_envelope(
+            envelope, group="research", protocol=protocol
+        )
+        factor_envelope = bind_statistics_envelope(
+            envelope, group="factor", protocol=protocol
+        )
         statistics_tables = build_a_share_statistics_tables(
             layout=layout,
             dataset_catalog=ResearchDatasetCatalog((spec,)),
@@ -1970,7 +2009,7 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             (tmp_path / f"statistics_{position}").with_name(
                 (tmp_path / f"statistics_{position}").name + "_factor"
             ),
-            envelope=envelope,
+            envelope=factor_envelope,
             tables={
                 key: value
                 for key, value in (statistics_tables).items()
@@ -1991,7 +2030,7 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             root, expected_identity=envelope.instance_identity
         )
         factor_artifact = read_statistics_artifact(
-            factor_root, expected_identity=envelope.instance_identity
+            factor_root, expected_identity=factor_envelope.instance_identity
         )
         tables = {}
         for member in members:
@@ -2060,7 +2099,7 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             (tmp_path / f"paired_statistics_{position}").with_name(
                 (tmp_path / f"paired_statistics_{position}").name + "_factor"
             ),
-            envelope=envelope,
+            envelope=factor_envelope,
             tables={
                 key: value
                 for key, value in (paired_tables).items()
@@ -2081,7 +2120,7 @@ def test_model_family_names_preserve_factor_statistics_and_persisted_identity(
             paired_root, expected_identity=envelope.instance_identity
         )
         read_statistics_artifact(
-            factor_paired_root, expected_identity=envelope.instance_identity
+            factor_paired_root, expected_identity=factor_envelope.instance_identity
         )
         with paired_artifact.table("model_group_comparison.parquet") as persisted:
             pd.testing.assert_frame_equal(

@@ -80,7 +80,7 @@ def test_dataset_writer_accepts_private_processed_artifact_root(tmp_path: Path) 
     assert (root / "data" / "year=2014" / "part-000.parquet").is_file()
 
 
-def test_projected_dataset_fingerprint_includes_primary_key_columns(
+def test_projected_exact_comparison_includes_primary_key_columns(
     tmp_path: Path,
 ) -> None:
     left = tmp_path / "data" / "processed" / "a_share" / "factor" / "left"

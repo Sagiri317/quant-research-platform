@@ -34,7 +34,7 @@ def test_csv_constructor_preserves_primary_when_close_fails(
 ):
     from quant_research_platform.sources.csmar import raw_schemas
 
-    primary = error_type("read-primary")
+    primary = error_type("constructor-primary")
     path = tmp_path / "synthetic.csv"
     path.write_bytes(b"a,b\n1,2\n")
     handle = path.open("rb")
@@ -43,7 +43,7 @@ def test_csv_constructor_preserves_primary_when_close_fails(
         def fileno(self):
             return handle.fileno()
 
-        def read(self, _size):
+        def readable(self):
             raise primary
 
         def close(self):

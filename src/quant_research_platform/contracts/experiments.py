@@ -574,7 +574,6 @@ class TrialRecord:
     risk_assumptions: Mapping[str, object] = field(default_factory=dict)
     rebalance_assumption: str = "not_applicable"
     artifact_lineage: tuple[str, ...] = ()
-    holdout_accessed: bool = False
 
     def __post_init__(self) -> None:
         for value in (
@@ -629,8 +628,6 @@ class TrialRecord:
             for key, value in self.thread_settings.items()
         ):
             raise ValueError("trial_thread_settings_invalid")
-        if self.holdout_accessed is not False:
-            raise ValueError("trial_holdout_access_forbidden")
         for field_name in (
             "normalized_parameters",
             "backend_versions",
@@ -676,7 +673,6 @@ class TrialRecord:
             "risk_assumptions": plain_json_value(self.risk_assumptions),
             "rebalance_assumption": self.rebalance_assumption,
             "artifact_lineage": list(self.artifact_lineage),
-            "holdout_accessed": self.holdout_accessed,
         }
 
     @classmethod

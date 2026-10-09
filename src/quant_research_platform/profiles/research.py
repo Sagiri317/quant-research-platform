@@ -128,6 +128,9 @@ def _a_share_profile() -> ResearchProfile:
     from quant_research_platform.research.evaluations.runner import (
         build_evaluation_result_from_research_dataset,
     )
+    from quant_research_platform.research.models.persisted import (
+        read_quarterly_model_artifact,
+    )
     from quant_research_platform.research.models.production import (
         build_model_selection_result,
     )
@@ -253,7 +256,10 @@ def _a_share_profile() -> ResearchProfile:
             **{
                 f"{scenario_id}_report_artifact": ProducerBinding(
                     ProducerKind.REPORT,
-                    produce_a_share_report,
+                    partial(
+                        produce_a_share_report,
+                        read_model_artifact=read_quarterly_model_artifact,
+                    ),
                 )
                 for scenario_id in a_share.SCENARIO_IDS
             },
@@ -511,6 +517,8 @@ def bind_research_configuration(
 
         portfolio_producer = partial(
             build_portfolio_ledger,
+            shared_alpha_facts={},
+            shared_risk_fits={},
             iter_portfolio_sessions=a_share_producer.iter_portfolio_sessions,
             fee_schedule_from_frame=fee_schedule_from_frame,
             require_fee_coverage=require_fee_coverage,

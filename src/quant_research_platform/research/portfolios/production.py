@@ -166,6 +166,8 @@ def build_portfolio_ledger(
     optimizer_config: OptimizerConfig | None = None,
     frozen_calibration: AlphaCalibration | None = None,
     on_final_calibration=None,
+    shared_alpha_facts: dict | None = None,
+    shared_risk_fits: dict | None = None,
     prediction_lookup: object,
     persisted_model: object,
     access_window: str,
@@ -313,6 +315,36 @@ def build_portfolio_ledger(
         else None
     )
     previous_risk_cross: pd.DataFrame | None = None
+    market_facts = tuple(
+        (target_id, upstream_identities[target_id])
+        for target_id in (
+            candidate.market_panel_target_id,
+            candidate.trading_calendar_target_id,
+            "market_bars_1d",
+            "stock_master",
+        )
+    )
+    alpha_fact_key = (
+        market_facts,
+        upstream_identities[candidate.prediction_target_id],
+        upstream_identities[candidate.research_dataset_id],
+        candidate.prediction_selector,
+        candidate.selection_group,
+        candidate.rebalance_schedule,
+        access_window,
+        alpha_start,
+        tuple(sorted(validity_by_quarter.items())),
+    )
+    risk_fit_key = (
+        market_facts,
+        tuple(
+            (target_id, upstream_identities[target_id])
+            for target_id in candidate.risk_context_target_ids
+        ),
+        risk_style_columns,
+        risk_config or FactorRiskConfig(),
+        session_start,
+    )
     calibration_rows: list[dict[str, object]] = []
     pending_calibration: tuple[pd.Series, pd.Series, pd.Timestamp] | None = None
     waiting_alpha: tuple[pd.Series, pd.Timestamp] | None = None
@@ -414,9 +446,17 @@ def build_portfolio_ledger(
                 risk_frames.clear()
 
                 if previous_risk_cross is not None and not panel.empty:
-                    factor_risk.observe_return_session(
-                        _factor_return_cross(exposures=previous_risk_cross, panel=panel)
+                    risk_cross = _factor_return_cross(
+                        exposures=previous_risk_cross, panel=panel
                     )
+                    if shared_risk_fits is None:
+                        factor_risk.observe_return_session(risk_cross)
+                    else:
+                        factor_risk.observe_return_session(
+                            risk_cross,
+                            shared_fits=shared_risk_fits,
+                            fit_key=(risk_fit_key, decision_timestamp),
+                        )
                 if previous_risk_cross is not None:
                     carried = previous_risk_cross.loc[
                         previous_risk_cross.asset_id.isin(view.closed_assets)
@@ -579,6 +619,8 @@ def build_portfolio_ledger(
                         as_of=decision_timestamp,
                         risk_style_columns=risk_style_columns,
                         frozen_calibration=frozen_calibration,
+                        shared_alpha_facts=shared_alpha_facts,
+                        alpha_fact_key=alpha_fact_key,
                     )
                     if maintenance:
                         target_override = benchmark_weights.copy(deep=True)
@@ -655,13 +697,12 @@ def build_portfolio_ledger(
                 raise ValueError("portfolio_final_calibration_sink_required")
             observation = {}
             with record_run_observations(observation):
-                calibration = calibrate_expected_alpha(
-                    pd.DataFrame(
-                        calibration_rows,
-                        columns=["timestamp", "alpha_score", "holding_return"],
-                    ),
+                calibration = _calibration_fact(
+                    calibration_rows,
+                    calibration_intervals,
                     as_of=pd.Timestamp(output_window.end),
-                    scheduled_intervals=calibration_intervals,
+                    shared_alpha_facts=shared_alpha_facts,
+                    alpha_fact_key=alpha_fact_key,
                 )
             on_final_calibration(
                 {
@@ -887,6 +928,20 @@ def _benchmark_weights(
     )
 
 
+def _calibration_fact(rows, intervals, *, as_of, shared_alpha_facts, alpha_fact_key):
+    key = (alpha_fact_key, as_of)
+    if shared_alpha_facts is not None and key in shared_alpha_facts:
+        return shared_alpha_facts[key]
+    calibration = calibrate_expected_alpha(
+        pd.DataFrame(rows, columns=["timestamp", "alpha_score", "holding_return"]),
+        as_of=as_of,
+        scheduled_intervals=intervals,
+    )
+    if shared_alpha_facts is not None:
+        shared_alpha_facts[key] = calibration
+    return calibration
+
+
 def _enhanced_decision(
     *,
     benchmark_weights: pd.Series,
@@ -898,13 +953,15 @@ def _enhanced_decision(
     as_of: pd.Timestamp,
     risk_style_columns: tuple[str, ...],
     frozen_calibration: AlphaCalibration | None = None,
+    shared_alpha_facts: dict | None = None,
+    alpha_fact_key=None,
 ) -> _EnhancedDecision:
-    calibration = frozen_calibration or calibrate_expected_alpha(
-        pd.DataFrame(
-            calibration_rows, columns=["timestamp", "alpha_score", "holding_return"]
-        ),
+    calibration = frozen_calibration or _calibration_fact(
+        calibration_rows,
+        calibration_intervals,
         as_of=as_of,
-        scheduled_intervals=calibration_intervals,
+        shared_alpha_facts=shared_alpha_facts,
+        alpha_fact_key=alpha_fact_key,
     )
     expected = pd.Series(np.nan, index=alpha.index, dtype="float64")
     if not calibration.benchmark_only:

@@ -1117,18 +1117,6 @@ def validation_windows(plan, output_window):
     )
 
 
-def execution_windows(plan, output_window, *, access_window):
-    """Execution consumes the frozen final test and never validation."""
-    if access_window != "holdout":
-        raise PermissionError("crypto_execution_requires_frozen_test")
-    boundary = TimeWindow(**plan["test"])
-    if pd.Timestamp(output_window.start) < pd.Timestamp(boundary.start) or pd.Timestamp(
-        output_window.end
-    ) > pd.Timestamp(boundary.end):
-        raise PermissionError("crypto_execution_test_window_invalid")
-    return ((plan["folds"][-1]["fold_id"], output_window),)
-
-
 def protocol(
     scenario_id: str = market_ids.HFT_RESEARCH_DATASET_ID,
     access_window: str = "development",

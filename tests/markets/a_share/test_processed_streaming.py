@@ -1326,3 +1326,87 @@ def test_historical_calendar_gap_keeps_exact_age_unknown_across_slabs(
     recent = actual.loc[actual.asset_id.eq("000003")]
     assert recent.listing_age_trading_days.tolist() == list(range(51, 61))
     assert not recent.has_252_trading_sessions.any()
+
+
+@pytest.mark.parametrize(
+    "missing",
+    ("stock_master", "market_cap", "trading_no_limit", "special_treatment_changes"),
+)
+def test_missing_mandatory_panel_source_fails_before_materialization(
+    tmp_path, monkeypatch, missing
+):
+    profile = research_profile()
+    layout = StorageLayout(tmp_path)
+    source_spec = profile.interim.get(missing)
+    missing_root = layout.interim_data_root(source_spec.source_id, missing)
+    monkeypatch.setattr(
+        producer, "filesystem_exists", lambda root: root != missing_root
+    )
+    monkeypatch.setattr(
+        producer, "open_dataset_session", lambda *args, **kwargs: object()
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("missing source reached materialization")
+
+    monkeypatch.setattr(producer, "materialize_dataset_session", forbidden)
+    with pytest.raises(
+        ValueError, match=f"a_share_panel_source_data_missing: {missing}$"
+    ):
+        with producer.produce_a_share_processed_data(
+            profile.processed.get("market_panel_1d"),
+            layout=layout,
+            time_window=TimeWindow("2020-01-02", "2020-01-03"),
+            source_catalog=profile.interim,
+        ):
+            pass
+
+
+@pytest.mark.parametrize("prior", (None, 2.0, 1e308))
+def test_fundamental_adapter_reuses_prior_year_for_beginning_balances(
+    prior, monkeypatch
+):
+    panel = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": ["a", "b"],
+            "timestamp": pd.Timestamp("2020-08-03"),
+        }
+    )
+    pit = pd.DataFrame(
+        [
+            {
+                "asset_id": asset,
+                "timestamp": pd.Timestamp("2020-08-03"),
+                "metric_id": metric,
+                "value": 1e308,
+                "prior_year_value": prior,
+                "beginning_value": prior,
+            }
+            for asset in ("a", "b")
+            for metric in ("total_assets", "parent_equity")
+        ]
+    )
+    pivots = []
+    original = pd.DataFrame.pivot_table
+
+    def pivot(frame, *args, **kwargs):
+        pivots.append(kwargs.get("values"))
+        return original(frame, *args, **kwargs)
+
+    monkeypatch.setattr(pd.DataFrame, "pivot_table", pivot)
+    result = producer._fundamental_pit_frame(
+        research_profile().processed.get("fundamental_pit"), panel=panel, pit=pit
+    )
+    assert pivots == ["value", "prior_year_value"]
+    for metric in ("total_assets", "parent_equity"):
+        pd.testing.assert_series_equal(
+            result[f"beginning_{metric}"],
+            result[f"prior_year_{metric}"],
+            check_names=False,
+            check_exact=True,
+        )
+        if prior is None:
+            assert result[f"average_{metric}"].isna().all()
+        elif prior == 1e308:
+            assert result[f"average_{metric}"].eq(1e308).all()

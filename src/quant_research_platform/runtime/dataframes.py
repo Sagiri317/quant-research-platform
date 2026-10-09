@@ -39,15 +39,17 @@ def iter_complete_time_frames(
             current_min = pd.Timestamp(timestamps.iloc[0])
             if emitted_max is not None and current_min <= emitted_max:
                 raise ValueError("non_monotonic_time_chunk_order")
-            start = 0
             if pending:
                 if current_min < pending_timestamp:
                     raise ValueError("non_monotonic_time_chunk_order")
-                if current_min == pending_timestamp:
-                    start = int(timestamps.searchsorted(current_min, side="right"))
-                    pending.append(frame.iloc[:start])
-                    if start == len(frame):
-                        continue
+            last_timestamp = pd.Timestamp(timestamps.iloc[-1])
+            if pending and last_timestamp == pending_timestamp:
+                pending.append(frame)
+                continue
+            last_start = int(timestamps.searchsorted(last_timestamp, side="left"))
+            if last_start:
+                pending.append(frame.iloc[:last_start])
+            if pending:
                 complete = (
                     pending[0]
                     if len(pending) == 1
@@ -57,17 +59,12 @@ def iter_complete_time_frames(
                     yield complete
                 except GeneratorExit:
                     return
-                emitted_max = pending_timestamp
+                emitted_max = (
+                    pd.Timestamp(timestamps.iloc[last_start - 1])
+                    if last_start
+                    else pending_timestamp
+                )
                 pending.clear()
-            last_timestamp = pd.Timestamp(timestamps.iloc[-1])
-            last_start = int(timestamps.searchsorted(last_timestamp, side="left"))
-            if last_start > start:
-                complete = frame.iloc[start:last_start]
-                try:
-                    yield complete
-                except GeneratorExit:
-                    return
-                emitted_max = pd.Timestamp(timestamps.iloc[last_start - 1])
             pending.append(frame.iloc[last_start:])
             pending_timestamp = last_timestamp
         if pending:

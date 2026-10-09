@@ -369,6 +369,7 @@ class TardisArchive:
             buffered = self._records_by_stream.get(requested)
             if buffered is not None and position < buffered.seek(0, 2):
                 buffered.seek(position)
+                start = position
                 record = pickle.load(buffered)
             else:
                 item = next(self._native_records, None)
@@ -381,7 +382,7 @@ class TardisArchive:
                         closing_iterator(TemporaryFile())
                     )
                     self._records_by_stream[key] = buffered
-                buffered.seek(0, 2)
+                start = buffered.seek(0, 2)
                 pickle.dump(record, buffered, protocol=pickle.HIGHEST_PROTOCOL)
                 if key != requested:
                     continue
@@ -394,7 +395,7 @@ class TardisArchive:
                 > end_ns
             ):
                 return
-            yield record
+            yield start, record
 
     def funding_root(self, symbol):
         return self.root / "funding" / symbol / "observations"
@@ -447,7 +448,7 @@ class TardisArchive:
         ):
             raise ValueError("tardis_derivative_scope_invalid")
         with closing_iterator(self._stream_records(symbol, "state", None)) as records:
-            for record in records:
+            for _start, record in records:
                 observed = strict_iso_timestamp(
                     record["receive_time"], error="tardis_observed_time_invalid"
                 ).value
@@ -473,17 +474,17 @@ class TardisArchive:
             self._stream_records(symbol, "depth" if depth else "agg_trades", end_ns)
         ) as records:
             if not depth:
-                for _yield_value in records:
+                for _start, _yield_value in records:
                     try:
                         yield _yield_value
                     except GeneratorExit:
                         return
                 return
-            pending = []
-            for record in records:
+            prefix_start = None
+            for start, record in records:
                 identity = record["observation_id"]
                 if identity != active_observation:
-                    pending.clear()
+                    prefix_start = None
                     active_observation = identity
                     snapshot_ready = False
                 if record["data_kind"] == "depth_snapshot":
@@ -491,21 +492,26 @@ class TardisArchive:
                         yield record
                     except GeneratorExit:
                         return
-                    for buffered in pending:
-                        buffered["data_kind"] = "depth_bootstrap"
+                    prefix_position = prefix_start
+                    while prefix_position is not None and prefix_position < start:
+                        buffered = self._records_by_stream[(symbol, "depth")]
+                        buffered.seek(prefix_position)
+                        bootstrap = pickle.load(buffered)
+                        prefix_position = buffered.tell()
+                        bootstrap["data_kind"] = "depth_bootstrap"
                         try:
-                            yield buffered
+                            yield bootstrap
                         except GeneratorExit:
                             return
-                    pending.clear()
+                    prefix_start = None
                     snapshot_ready = True
                 elif snapshot_ready:
                     try:
                         yield record
                     except GeneratorExit:
                         return
-                else:
-                    pending.append(record)
+                elif prefix_start is None:
+                    prefix_start = start
 
 
 @contextmanager

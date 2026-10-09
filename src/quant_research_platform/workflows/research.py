@@ -34,12 +34,9 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.artifacts.research import (
-    _instance_root,
-    _report_manifest_metadata,
-    read_research_report_artifact,
+    build_report_from_run,
     read_research_run_record,
     read_validated_reference,
-    write_research_report_artifact,
     write_research_run_record,
 )
 from quant_research_platform.artifacts.statistics import (
@@ -118,9 +115,6 @@ from quant_research_platform.storage.datasets.inspection import (
 from quant_research_platform.storage.datasets.inspection import (
     inspect_dataset_session,
 )
-from quant_research_platform.storage.datasets.instances import (
-    discover_dataset_instances,
-)
 from quant_research_platform.storage.datasets.reading import (
     DatasetSession,
     open_dataset_session,
@@ -133,7 +127,6 @@ from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.experiments import research_run_trial_references
 from quant_research_platform.storage.identity import (
     filesystem_exists,
-    filesystem_glob,
     filesystem_stat,
     require_unaliased_path,
     validate_instance_identity,
@@ -146,7 +139,6 @@ from quant_research_platform.storage.rebuild import (
 )
 from quant_research_platform.storage.semantic_artifacts import (
     compare_semantic_artifacts,
-    discover_semantic_artifact_instances,
     read_semantic_artifact,
     read_semantic_artifact_record,
     write_semantic_artifact,
@@ -778,7 +770,6 @@ def research_run(
             operation_evidence=unmeasured_operation_evidence(
                 "holdout_preflight_blocked"
             ),
-            holdout_not_accessed=True,
         )
         return {**result, "run_id": run_id}
     if plan:
@@ -990,156 +981,30 @@ def report_build(
     record = read_research_run_record(
         layout.research_run_path(run_id), expected_profile_id=profile.profile_id
     )
-    return _build_report_from_run(
-        profile=profile, layout=layout, record=record, plan=plan
+    from quant_research_platform.profiles.research import bind_research_configuration
+
+    profile = bind_research_configuration(
+        profile,
+        record.payload()["protocol"]["research_configuration"],
+        tardis_root=layout.raw_source_root("tardis"),
+        access_window=record.research_window["access"],
     )
-
-
-def status(
-    *, profile: ResearchProfile, layout: StorageLayout, run_id: str | None = None
-) -> dict[str, object]:
-    """Read exact run evidence or list records without planning any new work."""
-    if run_id is not None:
-        return read_research_run_record(
-            layout.research_run_path(run_id), expected_profile_id=profile.profile_id
-        ).payload()
-    root = layout.research_run_path("index").parent
-    records = []
-    for path in filesystem_glob(root, "*.json"):
-        record = read_research_run_record(path)
-        if record.profile_id != profile.profile_id:
-            continue
-        records.append(
-            {
-                "run_id": record.run_id,
-                "scenario_id": record.scenario_id,
-                "status": record.status.value,
-                "research_window": dict(record.research_window),
-            }
-        )
-    records.sort(key=lambda item: item["run_id"])
-    return {"profile_id": profile.profile_id, "runs": records}
-
-
-def inspect(
-    *,
-    profile: ResearchProfile,
-    layout: StorageLayout,
-    dataset_id: str,
-    run_id: str | None = None,
-) -> dict[str, object]:
-    if run_id is not None:
-        return _inspect_run_target(
-            profile=profile, layout=layout, target_id=dataset_id, run_id=run_id
-        )
-    spec = profile.research_datasets.get(dataset_id)
-    root = layout.research_dataset_root(spec.market_id, spec.data_id)
-    result: dict[str, object] = {
-        "profile_id": profile.profile_id,
-        "dataset_id": dataset_id,
-        "required_columns": list(spec.required_columns),
-        "exists": filesystem_exists(root),
-        "instances": [],
-    }
-    if not filesystem_exists(root):
-        result.update(
-            status=RunStatus.BLOCKED.value,
-            blocker="dataset_instances_missing",
-        )
-        return result
-    try:
-        instances = discover_dataset_instances(root)
-    except ValueError:
-        result.update(
-            status=RunStatus.FAILED.value,
-            blocker="dataset_instance_invalid",
-        )
-        return result
-    if not instances:
-        result.update(
-            status=RunStatus.BLOCKED.value,
-            blocker="dataset_instances_missing",
-        )
-        return result
-    instance_summaries = []
-    try:
-        for instance in instances:
-            manifest = read_dataset_manifest_evidence(instance)
-            envelope = validate_business_manifest_envelope(
-                manifest[COMMON_MANIFEST_METADATA_KEY]
-            )
-            instance_summaries.append(
-                {
-                    "instance_identity": instance.name,
-                    "status": "COMPLETE",
-                    "schema_identity": envelope["schema_identity"],
-                    "row_count": manifest["row_count"],
-                }
-            )
-    except (FileNotFoundError, OSError, ValueError):
-        result.update(
-            status=RunStatus.FAILED.value,
-            blocker="dataset_instance_invalid",
-        )
-        return result
-    result.update(
-        status=RunStatus.BLOCKED.value,
-        blocker="request_identity_required",
-        instances=instance_summaries,
+    binding = profile.producer_bindings.get(f"{record.scenario_id}_report_artifact")
+    if binding is None or binding.kind is not ProducerKind.REPORT:
+        raise ValueError("report_producer_binding_missing")
+    return build_report_from_run(
+        layout=layout,
+        record=record,
+        plan=plan,
+        market_id=profile.market_id,
+        produce_report=binding.producer,
+        software_identity=_target_software_identity(
+            binding, production_software_identity()
+        ),
+        execution_targets=profile.protocol(record.scenario_id).execution_targets()
+        if str(profile.market_id) == "crypto"
+        else (),
     )
-    return result
-
-
-def _inspect_run_target(*, profile, layout, target_id, run_id):
-    record = read_research_run_record(
-        layout.research_run_path(run_id), expected_profile_id=profile.profile_id
-    )
-    if target_id == f"{record.scenario_id}_report_artifact":
-        logical = layout.semantic_artifact_root(profile.market_id, target_id)
-        instances = []
-        selected = {}
-
-        def belongs_to_run(envelope):
-            metadata = _report_manifest_metadata(envelope)
-            if envelope["logical_artifact_id"] != target_id:
-                raise ValueError("research_report_semantics_invalid")
-            if metadata["source_run_id"] == run_id:
-                selected[envelope["instance_identity"]] = envelope
-                return True
-            return False
-
-        for instance in discover_semantic_artifact_instances(
-            logical, manifest_scope=belongs_to_run
-        ):
-            report = read_research_report_artifact(
-                instance, expected_identity=instance.name, source_run=record
-            )
-            instances.append(
-                {
-                    "instance_identity": instance.name,
-                    "schema_identity": selected[instance.name]["schema_identity"],
-                    "report_status": report["report_status"],
-                }
-            )
-        return {
-            "profile_id": profile.profile_id,
-            "run_id": run_id,
-            "target_id": target_id,
-            "status": "BLOCKED",
-            "instances": instances,
-            "blocker": "report_identity_required"
-            if instances
-            else "report_instances_missing",
-        }
-    result = next(
-        (item for item in record.target_results if item.target_id == target_id),
-        None,
-    )
-    if result is None:
-        raise KeyError(target_id)
-    if result.status in {TargetStatus.BUILT, TargetStatus.REUSED}:
-        read_validated_reference(layout, result)
-    return {"profile_id": profile.profile_id, "run_id": run_id, **result.payload()}
 
 
 def _execute_action(
@@ -2181,7 +2046,6 @@ def _write_research_run_record(
     status: RunStatus,
     operation_evidence: Mapping[str, object],
     failure_reason: str | None = None,
-    holdout_not_accessed: bool = False,
 ) -> None:
     references: list[ResearchRunTargetResult] = []
     for result in target_results:
@@ -2210,17 +2074,6 @@ def _write_research_run_record(
         )
     protocol_snapshot = protocol.manifest()
     trial_ledgers = research_run_trial_references(layout, run_id)
-    holdout = (
-        {"qualification": "HOLDOUT_NOT_ACCESSED", "prior_runs": []}
-        if holdout_not_accessed
-        else _holdout_evidence(
-            layout=layout,
-            profile=profile,
-            protocol=protocol,
-            research_window=research_window,
-            target_results=tuple(references),
-        )
-    )
     values = dict(
         run_id=run_id,
         trial_ledgers=trial_ledgers,
@@ -2235,238 +2088,44 @@ def _write_research_run_record(
         status=status,
         operation_evidence=operation_evidence,
         failure_reason=failure_reason,
-        holdout_evidence=holdout,
     )
     record = ResearchRunRecord(**values)
     write_research_run_record(layout.research_run_path(run_id), record)
 
 
-def _holdout_evidence(
-    *,
-    layout: StorageLayout,
-    profile: ResearchProfile,
-    protocol: Any,
-    research_window: Mapping[str, object],
-    target_results: tuple[ResearchRunTargetResult, ...],
-) -> dict[str, object]:
-    if protocol.access_window != "holdout":
-        return {}
-    prior = []
-    same_evidence = False
-    same_inputs = False
-    produced = {
-        item.target_id: item
-        for item in target_results
-        if item.status in {TargetStatus.BUILT, TargetStatus.REUSED}
-    }
-    current = {key: item.instance_identity for key, item in produced.items()}
-
-    def frozen_inputs(frozen):
-        return canonical_json_hash(
-            {
-                "targets": frozen["targets"],
-                "alpha_sources": frozen.get("alpha_sources", []),
-            }
-        )
-
-    evidence_targets = tuple(
-        key
-        for key, item in produced.items()
-        if item.producer_kind
-        in {
-            ProducerKind.INTERIM,
-            ProducerKind.PROCESSED,
-            ProducerKind.DATASET,
-            ProducerKind.MODEL,
-        }
-    )
-    for path in filesystem_glob(layout.research_run_path("run_probe").parent, "*.json"):
-        record = read_research_run_record(path)
-        if (
-            record.profile_id != profile.profile_id
-            or record.scenario_id != protocol.scenario_id
-            or record.research_window["access"] != "holdout"
-            or record.holdout_evidence.get("qualification") == "HOLDOUT_NOT_ACCESSED"
-        ):
-            continue
-        prior.append(
-            {
-                "run_id": record.run_id,
-                "identity": canonical_json_hash(record.payload()),
-            }
-        )
-        old = {
-            item.target_id: item.instance_identity
-            for item in record.target_results
-            if item.status in {TargetStatus.BUILT, TargetStatus.REUSED}
-        }
-        if (
-            record.status is RunStatus.COMPLETE
-            and protocol.scenario_id in current
-            and all(key in current for key in protocol.frozen_target_ids())
-            and all(old.get(key) == current[key] for key in evidence_targets)
-        ):
-            if frozen_inputs(
-                record.payload()["protocol"]["frozen_development"]
-            ) == frozen_inputs(protocol.frozen_development):
-                same_inputs = True
-                same_evidence |= (
-                    dict(record.research_window) == dict(research_window)
-                    and old == current
-                )
-    prior.sort(key=lambda item: item["run_id"])
-    return {
-        "qualification": "REUSE"
-        if same_evidence
-        else "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
-        if same_inputs
-        else "POST_HOLDOUT_CORRECTED"
-        if prior
-        else "HOLDOUT_FIRST_EVIDENCE",
-        "prior_runs": prior,
-    }
-
-
-def _build_report_from_run(
-    *,
-    profile: ResearchProfile,
-    layout: StorageLayout,
-    record: ResearchRunRecord,
-    plan: bool,
-) -> dict[str, object]:
-    from quant_research_platform.profiles.research import bind_research_configuration
-
-    profile = bind_research_configuration(
-        profile,
-        record.payload()["protocol"]["research_configuration"],
-        tardis_root=layout.raw_source_root("tardis"),
-        access_window=record.research_window["access"],
-    )
-    report_target = f"{record.scenario_id}_report_artifact"
-    binding = profile.producer_bindings.get(report_target)
-    if binding is None or binding.kind is not ProducerKind.REPORT:
-        raise ValueError("report_producer_binding_missing")
-    report_inputs = {}
-    if str(profile.market_id) == "a_share":
-        selections = {}
-        reference_member_identities = {}
-        for result in record.target_results:
-            if result.producer_kind is not ProducerKind.MODEL or result.status in {
-                TargetStatus.BLOCKED,
-                TargetStatus.FAILED,
-            }:
-                continue
-            identities = {}
-            try:
-                read_validated_reference(layout, result, member_identities=identities)
-            except (FileNotFoundError, OSError, ValueError):
-                continue
-            persisted = read_quarterly_model_artifact(
-                _instance_root(layout, result),
-                expected_identity=result.instance_identity,
-                trial_layout=layout,
-                expected_member_identities=identities,
-            )
-            selections = persisted.selections
-            reference_member_identities[result.target_id] = identities
-        report_inputs["selections"] = selections
-        report_inputs["reference_member_identities"] = reference_member_identities
-    elif str(profile.market_id) == "crypto":
-        report_inputs["execution_targets"] = profile.protocol(
-            record.scenario_id
-        ).execution_targets()
-    payload = binding.producer(layout=layout, record=record, **report_inputs)
-    report_status = RunStatus(payload["report_status"])
-    source_run_identity = canonical_json_hash(record.payload())
-    software = production_software_identity()
-    contract = {
-        "schema_id": payload["schema_id"],
-        "required_sections": list(payload["sections"]),
-        "source_run_identity": source_run_identity,
-    }
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=report_target,
-        schema_identity=canonical_json_hash(contract),
-        protocol_or_spec_identity=record.protocol_identity,
-        software_identity=_target_software_identity(binding, software),
-        research_window=record.research_window,
-        upstream_identities={"source_run": source_run_identity},
-        semantic_metadata={
-            "target_contract": contract,
-            "source_run_id": record.run_id,
-            "source_run_status": record.status.value,
-            "report_status": report_status.value,
-        },
-    )
-    logical_root = layout.semantic_artifact_root(profile.market_id, report_target)
-    instance_root = layout.instance_root(logical_root, envelope.instance_identity)
-    decision = "REUSE" if filesystem_exists(instance_root) else "BUILD"
-    if plan:
-        blocker = None
-        if decision == "REUSE":
-            try:
-                if (
-                    read_research_report_artifact(
-                        instance_root, expected_identity=envelope.instance_identity
-                    )
-                    != payload
-                ):
-                    raise ValueError("research_report_reuse_mismatch")
-            except (FileNotFoundError, OSError, ValueError):
-                decision = "BLOCKED"
-                blocker = "persisted_report_invalid"
-                report_status = RunStatus.FAILED
-        return {
-            "stage": "report build",
-            "profile_id": profile.profile_id,
-            "run_id": record.run_id,
-            "source_run_status": record.status.value,
-            "status": report_status.value,
-            "target": {
-                "target_id": report_target,
-                "decision": decision,
-                "requested_identity": envelope.instance_identity,
-                "blocker": blocker,
-            },
-        }
-    target_status = TargetStatus.BUILT
-    if decision == "REUSE":
-        existing = read_research_report_artifact(
-            instance_root, expected_identity=envelope.instance_identity
-        )
-        if existing != payload:
-            raise ValueError("research_report_reuse_mismatch")
-        target_status = TargetStatus.REUSED
-    else:
-        write_research_report_artifact(
-            logical_root,
-            envelope=envelope,
-            payload=payload,
-        )
-    return {
-        "stage": "report build",
-        "profile_id": profile.profile_id,
-        "run_id": record.run_id,
-        "source_run_status": record.status.value,
-        "status": report_status.value,
-        "target_result": {
-            "target_id": report_target,
-            "status": target_status.value,
-            "instance_identity": envelope.instance_identity,
-        },
-        "report": payload,
-    }
-
-
 def _semantic_failure_code(exc: BaseException) -> str:
     value = str(exc)
+    code, separator, context = value.partition(": ")
     if (
-        value
+        isinstance(exc, ValueError)
+        and separator
+        and code
+        in {
+            "missing_filter_columns",
+            "null_filter_column_values",
+            "invalid_filter_column_dtype",
+        }
+    ):
+        from quant_research_platform.contracts.filtering import FILTER_COLUMNS
+
+        if context in FILTER_COLUMNS:
+            return f"{code}:{context}"
+    if (
+        isinstance(exc, ValueError)
+        and value
         and len(value) <= 96
         and re.fullmatch(r"[a-zA-Z0-9_.-]+(?::[a-zA-Z0-9_.-]+)*", value)
     ):
         return value
-    return type(exc).__name__.lower()
+    reason = type(exc).__name__.lower()
+    trace = exc.__traceback__
+    origin = None
+    while trace is not None:
+        module = trace.tb_frame.f_globals.get("__name__", "")
+        if module.startswith("quant_research_platform."):
+            origin = f"{module}.{trace.tb_frame.f_code.co_name}:{trace.tb_lineno}"
+        trace = trace.tb_next
+    return reason if origin is None else f"{reason}:{origin}"
 
 
 def _reuse_target(

@@ -24,6 +24,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioCapital,
     PortfolioTargetBlocked,
 )
+from quant_research_platform.contracts.time import crypto_execution_windows
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerCalibration,
     MakerConfig,
@@ -45,7 +46,6 @@ from quant_research_platform.research.protocols.crypto_hft import (
     HFT_EXECUTION_CONTEXT_COLUMNS,
     CryptoMakerCandidate,
     CryptoMakerPlan,
-    execution_windows,
     portfolio_candidates,
     validation_windows,
 )
@@ -496,7 +496,7 @@ def produce_taker_ledger(
         taker_fee_bps=execution["taker_fee_bps"],
         markout_horizon_ms=execution["markout_horizon_ms"],
     )
-    windows = execution_windows(
+    windows = crypto_execution_windows(
         plan, output_window, access_window=protocol_manifest["access_window"]
     )
     bounds = _window_bounds(windows)
@@ -947,7 +947,7 @@ def produce_maker_ledger(
     read_statistics_artifact,
 ):
     plan = protocol_manifest["research_plan"]
-    windows = execution_windows(
+    windows = crypto_execution_windows(
         plan, output_window, access_window=protocol_manifest["access_window"]
     )
     bounds = _window_bounds(windows)
@@ -1494,6 +1494,7 @@ def validate_maker_calibration(artifact, envelope):
                             commands=(),
                             lifetime_ns=CryptoMakerPlan.quote_horizon_ms * 1000000,
                             replace_quantity=row.quote_quantity,
+                            history_scale=1,
                             events=iter(window),
                         )
                     ) as response:

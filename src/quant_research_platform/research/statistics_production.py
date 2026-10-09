@@ -13,7 +13,7 @@ from quant_research_platform.contracts.experiments import (
     legal_training_rows,
 )
 from quant_research_platform.contracts.json_codec import canonical_json_hash
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, a_share_analysis_windows
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import iter_research_dataset_chunks
 from quant_research_platform.research.features.transforms import (
@@ -21,7 +21,6 @@ from quant_research_platform.research.features.transforms import (
 )
 from quant_research_platform.research.protocols.a_share import (
     _inference_blocker,
-    analysis_windows,
     label_catalog,
 )
 from quant_research_platform.research.randomness import derive_seed
@@ -82,7 +81,7 @@ def build_a_share_factor_statistics_tables(
         _fdr_method(statistics["fdr_primary"], expected="BH"),
         _fdr_method(statistics["fdr_robustness"], expected="BY"),
     )
-    window, _ = analysis_windows(protocol_manifest, time_window)
+    window, _ = a_share_analysis_windows(protocol_manifest, time_window)
     columns = tuple(
         dict.fromkeys(
             (
@@ -197,7 +196,9 @@ def build_a_share_statistics_tables(
         or type(repetitions) is not int
     ):
         raise ValueError("statistics_protocol_invalid")
-    _factor_window, model_window = analysis_windows(protocol_manifest, time_window)
+    _factor_window, model_window = a_share_analysis_windows(
+        protocol_manifest, time_window
+    )
     model_entries = {
         (item["quarter_id"], item["family_id"]): item
         for item in persisted_model.prediction_models(

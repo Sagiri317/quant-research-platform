@@ -33,6 +33,7 @@ from quant_research_platform.research.predictions import runner
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.storage.datasets.writing import write_dataset
 from tests.helpers.research_specs import make_demo_research_dataset_spec
+from tests.helpers.statistics_artifacts import statistics_envelope
 from tests.research.prediction_output_helpers import write_prediction_result
 from tests.research.workflow_test_support import shared_model_case, shared_model_rows
 
@@ -217,6 +218,9 @@ def test_transform_prediction_publication_and_consumers_share_exact_validity(
             },
             upstream_identities={},
             semantic_metadata={},
+        )
+        envelope = statistics_envelope(
+            envelope, group="research", protocol=statistics_protocol
         )
         root = write_statistics_artifact(
             tmp_path / "statistics", envelope=envelope, tables=tables

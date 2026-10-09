@@ -117,15 +117,6 @@ def test_trial_ledger_is_append_only_and_retains_failed_and_abandoned(
     } == original
 
 
-def test_trial_record_never_allows_holdout_access() -> None:
-    plan = _plan()
-    with pytest.raises(ValueError, match="^trial_holdout_access_forbidden$"):
-        replace(
-            _record(plan, event_id="event-1", attempt_index=1, status="completed"),
-            holdout_accessed=True,
-        )
-
-
 def test_trial_record_deep_snapshots_and_ledger_rejects_backfill(
     tmp_path: Path,
 ) -> None:
@@ -148,9 +139,13 @@ def test_trial_record_deep_snapshots_and_ledger_rejects_backfill(
 
 @pytest.mark.parametrize(
     "field,value",
-    (("development_test_metrics", {}), ("development_test_contaminated", True)),
+    (
+        ("development_test_metrics", {}),
+        ("development_test_contaminated", True),
+        ("holdout_accessed", False),
+    ),
 )
-def test_retired_fourth_role_trial_fields_are_rejected(field, value):
+def test_retired_trial_fields_are_rejected(field, value):
     record = _record(_plan(), event_id="event-1", attempt_index=1, status="completed")
     payload = record.payload()
     assert field not in payload
@@ -524,6 +519,21 @@ def test_run_ledger_references_have_no_arbitrary_member_limit(tmp_path):
     references = research_run_trial_references(layout, "run_test")
     assert len(references) == 1026
     assert len({item["experiment_id"] for item in references}) == 1026
+
+
+def test_run_ledger_references_reject_non_directory_member(tmp_path):
+    from quant_research_platform.storage.experiments import (
+        research_run_trial_references,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    layout = StorageLayout(tmp_path)
+    plan = _plan()
+    append_trial_record(
+        layout.trial_ledger_root("run_test", plan.experiment_id),
+        plan,
+        _record(plan, event_id="first", attempt_index=1, status="failed"),
+    )
     root = layout.trial_ledger_root("run_test")
     (root / "invalid").write_text("not a ledger", encoding="utf-8")
     with pytest.raises(ValueError, match="trial_run_members_invalid"):
@@ -581,11 +591,8 @@ def test_first_plan_readback_precedes_first_trial_publication(tmp_path, monkeypa
 
 
 @pytest.mark.parametrize("member", ("plan", "record"))
-@pytest.mark.parametrize("extra_byte", (0, 1))
 @pytest.mark.parametrize("existing", (False, True))
-def test_trial_json_roundtrips_above_former_capacity(
-    tmp_path, member, extra_byte, existing
-):
+def test_trial_json_roundtrips_above_former_capacity(tmp_path, member, existing):
     from quant_research_platform.contracts.json_codec import (
         render_qrp_json_object,
     )
@@ -593,7 +600,7 @@ def test_trial_json_roundtrips_above_former_capacity(
     root = tmp_path / "ledger"
     plan = _plan()
     padding = "研究" + chr(10) + '"'
-    disk_size = 1024 * 1024 + extra_byte
+    disk_size = 1024 * 1024 + 1
     if member == "plan":
         plan = replace(plan, input_lineage=(padding,))
         remaining = disk_size - len(
@@ -761,7 +768,6 @@ def test_begin_refit_persists_fit_domain_and_all_real_parent_ledgers(tmp_path, g
     assert len(records) == 1
     assert records[0].status == "completed"
     assert records[0].metrics == {"n_train": 6}
-    assert records[0].holdout_accessed is False
     assert {
         path.relative_to(layout.trial_ledger_root("run_refit")): path.read_bytes()
         for recorder in recorders
@@ -872,3 +878,82 @@ def test_trial_storage_rejects_credentials_before_write_and_on_read(tmp_path):
     )
     with pytest.raises(ValueError, match="trial_evidence_unsafe"):
         read_trial_ledger(root)
+
+
+@pytest.mark.parametrize("mutation", ("fractured", "plan", "root", "append", "decode"))
+def test_trial_ledger_rechecks_full_read_snapshot(tmp_path, monkeypatch, mutation):
+    from quant_research_platform.storage import manifests
+
+    root = tmp_path / "ledger"
+    plan = _plan()
+    for index in (1, 2):
+        append_trial_record(
+            root,
+            plan,
+            _record(
+                plan, event_id=f"event-{index}", attempt_index=index, status="failed"
+            ),
+        )
+    original = manifests.read_qrp_json_file
+    mutated = False
+
+    def read(path, **kwargs):
+        nonlocal mutated
+        value = original(path, **kwargs)
+        if path.name == "00000001.json" and not mutated:
+            mutated = True
+            if mutation in {"fractured", "decode"}:
+                for index in (1, 2):
+                    member = root / "records" / f"{index:08d}.json"
+                    member.write_bytes(
+                        member.read_bytes().replace(b'"failed"', b'"abandoned"')
+                    )
+            elif mutation == "plan":
+                member = root / "plan.json"
+                member.write_bytes(member.read_bytes() + b"\n")
+            elif mutation == "root":
+                (root / "unexpected").write_bytes(b"")
+            else:
+                append_trial_record(
+                    root,
+                    plan,
+                    _record(plan, event_id="event-3", attempt_index=3, status="failed"),
+                )
+            if mutation == "decode":
+                raise ValueError("synthetic_decode_failure")
+        return value
+
+    monkeypatch.setattr(manifests, "read_qrp_json_file", read)
+    with pytest.raises(
+        ValueError,
+        match="synthetic_decode_failure"
+        if mutation == "decode"
+        else "identity_changed",
+    ):
+        read_trial_ledger(root, plan)
+
+
+def test_trial_reference_binds_experiment_locator(tmp_path):
+    import shutil
+
+    from quant_research_platform.storage.experiments import (
+        read_trial_ledger_reference,
+        research_run_trial_references,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    layout = StorageLayout(tmp_path)
+    plan = _plan()
+    root = layout.trial_ledger_root("run_test", plan.experiment_id)
+    append_trial_record(
+        root, plan, _record(plan, event_id="first", attempt_index=1, status="failed")
+    )
+    (reference,) = research_run_trial_references(layout, "run_test")
+    assert read_trial_ledger_reference(layout, reference)[0] == plan
+    shutil.copytree(root, layout.trial_ledger_root("run_test", "different-experiment"))
+    with pytest.raises(ValueError, match="trial_ledger_reference_mismatch"):
+        read_trial_ledger_reference(
+            layout, {**reference, "experiment_id": "different-experiment"}
+        )
+    with pytest.raises(ValueError, match="trial_run_members_invalid"):
+        research_run_trial_references(layout, "run_test")

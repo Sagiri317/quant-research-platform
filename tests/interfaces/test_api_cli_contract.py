@@ -17,20 +17,8 @@ from quant_research_platform.interfaces.api.app import create_app
 from quant_research_platform.interfaces.cli import commands as cli_commands
 from quant_research_platform.interfaces.cli.commands import app
 from quant_research_platform.interfaces.queries import list_factors
+from quant_research_platform.policy.share_safety import unsafe_for_share_reason
 from quant_research_platform.profiles.research import research_profile
-
-FORBIDDEN_PUBLIC_MARKERS = (
-    "provider_id",
-    "source_id",
-    "data/raw",
-    "data\\raw",
-    "data/interim",
-    "data\\interim",
-    "data/processed",
-    "data\\processed",
-    "000001",
-    "600000",
-)
 
 
 def test_api_routes_are_current_and_exact() -> None:
@@ -457,8 +445,19 @@ async def test_overlapping_published_queries_complete_independently(
 
 
 def _assert_public_text_is_sanitized(text: str) -> None:
-    lowered = text.lower()
-    assert all(marker.lower() not in lowered for marker in FORBIDDEN_PUBLIC_MARKERS)
+    assert unsafe_for_share_reason(text) is None
+
+
+@pytest.mark.parametrize(
+    "unsafe",
+    ["token=SYNTHETIC_SECRET", r"C:\private\rows.csv", "/home/private/rows.csv"],
+)
+def test_public_output_guard_preserves_identifiers_and_rejects_secrets(unsafe):
+    _assert_public_text_is_sanitized(
+        "provider_id=demo source_id=fixture 000001 600000 data/raw"
+    )
+    with pytest.raises(AssertionError):
+        _assert_public_text_is_sanitized(unsafe)
 
 
 @pytest.mark.parametrize(

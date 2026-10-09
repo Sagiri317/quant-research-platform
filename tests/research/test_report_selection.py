@@ -26,7 +26,7 @@ def record():
         "portfolio_candidates": (),
         "holdout_window": {},
     }
-    payload = {"protocol": protocol, "operation_evidence": {}, "holdout_evidence": {}}
+    payload = {"protocol": protocol, "operation_evidence": {}}
     return SimpleNamespace(
         payload=lambda: payload,
         protocol=protocol,
@@ -242,7 +242,7 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(
         research_profile,
     )
     from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.workflows.research import _build_report_from_run
+    from quant_research_platform.workflows import research as workflow
     from tests.helpers.research_configuration import research_configuration
 
     current = research_configuration("crypto", "baseline")
@@ -283,9 +283,12 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(
         research_window={"access": "holdout"},
         payload=lambda: {"protocol": {"research_configuration": frozen}},
     )
+    monkeypatch.setattr(
+        workflow, "read_research_run_record", lambda *args, **kwargs: record
+    )
     with pytest.raises(RuntimeError, match="frozen_report_selection_verified"):
-        _build_report_from_run(
-            profile=profile, layout=StorageLayout(tmp_path), record=record, plan=True
+        workflow.report_build(
+            profile=profile, layout=StorageLayout(tmp_path), run_id="frozen", plan=True
         )
     assert len(calls) == 1
 
@@ -372,3 +375,73 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked(candidat
     assert coverage["groups"][0]["candidates"] == [
         {"candidate_id": candidate_id, "execution_mode": "independent_segments"}
     ]
+
+
+@pytest.mark.parametrize("mode", ["continuous", "independent_segments"])
+@pytest.mark.parametrize(
+    "other_status,has_daily",
+    [(None, False), (None, True), ("BLOCKED", False), ("FAILED", False)],
+)
+def test_crypto_daily_report_distinguishes_empty_observations(
+    mode, other_status, has_daily
+):
+    from quant_research_platform.artifacts.statistics import STATISTICS_TABLE_GROUPS
+
+    run = record()
+    run.research_window = {"access": "holdout"}
+    run.protocol["research_configuration"].update(
+        stage="research", portfolios=[{"candidate_id": "candidate"}]
+    )
+    tables = {
+        member.removesuffix(".parquet"): []
+        for member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]
+    }
+    items = [
+        {
+            "candidate_id": "candidate",
+            "execution_mode": mode,
+            "status": "DEFINED",
+            "tables": tables,
+        }
+    ]
+    daily = (
+        [{"candidate_id": "other", "status": "DEFINED", "net_return": 0.01}]
+        if has_daily
+        else []
+    )
+    if has_daily:
+        items.append(
+            {
+                "candidate_id": "other",
+                "execution_mode": mode,
+                "status": "DEFINED",
+                "tables": {**tables, "crypto_portfolio_daily": daily},
+            }
+        )
+    if other_status:
+        items.append({"status": other_status})
+    report = build_crypto_research_report(
+        record=run,
+        evidence={
+            "statistics": items,
+            "data": {"status": "DEFINED"},
+            "evaluations": [],
+            "models": {"status": "DEFINED"},
+            "predictions": {"status": "DEFINED"},
+            "model_comparisons": [],
+            "calibrations": [],
+            "issues": [],
+            "portfolios": [
+                {"candidate_id": candidate, "asset_id": "btc_usdt", "status": "DEFINED"}
+                for candidate in ("candidate", "other")
+            ],
+        },
+    )
+    result = report["sections"]["daily statistics"]["daily_returns"]
+    assert result["status"] == (
+        other_status or ("DEFINED" if has_daily else "UNDEFINED")
+    )
+    assert result["results"] == daily
+    if other_status is None and not has_daily:
+        assert result["reason"] == "insufficient_complete_utc_days"
+        assert report["sections"]["execution"] == {"status": "DEFINED", "results": []}

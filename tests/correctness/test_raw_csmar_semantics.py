@@ -302,30 +302,6 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
             list(frames)
 
 
-def test_analyst_duplicate_report_key_is_folded_and_counted_across_chunks(tmp_path):
-    from quant_research_platform.storage.datasets.reading import read_dataset
-    from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
-    from tests.helpers.a_share_raw import _write_csmar
-
-    layout = StorageLayout(tmp_path)
-    raw = layout.raw_source_root("csmar")
-    filesystem_mkdir(raw, parents=True)
-    row = _analyst_rows()[0]
-    _write_csmar(raw, "analyst_forecast", [row, row])
-    result = interim.materialize_interim_data(
-        layout=layout, data_ids=("analyst_forecast",), chunksize=1
-    )
-    root = result.artifact_roots["analyst_forecast"]
-    assert len(read_dataset(root)) == 1
-    assert (
-        read_dataset_manifest_evidence(root)["producer_diagnostics"][
-            "exact_duplicate_count"
-        ]
-        == 1
-    )
-
-
 @pytest.mark.parametrize("column", ("Markettype", "Daywk"))
 def test_calendar_direct_boolean_is_not_an_integer(column):
     row = {"Markettype": "4", "Clddt": "2025-01-03", "Daywk": "5", "State": "O"}
@@ -1385,10 +1361,16 @@ def test_legal_provider_width_and_quoting_preserve_fields(
 
 
 @pytest.mark.parametrize(
-    "data_id", ("market_bars_1d", "analyst_forecast", "trading_calendar")
+    "data_id,single",
+    [
+        ("market_bars_1d", False),
+        ("analyst_forecast", False),
+        ("analyst_forecast", True),
+        ("trading_calendar", False),
+    ],
 )
 def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
-    tmp_path, data_id
+    tmp_path, data_id, single
 ):
     import hashlib
 
@@ -1415,6 +1397,8 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
             Stkcd="000001", Markettype=1, Filling=0, Ahshrtrd_D=0.0, Ahvaltrd_D=0.0
         )
         source = [{**row, "Trddt": day} for day in ("2020-01-02", "2020-01-03")]
+    if single:
+        source = source[:1]
     rows = [*reversed(source), dict(source[0])]
     roots, frames, hashes = [], [], []
     spec = interim.interim_catalog().get(data_id)
@@ -1443,9 +1427,15 @@ def test_csmar_exact_duplicates_and_unordered_chunks_persist_identical_content(
             assert counts["excluded_missing_required_rows"] + len(saved) + metadata[
                 "exact_duplicate_count"
             ] == len(rows)
-            assert {"9007199254740992", "9007199254740993"}.issubset(saved.report_id)
+            if single:
+                assert len(saved) == 1
+            else:
+                assert {"9007199254740992", "9007199254740993"}.issubset(
+                    saved.report_id
+                )
             assert "张三,李四" in set(saved.analyst_ids.dropna())
-            assert saved.forecast_eps.isna().any()
+            if not single:
+                assert saved.forecast_eps.isna().any()
         assert str(saved.timestamp.dtype) == "datetime64[ns]"
         assert not saved.duplicated(list(spec.primary_key)).any()
     assert len(set(hashes)) == 1
@@ -1758,7 +1748,10 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
 
 
 @pytest.mark.parametrize("exponent", (0, 600, -600))
-def test_adjusted_open_preserves_units_through_storage_and_labels(tmp_path, exponent):
+@pytest.mark.parametrize("split", (False, True))
+def test_adjusted_open_preserves_units_through_storage_and_labels(
+    tmp_path, exponent, split
+):
     import math
 
     import numpy as np
@@ -1776,7 +1769,7 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(tmp_path, expo
     sessions = pd.date_range("2019-08-01", periods=3)
     prices = [math.ldexp(multiplier, exponent) for multiplier in (1.0, 1.0, 1.5)]
     rows = []
-    for timestamp, price in zip(sessions, prices, strict=True):
+    for position, (timestamp, price) in enumerate(zip(sessions, prices, strict=True)):
         row = dict.fromkeys(
             raw_exports.RAW_TABLE_CONTRACTS["market_bars_1d"].required_columns, 1.0
         )
@@ -1791,19 +1784,27 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(tmp_path, expo
             Hiprc=price,
             Loprc=price,
         )
+        if split:
+            split_price = prices[0] / (2 if position == 2 else 1)
+            row.update(
+                Opnprc=split_price,
+                Clsprc=split_price,
+                Hiprc=split_price,
+                Loprc=split_price,
+                Adjprcwd=prices[0],
+            )
         rows.append(row)
     _write_csmar(raw, "market_bars_1d", rows)
     built = interim.materialize_interim_data(
         layout=layout, data_ids=("market_bars_1d",)
     )
     loaded = read_dataset(built.artifact_roots["market_bars_1d"])
-    # open == close == adjusted close: the exact adjusted open is that price.
-    np.testing.assert_array_equal(loaded.adj_open, loaded.open)
+    np.testing.assert_array_equal(loaded.adj_open, loaded.adj_close)
     panel = loaded.rename(columns={"source_asset_id": "asset_id"}).assign(
         can_enter=True
     )
     labeled = add_forward_return_labels(panel, horizons=(1,), sessions=sessions)
-    assert labeled.forward_return_1d.iloc[0] == pytest.approx(0.5)
+    assert labeled.forward_return_1d.iloc[0] == pytest.approx(0.0 if split else 0.5)
     assert labeled.forward_return_1d_available_at.iloc[0] == sessions[2]
     assert labeled.forward_return_1d.iloc[1:].isna().all()
 
@@ -1811,6 +1812,7 @@ def test_adjusted_open_preserves_units_through_storage_and_labels(tmp_path, expo
 @pytest.mark.parametrize(
     "opening,adjusted,closing",
     [
+        (12.0, 20.0, 10.0),
         (2.0**600, 2.0**-600, 2.0**-600),
         (2.0**-600, 2.0**600, 2.0**600),
         (2.0**600, 2.0**600, 2.0**600),
@@ -2464,3 +2466,40 @@ def test_index_info_name_is_a_required_source_fact(tmp_path):
         interim.normalize_raw_frame(
             _collect_raw_export(path, "index_info"), "index_info"
         )
+
+
+def test_complete_chain_index_info_fixture_has_native_price_and_return_identities(
+    tmp_path, monkeypatch
+):
+    from quant_research_platform.markets.implementations.a_share.ids import (
+        FORMAL_BENCHMARKS,
+    )
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers import a_share_raw
+
+    layout = StorageLayout(tmp_path)
+    writer = a_share_raw._write_csmar
+
+    class CapturedIndexInfo(Exception):
+        pass
+
+    def write_index(root, data_id, rows, **kwargs):
+        if data_id == "index_info":
+            writer(root, data_id, rows, **kwargs)
+            raise CapturedIndexInfo
+
+    monkeypatch.setattr(a_share_raw, "_write_csmar", write_index)
+    total_returns = {"csi500": "H00905", "csi1000": "H00852"}
+    with pytest.raises(CapturedIndexInfo):
+        a_share_raw.write_a_share_raw_fixture(
+            layout, benchmark_total_return_indices=total_returns
+        )
+    result = interim.materialize_interim_data(layout=layout, data_ids=("index_info",))
+    saved = read_dataset(result.artifact_roots["index_info"]).set_index(
+        "source_asset_id"
+    )
+    assert len(saved) == 4
+    for code, (benchmark, name) in FORMAL_BENCHMARKS.items():
+        assert saved.loc[code, "index_name"] == name
+        assert saved.loc[total_returns[benchmark], "index_name"] == f"{name}全收益"

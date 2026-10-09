@@ -179,13 +179,6 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
         "access_window": "holdout",
         "scope": {"assets": ["btc_usdt"]},
     }
-    evidence = {
-        "qualification": "REUSE",
-        "prior_runs": [
-            {"run_id": "prior_" + "a" * 64 + str(index), "identity": "d" * 64}
-            for index in range(7500)
-        ],
-    }
     operation = unmeasured_operation_evidence("fixture_record")
     record = ResearchRunRecord(
         run_id="run_immutable",
@@ -212,7 +205,6 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
         ),
         status=RunStatus.COMPLETE,
         operation_evidence=operation,
-        holdout_evidence=evidence,
     )
     record = replace(
         record,
@@ -227,13 +219,10 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
         ),
     )
     original = record.payload()
-    assert len(json.dumps(original["holdout_evidence"]).encode()) > 1024 * 1024
     protocol["scope"]["assets"].append("eth_usdt")
-    evidence["prior_runs"].clear()
     operation["environment"]["reason"] = "changed"
     payload = record.payload()
     payload["protocol"]["scope"]["assets"].append("other")
-    payload["holdout_evidence"]["prior_runs"].clear()
     payload["operation_evidence"]["environment"]["reason"] = "changed"
     assert record.payload() == original
     assert canonical_json_hash(record.payload()["protocol"]) == record.protocol_identity
@@ -242,8 +231,6 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
         record.protocol["scope"]["other"] = "changed"
     with pytest.raises(AttributeError):
         record.protocol["scope"]["assets"].append("other")
-    with pytest.raises(TypeError):
-        record.holdout_evidence["prior_runs"][0]["identity"] = "e" * 64
     with pytest.raises(TypeError):
         record.operation_evidence["environment"]["reason"] = "changed"
     assert replace(record).payload() == original
@@ -261,7 +248,6 @@ def test_run_record_deeply_isolates_inputs_payload_and_persisted_identity(tmp_pa
         "protocol",
         "research_window",
         "operation_evidence",
-        "holdout_evidence",
     ),
 )
 def test_run_record_reader_rejects_wrong_json_container(tmp_path, field):

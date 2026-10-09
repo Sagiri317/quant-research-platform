@@ -66,7 +66,10 @@ def read_qrp_json_file(
 
 
 def read_bounded_qrp_json_directory(
-    root: Path, *, max_members: int
+    root: Path,
+    *,
+    max_members: int,
+    member_identities: dict[str, DatasetFileIdentity] | None = None,
 ) -> tuple[tuple[str, dict[str, Any]], ...]:
     """Read one bounded directory containing only QRP JSON object files."""
     if type(max_members) is not int or max_members < 0:
@@ -103,9 +106,10 @@ def read_bounded_qrp_json_directory(
     except (FileNotFoundError, NotADirectoryError) as exc:
         raise ValueError("dataset_metadata_directory_invalid") from exc
     names = member_names()
+    identities = {name: _qrp_json_file_identity(candidate / name) for name in names}
     result = []
     for name in names:
-        identity = _qrp_json_file_identity(candidate / name)
+        identity = identities[name]
         result.append(
             (
                 name,
@@ -114,6 +118,12 @@ def read_bounded_qrp_json_directory(
         )
     if member_names() != names:
         raise ValueError("dataset_metadata_directory_identity_changed")
+    if any(
+        _qrp_json_file_identity(candidate / name) != identities[name] for name in names
+    ):
+        raise ValueError("dataset_metadata_file_identity_changed")
+    if member_identities is not None:
+        member_identities.update(identities)
     return tuple(result)
 
 

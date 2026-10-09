@@ -33,6 +33,7 @@ from quant_research_platform.contracts.targets import (
     TargetStatus,
 )
 from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.interfaces import queries
 from quant_research_platform.profiles.research import (
     CRYPTO_PROFILE_ID,
     research_profile,
@@ -1663,10 +1664,25 @@ def test_rebuild_producer_primary_is_preserved_with_candidate_evidence(
     assert tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
 
 
+@pytest.mark.parametrize("failure", ["unsafe", "filter", "key", "type"])
 def test_rebuild_validation_failure_reports_failed_without_empty_candidate(
     tmp_path: Path,
+    failure,
 ) -> None:
-    primary = ValueError("producer validation failure")
+    if failure == "filter":
+        from quant_research_platform.research.filtering import apply_filter_mode
+
+        with pytest.raises(ValueError) as caught:
+            apply_filter_mode(pd.DataFrame(), mode="eligible", metadata_key="mode")
+        primary = caught.value
+    else:
+        primary = {
+            "unsafe": ValueError(
+                "token=private_payload C:\\private\\row.csv row=private_row"
+            ),
+            "key": KeyError("private_required_field"),
+            "type": TypeError("private_payload"),
+        }[failure]
     raw_root = tmp_path / "raw"
     marker_root = raw_root / "csmar"
     filesystem_mkdir(marker_root, parents=True)
@@ -1702,7 +1718,14 @@ def test_rebuild_validation_failure_reports_failed_without_empty_candidate(
     )
 
     assert failed["status"] == "FAILED"
-    assert failed["target_results"][0]["reason"] == "interim_build_failed:valueerror"
+    reason = failed["target_results"][0]["reason"]
+    if failure == "filter":
+        assert reason == "interim_build_failed:missing_filter_columns:eligible"
+    else:
+        assert reason.startswith(
+            f"interim_build_failed:{type(primary).__name__.lower()}:quant_research_platform."
+        )
+    assert "private" not in json.dumps(failed)
     assert read_dataset_manifest_evidence(old_root)["data_id"] == data_id
     assert calls["count"] == 2
     assert not tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
@@ -2144,7 +2167,7 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     assert report_result["target_result"]["status"] == "BUILT"
     assert report_result["report"]["report_status"] == "BLOCKED"
 
-    selected = research.inspect(
+    selected = queries.inspect(
         profile=profile,
         layout=layout,
         dataset_id="pv_all_report_artifact",
@@ -2165,7 +2188,7 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     markdown = other_root / "report.md"
     markdown.write_bytes(markdown.read_bytes() + b"\n")
     assert (
-        research.inspect(
+        queries.inspect(
             profile=profile,
             layout=layout,
             dataset_id="pv_all_report_artifact",
@@ -2174,7 +2197,7 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
         == selected
     )
     with pytest.raises(ValueError, match="semantic_artifact_member_integrity_invalid"):
-        research.inspect(
+        queries.inspect(
             profile=profile,
             layout=layout,
             dataset_id="pv_all_report_artifact",
@@ -2272,12 +2295,12 @@ def test_inspect_and_status_never_treat_a_directory_as_a_complete_target(
     root = layout.research_dataset_root("a_share", "pv_all")
     filesystem_mkdir(root, parents=True)
 
-    inspected = research.inspect(
+    inspected = queries.inspect(
         profile=profile,
         layout=layout,
         dataset_id="pv_all",
     )
-    status = research.status(profile=profile, layout=layout)
+    status = queries.status(profile=profile, layout=layout)
 
     assert inspected["status"] == "BLOCKED"
     assert inspected["blocker"] == "dataset_instances_missing"
@@ -3345,7 +3368,6 @@ def test_stage_choice_validates_published_source_and_never_uses_holdout(tmp_path
         protocol=holdout_protocol,
         protocol_identity=canonical_json_hash(holdout_protocol),
         research_window={**windows["holdout"], "access": "holdout"},
-        holdout_evidence={"qualification": "HOLDOUT_FIRST_EVIDENCE", "prior_runs": []},
     )
     write_research_run_record(layout.research_run_path(holdout.run_id), holdout)
     choice["run_id"] = holdout.run_id

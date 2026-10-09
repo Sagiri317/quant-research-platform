@@ -384,7 +384,7 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     ] == interim.source_content_identity(raw_root / "reference", data_id)
     dates = pd.bdate_range("2020-01-02", periods=5)
     inputs = _synthetic_interim_frames(dates)
-    stocks = inputs["stock_master"].assign(market_type=1)
+    stocks = inputs["stock_master"].copy()
     stocks["timestamp"] = stocks["listing_date"]
     dictionary = pd.DataFrame(
         {

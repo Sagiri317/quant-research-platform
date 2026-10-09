@@ -32,7 +32,11 @@ from quant_research_platform.contracts.portfolios import (
 )
 from quant_research_platform.contracts.signals import SignalSpec
 from quant_research_platform.contracts.targets import TargetSpec
-from quant_research_platform.contracts.time import TimeWindow, is_datetime_window
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    a_share_analysis_windows,
+    is_datetime_window,
+)
 from quant_research_platform.markets.implementations.a_share import ids as market_ids
 from quant_research_platform.research.factors.expectations.calculations import (
     FORECAST_FRESHNESS_DAYS,
@@ -519,7 +523,7 @@ class AShareProtocol:
             *self.statistics_target_ids,
             self.factor_statistics_target_id,
         }:
-            return analysis_windows(self.manifest(), window)[0]
+            return a_share_analysis_windows(self.manifest(), window)[0]
         if target_id == self.model_selection_target_id:
             return TimeWindow(
                 self.manifest()["model_chronology"]["warmup_window"]["start"],
@@ -937,23 +941,6 @@ def model_selection_windows(fold_windows, *, chronology, development_window, com
             )
         )
     return tuple(decisions)
-
-
-def analysis_windows(
-    manifest: Mapping[str, object], requested: TimeWindow
-) -> tuple[TimeWindow, TimeWindow]:
-    """Resolve full-development factor history and out-of-sample model dates."""
-    if manifest["access_window"] != "development":
-        return requested, requested
-    development = TimeWindow(**manifest["development_window"])
-    factor_history = TimeWindow(
-        manifest["formal_dataset_window"]["start"], development.end
-    )
-    if pd.Timestamp(requested.end) == pd.Timestamp(development.end) and pd.Timestamp(
-        requested.start
-    ) in {pd.Timestamp(development.start), pd.Timestamp(factor_history.start)}:
-        return factor_history, development
-    return requested, requested
 
 
 def source_history_window(

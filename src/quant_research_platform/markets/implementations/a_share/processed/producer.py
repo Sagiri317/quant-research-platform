@@ -78,17 +78,17 @@ from quant_research_platform.storage.layout import StorageLayout
 
 _OPTIONAL_SOURCE_IDS = frozenset(
     {
-        "stock_master",
-        "market_cap",
         "industry_classification",
         "industry_classification_sets",
         "industry_classification_versions",
         "stock_info_changes",
-        "trading_no_limit",
-        "special_treatment_changes",
     }
 )
 _FULL_HISTORY_SOURCE_IDS = _OPTIONAL_SOURCE_IDS | {
+    "stock_master",
+    "market_cap",
+    "trading_no_limit",
+    "special_treatment_changes",
     "trading_calendar",
     "index_info",
     "a_share_industry_snapshots",
@@ -375,6 +375,9 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
             expectations = _prepare_expectations(
                 analyst.rename(columns={"source_asset_id": "asset_id"}),
                 trading_sessions=unified_trading_sessions(source["trading_calendar"]),
+                selected_columns=tuple(
+                    definition.output_column for definition in definitions
+                ),
                 freshness_days=json.loads(spec.parameters_json).get(
                     "freshness_days", FORECAST_FRESHNESS_DAYS
                 ),
@@ -794,23 +797,6 @@ def _fundamental_pit_frame(
         values="value",
         aggfunc="first",
     ).reset_index()
-    beginning = (
-        pit.loc[:, ["asset_id", "timestamp", "metric_id", "beginning_value"]]
-        .pivot_table(
-            index=["asset_id", "timestamp"],
-            columns="metric_id",
-            values="beginning_value",
-            aggfunc="first",
-        )
-        .reset_index()
-    )
-    beginning = beginning.rename(
-        columns={
-            column: f"beginning_{column}"
-            for column in beginning.columns
-            if column not in {"asset_id", "timestamp"}
-        }
-    )
     prior_year = (
         pit.loc[:, ["asset_id", "timestamp", "metric_id", "prior_year_value"]]
         .pivot_table(
@@ -830,12 +816,13 @@ def _fundamental_pit_frame(
             if column not in {"asset_id", "timestamp"}
         }
     )
+    for column in ("total_assets", "parent_equity"):
+        source_column = f"prior_year_{column}"
+        if source_column in prior_year:
+            prior_year[f"beginning_{column}"] = prior_year[source_column]
     output = (
         panel.loc[:, ["market_id", "asset_id", "timestamp"]]
         .merge(values, on=["asset_id", "timestamp"], how="left", validate="one_to_one")
-        .merge(
-            beginning, on=["asset_id", "timestamp"], how="left", validate="one_to_one"
-        )
         .merge(
             prior_year, on=["asset_id", "timestamp"], how="left", validate="one_to_one"
         )

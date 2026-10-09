@@ -426,12 +426,12 @@ def test_research_windows_allow_continuous_crypto_across_midnight():
     with pytest.raises(ValueError, match="outside_access_boundary"):
         bind_research_configuration(research_profile(), config)
     config = research_configuration("crypto", "baseline")
-    config["research_plan"]["test"]["end"] = "2026-09-30T00:00:00"
-    config["windows"]["holdout"]["end"] = "2026-09-30T00:00:00"
+    config["research_plan"]["test"]["end"] = "2026-10-02T00:00:00"
+    config["windows"]["holdout"]["end"] = "2026-10-02T00:00:00"
     bound = bind_research_configuration(research_profile("crypto_binance_hft"), config)
     assert (
         bound.protocol(config["scenario_id"]).research_plan.test.end.isoformat()
-        == "2026-09-30T00:00:00"
+        == "2026-10-02T00:00:00"
     )
 
 
@@ -1167,6 +1167,87 @@ def test_crypto_configurations_preserve_market_signal_semantics(tmp_path, name):
         if spec.target_id == target_id
     )
     assert target.dependencies == (config["scenario_id"],)
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "baseline",
+        "multiscale",
+        "derivatives_state",
+        "spot_context",
+        "external_context",
+        "cross_btc_eth",
+        "cross_asset",
+    ],
+)
+def test_crypto_month_start_chronology_and_source_closure(tmp_path, name):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("crypto", name)
+    plan = config["research_plan"]
+    assert plan["folds"] == [
+        {
+            "fold_id": "development",
+            "train": {
+                "start": "2026-05-01T00:00:00",
+                "end": "2026-07-01T23:59:59.900000",
+            },
+            "validation": {
+                "start": "2026-08-01T00:00:00",
+                "end": "2026-09-01T23:59:59.900000",
+            },
+        }
+    ]
+    assert plan["test"] == {
+        "start": "2026-10-01T00:00:00",
+        "end": "2026-10-01T23:59:59.900000",
+    }
+    assert config["windows"] == {
+        "development": plan["folds"][0]["validation"],
+        "holdout": plan["test"],
+    }
+    assert plan["execution"]["backtest_modes"] == ["continuous"]
+    days = [f"2026-{month:02d}-01" for month in range(5, 11)]
+    assert config["source_archives"] == [
+        f"binance-futures/{day}-btcusdt-ethusdt-native" for day in days
+    ]
+    auxiliary = config.get("auxiliary_sources", {})
+    expected_sources = {
+        "baseline": set(),
+        "multiscale": set(),
+        "derivatives_state": {"derivatives_state"},
+        "spot_context": {"spot"},
+        "external_context": {"bybit", "okx"},
+        "cross_btc_eth": {"cross_asset"},
+        "cross_asset": {"cross_asset", "sol"},
+    }
+    assert set(auxiliary) == expected_sources[name]
+    for key, prefix, suffix in (
+        ("derivatives_state", "binance-futures", "btcusdt-ethusdt-state"),
+        ("spot", "binance", "btcusdt-ethusdt-native"),
+        ("sol", "binance-futures", "solusdt-native"),
+    ):
+        if key in auxiliary:
+            assert auxiliary[key]["archives"] == [
+                f"{prefix}/{day}-{suffix}" for day in days
+            ]
+    for venue, symbols in (
+        ("bybit", ("BTCUSDT", "ETHUSDT")),
+        ("okx", ("BTC-USDT-SWAP", "ETH-USDT-SWAP")),
+    ):
+        if venue in auxiliary:
+            assert auxiliary[venue]["archives"] == {
+                symbol: {
+                    kind: [f"{day}-{symbol}-{kind}" for day in days]
+                    for kind in ("quotes", "trades")
+                }
+                for symbol in symbols
+            }
+    profile = bind_research_configuration(
+        research_profile("crypto_binance_hft"), config, tardis_root=tmp_path
+    )
+    assert profile.protocol(config["scenario_id"]).manifest()["research_plan"] == plan
 
 
 @pytest.mark.parametrize(

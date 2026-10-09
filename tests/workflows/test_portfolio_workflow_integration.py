@@ -11,7 +11,14 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.artifacts.outputs import validate_output_bundle
-from quant_research_platform.artifacts.research import read_research_run_record
+from quant_research_platform.artifacts.portfolio_ledger import (
+    read_portfolio_ledger_artifact,
+)
+from quant_research_platform.artifacts.research import (
+    read_research_report_artifact,
+    read_research_run_record,
+)
+from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.catalog.factors import FactorCatalog
@@ -39,13 +46,16 @@ from quant_research_platform.contracts.targets import (
     TargetPlan,
     research_run_record_from_payload,
 )
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, a_share_analysis_windows
 from quant_research_platform.profiles.research import (
     A_SHARE_PROFILE_ID,
     ResearchProfile,
     research_profile,
 )
 from quant_research_platform.reports.a_share import REQUIRED_REPORT_SECTIONS
+from quant_research_platform.research.models.persisted import (
+    read_quarterly_model_artifact,
+)
 from quant_research_platform.research.portfolios import accounting
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.sources.csmar.interim import InterimImportResult
@@ -58,12 +68,12 @@ from quant_research_platform.storage.identity import (
     filesystem_mkdir,
     filesystem_read_text,
     filesystem_rename,
-    filesystem_unlink,
     filesystem_write_bytes,
     filesystem_write_text,
     native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from quant_research_platform.workflows import research
 from tests.helpers.portfolio_ledger import CONTINUOUS_EXECUTION_COLUMNS, session_frame
 from tests.helpers.research_configuration import (
@@ -647,7 +657,7 @@ def test_factor_and_model_windows_keep_separate_formal_boundaries(
 ):
     protocol = a_share.protocol("pv_all", access_window=access)
     requested = TimeWindow(start, end)
-    factor_window, model_window = a_share.analysis_windows(
+    factor_window, model_window = a_share_analysis_windows(
         protocol.manifest(), requested
     )
     assert factor_window == TimeWindow(expected_start, end)
@@ -657,186 +667,6 @@ def test_factor_and_model_windows_keep_separate_formal_boundaries(
             protocol.target_window("research run", None, requested, target)
             == factor_window
         )
-
-
-def test_holdout_evidence_uses_full_registered_window_and_actual_identities(
-    tmp_path, monkeypatch
-):
-    from quant_research_platform.contracts.json_codec import canonical_json_hash
-    from quant_research_platform.contracts.targets import (
-        ResearchRunRecord,
-        ResearchRunTargetResult,
-        unmeasured_operation_evidence,
-    )
-
-    layout = StorageLayout(tmp_path)
-    profile = _profile(_frames())
-    protocol = replace(
-        profile.protocol("pv_all"),
-        access_window="holdout",
-        frozen_development={
-            "run_id": "run_development",
-            "targets": {},
-            "alpha_sources": [
-                {
-                    "reference": {
-                        "target_id": "alpha_ledger",
-                        "instance_identity": "a" * 64,
-                    },
-                    "observed_at": "2023-12-29",
-                }
-            ],
-        },
-    )
-    window = {"start": "2024-01-01", "end": "2024-03-31", "access": "holdout"}
-    facts = (
-        ("pv_all", ProducerKind.DATASET, "b" * 64),
-        (protocol.model_selection_target_id, ProducerKind.MODEL, "c" * 64),
-        *(
-            (target, ProducerKind.PREDICTION, identity * 64)
-            for target, identity in zip(
-                protocol.prediction_target_ids, ("d", "1"), strict=True
-            )
-        ),
-    )
-    results = tuple(
-        ResearchRunTargetResult(
-            target_id=target,
-            producer_kind=kind,
-            status="BUILT",
-            instance_identity=identity,
-            schema_identity="e" * 64,
-            artifact_root=f"data/artifacts/a_share/{target}",
-        )
-        for target, kind, identity in facts
-    )
-    record = ResearchRunRecord(
-        run_id="run_first",
-        profile_id=profile.profile_id,
-        scenario_id="pv_all",
-        protocol=protocol.manifest(),
-        protocol_identity=canonical_json_hash(protocol.manifest()),
-        research_window=window,
-        software_identity="f" * 64,
-        terminal_targets=protocol.prediction_target_ids,
-        target_results=results,
-        status="COMPLETE",
-        operation_evidence=unmeasured_operation_evidence("fixture"),
-        holdout_evidence={
-            "qualification": "HOLDOUT_FIRST_EVIDENCE",
-            "prior_runs": [],
-        },
-    )
-    research.write_research_run_record(layout.research_run_path(record.run_id), record)
-    forged = record.payload()
-    forged["holdout_evidence"]["qualification"] = "HOLDOUT_NOT_ACCESSED"
-    import json
-
-    forged_path = layout.research_run_path("run_forged_not_accessed")
-    forged["run_id"] = "run_forged_not_accessed"
-    filesystem_write_text(forged_path, json.dumps(forged), encoding="utf-8")
-    with pytest.raises(ValueError, match="research_run_record_invalid"):
-        read_research_run_record(forged_path)
-    filesystem_unlink(forged_path)
-    with pytest.raises(ValueError, match="research_run_holdout_evidence_invalid"):
-        replace(
-            record,
-            status="BLOCKED",
-            holdout_evidence=forged["holdout_evidence"],
-            target_results=(
-                replace(
-                    results[0],
-                    status="BLOCKED",
-                    reason="dependency_blocked",
-                    instance_identity=None,
-                    schema_identity=None,
-                    artifact_root=None,
-                ),
-                *results[1:],
-            ),
-        )
-    arguments = dict(
-        layout=layout,
-        profile=profile,
-        protocol=protocol,
-        research_window=window,
-        target_results=results,
-    )
-    emitted = []
-    read_paths = []
-    original_glob = research.filesystem_glob
-    original_read = research.read_research_run_record
-
-    def incremental_glob(*args):
-        for path in original_glob(*args):
-            emitted.append(path)
-            yield path
-            assert path in read_paths
-
-    def tracked_read(path, **kwargs):
-        read_paths.append(path)
-        return original_read(path, **kwargs)
-
-    monkeypatch.setattr(research, "filesystem_glob", incremental_glob)
-    monkeypatch.setattr(research, "read_research_run_record", tracked_read)
-    assert research._holdout_evidence(**arguments)["qualification"] == "REUSE"
-    assert emitted and len(emitted) == len(read_paths)
-    for status in ("FAILED", "BLOCKED"):
-        partial_results = (
-            *results[:-1],
-            replace(
-                results[-1],
-                status=status,
-                reason="prediction_unavailable",
-                instance_identity=None,
-                schema_identity=None,
-                artifact_root=None,
-            ),
-        )
-        assert (
-            research._holdout_evidence(
-                **{**arguments, "target_results": partial_results}
-            )["qualification"]
-            != "REUSE"
-        )
-        partial = replace(record, status=status, target_results=partial_results)
-        partial_layout = StorageLayout(tmp_path / status.lower())
-        research.write_research_run_record(
-            partial_layout.research_run_path(partial.run_id), partial
-        )
-        prior = research._holdout_evidence(**{**arguments, "layout": partial_layout})
-        assert prior["qualification"] == "POST_HOLDOUT_CORRECTED"
-        assert [row["run_id"] for row in prior["prior_runs"]] == [partial.run_id]
-    other_window = {"start": "2025-01-01", "end": "2025-03-31", "access": "holdout"}
-    assert (
-        research._holdout_evidence(**{**arguments, "research_window": other_window})[
-            "qualification"
-        ]
-        == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
-    )
-    new_protocol = replace(
-        protocol,
-        frozen_development={
-            **protocol.frozen_development,
-            "run_id": "run_other_development",
-        },
-    )
-    assert (
-        research._holdout_evidence(**{**arguments, "protocol": new_protocol})[
-            "qualification"
-        ]
-        == "REUSE"
-    )
-    changed_output = (
-        *results[:-1],
-        replace(results[-1], instance_identity="3" * 64),
-    )
-    assert (
-        research._holdout_evidence(**{**arguments, "target_results": changed_output})[
-            "qualification"
-        ]
-        == "POST_HOLDOUT_ADDITIONAL_EVIDENCE"
-    )
 
 
 def test_portfolio_statistics_target_identity_tracks_its_consumed_contract(
@@ -1206,7 +1036,6 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         layout.research_run_path(blocked["run_id"])
     )
     assert blocked_record.status.value == "BLOCKED"
-    assert blocked_record.holdout_evidence["qualification"] == "HOLDOUT_NOT_ACCESSED"
     assert all(item.status.value == "BLOCKED" for item in blocked_record.target_results)
     assert (
         blocked_record.protocol["frozen_development"]["run_id"] == development["run_id"]
@@ -1226,7 +1055,6 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     assert len(set(loaded_sources)) == len(loaded_sources)
     record = read_research_run_record(layout.research_run_path(holdout["run_id"]))
     assert record.trial_ledgers == ()
-    assert record.holdout_evidence["qualification"] == "HOLDOUT_FIRST_EVIDENCE"
     expected_sources = {"global": [], "quarterly": []}
     for candidate in profile.protocol("pv_all").portfolio_candidates():
         if candidate.construction != "benchmark_enhanced":
@@ -1351,7 +1179,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     sources = {"global": [], "quarterly": []}
     for candidate in profile.protocol("pv_all").portfolio_candidates():
         target_id = f"pv_all_{candidate.candidate_id}_ledger"
-        artifact = research.read_portfolio_ledger_artifact(
+        artifact = read_portfolio_ledger_artifact(
             layout.instance_root(
                 layout.semantic_artifact_root("a_share", target_id),
                 results[target_id].instance_identity,
@@ -1371,7 +1199,7 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
                 for item in development_record.target_results
                 if item.target_id == target_id
             )
-            original = research.read_portfolio_ledger_artifact(
+            original = read_portfolio_ledger_artifact(
                 layout.instance_root(
                     layout.semantic_artifact_root("a_share", target_id),
                     source.instance_identity,
@@ -1409,15 +1237,15 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         )
     report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
     assert (
-        report["report"]["sections"]["development vs holdout"]["evidence"][
-            "qualification"
-        ]
-        == "HOLDOUT_FIRST_EVIDENCE"
+        report["report"]["sections"]["development vs holdout"]["requested_access"]
+        == "holdout"
     )
     reused = research.research_run(**request)
     assert reused["status"] == "COMPLETE", reused
     reused_record = read_research_run_record(layout.research_run_path(reused["run_id"]))
-    assert reused_record.holdout_evidence["qualification"] == "REUSE"
+    assert {
+        item.target_id: item.instance_identity for item in reused_record.target_results
+    } == {item.target_id: item.instance_identity for item in record.target_results}
     new_development = research.research_run(
         profile=profile,
         layout=layout,
@@ -1451,7 +1279,6 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         layout.research_run_path(operational["run_id"])
     )
     assert operational_record.software_identity != record.software_identity
-    assert operational_record.holdout_evidence["qualification"] == "REUSE"
     assert {
         item.target_id: item.instance_identity
         for item in operational_record.target_results
@@ -1476,12 +1303,6 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
     corrected_record = read_research_run_record(
         layout.research_run_path(corrected["run_id"])
     )
-    assert (
-        corrected_record.holdout_evidence["qualification"] == "POST_HOLDOUT_CORRECTED"
-    )
-    assert record.run_id in {
-        item["run_id"] for item in corrected_record.holdout_evidence["prior_runs"]
-    }
     corrected_prediction = next(
         item
         for item in corrected_record.target_results
@@ -1508,10 +1329,10 @@ def test_holdout_freezes_models_and_alpha_across_observation_quarters(
         profile=profile, layout=layout, run_id=corrected_record.run_id
     )
     assert (
-        corrected_report["report"]["sections"]["development vs holdout"]["evidence"][
-            "qualification"
+        corrected_report["report"]["sections"]["development vs holdout"][
+            "requested_access"
         ]
-        == "POST_HOLDOUT_CORRECTED"
+        == "holdout"
     )
     assert (
         content_hash_for_files(
@@ -1699,7 +1520,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         layout.semantic_artifact_root("a_share", statistics_id),
         statistics_identity,
     )
-    statistics_artifact = research.read_statistics_artifact(
+    statistics_artifact = read_statistics_artifact(
         statistics_root, expected_identity=statistics_identity
     )
     with statistics_artifact.table("prediction_diagnostics.parquet") as table:
@@ -1748,7 +1569,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         layout.semantic_artifact_root("a_share", protocol.model_selection_target_id),
         results[protocol.model_selection_target_id]["instance_identity"],
     )
-    model = research.read_quarterly_model_artifact(model_root, trial_layout=layout)
+    model = read_quarterly_model_artifact(model_root, trial_layout=layout)
     global_decision = model.selections["global"]["final"]
     quarterly_decision = model.selections["quarterly"]["2019Q1"]
     assert global_decision["validation_start"] == "2019-01-01"
@@ -1786,7 +1607,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
     for end_date in ("2019-01-15", "2019-02-15"):
         narrow_window = TimeWindow("2019-01-02", end_date)
         narrow_global = None
-        model = research.read_quarterly_model_artifact(model_root, trial_layout=layout)
+        model = read_quarterly_model_artifact(model_root, trial_layout=layout)
         for index, group in enumerate(("global", "quarterly")):
             group_prediction_id = protocol.prediction_target_ids[index]
             group_statistics_id = protocol.statistics_target_ids[index]
@@ -1851,7 +1672,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
                     envelope=narrow_envelope,
                     tables=narrow,
                 )
-                narrow_global = research.read_statistics_artifact(
+                narrow_global = read_statistics_artifact(
                     narrow_root, expected_identity=narrow_envelope.instance_identity
                 )
             else:
@@ -1889,7 +1710,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
                         envelope=quarter_envelope,
                         tables=narrow,
                     )
-                    saved_quarter = research.read_statistics_artifact(
+                    saved_quarter = read_statistics_artifact(
                         quarterly_root,
                         expected_identity=quarter_envelope.instance_identity,
                     )
@@ -1899,7 +1720,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
                         assert saved.reason.eq("no_common_observations").all()
         model = narrow_global = saved_quarter = None
         narrow_envelope = quarter_envelope = narrow_payload = None
-    model = research.read_quarterly_model_artifact(model_root, trial_layout=layout)
+    model = read_quarterly_model_artifact(model_root, trial_layout=layout)
     (_manifest, lookup) = read_prediction_output_bundle(
         damaged,
         expected_output_id=prediction_id,
@@ -1984,7 +1805,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         return native_write(interrupted_frames(), path, **kwargs)
 
     with monkeypatch.context() as patch:
-        model = research.read_quarterly_model_artifact(model_root, trial_layout=layout)
+        model = read_quarterly_model_artifact(model_root, trial_layout=layout)
         patch.setattr(prediction_writer, "write_parquet_chunks", fail_merged_write)
         pspec = PredictionSpec(
             prediction_id=prediction_id,
@@ -2029,9 +1850,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
             layout.semantic_artifact_root("a_share", target_id),
             identity,
         )
-        artifact = research.read_portfolio_ledger_artifact(
-            root, expected_identity=identity
-        )
+        artifact = read_portfolio_ledger_artifact(root, expected_identity=identity)
         requested_years[target_id.removeprefix("pv_all_").removesuffix("_ledger")] = (
             set()
         )
@@ -2133,7 +1952,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
         layout.semantic_artifact_root("a_share", "pv_all_report_artifact"),
         report_identity,
     )
-    report = research.read_research_report_artifact(
+    report = read_research_report_artifact(
         report_root, expected_identity=report_identity
     )
     assert set(report["sections"]) == set(REQUIRED_REPORT_SECTIONS)
@@ -2143,7 +1962,7 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
     dataset_ref = next(
         item for item in record.target_results if item.target_id == "pv_all"
     )
-    manifest = research.read_dataset_manifest_evidence(
+    manifest = read_dataset_manifest_evidence(
         layout.instance_root(
             layout.project_root / dataset_ref.artifact_root,
             dataset_ref.instance_identity,
@@ -2182,9 +2001,10 @@ def test_both_groups_build_and_reuse_one_real_persisted_chain(
     )
     from quant_research_platform.artifacts.research import produce_a_share_report
 
-    model = research.read_quarterly_model_artifact(model_root, trial_layout=layout)
     partial_report = produce_a_share_report(
-        layout=layout, record=partial, selections=model.selections
+        layout=layout,
+        record=partial,
+        read_model_artifact=read_quarterly_model_artifact,
     )
     assert partial_report["report_status"] == "BLOCKED"
     retained = partial_report["sections"]["portfolio"]["results"]

@@ -22,6 +22,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.semantic_artifacts import write_semantic_artifact
 from tests.helpers.research_configuration import research_configuration
+from tests.helpers.statistics_artifacts import statistics_envelope
 
 MAKER_MODEL_IDS = next(
     (item["price_model_id"], item["proxy_model_id"])
@@ -123,8 +124,8 @@ def tables(request):
 
 
 @pytest.fixture
-def envelope():
-    return build_business_manifest_envelope(
+def envelope(tables):
+    base = build_business_manifest_envelope(
         logical_artifact_id="statistics",
         schema_identity="a" * 64,
         protocol_or_spec_identity="b" * 64,
@@ -136,6 +137,16 @@ def envelope():
         },
         upstream_identities={},
         semantic_metadata={},
+    )
+    return statistics_envelope(
+        base,
+        group="factor" if "factor_diagnostics" in tables else "research",
+        protocol={
+            "access_window": "development",
+            "formal_dataset_window": {"start": "2023-01-02", "end": "2023-03-31"},
+            "development_window": {"start": "2023-01-02", "end": "2023-03-31"},
+            "holdout_window": {"start": "2023-01-02", "end": "2023-03-31"},
+        },
     )
 
 
@@ -316,6 +327,9 @@ def maker_calibration_tables():
         },
         upstream_identities={},
         semantic_metadata={"target_contract": {"protocol": manifest}},
+    )
+    envelope = statistics_envelope(
+        envelope, group="crypto_maker_calibration", protocol=manifest
     )
     return (frames, envelope)
 
@@ -597,6 +611,7 @@ def test_research_table_counts_reject_lossy_coercion(
 
 @pytest.mark.parametrize("count", (32, 64))
 def test_group_comparison_integral_counts_round_trip(tmp_path, tables, envelope, count):
+    envelope = _holdout_statistics_envelope(envelope, tables)
     tables["model_group_comparison"] = pd.DataFrame([_defined_group_comparison_row()])
     tables["model_group_comparison"]["observation_count"] = pd.Series(
         [count], dtype=object
@@ -773,7 +788,7 @@ def crypto_tables():
     "mutation", ("defined_null", "undefined_value", "reason", "status")
 )
 def test_crypto_status_measurements_are_rejected_at_write_and_read(
-    tmp_path, crypto_tables, envelope, member, mutation
+    tmp_path, crypto_tables, crypto_envelope, member, mutation
 ):
     frame = crypto_tables[member.removesuffix(".parquet")]
     if mutation == "defined_null":
@@ -789,12 +804,12 @@ def test_crypto_status_measurements_are_rejected_at_write_and_read(
     else:
         frame.loc[0, "status"] = "UNKNOWN"
     _assert_rejected_at_write_and_read(
-        tmp_path, crypto_tables, envelope, member, table_group="crypto_portfolio"
+        tmp_path, crypto_tables, crypto_envelope, member, table_group="crypto_portfolio"
     )
 
 
 def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
-    tmp_path, crypto_tables, envelope
+    tmp_path, crypto_tables, crypto_envelope
 ):
     daily = crypto_tables["crypto_portfolio_daily"]
     daily.loc[0, ["end_nav", "net_return", "status", "reason"]] = [
@@ -805,12 +820,12 @@ def test_crypto_text_diagnostics_and_undefined_daily_are_preserved(
     ]
     root = statistics.write_statistics_artifact(
         tmp_path / "crypto",
-        envelope=envelope,
+        envelope=crypto_envelope,
         tables=crypto_tables,
         table_group="crypto_portfolio",
     )
     artifact = statistics.read_statistics_artifact(
-        root, expected_identity=envelope.instance_identity
+        root, expected_identity=crypto_envelope.instance_identity
     )
     with artifact.table("crypto_execution_diagnostics.parquet") as frame:
         assert frame.loc[0, "status"] == "DEFINED"
@@ -1100,6 +1115,9 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
         research_window={**window, "access": "development"},
         upstream_identities={},
         semantic_metadata={"target_contract": {"protocol": manifest}},
+    )
+    envelope = statistics_envelope(
+        envelope, group="crypto_maker_calibration", protocol=manifest
     )
     coverage = {"s1": (first * 1000000, (last + 600) * 1000000)}
     run = SimpleNamespace(
@@ -1493,15 +1511,7 @@ def test_undefined_model_inference_rejects_inferential_values_and_false_means(
 def test_defined_group_comparison_requires_descriptive_facts(
     tmp_path, tables, envelope, corruption, fdr_method
 ):
-    envelope = build_business_manifest_envelope(
-        logical_artifact_id=envelope.logical_artifact_id,
-        schema_identity=envelope.schema_identity,
-        protocol_or_spec_identity=envelope.protocol_or_spec_identity,
-        research_window={**envelope.research_window, "access": "holdout"},
-        upstream_identities=envelope.upstream_identities,
-        software_identity=envelope.software_identity,
-        semantic_metadata=envelope.semantic_metadata,
-    )
+    envelope = _holdout_statistics_envelope(envelope, tables)
     row = _defined_group_comparison_row()
     row["fdr_method"] = fdr_method
     if fdr_method == "NOT_APPLICABLE":
@@ -1846,3 +1856,132 @@ def test_maker_validator_rejects_compound_damage_without_error_priority(
     assert {
         path.name: path.read_bytes() for path in root.iterdir() if path.is_file()
     } == before
+
+
+def _holdout_statistics_envelope(envelope, tables):
+    for frame in tables.values():
+        if "access_window" in frame:
+            frame["access_window"] = "holdout"
+    payload = envelope.payload()
+    protocol = payload["semantic_metadata"]["target_contract"]["protocol"]
+    protocol["access_window"] = "holdout"
+    base = build_business_manifest_envelope(
+        logical_artifact_id=envelope.logical_artifact_id,
+        schema_identity=envelope.schema_identity,
+        protocol_or_spec_identity=envelope.protocol_or_spec_identity,
+        software_identity=envelope.software_identity,
+        research_window={**payload["research_window"], "access": "holdout"},
+        upstream_identities=payload["upstream_identities"],
+        semantic_metadata=payload["semantic_metadata"],
+    )
+    return statistics_envelope(base, group="research", protocol=protocol)
+
+
+@pytest.fixture
+def crypto_envelope(envelope):
+    payload = envelope.payload()
+    window = {**payload["research_window"], "access": "holdout"}
+    base = build_business_manifest_envelope(
+        **{
+            key: value
+            for key, value in payload.items()
+            if key not in {"instance_identity", "status", "research_window"}
+        },
+        research_window=window,
+    )
+    return statistics_envelope(
+        base,
+        group="crypto_portfolio",
+        protocol={
+            "access_window": "holdout",
+            "execution_mode": "continuous",
+            "portfolio_candidates": [{"candidate_id": "candidate"}],
+            "research_plan": {
+                "test": {"start": window["start"], "end": window["end"]},
+                "folds": [{"fold_id": "fold_1"}],
+            },
+        },
+    )
+
+
+@pytest.mark.parametrize("boundary", ("access", "outside", "factor_history"))
+def test_research_statistics_bind_access_and_model_role_window(
+    tmp_path, tables, envelope, boundary
+):
+    member = "model_losses.parquet"
+    if boundary == "access":
+        tables["model_losses"]["access_window"] = "holdout"
+        error = "statistics_access_window_mismatch"
+    else:
+        tables["model_losses"]["timestamp"] = pd.Timestamp(
+            "2030-01-02" if boundary == "outside" else "2014-01-02"
+        )
+        error = "statistics_table_window_mismatch"
+    if boundary == "factor_history":
+        payload = envelope.payload()
+        protocol = payload["semantic_metadata"]["target_contract"]["protocol"]
+        protocol["formal_dataset_window"]["start"] = "2014-01-02"
+        base = build_business_manifest_envelope(
+            **{
+                key: value
+                for key, value in payload.items()
+                if key not in {"instance_identity", "status", "research_window"}
+            },
+            research_window={**payload["research_window"], "start": "2014-01-02"},
+        )
+        envelope = statistics_envelope(base, group="research", protocol=protocol)
+    _assert_rejected_at_write_and_read(tmp_path, tables, envelope, member, error=error)
+
+
+def test_statistics_table_group_matches_declared_target_at_write_and_read(
+    tmp_path, tables, envelope
+):
+    envelope = statistics_envelope(
+        envelope,
+        group="factor",
+        protocol=envelope.payload()["semantic_metadata"]["target_contract"]["protocol"],
+    )
+    with pytest.raises(ValueError, match="statistics_artifact_contract_mismatch"):
+        statistics.write_statistics_artifact(
+            tmp_path / "rejected", envelope=envelope, tables=tables
+        )
+
+    def write(staging):
+        for name, frame in tables.items():
+            pq.write_table(
+                pa.Table.from_pandas(
+                    frame,
+                    schema=statistics._ARROW_SCHEMAS[name + ".parquet"],
+                    preserve_index=False,
+                ),
+                native_filesystem_path(staging / (name + ".parquet")),
+            )
+
+    root = write_semantic_artifact(tmp_path / "unchecked", envelope, write)
+    with pytest.raises(ValueError, match="statistics_artifact_members_invalid"):
+        statistics.read_statistics_artifact(root, expected_identity=root.name)
+
+
+@pytest.mark.parametrize("boundary", ("candidate", "execution_mode", "date"))
+def test_crypto_statistics_bind_candidate_mode_and_window(
+    tmp_path, crypto_tables, crypto_envelope, boundary
+):
+    frame = crypto_tables["crypto_portfolio_daily"]
+    if boundary == "candidate":
+        frame["candidate_id"] = "other_candidate"
+        error = "statistics_candidate_id_mismatch"
+    elif boundary == "execution_mode":
+        frame["execution_mode"] = "independent_segments"
+        frame["episode_id"] = "a" * 64
+        error = "statistics_execution_mode_mismatch"
+    else:
+        frame["end_at"] = pd.Timestamp("2030-01-01")
+        error = "statistics_table_window_mismatch"
+    _assert_rejected_at_write_and_read(
+        tmp_path,
+        crypto_tables,
+        crypto_envelope,
+        "crypto_portfolio_daily.parquet",
+        table_group="crypto_portfolio",
+        error=error,
+    )

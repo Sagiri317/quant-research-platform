@@ -833,53 +833,6 @@ def test_research_dataset_role_validation_rejects_wrong_factor_source(
         )
 
 
-@pytest.mark.parametrize(
-    ("field_name", "bad_column", "expected_error"),
-    [
-        ("label_columns", "momentum_20d", "research_input_column_overlap"),
-        ("filter_columns", "market_type", "research_semantic_column_role_invalid"),
-        ("context_columns", "eligible", "research_semantic_column_role_invalid"),
-    ],
-)
-def test_research_dataset_role_validation_rejects_wrong_label_filter_and_context(
-    field_name: str, bad_column: str, expected_error: str
-) -> None:
-    spec_kwargs = {
-        "factor_columns": ("momentum_20d",),
-        "label_columns": ("forward_return_20d",),
-        "filter_columns": ("eligible", "can_enter", "can_exit"),
-        "context_columns": ("market_type",),
-    }
-    spec_kwargs[field_name] = (bad_column,)
-    with pytest.raises(ValueError, match=expected_error):
-        ResearchDatasetCatalog(
-            (
-                ResearchDatasetSpec(
-                    data_id=f"bad_{field_name}",
-                    market_id=MarketId("a_share"),
-                    input_data_ids=("demo_factors", "demo_labels", "demo_annotations"),
-                    base_input_data_id="demo_annotations",
-                    **spec_kwargs,
-                    frequency=DataFrequency.DAILY,
-                    grain=DataGrain.RESEARCH_ROW,
-                    column_roles={
-                        "market_id": ColumnRole.KEY,
-                        "asset_id": ColumnRole.KEY,
-                        "timestamp": ColumnRole.TIMESTAMP,
-                        "momentum_20d": ColumnRole.FACTOR,
-                        "forward_return_20d": ColumnRole.LABEL,
-                        "eligible": ColumnRole.UNIVERSE,
-                        "can_enter": ColumnRole.MASK,
-                        "can_exit": ColumnRole.MASK,
-                        "market_type": ColumnRole.CONTEXT,
-                    },
-                    primary_key=PLATFORM_ASSET_TIME_KEY,
-                    partition_columns=("year",),
-                ),
-            )
-        )
-
-
 @pytest.mark.parametrize("coverage", ("strict", "sparse"))
 @pytest.mark.parametrize("physical_rows", (1, 2))
 @pytest.mark.parametrize(

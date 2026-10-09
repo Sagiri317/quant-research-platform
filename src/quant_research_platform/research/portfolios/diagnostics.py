@@ -12,6 +12,7 @@ import pandas as pd
 from quant_research_platform.contracts.experiments import _model_inference_blocker
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.portfolios import PORTFOLIO_CASH_ASSET_ID
+from quant_research_platform.contracts.time import crypto_execution_windows
 from quant_research_platform.contracts.validation import strict_finite_float
 from quant_research_platform.markets.implementations.a_share import ids as a_share_ids
 from quant_research_platform.policy.lifecycle import closing_iterator
@@ -254,7 +255,6 @@ def build_crypto_portfolio_statistics_tables(
 ):
     from quant_research_platform.research.protocols.crypto_hft import (
         CryptoMakerCandidate,
-        execution_windows,
         portfolio_candidates,
     )
 
@@ -263,7 +263,7 @@ def build_crypto_portfolio_statistics_tables(
     target_id = protocol_manifest["execution_target_id"]
     plan = protocol_manifest["research_plan"]
     statistics_policy = protocol_manifest["portfolio_statistics"]
-    windows = execution_windows(
+    windows = crypto_execution_windows(
         plan, time_window, access_window=protocol_manifest["access_window"]
     )
     bounds = tuple(

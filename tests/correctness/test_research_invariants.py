@@ -412,7 +412,7 @@ def test_alpha_calibration_is_schedule_matched_and_non_flipping() -> None:
     "alpha_exponent,return_exponent",
     [(0, 0), (600, 0), (-600, 0), (0, 600), (0, -600), (600, 600), (-600, -600)],
 )
-def test_calibration_weighted_cluster_reference_and_true_mature_coverage(
+def test_calibration_weighted_cluster_reference_and_unit_scaling(
     alpha_exponent, return_exponent
 ):
     import statsmodels.api as sm
@@ -469,6 +469,23 @@ def test_calibration_weighted_cluster_reference_and_true_mature_coverage(
     )
     assert result.weighted_r2 == pytest.approx(fit.rsquared, rel=1e-12)
     assert result.scheduled_rebalance_dates == 6
+
+
+def test_alpha_calibration_missing_and_stale_date_coverage():
+    from quant_research_platform.research.portfolios.accounting import (
+        alpha_calibration_intervals,
+    )
+
+    sessions = pd.bdate_range("2023-01-02", "2023-02-20")
+    intervals = alpha_calibration_intervals(sessions, "weekly-last-trading-day")
+    dates = intervals.timestamp.iloc[:6]
+    frame = pd.DataFrame(
+        {
+            "timestamp": dates.repeat(2),
+            "alpha_score": [0.0, 1.0] * 6,
+            "holding_return": [0.0, 0.01] * 6,
+        }
+    )
     missing = calibrate_expected_alpha(
         frame.loc[frame.timestamp.ne(dates.iloc[1])],
         as_of=sessions[-1],

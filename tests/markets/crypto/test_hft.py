@@ -1014,3 +1014,73 @@ def test_l0_full_windows_chunk_segments_assets_causality_and_persistence(tmp_pat
     path = tmp_path / "l0.parquet"
     full.to_parquet(path, index=False)
     pd.testing.assert_frame_equal(pd.read_parquet(path), full, check_exact=True)
+
+
+@pytest.mark.parametrize("batch_rows", [1, 10])
+def test_panel_exact_cancellation_survives_events_and_batches(batch_rows):
+    from dataclasses import replace
+
+    books = [
+        _state(0, bid_index=990, bid_qty=1e308),
+        _state(10, bid_index=991, bid_qty=1e308),
+        _state(20, bid_index=992, bid_qty=1e308),
+        _state(30, bid_index=991, bid_qty=1e308),
+    ]
+    frames = list(
+        iter_panel_frames(
+            books,
+            [
+                _trade(10, 1e16, maker_buyer=False),
+                _trade(20, 1.0, maker_buyer=False),
+                _trade(30, 1e16, maker_buyer=True),
+            ],
+            market_id="crypto",
+            asset_id="btc_usdt",
+            start_ms=0,
+            end_ms=100,
+            book_coverage={"s1": _coverage(0, 300)},
+            trade_coverage=coverage_lookup({"trade-connection-1": _coverage(0, 300)}),
+            batch_rows=batch_rows,
+        )
+    )
+    row = pd.concat(frames).iloc[-1]
+    assert row.book_ofi_100ms == 1e308
+    assert row.observed_signed_trade_volume_100ms == 1.0
+    assert l1_ofi((1, 1.0), (1, 1e308), (3, 1.0), (3, 1e308)) == 0.0
+    assert l1_ofi((1, 1e308), (1, 1.0), (3, 1e308), (3, 2.0)) == -1.0
+    # A segment boundary must discard its predecessor's exact aggregate.
+    reset = [*books[:3], _boundary(25), replace(books[-1], segment_id="s2")]
+    row = pd.concat(
+        list(
+            iter_panel_frames(
+                reset,
+                [],
+                market_id="crypto",
+                asset_id="btc_usdt",
+                start_ms=0,
+                end_ms=100,
+                book_coverage={"s1": _coverage(0, 300), "s2": _coverage(0, 300)},
+                trade_coverage=coverage_lookup(
+                    {"trade-connection-1": _coverage(0, 300)}
+                ),
+                batch_rows=batch_rows,
+            )
+        )
+    ).iloc[-1]
+    assert row.book_ofi_100ms == 0.0
+    with pytest.raises(OverflowError):
+        list(
+            iter_panel_frames(
+                books[:3],
+                [],
+                market_id="crypto",
+                asset_id="btc_usdt",
+                start_ms=0,
+                end_ms=100,
+                book_coverage={"s1": _coverage(0, 300)},
+                trade_coverage=coverage_lookup(
+                    {"trade-connection-1": _coverage(0, 300)}
+                ),
+                batch_rows=batch_rows,
+            )
+        )

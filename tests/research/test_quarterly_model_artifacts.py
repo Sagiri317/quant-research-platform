@@ -1800,7 +1800,6 @@ def test_distinct_final_choices_have_distinct_real_refits(tmp_path, monkeypatch)
         if plan.stage == "refit":
             groups.append(plan.selection_groups)
             assert len(records) == 1 and records[0].status == "completed"
-            assert records[0].holdout_accessed is False
     assert groups == [("global",), ("quarterly",)]
 
 

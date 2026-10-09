@@ -30,10 +30,12 @@ from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_mkdir,
     filesystem_scandir,
+    filesystem_stat,
     require_unaliased_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import (
+    _directory_identity,
     _qrp_json_file_identity,
     read_bounded_qrp_json_directory,
     read_qrp_json_file,
@@ -77,6 +79,7 @@ def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
     if not filesystem_exists(root):
         return (plan, ())
     root = require_unaliased_path(root, error="trial_ledger_path_invalid")
+    root_identity = _directory_identity(filesystem_stat(root, follow_symlinks=False))
     members = set()
     with filesystem_scandir(root) as entries:
         for item in entries:
@@ -95,8 +98,15 @@ def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
     ) != canonical_identity_bytes(plan.protocol_payload()):
         raise ValueError("trial_plan_mismatch")
     plan = saved
+    records_root = root / "records"
+    records_identity = _directory_identity(
+        filesystem_stat(records_root, follow_symlinks=False)
+    )
+    record_identities = {}
     entries = read_bounded_qrp_json_directory(
-        root / "records", max_members=2 * plan.trial_budget
+        records_root,
+        max_members=2 * plan.trial_budget,
+        member_identities=record_identities,
     )
     if (
         evidence_json_value_unsafe_reason([payload for _, payload in entries])
@@ -127,6 +137,28 @@ def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
         raise ValueError("trial_ledger_order_invalid")
     for record in records:
         validate_trial_record_against_plan(plan, record)
+    if _qrp_json_file_identity(root / "plan.json") != identity or any(
+        _qrp_json_file_identity(records_root / name) != expected
+        for name, expected in record_identities.items()
+    ):
+        raise ValueError("dataset_metadata_file_identity_changed")
+    for directory, expected_identity, expected_names in (
+        (root, root_identity, members),
+        (records_root, records_identity, set(record_identities)),
+    ):
+        with filesystem_scandir(directory) as current:
+            names = set()
+            for item in current:
+                if len(names) == len(expected_names):
+                    raise ValueError("dataset_metadata_directory_identity_changed")
+                names.add(item.name)
+            if names != expected_names:
+                raise ValueError("dataset_metadata_directory_identity_changed")
+        if (
+            _directory_identity(filesystem_stat(directory, follow_symlinks=False))
+            != expected_identity
+        ):
+            raise ValueError("dataset_metadata_directory_identity_changed")
     return (saved, records)
 
 
@@ -154,7 +186,8 @@ def read_trial_ledger_reference(layout: StorageLayout, reference: dict[str, str]
     if plan is None:
         raise FileNotFoundError("trial_ledger_missing")
     if (
-        plan.protocol_hash != reference["protocol_hash"]
+        plan.experiment_id != reference["experiment_id"]
+        or plan.protocol_hash != reference["protocol_hash"]
         or any(record.run_id != reference["run_id"] for record in records)
         or trial_ledger_semantic_identity(plan, records)
         != reference["semantic_identity"]

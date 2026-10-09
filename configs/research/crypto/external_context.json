@@ -559,12 +559,12 @@
       {
         "fold_id": "development",
         "train": {
-          "start": "2026-07-01T00:00:00",
+          "start": "2026-05-01T00:00:00",
           "end": "2026-07-01T23:59:59.900000"
         },
         "validation": {
           "start": "2026-08-01T00:00:00",
-          "end": "2026-08-01T23:59:59.900000"
+          "end": "2026-09-01T23:59:59.900000"
         }
       }
     ],
@@ -611,19 +611,19 @@
       }
     },
     "test": {
-      "start": "2026-09-01T00:00:00",
-      "end": "2026-09-01T23:59:59.900000"
+      "start": "2026-10-01T00:00:00",
+      "end": "2026-10-01T23:59:59.900000"
     }
   },
   "comparison_model_id": "crypto_hft_btc_independent",
   "windows": {
     "development": {
       "start": "2026-08-01T00:00:00",
-      "end": "2026-08-01T23:59:59.900000"
+      "end": "2026-09-01T23:59:59.900000"
     },
     "holdout": {
-      "start": "2026-09-01T00:00:00",
-      "end": "2026-09-01T23:59:59.900000"
+      "start": "2026-10-01T00:00:00",
+      "end": "2026-10-01T23:59:59.900000"
     }
   },
   "auxiliary_sources": {
@@ -631,26 +631,38 @@
       "archives": {
         "BTCUSDT": {
           "quotes": [
+            "2026-05-01-BTCUSDT-quotes",
+            "2026-06-01-BTCUSDT-quotes",
             "2026-07-01-BTCUSDT-quotes",
             "2026-08-01-BTCUSDT-quotes",
-            "2026-09-01-BTCUSDT-quotes"
+            "2026-09-01-BTCUSDT-quotes",
+            "2026-10-01-BTCUSDT-quotes"
           ],
           "trades": [
+            "2026-05-01-BTCUSDT-trades",
+            "2026-06-01-BTCUSDT-trades",
             "2026-07-01-BTCUSDT-trades",
             "2026-08-01-BTCUSDT-trades",
-            "2026-09-01-BTCUSDT-trades"
+            "2026-09-01-BTCUSDT-trades",
+            "2026-10-01-BTCUSDT-trades"
           ]
         },
         "ETHUSDT": {
           "quotes": [
+            "2026-05-01-ETHUSDT-quotes",
+            "2026-06-01-ETHUSDT-quotes",
             "2026-07-01-ETHUSDT-quotes",
             "2026-08-01-ETHUSDT-quotes",
-            "2026-09-01-ETHUSDT-quotes"
+            "2026-09-01-ETHUSDT-quotes",
+            "2026-10-01-ETHUSDT-quotes"
           ],
           "trades": [
+            "2026-05-01-ETHUSDT-trades",
+            "2026-06-01-ETHUSDT-trades",
             "2026-07-01-ETHUSDT-trades",
             "2026-08-01-ETHUSDT-trades",
-            "2026-09-01-ETHUSDT-trades"
+            "2026-09-01-ETHUSDT-trades",
+            "2026-10-01-ETHUSDT-trades"
           ]
         }
       },
@@ -660,26 +672,38 @@
       "archives": {
         "BTC-USDT-SWAP": {
           "quotes": [
+            "2026-05-01-BTC-USDT-SWAP-quotes",
+            "2026-06-01-BTC-USDT-SWAP-quotes",
             "2026-07-01-BTC-USDT-SWAP-quotes",
             "2026-08-01-BTC-USDT-SWAP-quotes",
-            "2026-09-01-BTC-USDT-SWAP-quotes"
+            "2026-09-01-BTC-USDT-SWAP-quotes",
+            "2026-10-01-BTC-USDT-SWAP-quotes"
           ],
           "trades": [
+            "2026-05-01-BTC-USDT-SWAP-trades",
+            "2026-06-01-BTC-USDT-SWAP-trades",
             "2026-07-01-BTC-USDT-SWAP-trades",
             "2026-08-01-BTC-USDT-SWAP-trades",
-            "2026-09-01-BTC-USDT-SWAP-trades"
+            "2026-09-01-BTC-USDT-SWAP-trades",
+            "2026-10-01-BTC-USDT-SWAP-trades"
           ]
         },
         "ETH-USDT-SWAP": {
           "quotes": [
+            "2026-05-01-ETH-USDT-SWAP-quotes",
+            "2026-06-01-ETH-USDT-SWAP-quotes",
             "2026-07-01-ETH-USDT-SWAP-quotes",
             "2026-08-01-ETH-USDT-SWAP-quotes",
-            "2026-09-01-ETH-USDT-SWAP-quotes"
+            "2026-09-01-ETH-USDT-SWAP-quotes",
+            "2026-10-01-ETH-USDT-SWAP-quotes"
           ],
           "trades": [
+            "2026-05-01-ETH-USDT-SWAP-trades",
+            "2026-06-01-ETH-USDT-SWAP-trades",
             "2026-07-01-ETH-USDT-SWAP-trades",
             "2026-08-01-ETH-USDT-SWAP-trades",
-            "2026-09-01-ETH-USDT-SWAP-trades"
+            "2026-09-01-ETH-USDT-SWAP-trades",
+            "2026-10-01-ETH-USDT-SWAP-trades"
           ]
         }
       },
@@ -687,8 +711,11 @@
     }
   },
   "source_archives": [
+    "binance-futures/2026-05-01-btcusdt-ethusdt-native",
+    "binance-futures/2026-06-01-btcusdt-ethusdt-native",
     "binance-futures/2026-07-01-btcusdt-ethusdt-native",
     "binance-futures/2026-08-01-btcusdt-ethusdt-native",
-    "binance-futures/2026-09-01-btcusdt-ethusdt-native"
+    "binance-futures/2026-09-01-btcusdt-ethusdt-native",
+    "binance-futures/2026-10-01-btcusdt-ethusdt-native"
   ]
 }

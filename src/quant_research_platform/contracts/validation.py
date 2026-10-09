@@ -234,6 +234,8 @@ def strict_bool_series(
     null_mask = _null_mask(series)
     if bool(null_mask.any()) and not allow_null:
         raise ValueError(error)
+    if series.dtype == np.dtype("bool") or isinstance(series.dtype, pd.BooleanDtype):
+        return series.astype("boolean" if allow_null else "bool").rename(None)
     output: list[object] = []
     mapping = {
         "true": True,

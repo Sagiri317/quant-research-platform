@@ -12,6 +12,7 @@ from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
 from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.interfaces import queries
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.storage.datasets import (
     inspect_dataset,
@@ -205,7 +206,7 @@ def test_research_instance_round_trip_discovery_and_inspect_at_variable_roots(
     profile = replace(
         research_profile(), research_datasets=ResearchDatasetCatalog((spec,))
     )
-    result = research.inspect(profile=profile, layout=layout, dataset_id=spec.data_id)
+    result = queries.inspect(profile=profile, layout=layout, dataset_id=spec.data_id)
     assert result["status"] == "BLOCKED"
     assert result["blocker"] == "request_identity_required"
     assert result["instances"] == [

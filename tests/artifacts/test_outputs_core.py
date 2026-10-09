@@ -461,3 +461,56 @@ def test_crypto_prediction_window_shape_rejects_at_native_write_and_read(
         root, expected_output_id=spec.prediction_id
     )
     assert lookup.row_count == 2
+
+
+@pytest.mark.parametrize(
+    "case", ("endpoints", "before", "after", "open_before", "empty")
+)
+def test_prediction_writer_enforces_stream_window_before_publication(tmp_path, case):
+    import pandas as pd
+
+    from quant_research_platform.artifacts.outputs import (
+        validate_output_bundle,
+        write_prediction_outputs,
+    )
+    from quant_research_platform.storage.errors import OutputAlreadyExistsError
+    from quant_research_platform.storage.layout import StorageLayout
+
+    root, spec, output_spec, frame, model, prediction = _native_prediction_bundle(
+        tmp_path / "good"
+    )
+    original = {path.name: path.read_bytes() for path in root.iterdir()}
+    if case in {"before", "open_before"}:
+        frame.loc[0, "timestamp"] = pd.Timestamp("2014-01-01")
+    elif case == "after":
+        frame.loc[0, "timestamp"] = pd.Timestamp("2014-01-05")
+    elif case == "empty":
+        frame = frame.iloc[:0]
+    if case == "open_before":
+        spec = replace(spec, test_end=None, is_final_oos_window=True)
+        model.update(test_end=None)
+        prediction.update(requested_test_end=None, is_final_oos_window=True)
+    kwargs = dict(
+        spec=spec,
+        output_spec=output_spec,
+        output_chunks=(frame.iloc[:1], frame.iloc[1:]),
+        model_metadata=model,
+        prediction_metadata_factory=lambda: prediction,
+    )
+    if case == "endpoints":
+        published = write_prediction_outputs(
+            layout=StorageLayout(tmp_path / "new"), **kwargs
+        )
+        validate_output_bundle(published)
+    else:
+        with pytest.raises(
+            ValueError,
+            match="empty_prediction_window"
+            if case == "empty"
+            else "prediction_metadata_inconsistent",
+        ):
+            write_prediction_outputs(layout=StorageLayout(tmp_path / "new"), **kwargs)
+        assert not list((tmp_path / "new").rglob("prediction.parquet"))
+    with pytest.raises(OutputAlreadyExistsError):
+        write_prediction_outputs(layout=StorageLayout(tmp_path / "good"), **kwargs)
+    assert {path.name: path.read_bytes() for path in root.iterdir()} == original

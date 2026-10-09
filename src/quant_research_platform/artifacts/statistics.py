@@ -12,6 +12,11 @@ import pandas as pd
 import pyarrow as pa
 
 from quant_research_platform.contracts.business_manifest import BusinessManifestEnvelope
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    a_share_analysis_windows,
+    crypto_execution_windows,
+)
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_integer_series,
@@ -621,7 +626,7 @@ class StatisticsArtifact:
             )
         ) as frames:
             for frame in frames:
-                result = _validated_frame(frame, member=member)
+                result = _validated_frame(frame, member=member, envelope=self.envelope)
                 try:
                     yield result
                 except GeneratorExit:
@@ -646,7 +651,7 @@ class StatisticsArtifact:
                 raise ValueError("statistics_table_schema_invalid")
             table = parquet.read()
             frame = table.to_pandas()
-            result = _validated_frame(frame, member=member)
+            result = _validated_frame(frame, member=member, envelope=self.envelope)
             primary = None
             try:
                 yield result
@@ -675,6 +680,11 @@ def write_statistics_artifact(
 ) -> Path:
     if table_group not in STATISTICS_TABLE_GROUPS:
         raise ValueError("statistics_tables_invalid")
+    envelope_payload = envelope.payload()
+    if set(_statistics_members(envelope_payload)) != set(
+        STATISTICS_TABLE_GROUPS[table_group]
+    ):
+        raise ValueError("statistics_artifact_contract_mismatch")
     calibration = table_group == "crypto_maker_calibration"
     if calibration and (not callable(validate_tables)):
         raise ValueError("statistics_business_validator_required")
@@ -722,7 +732,9 @@ def write_statistics_artifact(
                         )
                     )
 
-                validated = _validated_frame(frame, member=member)
+                validated = _validated_frame(
+                    frame, member=member, envelope=envelope_payload
+                )
                 table = pa.Table.from_pandas(
                     validated, schema=_ARROW_SCHEMAS[member], preserve_index=False
                 )
@@ -761,9 +773,9 @@ def _statistics_artifact(
     root, envelope, members, member_identities=None, directory_identities=None
 ):
     by_path = {str(member.get("path")): member for member in members}
-    if not any(
-        set(by_path) == set(group) for group in STATISTICS_TABLE_GROUPS.values()
-    ) or len(by_path) != len(members):
+    if set(by_path) != set(_statistics_members(envelope)) or len(by_path) != len(
+        members
+    ):
         raise ValueError("statistics_artifact_members_invalid")
     identities, row_counts = ({}, {})
     for member in by_path:
@@ -831,7 +843,96 @@ def read_statistics_artifact(
         return artifact
 
 
-def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
+def _statistics_members(envelope):
+    contract = envelope["semantic_metadata"].get("target_contract")
+    if type(contract) is not dict or type(contract.get("protocol")) is not dict:
+        raise ValueError("statistics_artifact_contract_invalid")
+    declared = contract.get("statistics_tables")
+    protocol = contract["protocol"]
+    if (
+        type(declared) is not dict
+        or protocol.get("access_window") != envelope["research_window"]["access"]
+    ):
+        raise ValueError("statistics_artifact_contract_invalid")
+    for members in STATISTICS_TABLE_GROUPS.values():
+        if declared == {
+            member.removesuffix(".parquet"): list(_TABLE_COLUMNS[member])
+            for member in members
+        }:
+            return members
+    raise ValueError("statistics_artifact_contract_mismatch")
+
+
+def _validate_table_binding(frame, *, member, envelope):
+    protocol = envelope["semantic_metadata"]["target_contract"]["protocol"]
+    window = envelope["research_window"]
+    access = window["access"]
+    if "access_window" in frame and not frame.access_window.eq(access).all():
+        raise ValueError("statistics_access_window_mismatch")
+    if member in STATISTICS_TABLE_GROUPS["crypto_maker_calibration"]:
+        # Calibration has its own fold, maturity and event-reference validator.
+        return
+    start, end = pd.Timestamp(window["start"]), pd.Timestamp(window["end"])
+    if member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]:
+        crypto_execution_windows(
+            protocol["research_plan"], TimeWindow(start, end), access_window=access
+        )
+        candidates = {item["candidate_id"] for item in protocol["portfolio_candidates"]}
+        if not frame.execution_mode.eq(protocol["execution_mode"]).all():
+            raise ValueError("statistics_execution_mode_mismatch")
+    elif member in STATISTICS_TABLE_GROUPS["portfolio"]:
+        candidates = set(protocol["portfolio_candidates"])
+        if member == "portfolio_robustness.parquet":
+            joint = frame.candidate_id.eq("joint") & frame.test_id.isin(
+                ("cscv_pbo", "development_only")
+            )
+            if not (frame.candidate_id.isin(candidates) | joint).all():
+                raise ValueError("statistics_candidate_id_mismatch")
+        if (
+            "portfolio_id" in frame
+            and not frame.portfolio_id.isin(
+                protocol["statistics"]["group_comparison"]["portfolio_ids"]
+            ).all()
+        ):
+            raise ValueError("statistics_candidate_id_mismatch")
+        if (
+            "attribution_group" in frame
+            and not frame.attribution_group.isin(protocol["attribution_groups"]).all()
+        ):
+            raise ValueError("statistics_candidate_id_mismatch")
+    else:
+        candidates = set()
+    if (
+        "candidate_id" in frame
+        and member != "portfolio_robustness.parquet"
+        and not frame.candidate_id.isin(candidates).all()
+    ):
+        raise ValueError("statistics_candidate_id_mismatch")
+    if member in {"model_losses.parquet", "fama_macbeth_periods.parquet"}:
+        factor, model = a_share_analysis_windows(protocol, TimeWindow(start, end))
+        selected = factor if member == "fama_macbeth_periods.parquet" else model
+        start, end = pd.Timestamp(selected.start), pd.Timestamp(selected.end)
+        role = protocol[f"{access}_window"]
+        role_start = (
+            protocol["formal_dataset_window"]["start"]
+            if member == "fama_macbeth_periods.parquet" and access == "development"
+            else role["start"]
+        )
+        start, end = (
+            max(start, pd.Timestamp(role_start)),
+            min(end, pd.Timestamp(role["end"])),
+        )
+    for column in _TIMESTAMP_COLUMNS[member]:
+        upper = (
+            end + pd.Timedelta(1, "ns")
+            if member == "crypto_portfolio_coverage.parquet" and column == "stop_at"
+            else end
+        )
+        if not frame[column].between(start, upper).all():
+            raise ValueError("statistics_table_window_mismatch")
+
+
+def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFrame:
     if (
         type(frame) is not pd.DataFrame
         or tuple(frame.columns) != _TABLE_COLUMNS[member]
@@ -1232,5 +1333,6 @@ def _validated_frame(frame: pd.DataFrame, *, member: str) -> pd.DataFrame:
             not result.component_type.isin(("additive", "detail")).all()
         ):
             raise ValueError("statistics_attribution_component_invalid")
+    _validate_table_binding(result, member=member, envelope=envelope)
     result.index = pd.RangeIndex(len(result))
     return result

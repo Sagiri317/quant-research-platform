@@ -28,7 +28,11 @@ from quant_research_platform.contracts.models import (
     validate_model_metadata_core,
 )
 from quant_research_platform.contracts.run_id import validate_run_id
-from quant_research_platform.contracts.time import TimeWindow, time_value_isoformat
+from quant_research_platform.contracts.time import (
+    TimeWindow,
+    crypto_execution_windows,
+    time_value_isoformat,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.models.fitting import validate_model_state
 from quant_research_platform.research.models.production import (
@@ -1413,14 +1417,10 @@ class PersistedCryptoModelArtifact:
         )
 
     def prediction_models(self, window, *, access_window):
-        from quant_research_platform.research.protocols.crypto_hft import (
-            execution_windows,
-        )
-
         plan = self.envelope["semantic_metadata"]["target_contract"]["protocol"][
             "research_plan"
         ]
-        execution_windows(plan, window, access_window=access_window)
+        crypto_execution_windows(plan, window, access_window=access_window)
         if not self.final_models:
             raise ValueError("crypto_final_models_missing")
         return tuple(

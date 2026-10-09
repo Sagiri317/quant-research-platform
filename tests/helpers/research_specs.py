@@ -18,67 +18,30 @@ DEMO_FACTOR_COLUMN = "momentum_20d"
 DEMO_LABEL_COLUMN = forward_return_label_column(20)
 
 
-def make_demo_research_dataset_spec(
-    *,
-    data_id: str = "demo",
-    market_id: str | MarketId = "a_share",
-    input_data_ids: tuple[str, ...] | None = None,
-    base_input_data_id: str | None = None,
-    factor_columns: tuple[str, ...] | None = None,
-    feature_columns: tuple[str, ...] = (),
-    feature_transforms: tuple[object, ...] = (),
-    label_columns: tuple[str, ...] | None = None,
-    filter_columns: tuple[str, ...] | None = None,
-    context_columns: tuple[str, ...] | None = None,
-    key_coverage: Mapping[str, str] | None = None,
-    filter_column_roles: Mapping[str, ColumnRole] | None = None,
-    frequency: DataFrequency = DataFrequency.DAILY,
-    grain: DataGrain = DataGrain.RESEARCH_ROW,
-    primary_key: tuple[str, ...] = PLATFORM_ASSET_TIME_KEY,
-    partition_columns: tuple[str, ...] = ("year",),
-) -> ResearchDatasetSpec:
-    defaults = _demo_research_dataset_defaults()
+def make_demo_research_dataset_spec(**overrides: object) -> ResearchDatasetSpec:
     return _research_dataset_spec_from_defaults(
-        defaults,
-        data_id=data_id,
-        market_id=market_id,
-        input_data_ids=input_data_ids,
-        base_input_data_id=base_input_data_id,
-        factor_columns=factor_columns,
-        feature_columns=feature_columns,
-        feature_transforms=feature_transforms,
-        label_columns=label_columns,
-        filter_columns=filter_columns,
-        context_columns=context_columns,
-        key_coverage=key_coverage,
-        filter_column_roles=filter_column_roles,
-        frequency=frequency,
-        grain=grain,
-        primary_key=primary_key,
-        partition_columns=partition_columns,
+        **(_demo_research_dataset_defaults() | overrides)
     )
 
 
 def make_dummy_research_dataset_spec(**overrides: object) -> ResearchDatasetSpec:
     return _research_dataset_spec_from_defaults(
-        _dummy_research_dataset_defaults(),
-        **overrides,
+        **(_dummy_research_dataset_defaults() | overrides)
     )
 
 
 def _research_dataset_spec_from_defaults(
-    defaults: Mapping[str, object],
     *,
-    data_id: str = "demo",
-    market_id: str | MarketId = "a_share",
-    input_data_ids: tuple[str, ...] | None = None,
-    base_input_data_id: str | None = None,
-    factor_columns: tuple[str, ...] | None = None,
+    data_id: str,
+    market_id: str | MarketId,
+    input_data_ids: tuple[str, ...],
+    base_input_data_id: str,
+    factor_columns: tuple[str, ...],
     feature_columns: tuple[str, ...] = (),
     feature_transforms: tuple[object, ...] = (),
-    label_columns: tuple[str, ...] | None = None,
-    filter_columns: tuple[str, ...] | None = None,
-    context_columns: tuple[str, ...] | None = None,
+    label_columns: tuple[str, ...],
+    filter_columns: tuple[str, ...],
+    context_columns: tuple[str, ...],
     key_coverage: Mapping[str, str] | None = None,
     filter_column_roles: Mapping[str, ColumnRole] | None = None,
     frequency: DataFrequency = DataFrequency.DAILY,
@@ -86,30 +49,6 @@ def _research_dataset_spec_from_defaults(
     primary_key: tuple[str, ...] = PLATFORM_ASSET_TIME_KEY,
     partition_columns: tuple[str, ...] = ("year",),
 ) -> ResearchDatasetSpec:
-    if data_id == "demo" and defaults["data_id"] != "demo":
-        data_id = defaults["data_id"]
-    if str(market_id) == "a_share" and defaults["market_id"] != "a_share":
-        market_id = defaults["market_id"]
-    input_data_ids = (
-        defaults["input_data_ids"] if input_data_ids is None else input_data_ids
-    )
-    base_input_data_id = (
-        defaults["base_input_data_id"]
-        if base_input_data_id is None
-        else base_input_data_id
-    )
-    factor_columns = (
-        defaults["factor_columns"] if factor_columns is None else factor_columns
-    )
-    label_columns = (
-        defaults["label_columns"] if label_columns is None else label_columns
-    )
-    filter_columns = (
-        defaults["filter_columns"] if filter_columns is None else filter_columns
-    )
-    context_columns = (
-        defaults["context_columns"] if context_columns is None else context_columns
-    )
     roles = _research_column_roles(
         factor_columns=factor_columns,
         feature_columns=feature_columns,

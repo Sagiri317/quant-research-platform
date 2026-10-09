@@ -348,6 +348,21 @@ class FactorRiskState:
         require_complete: bool = False,
         project_ineligible: bool = False,
     ) -> FactorReturnFit | None:
+        fitted, industries = self._fit_return_session(
+            cross,
+            require_complete=require_complete,
+            project_ineligible=project_ineligible,
+        )
+        self._industry_codes.update(industries)
+        return fitted
+
+    def _fit_return_session(
+        self,
+        cross: pd.DataFrame,
+        *,
+        require_complete: bool = False,
+        project_ineligible: bool = False,
+    ) -> tuple[FactorReturnFit | None, tuple[str, ...]]:
         if "asset_return" not in cross:
             raise ValueError("factor_risk_columns_invalid")
         frame = self.prepare_exposures(cross, include_ineligible=project_ineligible)
@@ -359,19 +374,19 @@ class FactorRiskState:
         ):
             raise ValueError("holding_returns_incomplete")
         if frame.empty:
-            return None
+            return None, ()
         if frame.asset_id.duplicated().any() or frame.timestamp.nunique() != 1:
             raise ValueError("factor_return_cross_section_keys_invalid")
         frame = frame.dropna().loc[lambda item: item[self.config.weight_column].gt(0.0)]
         if frame.empty:
-            return
+            return None, ()
         frame = preprocess_risk_styles(frame, style_columns=self.style_columns)
         projection = frame.iloc[:0]
         if project_ineligible and "eligible" in frame:
             projection = frame.loc[~frame.eligible]
             frame = frame.loc[frame.eligible]
         if frame.empty:
-            return None
+            return None, ()
         group_codes = _industry_group_codes(frame)
         current_industries = sorted(set(group_codes))
         industry_columns = tuple(f"industry_{code}" for code in current_industries)
@@ -394,8 +409,7 @@ class FactorRiskState:
             len(frame) < max(self.config.minimum_cross_section, 5 * p)
             or np.linalg.matrix_rank(design) != p
         ):
-            self._industry_codes.update(current_industries)
-            return
+            return None, tuple(current_industries)
         weights, _ = _integer_coordinates(
             np.sqrt(frame[self.config.weight_column].to_numpy(dtype="float64"))
         )
@@ -489,7 +503,6 @@ class FactorRiskState:
             raise ValueError("factor_risk_fit_non_finite") from None
         if not np.isfinite(coefficients).all() or not np.isfinite(residuals).all():
             raise ValueError("factor_risk_fit_non_finite")
-        self._industry_codes.update(current_industries)
         assets = pd.Index(frame["asset_id"].astype(str), name="asset_id")
         if not projection.empty:
             projection_codes = _industry_group_codes(projection)
@@ -542,10 +555,23 @@ class FactorRiskState:
             pd.Series(coefficients, index=exposure_columns),
             pd.Series(residuals, index=assets),
             pd.Series(returns, index=assets),
-        )
+        ), tuple(current_industries)
 
-    def observe_return_session(self, cross: pd.DataFrame) -> None:
-        fitted = self.fit_return_session(cross)
+    def observe_return_session(
+        self, cross: pd.DataFrame, *, shared_fits=None, fit_key=None
+    ) -> None:
+        if shared_fits is None or fit_key not in shared_fits:
+            fitted, industries = self._fit_return_session(cross)
+            fact = (
+                industries,
+                None if fitted is None else (fitted.factor_returns, fitted.residuals),
+            )
+            if shared_fits is not None:
+                shared_fits[fit_key] = fact
+        else:
+            fact = shared_fits[fit_key]
+        industries, fitted = fact
+        self._industry_codes.update(industries)
         self._session_count += 1
         while (
             self._factor_rows
@@ -567,10 +593,10 @@ class FactorRiskState:
                 del self._residuals[asset]
         if fitted is None:
             return
-        frame = fitted.exposures.reset_index()
-        exposure_columns = tuple(fitted.factor_returns.index)
-        coefficients = fitted.factor_returns.to_numpy()
-        residuals = fitted.residuals.to_numpy()
+        factor_returns, residual_values = fitted
+        exposure_columns = tuple(factor_returns.index)
+        coefficients = factor_returns.to_numpy()
+        residuals = residual_values.to_numpy()
         timestamp = pd.Timestamp(cross["timestamp"].iloc[0])
         row: dict[str, object] = {
             "timestamp": timestamp,
@@ -585,7 +611,7 @@ class FactorRiskState:
         )
         self._factor_rows.append(row)
         for asset, residual in zip(
-            frame["asset_id"].astype(str),
+            residual_values.index.astype(str),
             residuals,
             strict=True,
         ):

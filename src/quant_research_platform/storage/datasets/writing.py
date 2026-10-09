@@ -102,6 +102,11 @@ class _WriteStats:
     _schema: list[dict[str, Any]] | None = None
     _arrow_schema: pa.Schema | None = None
     _logical_dtype_plan: dict[str, Any] | None = None
+    _dtype_plans: dict[bytes, tuple[dict[str, Any], dict[str, object]]] = field(
+        default_factory=dict
+    )
+    _dtype_schemas: set[tuple[bytes, pa.Schema]] = field(default_factory=set)
+    _frame_dtype_bytes: dict[bytes, bytes] = field(default_factory=dict)
     _summary_observer: DatasetSummaryObserver = field(init=False)
 
     def __post_init__(self) -> None:
@@ -202,18 +207,24 @@ class _WriteStats:
         def observe_metadata(metadata: DatasetPartMetadata) -> None:
             nonlocal observed_metadata, observed_logical_dtypes
             observed_metadata = metadata
-            logical_payload = parse_logical_dtype_metadata(
-                metadata.logical_dtype_payload
-            )
-            observed_logical_dtypes = logical_payload
-            self.observe_logical_dtype_payload(logical_payload)
-            dtype_overrides.update(
-                pandas_dtype_overrides_from_logical_payload(
-                    logical_payload, columns=tuple(metadata.schema.names)
+            raw = metadata.logical_dtype_payload
+            if raw not in self._dtype_plans:
+                logical_payload = parse_logical_dtype_metadata(raw)
+                self.observe_logical_dtype_payload(logical_payload)
+                self._dtype_plans[raw] = (
+                    logical_payload,
+                    pandas_dtype_overrides_from_logical_payload(
+                        logical_payload, columns=tuple(metadata.schema.names)
+                    ),
                 )
-            )
+            logical_payload, overrides = self._dtype_plans[raw]
+            observed_logical_dtypes = logical_payload
+            dtype_overrides.update(overrides)
             physical_schema = physical_schema_from_schema(metadata.schema)
-            validate_persisted_logical_schema(metadata.schema, logical_payload)
+            dtype_schema = (raw, metadata.schema.remove_metadata())
+            if dtype_schema not in self._dtype_schemas:
+                validate_persisted_logical_schema(metadata.schema, logical_payload)
+                self._dtype_schemas.add(dtype_schema)
             if self._schema is None:
                 self._schema = physical_schema
                 self.columns = physical_schema_columns(physical_schema)
@@ -256,6 +267,12 @@ class _WriteStats:
             self.partition_row_counts.get(partition, 0) + observed_rows
         )
         self.inventory.add(path, observed_metadata)
+
+    def dtype_metadata(self, payload: dict[str, Any]) -> bytes:
+        identity = canonical_identity_bytes(payload)
+        if identity not in self._frame_dtype_bytes:
+            self._frame_dtype_bytes[identity] = logical_dtype_metadata_bytes(payload)
+        return self._frame_dtype_bytes[identity]
 
     def observe_logical_dtype_payload(self, logical_payload: Mapping[str, Any]) -> None:
         category_plan = {"schema_id": logical_payload["schema_id"], "columns": []}
@@ -447,11 +464,7 @@ def _write_contents(
                     object_string_columns=object_string_columns,
                 )
                 persisted = table.replace_schema_metadata(
-                    {
-                        b"qrp.logical-dtypes": logical_dtype_metadata_bytes(
-                            logical_dtypes
-                        )
-                    }
+                    {b"qrp.logical-dtypes": accumulator.dtype_metadata(logical_dtypes)}
                 )
                 part_index = part_indices.get(partition, 0)
                 part_indices[partition] = part_index + 1

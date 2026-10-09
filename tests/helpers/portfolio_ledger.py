@@ -333,11 +333,6 @@ def capture_fill_rows(emit, on_batch=None):
                 "fill_qty": abs(trade.quantity),
                 "fill_price": abs(trade.notional / trade.quantity),
                 "notional": abs(trade.notional),
-                "fee": -sum(
-                    flow.amount
-                    for flow in batch.cashflows
-                    if flow.fill_id == trade.fill_id
-                ),
             }
         resolved = set()
         for diagnostic in batch.diagnostics:

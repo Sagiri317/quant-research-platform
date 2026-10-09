@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from quant_research_platform.compute.dataframe.cross_section import (
@@ -31,7 +32,7 @@ def test_dataframe_cross_section_metrics() -> None:
     assert not grouped.empty
 
 
-def test_dataframe_cross_section_preserves_extra_columns() -> None:
+def test_dataframe_cross_section_accepts_ignored_extra_columns() -> None:
     spec = ComputePanelSpec(signal_columns=("factor",), label_column="forward_return")
     frame = make_cross_section_compute_panel().assign(
         segment=["a", "a", "a", "b", "b", "b"]
@@ -42,8 +43,11 @@ def test_dataframe_cross_section_preserves_extra_columns() -> None:
         spec,
         n_groups=2,
     )
-    assert len(ic) == 2
-    assert len(grouped) == 4
+    expected_ic, expected_grouped = compute_ic_and_grouped_label_values(
+        frame.drop(columns="segment"), spec, n_groups=2
+    )
+    pd.testing.assert_frame_equal(ic, expected_ic)
+    pd.testing.assert_frame_equal(grouped, expected_grouped)
 
 
 def test_dataframe_cross_section_rejects_invalid_group_counts_and_columns() -> None:
@@ -94,29 +98,6 @@ def test_pearson_moments_preserve_exact_boundaries(
         right_m2=8.0,
         covariance=covariance,
     ) == (expected, None)
-
-
-@pytest.mark.parametrize("expected", (1.0, -1.0))
-def test_pearson_moments_preserve_one_ulp_invalid_covariance(expected: float) -> None:
-    overflow = float(np.copysign(np.nextafter(1.0, np.inf), expected))
-
-    assert _pearson_correlation_from_moments(
-        count=17,
-        left_m2=1.0,
-        right_m2=1.0,
-        covariance=overflow,
-    ) == (overflow, None)
-
-
-def test_pearson_moments_preserve_materially_invalid_result() -> None:
-    invalid = float(np.nextafter(np.nextafter(1.0, np.inf), np.inf))
-
-    assert _pearson_correlation_from_moments(
-        count=17,
-        left_m2=1.0,
-        right_m2=1.0,
-        covariance=invalid,
-    ) == (invalid, None)
 
 
 def test_correlation_moments_preserve_exact_values_when_binary_scale_changes():

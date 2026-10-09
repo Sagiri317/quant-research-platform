@@ -141,7 +141,6 @@ def build_a_share_report(
             "development_window": run_payload["protocol"].get("development_window"),
             "holdout_window": run_payload["protocol"].get("holdout_window"),
             "frozen_development": run_payload["protocol"].get("frozen_development"),
-            "evidence": run_payload["holdout_evidence"],
         },
         "robustness": [
             {"selection_group": group, **row}

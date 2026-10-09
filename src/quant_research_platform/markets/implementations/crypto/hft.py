@@ -52,23 +52,31 @@ def l1_ofi(
 ) -> float:
     """Cont-style L1 OFI over exact integer price ticks."""
 
-    previous_bid_price, previous_bid_qty = previous_bid
-    current_bid_price, current_bid_qty = current_bid
-    previous_ask_price, previous_ask_qty = previous_ask
-    current_ask_price, current_ask_qty = current_ask
-    if current_bid_price > previous_bid_price:
-        bid_term = current_bid_qty
-    elif current_bid_price == previous_bid_price:
-        bid_term = current_bid_qty - previous_bid_qty
-    else:
-        bid_term = -previous_bid_qty
-    if current_ask_price < previous_ask_price:
-        ask_term = -current_ask_qty
-    elif current_ask_price == previous_ask_price:
-        ask_term = previous_ask_qty - current_ask_qty
-    else:
-        ask_term = previous_ask_qty
-    return bid_term + ask_term
+    return _ofi_units(
+        (previous_bid[0], _quantity_units(previous_bid[1])),
+        (current_bid[0], _quantity_units(current_bid[1])),
+        (previous_ask[0], _quantity_units(previous_ask[1])),
+        (current_ask[0], _quantity_units(current_ask[1])),
+    ) / (1 << 1074)
+
+
+def _quantity_units(value):
+    # Every finite binary64 quantity is an integer multiple of 2**-1074.
+    numerator, denominator = value.as_integer_ratio()
+    return numerator << (1074 - (denominator.bit_length() - 1))
+
+
+def _ofi_units(previous_bid, current_bid, previous_ask, current_ask):
+    result = 0
+    if current_bid[0] >= previous_bid[0]:
+        result += current_bid[1]
+    if current_bid[0] <= previous_bid[0]:
+        result -= previous_bid[1]
+    if current_ask[0] <= previous_ask[0]:
+        result -= current_ask[1]
+    if current_ask[0] >= previous_ask[0]:
+        result += previous_ask[1]
+    return result
 
 
 def iter_panel_frames(
@@ -103,7 +111,7 @@ def iter_panel_frames(
         next_book: BookState | BookBoundary | None = None
         next_trade: TradeEvent | None = None
         current_state: BookState | None = None
-        previous_bbo: tuple[tuple[int, float], tuple[int, float]] | None = None
+        previous_bbo: tuple[tuple[int, int], tuple[int, int]] | None = None
         previous_book_time: int | None = None
         previous_trade_time: int | None = None
         next_book = next(active_books, None)
@@ -116,12 +124,12 @@ def iter_panel_frames(
             interval_start = max(0, grid_time - HFT_GRID_MS)
             grid_time_ns = grid_time * _NANOSECONDS_PER_MILLISECOND
             interval_start_ns = interval_start * _NANOSECONDS_PER_MILLISECOND
-            book_ofi = 0.0
+            book_ofi = 0
             trade_count = 0
-            trade_volume = 0.0
-            signed_trade_volume = 0.0
-            taker_buy_volume = 0.0
-            taker_sell_volume = 0.0
+            trade_volume = 0
+            signed_trade_volume = 0
+            taker_buy_volume = 0
+            taker_sell_volume = 0
             trade_source_sequence_min: int | None = None
             trade_source_sequence_max: int | None = None
             trade_connections = trade_coverage(interval_start_ns, grid_time_ns)
@@ -137,7 +145,7 @@ def iter_panel_frames(
                 if isinstance(event, BookBoundary):
                     current_state = None
                     previous_bbo = None
-                    book_ofi = 0.0
+                    book_ofi = 0
                     continue
                 state = _book_value(event)
                 if (
@@ -145,22 +153,29 @@ def iter_panel_frames(
                     or state.segment_id != current_state.segment_id
                 ):
                     previous_bbo = None
-                    book_ofi = 0.0
+                    book_ofi = 0
+                current_bbo = (
+                    (
+                        (state.best_bid[0], _quantity_units(state.best_bid[1])),
+                        (state.best_ask[0], _quantity_units(state.best_ask[1])),
+                    )
+                    if state.best_bid is not None and state.best_ask is not None
+                    else None
+                )
                 if (
                     previous_bbo is not None
-                    and state.best_bid is not None
-                    and state.best_ask is not None
+                    and current_bbo is not None
                     and event_time > interval_start_ns
                 ):
-                    book_ofi += l1_ofi(
+                    book_ofi += _ofi_units(
                         previous_bbo[0],
-                        state.best_bid,
+                        current_bbo[0],
                         previous_bbo[1],
-                        state.best_ask,
+                        current_bbo[1],
                     )
                 current_state = state
-                if state.best_bid is not None and state.best_ask is not None:
-                    previous_bbo = (state.best_bid, state.best_ask)
+                if current_bbo is not None:
+                    previous_bbo = current_bbo
             while next_trade is not None:
                 if not isinstance(next_trade, TradeEvent):
                     raise TypeError("hft_trade_event_invalid")
@@ -193,6 +208,7 @@ def iter_panel_frames(
                     and trade.observed_time_ns <= grid_time_ns
                 ):
                     trade_count += 1
+                    quantity = _quantity_units(quantity)
                     trade_volume += quantity
                     trade_source_sequence_min = (
                         trade.source_sequence
@@ -244,12 +260,12 @@ def iter_panel_frames(
                 trade_observation_id=trade_connections[0],
                 trade_source_sequence_min=trade_source_sequence_min,
                 trade_source_sequence_max=trade_source_sequence_max,
-                book_ofi=book_ofi,
+                book_ofi=book_ofi / (1 << 1074),
                 trade_count=trade_count,
-                trade_volume=trade_volume,
-                signed_trade_volume=signed_trade_volume,
-                taker_buy_volume=taker_buy_volume,
-                taker_sell_volume=taker_sell_volume,
+                trade_volume=trade_volume / (1 << 1074),
+                signed_trade_volume=signed_trade_volume / (1 << 1074),
+                taker_buy_volume=taker_buy_volume / (1 << 1074),
+                taker_sell_volume=taker_sell_volume / (1 << 1074),
             )
             if len(buffers["timestamp"]) >= batch_rows:
                 _yield_value = _panel_frame(buffers)

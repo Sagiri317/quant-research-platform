@@ -152,10 +152,7 @@ def download_dataset(output_root, *, exchange, dataset_type, symbol, date):
     """Keep original gzip bytes and validate every row before atomic publication."""
     url = _request_url(exchange, dataset_type, symbol, date)
 
-    def write(root):
-        path = root / "data.csv.gz"
-        digest = hashlib.sha256()
-        size = 0
+    def open_response():
         try:
             response = urllib.request.urlopen(url, timeout=60)
         except urllib.error.HTTPError as error:
@@ -163,13 +160,34 @@ def download_dataset(output_root, *, exchange, dataset_type, symbol, date):
                 if error.code in {401, 403}:
                     raise PermissionError("tardis_access_not_authorized") from None
                 raise ValueError(f"tardis_http_status_{error.code}") from None
+        if response.status != 200:
+            with closing_iterator(response):
+                raise ValueError("tardis_http_response_invalid")
+        return response
+
+    return _publish_dataset(
+        output_root,
+        open_response,
+        exchange=exchange,
+        dataset_type=dataset_type,
+        symbol=symbol,
+        date=date,
+    )
+
+
+def _publish_dataset(output_root, open_source, *, exchange, dataset_type, symbol, date):
+    """Close and verify original gzip input before atomic archive publication."""
+    url = _request_url(exchange, dataset_type, symbol, date)
+
+    def write(root):
+        path = root / "data.csv.gz"
+        digest = hashlib.sha256()
+        size = 0
         with (
-            closing_iterator(response),
+            closing_iterator(open_source()) as source,
             closing_iterator(open_filesystem_file(path, "xb")) as output,
         ):
-            if response.status != 200:
-                raise ValueError("tardis_http_response_invalid")
-            while block := response.read(_COPY_BYTES):
+            while block := source.read(_COPY_BYTES):
                 size += len(block)
                 output.write(block)
                 digest.update(block)
@@ -210,7 +228,6 @@ def download_dataset(output_root, *, exchange, dataset_type, symbol, date):
             "clock": "vendor_utc_microseconds",
             "coverage": "observed_rows_only_no_native_continuity_proof",
             "amount_unit": "contracts" if exchange == "okex-swap" else "base",
-            "iv_unit": None,
         }
         atomic_write_json(root / "manifest.json", manifest)
         return manifest
@@ -238,7 +255,6 @@ def _archive_manifest(root):
         "clock",
         "coverage",
         "amount_unit",
-        "iv_unit",
     } or (
         type(manifest["sha256"]) is not str
         or len(manifest["sha256"]) != 64
@@ -269,7 +285,6 @@ def _archive_manifest(root):
         or manifest["coverage"] != "observed_rows_only_no_native_continuity_proof"
         or manifest["amount_unit"]
         != ("contracts" if manifest["exchange"] == "okex-swap" else "base")
-        or manifest["iv_unit"] is not None
         or type(manifest["row_count"]) is not int
         or manifest["row_count"] < 0
     ):

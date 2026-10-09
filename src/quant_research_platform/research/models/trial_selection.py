@@ -213,7 +213,7 @@ def evaluate_model_trial_metrics_from_chunks(
     validation_axis: EvaluationAxis = "cross_sectional",
     label_calibration: tuple[float, float] | None = None,
 ) -> dict[str, object]:
-    """Evaluate model-selection metrics from bounded prediction chunks."""
+    """Evaluate time-ordered chunks, including timestamps split across chunks."""
     if type(validation_axis) is not str or validation_axis not in EVALUATION_AXES:
         raise ValueError("model_validation_axis_invalid")
     coverage = (
@@ -223,17 +223,28 @@ def evaluate_model_trial_metrics_from_chunks(
     )
 
     def metric_chunks():
-        with closing_iterator(iter(chunks)) as source:
+        with closing_iterator(
+            iter_complete_time_frames(iter(chunks), timestamp_column="timestamp")
+        ) as source:
             for frame in source:
                 if frame.empty:
                     continue
                 if coverage is not None:
                     coverage.add(frame)
-                yield _metric_chunk(
+                values = _metric_chunk(
                     frame,
                     label_column=label_column,
                     prediction_column=prediction_column,
                 )
+                if validation_axis == "cross_sectional":
+                    ranks = values.groupby("timestamp_ns", sort=False)[
+                        ["label", "prediction"]
+                    ].rank(method="average", pct=True)
+                    values["label_rank"] = ranks["label"]
+                    values["prediction_rank"] = ranks["prediction"]
+                else:
+                    values["label_rank"] = values["prediction_rank"] = 0.0
+                yield values
         if coverage is not None and (
             coverage.semantic_identity != expected_coverage.semantic_identity
             or coverage.row_count != expected_coverage.row_count
@@ -241,48 +252,18 @@ def evaluate_model_trial_metrics_from_chunks(
             raise ValueError("model_trial_common_coverage_mismatch")
 
     with closing_iterator(metric_chunks()) as source:
-        if (
-            validation_axis == "single_asset_time_series"
-            and expected_coverage is not None
-            and len(expected_coverage._assets) == 1
-        ):
-            # One-asset coverage enforces the same timestamp order used by sorting.
-            summary = _cross_sectional_metric_summary(
-                (
-                    (timestamp, label, prediction, 0.0, 0.0)
-                    for values in source
-                    for timestamp, label, prediction in values.itertuples(
-                        index=False, name=None
-                    )
-                ),
-                validation_axis=validation_axis,
-                label_calibration=label_calibration,
-            )
-            if summary["validation_rows"] == 0:
-                raise ValueError("empty_model_selection_validation_window")
-            return {"model_id": model_id, **summary}
-        parts = list(source)
-    if not parts:
-        raise ValueError("empty_model_selection_validation_window")
-    values = pd.concat(parts, ignore_index=True)
-    if not values["timestamp_ns"].is_monotonic_increasing:
-        values = values.sort_values("timestamp_ns", kind="stable")
-    if validation_axis == "cross_sectional":
-        ranks = values.groupby("timestamp_ns", sort=False)[
-            ["label", "prediction"]
-        ].rank(method="average", pct=True)
-        values["label_rank"] = ranks["label"]
-        values["prediction_rank"] = ranks["prediction"]
-    else:
-        values["label_rank"] = values["prediction_rank"] = 0.0
-    return {
-        "model_id": model_id,
-        **_cross_sectional_metric_summary(
-            values.itertuples(index=False, name=None),
+        summary = _cross_sectional_metric_summary(
+            (
+                row
+                for values in source
+                for row in values.itertuples(index=False, name=None)
+            ),
             validation_axis=validation_axis,
             label_calibration=label_calibration,
-        ),
-    }
+        )
+    if summary["validation_rows"] == 0:
+        raise ValueError("empty_model_selection_validation_window")
+    return {"model_id": model_id, **summary}
 
 
 def _cross_sectional_metric_summary(

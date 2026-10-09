@@ -7,6 +7,7 @@ from quant_research_platform.contracts.targets import unmeasured_operation_evide
 from quant_research_platform.markets.implementations.a_share.processed import (
     producer as market_sessions,
 )
+from tests.helpers.statistics_artifacts import statistics_envelope
 
 
 def test_extreme_valid_ledgers_keep_finite_group_bootstrap(tmp_path):
@@ -343,6 +344,9 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         },
         upstream_identities={},
         semantic_metadata={},
+    )
+    envelope = statistics_envelope(
+        envelope, group="portfolio", protocol=selected_protocol.manifest()
     )
     from quant_research_platform.research.portfolios.risk import (
         FactorRiskState,
@@ -1172,6 +1176,9 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
         upstream_identities={},
         semantic_metadata={},
     )
+    envelope = statistics_envelope(
+        envelope, group="portfolio", protocol=selected_protocol.manifest()
+    )
 
     def produce(selected_ledgers, *, robustness=False, access_window="development"):
         manifest = selected_protocol.manifest()
@@ -1215,7 +1222,10 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
         software_identity="c" * 64,
         research_window=window,
         upstream_identities={},
-        semantic_metadata={},
+        semantic_metadata={"fixture_case": "duplicate_keys"},
+    )
+    rejected = statistics_envelope(
+        rejected, group="portfolio", protocol=selected_protocol.manifest()
     )
     with pytest.raises(ValueError, match="statistics_table_duplicate_keys"):
         write_statistics_artifact(
@@ -1340,6 +1350,11 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
             upstream_identities=envelope.upstream_identities,
             semantic_metadata=envelope.semantic_metadata,
         )
+        holdout_envelope = statistics_envelope(
+            holdout_envelope,
+            group="portfolio",
+            protocol={**selected_protocol.manifest(), "access_window": "holdout"},
+        )
         holdout_root = write_statistics_artifact(
             tmp_path / "holdout_statistics",
             envelope=holdout_envelope,
@@ -1409,12 +1424,12 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
             )
             holdout_root = write_statistics_artifact(
                 tmp_path / variant,
-                envelope=envelope,
+                envelope=holdout_envelope,
                 tables=holdout_tables,
                 table_group="portfolio",
             )
             with read_statistics_artifact(
-                holdout_root, expected_identity=envelope.instance_identity
+                holdout_root, expected_identity=holdout_envelope.instance_identity
             ).table("portfolio_group_comparison.parquet") as saved:
                 assert saved.status.eq("DEFINED").all()
                 assert saved.bootstrap_status.eq("DEFINED").all()
@@ -1442,6 +1457,9 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
                 key: ledger.identity for key, ledger in altered_ledgers.items()
             },
             semantic_metadata={},
+        )
+        changed_envelope = statistics_envelope(
+            changed_envelope, group="portfolio", protocol=selected_protocol.manifest()
         )
         changed_root = write_statistics_artifact(
             tmp_path / "changed_statistics",
@@ -1728,6 +1746,9 @@ def test_public_portfolio_statistics_derive_missing_csi_opens_and_preserve_sourc
             )
             contract = envelope(
                 "pv_all_portfolio_statistics", metadata={"fixture_case": case}
+            )
+            contract = statistics_envelope(
+                contract, group="portfolio", protocol=manifest
             )
             root = write_statistics_artifact(
                 tmp_path / "statistics",

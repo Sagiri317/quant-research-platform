@@ -35,6 +35,7 @@ def test_complete_session_frames_merge_boundary_and_emit_one_session() -> None:
     )
     chunks = list(iter_complete_session_frames(frames, timestamp_column="timestamp"))
     assert [len(chunk) for chunk in chunks] == [2, 2, 1]
+    assert pd.concat(chunks).value.tolist() == [1, 2, 3, 4, 5]
     assert [chunk["timestamp"].nunique() for chunk in chunks] == [1, 1, 1]
 
 

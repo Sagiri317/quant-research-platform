@@ -169,6 +169,19 @@ def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
             ),
         )
 
+    _, before_queries = identities()
+    query = package / "interfaces/queries.py"
+    query.write_bytes(query.read_bytes() + b"\n# Read-only projection change.\n")
+    assert identities()[1] == before_queries
+    renderer = package / "artifacts/research.py"
+    renderer.write_bytes(
+        renderer.read_bytes() + b"\n# Report assembly and Markdown change.\n"
+    )
+    after_renderer = identities()[1]
+    for binding, before, after in zip(
+        bindings, before_queries, after_renderer, strict=True
+    ):
+        assert (after != before) is (binding.kind is ProducerKind.REPORT)
     original_package, original = identities()
     resource = package / "runtime" / "resources.py"
     resource.write_bytes(

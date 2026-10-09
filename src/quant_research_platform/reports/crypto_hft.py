@@ -37,8 +37,19 @@ def build_crypto_research_report(*, record, evidence):
             rows = item["tables"][table]
             selected.extend(row for row in rows if predicate is None or predicate(row))
         states.extend({"status": row["status"]} for row in selected if "status" in row)
+        status = diagnostic_status(states)
+        if (
+            table == "crypto_portfolio_daily"
+            and not selected
+            and status not in {"FAILED", "BLOCKED"}
+        ):
+            return {
+                "status": "UNDEFINED",
+                "reason": "insufficient_complete_utc_days",
+                "results": [],
+            }
         return {
-            "status": diagnostic_status(states),
+            "status": status,
             "results": selected,
         }
 
@@ -154,7 +165,6 @@ def build_crypto_research_report(*, record, evidence):
             "status": "DEFINED",
             "access_window": record.research_window["access"],
             "frozen_development": run_payload["protocol"].get("frozen_development"),
-            "evidence": run_payload["holdout_evidence"],
             "holdout_window": run_payload["protocol"]["holdout_window"],
         },
         "readiness/blockers": {

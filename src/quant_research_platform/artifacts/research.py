@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 from collections import Counter
 from collections.abc import Mapping
+from html import escape
 from pathlib import Path, PurePosixPath
 from types import MappingProxyType
 
@@ -29,6 +30,7 @@ from quant_research_platform.artifacts.statistics import (
 )
 from quant_research_platform.contracts.business_manifest import (
     BusinessManifestEnvelope,
+    build_business_manifest_envelope,
     validate_business_manifest_envelope,
 )
 from quant_research_platform.contracts.json_codec import canonical_json_hash
@@ -37,6 +39,7 @@ from quant_research_platform.contracts.targets import (
     ProducerKind,
     ResearchRunRecord,
     ResearchRunTargetResult,
+    RunStatus,
     TargetStatus,
     research_run_record_from_payload,
 )
@@ -45,7 +48,6 @@ from quant_research_platform.reports import (
     a_share,
     crypto_hft,
     diagnostic_status,
-    render_research_report,
 )
 from quant_research_platform.reports.a_share import build_a_share_report
 from quant_research_platform.reports.crypto_hft import build_crypto_research_report
@@ -56,11 +58,15 @@ from quant_research_platform.storage.datasets.schema import COMMON_MANIFEST_META
 from quant_research_platform.storage.experiments import (
     read_model_trial_ledger_reference,
 )
-from quant_research_platform.storage.identity import open_filesystem_file
+from quant_research_platform.storage.identity import (
+    filesystem_exists,
+    open_filesystem_file,
+)
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
 from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact_record,
+    semantic_artifact_read_session,
     write_semantic_artifact,
 )
 
@@ -659,9 +665,29 @@ def produce_a_share_report(
     *,
     layout: StorageLayout,
     record: ResearchRunRecord,
-    selections,
-    reference_member_identities=None,
+    read_model_artifact,
 ) -> dict[str, object]:
+    selections = {}
+    reference_member_identities = {}
+    for result in record.target_results:
+        if result.producer_kind is not ProducerKind.MODEL or result.status in {
+            TargetStatus.BLOCKED,
+            TargetStatus.FAILED,
+        }:
+            continue
+        identities = {}
+        try:
+            read_validated_reference(layout, result, member_identities=identities)
+        except (FileNotFoundError, OSError, ValueError):
+            continue
+        persisted = read_model_artifact(
+            _instance_root(layout, result),
+            expected_identity=result.instance_identity,
+            trial_layout=layout,
+            expected_member_identities=identities,
+        )
+        selections = persisted.selections
+        reference_member_identities[result.target_id] = identities
     return build_a_share_report(
         record=record,
         evidence=load_a_share_run_evidence(
@@ -770,45 +796,45 @@ def read_research_report_artifact(
     source_run: ResearchRunRecord | None = None,
     include_markdown: bool = False,
 ) -> dict[str, object]:
-    envelope, members = read_semantic_artifact_record(
-        Path(instance_root), expected_identity=expected_identity
-    )
-    by_path = _require_members(members, ("report.json", "report.md"))
-    contract = envelope["semantic_metadata"].get("target_contract")
-    if type(contract) is not dict:
-        raise ValueError("research_report_semantics_invalid")
-    schema_id = contract.get("schema_id")
-    _report_contract(schema_id)
-    payload = read_json_evidence(
-        Path(instance_root) / "report.json",
-        expected_schema_id=schema_id,
-        error="research_report_payload_invalid",
-        expected_member=by_path["report.json"],
-    )
-    _validate_report_payload(payload)
-    _validate_report_semantics(envelope, payload)
-    if source_run is not None and (
-        payload["run_id"] != source_run.run_id
-        or payload["scenario_id"] != source_run.scenario_id
-        or payload["source_run_status"] != source_run.status.value
-        or (envelope["research_window"] != dict(source_run.research_window))
-        or (envelope["protocol_or_spec_identity"] != source_run.protocol_identity)
-        or (
-            envelope["upstream_identities"]
-            != {"source_run": canonical_json_hash(source_run.payload())}
+    with semantic_artifact_read_session(
+        Path(instance_root), expected_identity=expected_identity, member_identities={}
+    ) as (envelope, members):
+        by_path = _require_members(members, ("report.json", "report.md"))
+        contract = envelope["semantic_metadata"].get("target_contract")
+        if type(contract) is not dict:
+            raise ValueError("research_report_semantics_invalid")
+        schema_id = contract.get("schema_id")
+        _report_contract(schema_id)
+        payload = read_json_evidence(
+            Path(instance_root) / "report.json",
+            expected_schema_id=schema_id,
+            error="research_report_payload_invalid",
+            expected_member=by_path["report.json"],
         )
-    ):
-        raise ValueError("research_report_run_lineage_mismatch")
-    if payload["scenario_id"] != envelope["logical_artifact_id"].removesuffix(
-        "_report_artifact"
-    ):
-        raise ValueError("research_report_payload_invalid")
-    if include_markdown:
-        markdown = _read_utf8(
-            Path(instance_root) / "report.md", expected_member=by_path["report.md"]
-        )
-        return {"report": payload, "markdown": markdown}
-    return payload
+        _validate_report_payload(payload)
+        _validate_report_semantics(envelope, payload)
+        if source_run is not None and (
+            payload["run_id"] != source_run.run_id
+            or payload["scenario_id"] != source_run.scenario_id
+            or payload["source_run_status"] != source_run.status.value
+            or (envelope["research_window"] != dict(source_run.research_window))
+            or (envelope["protocol_or_spec_identity"] != source_run.protocol_identity)
+            or (
+                envelope["upstream_identities"]
+                != {"source_run": canonical_json_hash(source_run.payload())}
+            )
+        ):
+            raise ValueError("research_report_run_lineage_mismatch")
+        if payload["scenario_id"] != envelope["logical_artifact_id"].removesuffix(
+            "_report_artifact"
+        ):
+            raise ValueError("research_report_payload_invalid")
+        if include_markdown:
+            markdown = _read_utf8(
+                Path(instance_root) / "report.md", expected_member=by_path["report.md"]
+            )
+            return {"report": payload, "markdown": markdown}
+        return payload
 
 
 def _validate_report_payload(payload: object) -> None:
@@ -1337,3 +1363,206 @@ def produce_crypto_report(
             "issues": issues,
         },
     )
+
+
+def build_report_from_run(
+    *,
+    market_id,
+    produce_report,
+    software_identity: str,
+    execution_targets=(),
+    layout: StorageLayout,
+    record: ResearchRunRecord,
+    plan: bool,
+) -> dict[str, object]:
+    report_target = f"{record.scenario_id}_report_artifact"
+    report_inputs = (
+        {"execution_targets": execution_targets} if str(market_id) == "crypto" else {}
+    )
+    payload = produce_report(layout=layout, record=record, **report_inputs)
+    report_status = RunStatus(payload["report_status"])
+    source_run_identity = canonical_json_hash(record.payload())
+    contract = {
+        "schema_id": payload["schema_id"],
+        "required_sections": list(payload["sections"]),
+        "source_run_identity": source_run_identity,
+    }
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=report_target,
+        schema_identity=canonical_json_hash(contract),
+        protocol_or_spec_identity=record.protocol_identity,
+        software_identity=software_identity,
+        research_window=record.research_window,
+        upstream_identities={"source_run": source_run_identity},
+        semantic_metadata={
+            "target_contract": contract,
+            "source_run_id": record.run_id,
+            "source_run_status": record.status.value,
+            "report_status": report_status.value,
+        },
+    )
+    logical_root = layout.semantic_artifact_root(market_id, report_target)
+    instance_root = layout.instance_root(logical_root, envelope.instance_identity)
+    decision = "REUSE" if filesystem_exists(instance_root) else "BUILD"
+    if plan:
+        blocker = None
+        if decision == "REUSE":
+            try:
+                if (
+                    read_research_report_artifact(
+                        instance_root, expected_identity=envelope.instance_identity
+                    )
+                    != payload
+                ):
+                    raise ValueError("research_report_reuse_mismatch")
+            except (FileNotFoundError, OSError, ValueError):
+                decision = "BLOCKED"
+                blocker = "persisted_report_invalid"
+                report_status = RunStatus.FAILED
+        return {
+            "stage": "report build",
+            "profile_id": record.profile_id,
+            "run_id": record.run_id,
+            "source_run_status": record.status.value,
+            "status": report_status.value,
+            "target": {
+                "target_id": report_target,
+                "decision": decision,
+                "requested_identity": envelope.instance_identity,
+                "blocker": blocker,
+            },
+        }
+    target_status = TargetStatus.BUILT
+    if decision == "REUSE":
+        existing = read_research_report_artifact(
+            instance_root, expected_identity=envelope.instance_identity
+        )
+        if existing != payload:
+            raise ValueError("research_report_reuse_mismatch")
+        target_status = TargetStatus.REUSED
+    else:
+        write_research_report_artifact(
+            logical_root,
+            envelope=envelope,
+            payload=payload,
+        )
+    return {
+        "stage": "report build",
+        "profile_id": record.profile_id,
+        "run_id": record.run_id,
+        "source_run_status": record.status.value,
+        "status": report_status.value,
+        "target_result": {
+            "target_id": report_target,
+            "status": target_status.value,
+            "instance_identity": envelope.instance_identity,
+        },
+        "report": payload,
+    }
+
+
+def render_research_report(payload: dict[str, object], *, sections, title) -> str:
+    lines = [
+        f"# {title}",
+        "",
+        f"Run: {payload['run_id']}",
+        f"Scenario: {payload['scenario_id']}",
+        f"Access: {payload['access_window']}",
+        f"Source run status: {payload['source_run_status']}",
+        f"Report status: {payload['report_status']}",
+        "",
+        "完整机器证据：[report.json](report.json)。"
+        "表中的 — 表示未提供值；状态与原因见对应列。",
+        "",
+    ]
+    content = payload["sections"]
+    if type(content) is not dict:
+        raise ValueError("research_report_payload_invalid")
+    for name in sections:
+        lines.extend((f"## {_markdown_cell(name)}", ""))
+        _markdown_content(lines, content[name], depth=3)
+    return "\n".join(lines)
+
+
+def _markdown_cell(value):
+    if value is None:
+        return "—"
+    if isinstance(value, bool):
+        return str(value).lower()
+    if isinstance(value, int | float):
+        return f"{value:,}"
+    return escape(str(value), quote=False).replace("|", "\\|").replace("\n", "<br>")
+
+
+def _markdown_table(lines, rows):
+    columns = list(dict.fromkeys(key for row in rows for key in row))
+    if not columns:
+        return
+    lines.extend(
+        (
+            "| " + " | ".join((_markdown_cell(key) for key in columns)) + " |",
+            "| " + " | ".join("---" for _key in columns) + " |",
+        )
+    )
+    lines.extend(
+        "| " + " | ".join(_markdown_cell(row.get(key)) for key in columns) + " |"
+        for row in rows
+    )
+    lines.append("")
+
+
+def _markdown_content(lines, value, *, depth):
+    if isinstance(value, Mapping):
+        scalars = [
+            {"指标": key, "值": item}
+            for key, item in value.items()
+            if not isinstance(item, (Mapping, list, tuple))
+        ]
+        _markdown_table(lines, scalars)
+        for key, item in value.items():
+            if isinstance(item, (Mapping, list, tuple)):
+                lines.extend((f"{'#' * min(depth, 6)} {_markdown_cell(key)}", ""))
+                _markdown_content(lines, item, depth=depth + 1)
+    elif isinstance(value, (list, tuple)):
+        if not value:
+            lines.extend(("无记录。", ""))
+        elif all(isinstance(item, Mapping) for item in value):
+            _markdown_table(
+                lines,
+                [
+                    {
+                        key: item
+                        for key, item in row.items()
+                        if not isinstance(item, (Mapping, list, tuple))
+                    }
+                    for row in value
+                ],
+            )
+            for index, row in enumerate(value, start=1):
+                label = next(
+                    (
+                        row[key]
+                        for key in ("candidate_id", "model_id", "target_id", "fold_id")
+                        if key in row
+                    ),
+                    str(index),
+                )
+                for key, item in row.items():
+                    if isinstance(item, (Mapping, list, tuple)):
+                        lines.extend(
+                            (
+                                f"{'#' * min(depth, 6)} {_markdown_cell(label)} / "
+                                f"{_markdown_cell(key)}",
+                                "",
+                            )
+                        )
+                        _markdown_content(lines, item, depth=depth + 1)
+        else:
+            for item in value:
+                if isinstance(item, (Mapping, list, tuple)):
+                    _markdown_content(lines, item, depth=depth + 1)
+                else:
+                    lines.append(f"- {_markdown_cell(item)}")
+            lines.append("")
+    else:
+        lines.extend((_markdown_cell(value), ""))

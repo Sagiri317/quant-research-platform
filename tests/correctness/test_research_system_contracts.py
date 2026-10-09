@@ -409,7 +409,7 @@ def test_risk_manifest_serializes_the_same_runtime_config():
     )
     protocol = a_share.AShareProtocol("pv_all", risk_config=config)
     assert protocol.manifest()["risk"] == asdict(config)
-    assert FactorRiskState(style_columns=("x",), config=config).config is config
+    assert FactorRiskState(style_columns=("x",), config=config).config == config
 
 
 def test_forward_labels_exact_on_sparse_sessions_and_extreme_prices():

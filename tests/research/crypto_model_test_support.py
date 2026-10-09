@@ -244,8 +244,11 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
     )
     logical_root = prediction_root.parent.parent
     prior = {p.name for p in filesystem_iterdir(prediction_root.parent)}
-    for index, (stamp, asset) in enumerate(
-        (("08.500000", "btc_usdt"), ("08.700000", "eth_usdt"))
+    for index, (stamp, asset, error) in enumerate(
+        (
+            ("08.500000", "btc_usdt", "prediction_metadata_inconsistent"),
+            ("08.700000", "eth_usdt", "crypto_prediction_fold_scope_misaligned"),
+        )
     ):
         envelope = build_business_manifest_envelope(
             **{
@@ -292,7 +295,7 @@ def check_crypto_prediction_staging(*, layout, prediction_root, saved):
                 ),
             )
 
-        with pytest.raises(ValueError, match="crypto_prediction_fold_scope_misaligned"):
+        with pytest.raises(ValueError, match=error):
             write_semantic_artifact(logical_root, envelope, write)
         assert {p.name for p in filesystem_iterdir(prediction_root.parent)} == prior
         assert read_semantic_artifact_record(prediction_root) == old

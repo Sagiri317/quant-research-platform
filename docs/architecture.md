@@ -29,7 +29,7 @@ research 可以依赖 contracts、storage、runtime；市场/data ID仅从各市
 不得依赖 sources 或 markets/implementations 的执行、来源、生产器实现。
 research/protocols 持有配置选择校验、窗口、冻结及统计研究语义，profiles 只组合目录与来源/生产器绑定。
 开发到留出统一复用冻结 target/reference：市场 protocol 指定冻结模型/校准及资格，workflow 负责 DAG 和引用发布。
-留出创建新的预测、评估、账本、统计、报告与 holdout_evidence，不重新训练或校准。
+留出创建新的预测、评估、账本、统计、报告与正常运行记录，不重新训练或校准。
 允许 artifacts→reports，禁止 reports→artifacts。
 可移植模型算法 ID、依赖、输入种类及并行类别由 contracts 定义；研究选择与参数由显式配置提供；
 拟合、预测、缩放、排名、重要性和验证由 research 持有。字段名使用 model_algorithm，

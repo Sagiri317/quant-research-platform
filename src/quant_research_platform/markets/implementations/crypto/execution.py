@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 from fractions import Fraction
 from itertools import groupby
 from types import SimpleNamespace
@@ -1243,13 +1243,12 @@ class MakerCalibration:
         commands,
         lifetime_ns,
         replace_quantity,
+        history_scale,
         events,
     ):
         side = new_order.side
         start = int(sample["decision_at"])
         end = start + lifetime_ns
-        # Nested source windows make the current per-asset unit divide the frozen unit.
-        history_scale = (self.price_unit / Fraction(new_order.price_unit)).numerator
         origin = (
             sample["initial_bid_index" if side == "buy" else "initial_ask_index"]
             * history_scale
@@ -1259,18 +1258,20 @@ class MakerCalibration:
         trade_context = sample["trade_observation_id"]
 
         def mapped(order):
-            return replace(
-                order,
-                price_index=origin + order.price_index - current_origin,
-                segment_id=book_context
-                if order.segment_id == new_order.segment_id
-                else order.segment_id,
-                trade_observation_id=trade_context
-                if order.trade_observation_id == new_order.trade_observation_id
-                else order.trade_observation_id,
-                created_time_ns=start + order.created_time_ns - decision_ns,
-                effective_at_ns=start + order.effective_at_ns - decision_ns,
-                valid_until_ns=start + order.valid_until_ns - decision_ns,
+            return _MakerOrder(
+                **{
+                    **vars(order),
+                    "price_index": origin + order.price_index - current_origin,
+                    "segment_id": book_context
+                    if order.segment_id == new_order.segment_id
+                    else order.segment_id,
+                    "trade_observation_id": trade_context
+                    if order.trade_observation_id == new_order.trade_observation_id
+                    else order.trade_observation_id,
+                    "created_time_ns": start + order.created_time_ns - decision_ns,
+                    "effective_at_ns": start + order.effective_at_ns - decision_ns,
+                    "valid_until_ns": start + order.valid_until_ns - decision_ns,
+                }
             )
 
         active = {} if active_order is None else {side: mapped(active_order)}
@@ -1329,16 +1330,20 @@ class MakerCalibration:
                         pending.clear()
                         current_state = None
                     elif kind == "book":
-                        next_state = SimpleNamespace(
-                            segment_id=event.segment_id,
-                            bids=tuple(
-                                (tick * history_scale, quantity)
-                                for tick, quantity in event.bids
-                            ),
-                            asks=tuple(
-                                (tick * history_scale, quantity)
-                                for tick, quantity in event.asks
-                            ),
+                        next_state = (
+                            event
+                            if history_scale == 1
+                            else SimpleNamespace(
+                                segment_id=event.segment_id,
+                                bids=tuple(
+                                    (tick * history_scale, quantity)
+                                    for tick, quantity in event.bids
+                                ),
+                                asks=tuple(
+                                    (tick * history_scale, quantity)
+                                    for tick, quantity in event.asks
+                                ),
+                            )
                         )
                         if (
                             current_state is not None
@@ -1356,10 +1361,14 @@ class MakerCalibration:
                             and current_state is not None
                             and order.segment_id == current_state.segment_id
                         ):
-                            trade = SimpleNamespace(
-                                **(
-                                    vars(event)
-                                    | {"price_index": event.price_index * history_scale}
+                            trade = (
+                                event
+                                if history_scale == 1
+                                else SimpleNamespace(
+                                    price_index=event.price_index * history_scale,
+                                    visible_quantity=event.visible_quantity,
+                                    observation_id=event.observation_id,
+                                    buyer_is_maker=event.buyer_is_maker,
                                 )
                             )
                             quantity, _reason = _maker_trade_fill(order, trade)
@@ -1414,6 +1423,8 @@ class MakerCalibration:
         limit = new_order.remaining
         keep_gain = cancel_gain = 0.0
         sample_count = 0
+        # Nested source windows make the current unit divide the frozen unit.
+        history_scale = (self.price_unit / Fraction(new_order.price_unit)).numerator
 
         def records():
             nonlocal keep_gain, cancel_gain, sample_count
@@ -1438,6 +1449,7 @@ class MakerCalibration:
                         commands=commands,
                         lifetime_ns=lifetime_ns,
                         replace_quantity=replacement,
+                        history_scale=history_scale,
                         events=self.events(
                             int(sample["event_start"]), int(sample["event_end"])
                         ),

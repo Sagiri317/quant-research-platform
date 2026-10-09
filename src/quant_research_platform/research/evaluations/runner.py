@@ -11,7 +11,7 @@ from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
 from quant_research_platform.catalog.evaluations import EvaluationCatalog
 from quant_research_platform.contracts.experiments import label_maturity_mask
 from quant_research_platform.contracts.filtering import required_filter_columns
-from quant_research_platform.contracts.time import TimeWindow
+from quant_research_platform.contracts.time import TimeWindow, crypto_execution_windows
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.research.datasets.io import (
     _research_dataset_access_window,
@@ -51,10 +51,7 @@ def build_crypto_evaluation_result(
     """Evaluate declared validation or frozen test with their maturity cutoff."""
     spec = evaluation_catalog.get(evaluation_id)
     dataset = dataset_catalog.get(spec.research_dataset_id)
-    from quant_research_platform.research.protocols.crypto_hft import (
-        execution_windows,
-        validation_windows,
-    )
+    from quant_research_platform.research.protocols.crypto_hft import validation_windows
 
     access = protocol_manifest["access_window"]
     if access == "development" and spec.signals[0].source_kind == "prediction":
@@ -65,7 +62,7 @@ def build_crypto_evaluation_result(
             for _fold, window in (
                 validation_windows(protocol_manifest["research_plan"], time_window)
                 if access == "development"
-                else execution_windows(
+                else crypto_execution_windows(
                     protocol_manifest["research_plan"],
                     time_window,
                     access_window=access,

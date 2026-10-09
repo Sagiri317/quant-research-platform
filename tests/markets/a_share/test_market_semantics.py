@@ -1147,7 +1147,6 @@ def test_public_snapshots_preserve_unknown_barriers_and_actual_publication():
             {
                 "source_asset_id": ["000001"],
                 "listing_date": pd.to_datetime(["2010-01-01"]),
-                "market_type": [1],
             }
         )
     )

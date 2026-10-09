@@ -4,6 +4,7 @@ import hashlib
 import json
 from dataclasses import replace
 from decimal import Decimal
+from fractions import Fraction
 from functools import partial
 from types import SimpleNamespace
 
@@ -347,6 +348,9 @@ def test_frozen_archive_identity_and_persisted_maker_units(
                                 commands=commands,
                                 lifetime_ns=500_000_000,
                                 replace_quantity=replacement,
+                                history_scale=(
+                                    model.price_unit / Fraction(new.price_unit)
+                                ).numerator,
                                 events=model.events(
                                     sample["event_start"],
                                     sample["event_end"],

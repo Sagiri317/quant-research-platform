@@ -217,7 +217,8 @@ def test_persisted_trial_correlations_obey_exact_bounds(field, sign):
         validate_completed_model_trial_metrics("model", metrics)
 
 
-def test_ordered_single_asset_coverage_releases_consumed_metric_frames(monkeypatch):
+@pytest.mark.parametrize("axis", ["single_asset_time_series", "cross_sectional"])
+def test_ordered_coverage_releases_consumed_metric_frames(monkeypatch, axis):
     from quant_research_platform.research.models.trial_selection import (
         ModelSampleCoverage,
     )
@@ -234,13 +235,13 @@ def test_ordered_single_asset_coverage_releases_consumed_metric_frames(monkeypat
         model_id="probe",
         label_column="label",
         prediction_column="prediction",
-        validation_axis="single_asset_time_series",
+        validation_axis=axis,
     )
     expected = evaluate_model_trial_metrics_from_chunks((frame,), **kwargs)
-    unordered = evaluate_model_trial_metrics_from_chunks(
-        (frame.iloc[4:], frame.iloc[:4]), **kwargs
-    )
-    assert unordered == expected
+    with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
+        evaluate_model_trial_metrics_from_chunks(
+            (frame.iloc[4:], frame.iloc[:4]), **kwargs
+        )
     coverage = ModelSampleCoverage({"asset_ids": ["a"]})
     coverage.add(frame)
     closed = []
@@ -271,7 +272,7 @@ def test_ordered_single_asset_coverage_releases_consumed_metric_frames(monkeypat
     )
     assert actual == expected and closed == [True]
     assert all(ref() is None for ref in references)
-    with pytest.raises(ValueError, match="model_coverage_key_order_invalid"):
+    with pytest.raises(ValueError, match="non_monotonic_time_chunk_order"):
         evaluate_model_trial_metrics_from_chunks(
             (frame.iloc[4:], frame.iloc[:4]), expected_coverage=coverage, **kwargs
         )

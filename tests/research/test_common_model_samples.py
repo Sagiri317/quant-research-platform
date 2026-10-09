@@ -58,9 +58,32 @@ def test_single_selected_model_has_no_invented_comparison():
         dataset_id="example",
     )
     from quant_research_platform.artifacts.statistics import _validated_frame
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from tests.helpers.statistics_artifacts import statistics_envelope
 
-    assert _validated_frame(comparisons, member="model_comparison.parquet").empty
-    _validated_frame(tests, member="model_reality_checks.parquet")
+    envelope = statistics_envelope(
+        build_business_manifest_envelope(
+            logical_artifact_id="single_selected_model_statistics",
+            schema_identity="a" * 64,
+            protocol_or_spec_identity="b" * 64,
+            software_identity="c" * 64,
+            research_window={
+                "start": "2023-01-01",
+                "end": "2023-01-03",
+                "access": "development",
+            },
+            upstream_identities={},
+            semantic_metadata={},
+        ),
+        group="research",
+        protocol={"access_window": "development"},
+    ).payload()
+    assert _validated_frame(
+        comparisons, member="model_comparison.parquet", envelope=envelope
+    ).empty
+    _validated_frame(tests, member="model_reality_checks.parquet", envelope=envelope)
     assert comparisons.empty
     assert set(tests["status"]) == {"UNDEFINED"}
     assert set(robustness["reason"]) == {"no_comparison_models"}

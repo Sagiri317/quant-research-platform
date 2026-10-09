@@ -9,28 +9,66 @@ WORKFLOW_ACTIONS = (
     "dataset_build",
     "research_run",
     "report_build",
-    "status",
-    "inspect",
 )
 
 
-def test_public_workflow_actions_have_one_owner_and_direct_callers() -> None:
-    workflow_root = SOURCE_ROOT / "workflows"
-    owners = {action: [] for action in WORKFLOW_ACTIONS}
-    for path in workflow_root.rglob("*.py"):
-        tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
-        for node in ast.walk(tree):
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                if node.name in owners:
-                    owners[node.name].append(path)
-
-    assert owners == {
-        action: [workflow_root / "research.py"] for action in WORKFLOW_ACTIONS
+def test_public_actions_have_one_owner_in_their_responsibility_layer() -> None:
+    actions = {
+        **dict.fromkeys(WORKFLOW_ACTIONS, "workflows"),
+        "status": "interfaces",
+        "inspect": "interfaces",
     }
+    owners = {action: [] for action in actions}
+    for layer in ("workflows", "interfaces"):
+        for path in (SOURCE_ROOT / layer).rglob("*.py"):
+            if layer == "interfaces" and path.parent.name in {"api", "cli"}:
+                continue
+            tree = ast.parse(path.read_text(encoding="utf-8"))
+            for node in tree.body:
+                if (
+                    isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name in owners
+                ):
+                    owners[node.name].append(layer)
+    assert owners == {action: [layer] for action, layer in actions.items()}
+    references = _canonical_references(
+        ast.parse(
+            (SOURCE_ROOT / "interfaces/cli/commands.py").read_text(encoding="utf-8")
+        )
+    )
+    for action, layer in actions.items():
+        assert any(
+            reference.startswith(f"quant_research_platform.{layer}.")
+            and reference.endswith("." + action)
+            for reference in references
+        )
 
-    cli_path = SOURCE_ROOT / "interfaces" / "cli" / "commands.py"
-    assert _imports_research_workflow(cli_path)
-    assert _direct_workflow_calls(cli_path) == set(WORKFLOW_ACTIONS)
+
+def test_query_owner_has_no_workflow_or_source_traversal(import_edges):
+    from tests.helpers.import_graph import import_edges_under
+
+    for edge in import_edges_under(import_edges, SOURCE_ROOT / "interfaces/queries.py"):
+        assert not edge.module.startswith(
+            ("quant_research_platform.workflows", "quant_research_platform.sources")
+        )
+        assert not edge.module.rsplit(".", 1)[-1].startswith("write_")
+
+
+def test_public_action_reference_check_accepts_import_aliases():
+    expected = {
+        "quant_research_platform.workflows.research.data_materialize",
+        "quant_research_platform.interfaces.queries.status",
+    }
+    for source in (
+        "from quant_research_platform.workflows import research\n"
+        "from quant_research_platform.interfaces import queries\n"
+        "research.data_materialize()\nqueries.status()",
+        "from quant_research_platform.workflows.research "
+        "import data_materialize as build\n"
+        "from quant_research_platform.interfaces import queries as read\n"
+        "build()\nread.status()",
+    ):
+        assert expected.issubset(_canonical_references(ast.parse(source)))
 
 
 def test_research_and_profile_owners_have_no_provider_traversal(import_edges) -> None:
@@ -73,7 +111,6 @@ def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
         "ProcessedMaterializer",
     }.isdisjoint(_defined_symbols(profile_tree))
 
-    resolver_owner = SOURCE_ROOT / "workflows" / "research.py"
     resolver_defs = []
     for path in (SOURCE_ROOT / "workflows").rglob("*.py"):
         tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
@@ -84,11 +121,8 @@ def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
                 "resolve_target_graph",
                 "plan_targets",
             }:
-                resolver_defs.append((node.name, path))
-    assert resolver_defs == [
-        ("resolve_target_graph", resolver_owner),
-        ("plan_targets", resolver_owner),
-    ]
+                resolver_defs.append(node.name)
+    assert sorted(resolver_defs) == ["plan_targets", "resolve_target_graph"]
 
 
 def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction() -> None:
@@ -192,26 +226,23 @@ def _imported_modules(tree: ast.AST) -> set[str]:
     return modules
 
 
-def _imports_research_workflow(path: Path) -> bool:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
-    return any(
-        isinstance(node, ast.ImportFrom)
-        and node.module == "quant_research_platform.workflows"
-        and any(
-            alias.name == "research" and alias.asname is None for alias in node.names
-        )
-        for node in ast.walk(tree)
-    )
-
-
-def _direct_workflow_calls(path: Path) -> set[str]:
-    tree = ast.parse(path.read_text(encoding="utf-8"), filename=path.as_posix())
-    return {
-        node.func.attr
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and isinstance(node.func.value, ast.Name)
-        and node.func.value.id == "research"
-        and node.func.attr in WORKFLOW_ACTIONS
-    }
+def _canonical_references(tree):
+    bindings = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.ImportFrom) and node.module:
+            for alias in node.names:
+                bindings[alias.asname or alias.name] = f"{node.module}.{alias.name}"
+        elif isinstance(node, ast.Import):
+            for alias in node.names:
+                bindings[alias.asname or alias.name.split(".")[0]] = (
+                    alias.name if alias.asname else alias.name.split(".")[0]
+                )
+    references = set()
+    for node in ast.walk(tree):
+        parts = []
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if isinstance(node, ast.Name) and node.id in bindings:
+            references.add(".".join((bindings[node.id], *reversed(parts))))
+    return references

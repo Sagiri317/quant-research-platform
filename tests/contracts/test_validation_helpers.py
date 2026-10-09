@@ -158,6 +158,35 @@ def test_strict_bool_series_accepts_explicit_bool_forms() -> None:
     ).tolist() == [True, False, True, False, True, False]
 
 
+@pytest.mark.parametrize("dtype", ["bool", "boolean"])
+@pytest.mark.parametrize("allow_null", [False, True])
+@pytest.mark.parametrize("empty", [False, True])
+def test_typed_bool_validation_preserves_values_index_and_detaches(
+    dtype, allow_null, empty
+) -> None:
+    values = [] if empty else [True, False]
+    index = pd.Index([] if empty else [7, 3], dtype="int64", name="row")
+    source = pd.Series(values, index=index, dtype=dtype, name="named")
+    result = validation.strict_bool_series(
+        source, error="invalid_contract_bool", allow_null=allow_null
+    )
+    expected = pd.Series(values, index=index, dtype="boolean" if allow_null else "bool")
+    pd.testing.assert_series_equal(result, expected)
+    if not empty:
+        result.iloc[0] = False
+        assert source.iloc[0]
+
+
+def test_nullable_bool_validation_keeps_null_policy() -> None:
+    source = pd.Series([True, pd.NA], dtype="boolean", name="named")
+    with pytest.raises(ValueError, match="invalid_contract_bool"):
+        validation.strict_bool_series(source, error="invalid_contract_bool")
+    result = validation.strict_bool_series(
+        source, error="invalid_contract_bool", allow_null=True
+    )
+    pd.testing.assert_series_equal(result, source.rename(None))
+
+
 def test_strict_timestamp_series_rejects_invalid_or_null_values() -> None:
     with warnings.catch_warnings():
         warnings.simplefilter("error")

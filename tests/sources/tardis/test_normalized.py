@@ -245,3 +245,62 @@ def test_normalized_gzip_close_preserves_parser_failure(
         assert caught.value is secondary
     else:
         assert any("OSError" in note for note in caught.value.__notes__)
+
+
+@pytest.mark.parametrize("dataset_type", ["quotes", "trades", "derivative_ticker"])
+def test_offline_publication_revalidates_original_bytes_without_iv(
+    tmp_path, dataset_type
+):
+    from quant_research_platform.sources.tardis.normalized import (
+        _COLUMNS,
+        _publish_dataset,
+    )
+
+    fields = _COLUMNS[dataset_type]
+    values = dict.fromkeys(fields, "1")
+    values.update(
+        exchange="bybit",
+        symbol="BTCUSDT",
+        timestamp="1785542400000000",
+        local_timestamp="1785542400000001",
+        side="buy",
+    )
+    raw = gzip.compress(
+        (
+            ",".join(fields) + "\n" + ",".join(values[key] for key in fields) + "\n"
+        ).encode()
+    )
+    root = tmp_path / "archive"
+    manifest = _publish_dataset(
+        root,
+        lambda: io.BytesIO(raw),
+        exchange="bybit",
+        dataset_type=dataset_type,
+        symbol="BTCUSDT",
+        date="2026-08-01",
+    )
+    assert "iv_unit" not in manifest
+    assert (root / "data.csv.gz").read_bytes() == raw
+    assert (
+        len(
+            list(
+                iter_records(
+                    root.parent,
+                    archive_paths=(root.name,),
+                    time_window=TimeWindow("2026-08-01", "2026-08-01"),
+                )
+            )
+        )
+        == 1
+    )
+    for key, value in (("amount_unit", "wrong"), ("iv_unit", None)):
+        changed = manifest | {key: value}
+        (root / "manifest.json").write_text(json.dumps(changed))
+        with pytest.raises(ValueError, match="tardis_normalized_manifest_invalid"):
+            list(
+                iter_records(
+                    root.parent,
+                    archive_paths=(root.name,),
+                    time_window=TimeWindow("2026-08-01", "2026-08-01"),
+                )
+            )

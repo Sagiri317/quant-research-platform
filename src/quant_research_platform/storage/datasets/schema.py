@@ -517,13 +517,13 @@ def _canonical_logical_dtype_descriptor(
 
 
 def merge_logical_dtype_payloads(payloads: list[Mapping[str, Any]]) -> dict[str, Any]:
+    """Merge declarations already constructed or validated by the dtype owner."""
     if not payloads:
         raise ValueError("dataset_logical_dtypes_missing")
-    validated = [validate_logical_dtype_payload(payload) for payload in payloads]
-    first = validated[0]
+    first = payloads[0]
     names = tuple(item["name"] for item in first["columns"])
     merged = [dict(item) for item in first["columns"]]
-    for payload in validated[1:]:
+    for payload in payloads[1:]:
         if tuple(item["name"] for item in payload["columns"]) != names:
             raise ValueError("dataset_logical_dtype_mismatch")
         for index, current in enumerate(payload["columns"]):
@@ -580,10 +580,10 @@ def _promote_compatible_logical_dtype(
 def pandas_dtype_overrides_from_logical_payload(
     payload: Mapping[str, Any], *, columns: tuple[str, ...]
 ) -> dict[str, object]:
-    validated = validate_logical_dtype_payload(payload)
+    """Construct pandas dtypes from an already admitted logical declaration."""
     selected = set(columns)
     result: dict[str, object] = {}
-    for descriptor in validated["columns"]:
+    for descriptor in payload["columns"]:
         name = descriptor["name"]
         if name not in selected:
             continue

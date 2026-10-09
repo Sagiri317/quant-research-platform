@@ -375,7 +375,6 @@ def _execute_notebook(
         "def forbidden(*args, **kwargs):\n"
         "    raise AssertionError('notebook_started_work')\n"
         f"assert Path(sys.executable).resolve() == Path({sys.executable!r}).resolve()\n"
-        "assert Path(sys.prefix).name == 'quantlab313'\n"
         "guards = [patch.object(guarded_workflow, name, forbidden) "
         f"for name in {_FORBIDDEN_ACTIONS!r}]\n"
         "guards.append(patch.object(guarded_report, "

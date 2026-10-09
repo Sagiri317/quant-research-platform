@@ -263,18 +263,12 @@ def test_logical_dtype_merge_preserves_only_compatible_semantics() -> None:
         return logical_dtype_payload_from_frame(pd.DataFrame({name: series}))
 
     numpy_integer = payload(pd.Series([1], dtype="int64"))
-    payload(pd.Series([1], dtype="Int64"))
-    payload(pd.Series([True], dtype="bool"))
-    payload(pd.Series([True], dtype="boolean"))
-    payload(pd.Series([1.0], dtype="float64"))
-    payload(pd.Series([1.0], dtype="Float64"))
     ordered_a = payload(
         pd.Series(pd.Categorical(["a"], categories=["a"], ordered=True))
     )
     ordered_b = payload(
         pd.Series(pd.Categorical(["b"], categories=["b"], ordered=True))
     )
-    payload(pd.Series(pd.Categorical(["a"], categories=["a"], ordered=True)))
     incompatible = (
         ([], "dataset_logical_dtypes_missing"),
         (
@@ -1154,3 +1148,64 @@ def test_null_resolution_preserves_map_key_order_contract():
     assert dataset_schema.arrow_type_has_null(old)
     assert not dataset_schema.arrow_type_resolves_null(old, changed)
     assert dataset_schema.arrow_type_resolves_null(old, resolved)
+
+
+@pytest.mark.parametrize("changed", (False, True))
+def test_writer_dtype_work_depends_on_distinct_metadata_not_parts(
+    tmp_path, monkeypatch, changed
+):
+    work = {"validate": 0, "categories": 0, "encode": 0, "physical": 0}
+    validate = dataset_schema.validate_logical_dtype_payload
+    encode = dataset_writing.encode_logical_category_value
+    physical = dataset_writing.validate_persisted_logical_schema
+
+    def checked(payload):
+        work["validate"] += 1
+        work["categories"] += sum(
+            len(item.get("categories", ())) for item in payload["columns"]
+        )
+        return validate(payload)
+
+    def encoded(value):
+        work["encode"] += 1
+        return encode(value)
+
+    def compatible(*args):
+        work["physical"] += 1
+        return physical(*args)
+
+    monkeypatch.setattr(dataset_schema, "validate_logical_dtype_payload", checked)
+    monkeypatch.setattr(dataset_writing, "encode_logical_category_value", encoded)
+    monkeypatch.setattr(
+        dataset_writing, "validate_persisted_logical_schema", compatible
+    )
+    counts = []
+    for parts in (1, 12):
+        for key in work:
+            work[key] = 0
+        frames = []
+        for index in range(parts):
+            frame = make_default_dataset_frame(
+                asset_ids=("a",), dates=(f"2020-01-{index + 1:02}",), values=("v0",)
+            )
+            # Alternating domains proves reuse across nonadjacent parts.
+            domain = 512 + int(changed and index % 2 == 1)
+            frame["value"] = pd.Categorical(
+                frame["value"], categories=[f"v{i}" for i in range(domain)]
+            )
+            frames.append(frame)
+        root = make_dataset_artifact_root(tmp_path, f"dtype_work_{parts}")
+        write_dataset(
+            root, iter(frames), spec=make_processed_dataset_spec(f"dtype_work_{parts}")
+        )
+        counts.append(dict(work))
+        observed = read_dataset(root)
+        assert len(observed) == parts
+        assert len(observed["value"].cat.categories) == 512 + int(changed and parts > 1)
+    if changed:
+        assert counts[1]["encode"] == 512 + 513
+        assert counts[1]["physical"] == 2
+    else:
+        assert counts[0] == counts[1]
+        assert counts[1]["encode"] == 512
+        assert counts[1]["physical"] == 1

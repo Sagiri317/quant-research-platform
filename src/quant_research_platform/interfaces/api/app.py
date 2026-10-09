@@ -21,7 +21,6 @@ from quant_research_platform.profiles.research import (
     research_profile,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
 
 
 def create_app(*, project_root: Path | None = None) -> FastAPI:
@@ -109,7 +108,7 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
         profile: str = A_SHARE_PROFILE_ID, run_id: str | None = None
     ) -> dict[str, object]:
         return evidence_query(
-            research.status, profile=selected_profile(profile), run_id=run_id
+            queries.status, profile=selected_profile(profile), run_id=run_id
         )
 
     @app.get("/api/inspect/{target_id}", operation_id="inspect_published_target")
@@ -117,7 +116,7 @@ def _include_routes(app: FastAPI, *, layout: StorageLayout | None) -> None:
         target_id: str, profile: str = A_SHARE_PROFILE_ID, run_id: str | None = None
     ) -> dict[str, object]:
         return evidence_query(
-            research.inspect,
+            queries.inspect,
             profile=selected_profile(profile),
             dataset_id=target_id,
             run_id=run_id,

@@ -176,7 +176,7 @@ def status(
     run_id: str | None = typer.Option(None, "--run-id"),  # noqa: B008
 ) -> None:
     _echo_result(
-        research.status(
+        queries.status(
             profile=research_profile(profile),
             layout=StorageLayout(project_root=project_root),
             run_id=run_id,
@@ -192,7 +192,7 @@ def inspect(
     run_id: str | None = typer.Option(None, "--run-id"),  # noqa: B008
 ) -> None:
     _echo_result(
-        research.inspect(
+        queries.inspect(
             profile=research_profile(profile),
             layout=StorageLayout(project_root=project_root),
             dataset_id=dataset_id,

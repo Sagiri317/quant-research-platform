@@ -7,6 +7,9 @@ import pytest
 from quant_research_platform.research.factors.expectations.calculations import (
     _prepare_expectations,
 )
+from quant_research_platform.research.factors.expectations.definitions import (
+    ALL_EXPECTATIONS_FACTORS,
+)
 
 
 def test_latest_declaration_keeps_same_day_median_and_next_session_gate():
@@ -745,3 +748,66 @@ def test_indexed_event_range_is_chunk_and_query_order_independent(
     pd.testing.assert_frame_equal(
         backwards.iloc[::-1].reset_index(drop=True), whole, check_exact=True
     )
+
+
+@pytest.mark.parametrize(
+    "selected",
+    [(column,) for column in ALL_EXPECTATIONS_FACTORS]
+    + [("log_analyst_coverage", "forward_earnings_yield_fy2")],
+)
+def test_selected_expectations_equal_full_output_and_keep_price_gate(selected):
+    records = pd.DataFrame(
+        [
+            {
+                "asset_id": "asset",
+                "declare_date": pd.Timestamp("2025-01-03"),
+                "forecast_end_date": pd.Timestamp(f"{year}-12-31"),
+                "institution_id": institution,
+                "forecast_eps": eps,
+            }
+            for year in (2025, 2026)
+            for institution, eps in zip(("A", "B", "C"), (1.0, 2.0, 4.0), strict=True)
+        ]
+    )
+    sessions = pd.bdate_range("2025-01-03", periods=4)
+    observations = pd.DataFrame(
+        {"asset_id": "asset", "timestamp": sessions, "close": [10.0, 10.0, 0.0, np.nan]}
+    )
+    full = _prepare_expectations(records, trading_sessions=sessions)(observations)
+    query = _prepare_expectations(
+        records, trading_sessions=sessions, selected_columns=selected
+    )
+    actual = pd.concat(
+        [query(observations.iloc[:2]), query(observations.iloc[2:])], ignore_index=True
+    )
+    pd.testing.assert_frame_equal(
+        actual, full.loc[:, ["asset_id", "timestamp", *selected]], check_exact=True
+    )
+    assert actual.iloc[2:, 2:].isna().all().all()
+
+
+def test_coverage_query_does_not_compute_medians(monkeypatch):
+    from quant_research_platform.research.factors.expectations import calculations
+
+    records = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "declare_date": pd.Timestamp("2025-01-03"),
+            "forecast_end_date": pd.Timestamp("2025-12-31"),
+            "institution_id": ["A", "B", "C"],
+            "forecast_eps": [1.0, 2.0, 4.0],
+        }
+    )
+    sessions = pd.bdate_range("2025-01-03", periods=2)
+    query = _prepare_expectations(
+        records, trading_sessions=sessions, selected_columns=("log_analyst_coverage",)
+    )
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("unused median")
+
+    monkeypatch.setattr(calculations, "median", forbidden)
+    actual = query(
+        pd.DataFrame({"asset_id": "asset", "timestamp": sessions, "close": 10.0})
+    )
+    assert actual.log_analyst_coverage.iloc[-1] == np.log(3)

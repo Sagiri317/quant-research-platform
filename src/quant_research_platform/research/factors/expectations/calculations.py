@@ -26,8 +26,14 @@ def _prepare_expectations(
     trading_sessions,
     freshness_days=FORECAST_FRESHNESS_DAYS,
     minimum_institutions=3,
+    selected_columns=ALL_EXPECTATIONS_FACTORS,
 ):
     """Prepare one immutable request's source, then query observation slabs."""
+    if not selected_columns or set(selected_columns).difference(
+        ALL_EXPECTATIONS_FACTORS
+    ):
+        raise ValueError("expectations_selected_columns_invalid")
+    selected_columns = tuple(selected_columns)
     required_records = {
         "asset_id",
         "declare_date",
@@ -100,6 +106,7 @@ def _prepare_expectations(
         },
         freshness_days=freshness_days,
         minimum_institutions=minimum_institutions,
+        selected_columns=selected_columns,
     )
 
 
@@ -109,6 +116,7 @@ def _expectations_for_observations(
     *,
     freshness_days,
     minimum_institutions,
+    selected_columns,
 ):
     if not {"asset_id", "timestamp", "close"}.issubset(observations.columns):
         raise ValueError("expectations_input_columns_invalid")
@@ -161,10 +169,11 @@ def _expectations_for_observations(
                 observation_closes[position],
                 active.values(),
                 minimum_institutions=minimum_institutions,
+                selected_columns=selected_columns,
             )
     return pd.DataFrame.from_records(
         rows,
-        columns=("asset_id", "timestamp", *ALL_EXPECTATIONS_FACTORS),
+        columns=("asset_id", "timestamp", *selected_columns),
     )
 
 
@@ -175,11 +184,12 @@ def _features_for_observation(
     forecast,
     *,
     minimum_institutions: int,
+    selected_columns,
 ) -> dict[str, object]:
     base: dict[str, object] = {
         "asset_id": asset_id,
         "timestamp": timestamp,
-        **{factor: float("nan") for factor in ALL_EXPECTATIONS_FACTORS},
+        **{factor: float("nan") for factor in selected_columns},
     }
     if pd.isna(close) or close <= 0.0:
         return base
@@ -194,22 +204,44 @@ def _features_for_observation(
         selected.append(by_period[end_dates[1]])
     eps_values = [event.forecast_eps for event in selected[0]]
     if len(eps_values) >= minimum_institutions:
-        exact = eps_values
-        center = median(exact)
-        mad = float(median(abs(value - center) for value in exact))
-        base["forward_earnings_yield_fy1"] = float(center / Fraction(float(close)))
-        base["forecast_dispersion_fy1"] = mad
-        base["log_analyst_coverage"] = float(np.log(len(eps_values)))
-        base["forecast_dispersion_price_scaled_fy1"] = float(
-            median(abs(value - center) for value in exact) / Fraction(float(close))
-        )
-        base["median_forecast_age_days_fy1"] = float(
-            median((timestamp - event.declare_date).days for event in selected[0])
-        )
-        base["newly_updated_institution_fraction_fy1"] = sum(
-            event.available_at == timestamp for event in selected[0]
-        ) / len(selected[0])
-    if len(selected) > 1:
+        if any(
+            column in selected_columns
+            for column in (
+                "forward_earnings_yield_fy1",
+                "forecast_dispersion_fy1",
+                "forecast_dispersion_price_scaled_fy1",
+            )
+        ):
+            center = median(eps_values)
+            if "forward_earnings_yield_fy1" in selected_columns:
+                base["forward_earnings_yield_fy1"] = float(
+                    center / Fraction(float(close))
+                )
+            if any(
+                column in selected_columns
+                for column in (
+                    "forecast_dispersion_fy1",
+                    "forecast_dispersion_price_scaled_fy1",
+                )
+            ):
+                mad = median(abs(value - center) for value in eps_values)
+                if "forecast_dispersion_fy1" in selected_columns:
+                    base["forecast_dispersion_fy1"] = float(mad)
+                if "forecast_dispersion_price_scaled_fy1" in selected_columns:
+                    base["forecast_dispersion_price_scaled_fy1"] = float(
+                        mad / Fraction(float(close))
+                    )
+        if "log_analyst_coverage" in selected_columns:
+            base["log_analyst_coverage"] = float(np.log(len(eps_values)))
+        if "median_forecast_age_days_fy1" in selected_columns:
+            base["median_forecast_age_days_fy1"] = float(
+                median((timestamp - event.declare_date).days for event in selected[0])
+            )
+        if "newly_updated_institution_fraction_fy1" in selected_columns:
+            base["newly_updated_institution_fraction_fy1"] = sum(
+                event.available_at == timestamp for event in selected[0]
+            ) / len(selected[0])
+    if "forward_earnings_yield_fy2" in selected_columns and len(selected) > 1:
         fy2 = [event.forecast_eps for event in selected[1]]
         if len(fy2) >= minimum_institutions:
             base["forward_earnings_yield_fy2"] = float(

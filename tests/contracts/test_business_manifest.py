@@ -164,7 +164,7 @@ def test_validator_requires_hash_protocol_named_upstreams_and_exact_window() -> 
         validate_business_manifest_envelope(payload)
 
 
-def test_validator_returns_a_detached_bounded_payload() -> None:
+def test_validator_returns_a_detached_payload() -> None:
     source = _envelope().payload()
     validated = validate_business_manifest_envelope(source)
     validated["semantic_metadata"]["root_seed"] = 99

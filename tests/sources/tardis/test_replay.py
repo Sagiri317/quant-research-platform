@@ -1471,3 +1471,240 @@ def test_real_midnight_snapshot_recovers_book_without_inventing_observation(
             )
         if failure == "healthy":
             assert len({state.segment_id for state in states}) == 1
+
+
+def test_late_snapshot_prefix_cursors_are_independent_and_canonical(tmp_path):
+    from quant_research_platform.policy.lifecycle import closing_iterator
+
+    count = 300
+    native = b"".join(_delta(1, 100 + n, 100 + n, 99 + n) for n in range(count))
+    native += _line(
+        2,
+        "depthSnapshot",
+        {
+            "lastUpdateId": 100 + count - 1,
+            "bids": [[str(100 - i), "2"] for i in range(12)],
+            "asks": [[str(101 + i), "2"] for i in range(12)],
+        },
+    )
+    native += _delta(3, 100 + count, 100 + count, 99 + count)
+    published = tmp_path / "published"
+    import_slices(
+        published, date="2026-09-01", slices=_slices(tmp_path / "native", native)
+    )
+    options = dict(
+        symbol="BTCUSDT",
+        market_type=FUTURES_MARKET_TYPE,
+        data_kinds=("depth_snapshot", "depth"),
+    )
+    with open_market_source(published) as source:
+        assert (
+            list(
+                source.iter_market_records(
+                    **options, end_ns=pd.Timestamp("2026-09-01T00:00:01Z").value
+                )
+            )
+            == []
+        )
+        with (
+            closing_iterator(source.iter_market_records(**options)) as first,
+            closing_iterator(source.iter_market_records(**options)) as second,
+        ):
+            snapshot = next(first)
+            assert snapshot["data_kind"] == "depth_snapshot"
+            assert next(second) == snapshot
+            prefix = [next(first) for _ in range(17)]
+            other = list(second)
+            rest = list(first)
+            assert prefix + rest == other
+            assert len(other) == count + 1
+            assert all(row["data_kind"] == "depth_bootstrap" for row in other[:-1])
+            assert other[-1]["data_kind"] == "depth"
+        # Reopening must preserve canonical bytes and cutoff behavior.
+        assert list(source.iter_market_records(**options)) == [snapshot, *other]
+        assert (
+            list(
+                source.iter_market_records(
+                    **options, end_ns=pd.Timestamp("2026-09-01T00:00:01Z").value
+                )
+            )
+            == []
+        )
+
+
+@pytest.mark.parametrize(
+    "case", ["ordinary", "bucket_cancellation", "event_cancellation", "true_overflow"]
+)
+@pytest.mark.parametrize("batch_rows", [1, 10])
+def test_native_panel_exact_ofi_publication(tmp_path, case, batch_rows):
+    from quant_research_platform.markets.implementations.crypto.hft import (
+        iter_factor_frames,
+        iter_panel_frames,
+    )
+    from quant_research_platform.markets.implementations.crypto.processed import catalog
+    from quant_research_platform.sources.binance.replay import iter_agg_trades
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.datasets.writing import write_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+
+    midnight = pd.Timestamp("2026-09-01T00:00:00Z").value
+    quantity = "1" if case == "ordinary" else "1e308"
+
+    def line(ms, channel, payload):
+        return (
+            pd.Timestamp(midnight + ms * 1000000, tz="UTC")
+            .isoformat()
+            .replace("+00:00", "Z")
+            + " "
+            + json.dumps({"stream": "btcusdt@" + channel, "data": payload})
+            + "\n"
+        ).encode()
+
+    def trade(ms, identity):
+        return line(
+            ms,
+            "aggTrade",
+            dict(
+                e="aggTrade",
+                E=midnight // 1000000 + ms,
+                T=midnight // 1000000 + ms,
+                s="BTCUSDT",
+                st=1,
+                a=identity,
+                f=identity,
+                l=identity,
+                p="100",
+                q="1",
+                nq="1",
+                m=False,
+            ),
+        )
+
+    native = line(
+        0,
+        "depthSnapshot",
+        dict(
+            lastUpdateId=100,
+            bids=[["100", quantity], *[[str(100 - i), "1"] for i in range(1, 12)]],
+            asks=[["200", quantity], *[[str(200 + i), "1"] for i in range(1, 12)]],
+        ),
+    )
+    native += trade(0, 1)
+    updates = [(0, [], []), (10, [["100", "0"], ["101", quantity]], [])]
+    if case == "event_cancellation":
+        updates[1] = (
+            10,
+            [["100", "0"], ["101", quantity]],
+            [["200", "0"], ["201", quantity]],
+        )
+        updates.append((20, [["101", "0"], ["100", quantity]], []))
+    else:
+        updates.append((20, [["101", "0"], ["102", quantity]], []))
+        if case != "true_overflow":
+            updates.append((30, [["102", "0"], ["101", quantity]], []))
+    updates.append((200, [], []))
+    for number, (ms, bids, asks) in enumerate(updates):
+        native += line(
+            ms,
+            "depth@0ms",
+            dict(
+                e="depthUpdate",
+                E=midnight // 1000000 + ms,
+                T=midnight // 1000000 + ms,
+                s="BTCUSDT",
+                st=1,
+                ps="BTCUSDT",
+                U=100 + number,
+                u=100 + number,
+                pu=99 + number,
+                b=bids,
+                a=asks,
+            ),
+        )
+    native += trade(200, 2)
+    published = tmp_path / "raw"
+    import_slices(
+        published,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", native, count=1),
+    )
+    with open_market_source(published) as source:
+        stats = ReconstructionStats()
+        frames = iter_panel_frames(
+            iter_reconstructed_depth(
+                source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+            ),
+            iter_agg_trades(source, FUTURES_MARKET_TYPE, symbol="BTCUSDT"),
+            market_id="crypto",
+            asset_id="btc_usdt",
+            start_ms=midnight // 1000000,
+            end_ms=midnight // 1000000 + 100,
+            book_coverage=stats.coverage_segments,
+            trade_coverage=source.observation_coverage(
+                market_type=FUTURES_MARKET_TYPE,
+                data_kind="agg_trades",
+                symbol="BTCUSDT",
+            ).covering,
+            batch_rows=batch_rows,
+        )
+        spec = catalog.hft_processed_catalog().get("binance_futures_l2_panel_100ms")
+        layout = StorageLayout(tmp_path)
+        output = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+        if case == "true_overflow":
+            with pytest.raises(OverflowError):
+                write_dataset(output, frames, spec=spec)
+            assert not output.exists()
+        else:
+            write_dataset(output, frames, spec=spec)
+            panel = read_dataset(output)
+            assert panel.book_ofi_100ms.iloc[-1] == float(quantity)
+            factor = pd.concat(iter_factor_frames([panel], columns=("ofi_100ms",)))
+            assert factor.ofi_100ms.iloc[-1] == float(quantity)
+        assert stats.invalid_segments == 0
+
+
+def test_late_snapshot_prefix_excludes_previous_observation(tmp_path):
+    snapshot = {
+        "lastUpdateId": 200,
+        "bids": [[str(100 - i), "2"] for i in range(12)],
+        "asks": [[str(101 + i), "2"] for i in range(12)],
+    }
+    native = (
+        _delta(1, 100, 100, 99)
+        + b"\n"
+        + _delta(2, 200, 200, 199)
+        + _line(3, "depthSnapshot", snapshot)
+        + _delta(4, 201, 201, 200)
+    )
+    published = tmp_path / "published"
+    import_slices(
+        published,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", native, count=1),
+    )
+    with open_market_source(published) as source:
+        rows = list(
+            source.iter_market_records(
+                symbol="BTCUSDT",
+                market_type=FUTURES_MARKET_TYPE,
+                data_kinds=("depth_snapshot", "depth"),
+            )
+        )
+        assert [row["source_sequence"] for row in rows] == [4, 3, 5]
+        assert [row["data_kind"] for row in rows] == [
+            "depth_snapshot",
+            "depth_bootstrap",
+            "depth",
+        ]
+        assert len({row["observation_id"] for row in rows}) == 1
+        stats = ReconstructionStats()
+        books = list(
+            iter_reconstructed_depth(
+                source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=stats
+            )
+        )
+        assert len(books) == 1 and books[0].source_sequence == 5
+        assert (
+            list(stats.coverage_segments.values())[0][0]
+            == pd.Timestamp("2026-09-01T00:00:04Z").value
+        )

@@ -950,3 +950,50 @@ def test_fee_stress_keeps_representable_extreme_change():
     expected = float(Fraction(100) * Fraction(1e308) / 10000)
     assert row["cost_delta"] == expected
     assert row["net_pnl"] == -expected
+
+
+@pytest.mark.parametrize("close_price,realized", [(110.0, 10.0), (90.0, -10.0)])
+def test_capture_fill_rows_keeps_delayed_identity_without_derived_fees(
+    close_price, realized
+):
+    from quant_research_platform.research.portfolios.accounting import (
+        PortfolioEconomics,
+    )
+
+    fills, batches = [], []
+    economics = PortfolioEconomics(
+        PortfolioCapital("synthetic", 1000.0, "USDT", "linear_perpetual"),
+        "btc_usdt",
+        capture_fill_rows(fills.append, batches.append),
+    )
+    first = economics.fill(
+        timestamp_ns=0,
+        order_id="buy",
+        quantity=1.0,
+        price=100.0,
+        mark_price=100.0,
+        fee=1.0,
+    )
+    second = economics.fill(
+        timestamp_ns=1,
+        order_id="sell",
+        quantity=-1.0,
+        price=close_price,
+        mark_price=close_price,
+        fee=1.0,
+    )
+    economics.diagnostic({"fill_id": second, "markout": 2.0})
+    economics.diagnostic({"fill_id": first, "markout": 1.0})
+    assert [row["fill_id"] for row in fills] == [second, first]
+    assert [row["markout"] for row in fills] == [2.0, 1.0]
+    assert all("fee" not in row for row in fills)
+    flows = [flow for batch in batches for flow in batch.cashflows]
+    assert [flow.amount for flow in flows if flow.kind == "commission_cost"] == [
+        -1.0,
+        -1.0,
+    ]
+    assert [flow.amount for flow in flows if flow.kind == "realized_pnl"] == [
+        0.0,
+        realized,
+    ]
+    assert economics.mark(2, close_price)["net_pnl"] == realized - 2.0

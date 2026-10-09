@@ -7,7 +7,6 @@ from collections.abc import Sequence
 import numpy as np
 import pandas as pd
 
-from quant_research_platform.contracts.data import DataFrequency, horizon_unit_suffix
 from quant_research_platform.contracts.validation import (
     strict_bool_series,
     strict_finite_numeric_series,
@@ -20,7 +19,6 @@ def add_forward_return_labels(
     frame: pd.DataFrame,
     *,
     horizons: tuple[int, ...],
-    frequency: DataFrequency | str = DataFrequency.DAILY,
     asset_column: str = "asset_id",
     date_column: str = "timestamp",
     execution_price_column: str = "adj_open",
@@ -93,25 +91,19 @@ def add_forward_return_labels(
         available[valid_positions[finite]] = exit_dates[finite].to_numpy(
             dtype="datetime64[ns]"
         )
-        label_column = forward_return_label_column(horizon, frequency)
+        label_column = forward_return_label_column(horizon)
         result[label_column] = labels
         result[f"{label_column}_available_at"] = available
     return result.reset_index(drop=True)
 
 
-def forward_return_label_column(
-    horizon: int,
-    frequency: DataFrequency | str = DataFrequency.DAILY,
-) -> str:
+def forward_return_label_column(horizon: int) -> str:
     _validate_horizon(horizon, error="invalid_forward_return_horizon")
-    return f"forward_return_{horizon}{horizon_unit_suffix(frequency)}"
+    return f"forward_return_{horizon}d"
 
 
-def forward_return_available_at_column(
-    horizon: int,
-    frequency: DataFrequency | str = DataFrequency.DAILY,
-) -> str:
-    return f"{forward_return_label_column(horizon, frequency)}_available_at"
+def forward_return_available_at_column(horizon: int) -> str:
+    return f"{forward_return_label_column(horizon)}_available_at"
 
 
 def _session_axis(sessions: Sequence[object]) -> pd.DatetimeIndex:

@@ -240,13 +240,11 @@ def write_a_share_raw_fixture(
                     "Idxinfo02": "2000-01-03",
                     "Idxinfo03": 1000.0,
                     "Idxinfo04": "synthetic_a_share",
-                    "Idxinfo05": "market_cap",
-                    "Idxinfo06": "synthetic_provider",
-                    "Idxinfo07": "synthetic_scale_index",
-                    "Idxinfo08": "total_return"
-                    if source_code.startswith("H")
-                    else "price",
-                    "Idxinfo09": "a_share",
+                    "Idxinfo05": "",
+                    "Idxinfo06": "",
+                    "Idxinfo07": "",
+                    "Idxinfo08": "",
+                    "Idxinfo09": "",
                     "Idxinfo10": "weighted_index",
                 }
             )

@@ -2207,3 +2207,128 @@ def test_obsolete_status_field_does_not_change_status_authority_or_raw(tmp_path)
             manifest
         )
     assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize("output_levels", [None, 0, 10, 10**100])
+def test_depth_price_index_tracks_insert_delete_promotion_and_reset(output_levels):
+    import random
+
+    def snapshot():
+        return dict(
+            market_type=FUTURES_MARKET_TYPE,
+            segment_id="s",
+            observation_id="o",
+            payload=dict(
+                lastUpdateId=100,
+                bids=[[str(p), "1"] for p in range(100, 201, 5)],
+                asks=[[str(p), "1"] for p in range(210, 311, 5)],
+            ),
+        )
+
+    engine = replay.DepthReconstructor(
+        FUTURES_MARKET_TYPE,
+        price_unit="1",
+        snapshot_limit=21,
+        required_levels=10,
+        connection_close_ns=None,
+        stats=replay.ReconstructionStats(),
+        output_levels=output_levels,
+    )
+    randomizer = random.Random(81)
+    for _reset in range(2):
+        engine.bootstrap(snapshot())
+        bids = {p: 1.0 for p in range(100, 201, 5)}
+        asks = {p: 1.0 for p in range(210, 311, 5)}
+        for i in range(1, 101):
+            bid_changes = {
+                randomizer.randrange(101, 199): float(randomizer.randrange(4))
+            }
+            ask_changes = {
+                randomizer.randrange(211, 309): float(randomizer.randrange(4))
+            }
+            if i == 20:
+                bid_changes[200] = 0.0
+                ask_changes[210] = 0.0
+            # Beyond-frontier updates must never become executable.
+            bid_changes[99] = ask_changes[311] = 100.0
+            for target, changes, lower, upper in (
+                (bids, bid_changes, 100, 200),
+                (asks, ask_changes, 210, 310),
+            ):
+                for price, quantity in changes.items():
+                    if lower <= price <= upper:
+                        if quantity:
+                            target[price] = quantity
+                        else:
+                            target.pop(price, None)
+            row = dict(
+                market_type=FUTURES_MARKET_TYPE,
+                segment_id="s",
+                observation_id="o",
+                source_sequence=i,
+                receive_time="2026-08-01T00:00:00Z",
+                receive_monotonic_ns=i,
+                payload=dict(
+                    U=99 + i,
+                    u=100 + i,
+                    pu=99 + i,
+                    E=i,
+                    T=i,
+                    b=[[str(p), str(q)] for p, q in bid_changes.items()],
+                    a=[[str(p), str(q)] for p, q in ask_changes.items()],
+                ),
+            )
+            states = list(engine.feed(row))
+            assert len(states) == 1 and isinstance(states[0], BookState)
+            assert states[0].bids == tuple(
+                sorted(bids.items(), reverse=True)[:output_levels]
+            )
+            assert states[0].asks == tuple(sorted(asks.items())[:output_levels])
+            assert len(engine._bid_prices) == len(bids)
+            assert len(engine._ask_prices) == len(asks)
+
+
+@pytest.mark.parametrize(
+    "bids,reason",
+    [
+        ([["103", "1"]], "crossed_book"),
+        ([["100", "0"]], "unsupported_coverage"),
+        ([["100", "0"], ["99", "0"]], "one_sided_book"),
+    ],
+)
+def test_depth_index_direct_advance_checks_every_invalid_state(bids, reason):
+    engine = replay.DepthReconstructor(
+        FUTURES_MARKET_TYPE,
+        price_unit="1",
+        snapshot_limit=2,
+        required_levels=2,
+        connection_close_ns=None,
+        stats=replay.ReconstructionStats(),
+        output_levels=1,
+    )
+    snapshot = dict(
+        market_type=FUTURES_MARKET_TYPE,
+        segment_id="s",
+        observation_id="o",
+        payload=dict(
+            lastUpdateId=100,
+            bids=[["100", "1"], ["99", "1"]],
+            asks=[["102", "1"], ["103", "1"]],
+        ),
+    )
+    engine.bootstrap(snapshot)
+    row = dict(
+        market_type=FUTURES_MARKET_TYPE,
+        segment_id="s",
+        observation_id="o",
+        source_sequence=1,
+        receive_time="2026-08-01T00:00:00Z",
+        receive_monotonic_ns=1,
+        payload=dict(U=100, u=100, pu=99, E=1, T=1, b=bids, a=[]),
+    )
+    result = engine.advance(row)
+    assert isinstance(result, BookBoundary) and result.reason == reason
+    assert not engine.valid and engine.stats.emitted_states == 0
+    engine.bootstrap(snapshot)
+    assert engine.advance(row | {"payload": row["payload"] | {"b": []}}) is True
+    assert engine.valid and engine.stats.emitted_states == 0

@@ -576,7 +576,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
         unmeasured_operation_evidence,
     )
     from quant_research_platform.interfaces.queries import portfolio_curve
-    from quant_research_platform.workflows.research import _build_report_from_run
+    from quant_research_platform.workflows.research import report_build
 
     plan = _statistics_plan()
     plan["execution"]["backtest_modes"] = ["continuous", "independent_segments"]
@@ -702,7 +702,9 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
     ] = "net_pnl"
     with pytest.raises(ValueError, match="cross_episode_metric"):
         statistics_module._validated_frame(
-            invalid, member="crypto_portfolio_statistics.parquet"
+            invalid,
+            member="crypto_portfolio_statistics.parquet",
+            envelope=envelope.payload(),
         )
     artifact = read_statistics_artifact(
         root, expected_identity=envelope.instance_identity
@@ -790,7 +792,6 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
         target_results=references,
         status=RunStatus.BLOCKED,
         operation_evidence=unmeasured_operation_evidence("fixture_record"),
-        holdout_evidence={"qualification": "HOLDOUT_FIRST_EVIDENCE", "prior_runs": []},
     )
     write_research_run_record(layout.research_run_path(run.run_id), run)
     curve = portfolio_curve(
@@ -906,9 +907,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
         if member.is_file()
     } == data_before
     figure = namespace = curve = None
-    report = _build_report_from_run(
-        profile=profile, layout=layout, record=run, plan=False
-    )
+    report = report_build(profile=profile, layout=layout, run_id=run.run_id, plan=False)
     result = report["target_result"]
     saved = read_research_report_artifact(
         layout.instance_root(
@@ -938,15 +937,14 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
         envelope=execution_envelope,
         produce=lambda emit: produce(emit, price_delta=10.0),
     )
-    read_reference = queries.report_artifact.read_validated_reference
     read_curve = queries._ledger_curve
     consumed = 0
     replaced = False
 
-    def swap_after_reference(*args, **kwargs):
-        nonlocal replaced
-        reference = read_reference(*args, **kwargs)
-        assert kwargs["member_identities"]
+    def swap_after_consumption(*args, **kwargs):
+        nonlocal replaced, consumed
+        curve = read_curve(*args, **kwargs)
+        consumed += 1
         source = next(filesystem_glob(replacement, "**/valuations.parquet"))
         target = execution_root / source.relative_to(replacement)
         with open_filesystem_file(source, "rb") as member:
@@ -954,17 +952,9 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
                 destination.write(member.read())
                 destination.truncate()
         replaced = True
-        return reference
+        return curve
 
-    def observe_curve(*args, **kwargs):
-        nonlocal consumed
-        consumed += 1
-        return read_curve(*args, **kwargs)
-
-    monkeypatch.setattr(
-        queries.report_artifact, "read_validated_reference", swap_after_reference
-    )
-    monkeypatch.setattr(queries, "_ledger_curve", observe_curve)
+    monkeypatch.setattr(queries, "_ledger_curve", swap_after_consumption)
     with pytest.raises(ValueError, match="identity|changed"):
         portfolio_curve(
             profile=profile,
@@ -972,7 +962,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
             run_id=run.run_id,
             target_id=descriptor.target_id,
         )
-    assert replaced and consumed == 0
+    assert replaced and consumed == 1
 
 
 @pytest.mark.parametrize(

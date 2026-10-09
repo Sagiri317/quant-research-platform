@@ -8,12 +8,13 @@ import heapq
 import json
 import os
 import stat
+from bisect import bisect_left, insort
 from collections.abc import Callable, Iterator, Sequence
 from contextlib import ExitStack, contextmanager
 from dataclasses import dataclass, field, fields
 from decimal import Decimal
 from fractions import Fraction
-from itertools import groupby
+from itertools import groupby, islice
 from pathlib import Path
 from typing import Any
 
@@ -1258,13 +1259,16 @@ class DepthReconstructor:
             error="binance_replay_snapshot_asks_invalid",
             allow_zero=False,
         )
-        reason = self._invalid_reason(bids, asks)
+        bid_prices, ask_prices = sorted(bids), sorted(asks)
+        reason = self._invalid_reason(bid_prices, ask_prices)
         if reason is not None:
             raise ValueError(f"binance_replay_snapshot_{reason}")
         self._bids = bids
         self._asks = asks
-        self._known_bid_floor_tick = min(bids)
-        self._known_ask_ceiling_tick = max(asks)
+        self._bid_prices = bid_prices
+        self._ask_prices = ask_prices
+        self._known_bid_floor_tick = bid_prices[0]
+        self._known_ask_ceiling_tick = ask_prices[-1]
         self._segment_id = self._source_segment_id = segment_id
         self._observation_id = observation_id
         self._last_update_id = strict_non_negative_integer(
@@ -1349,9 +1353,9 @@ class DepthReconstructor:
             for price_index, quantity in ask_updates.items()
             if price_index <= self._known_ask_ceiling_tick
         }
-        _apply_levels(self._bids, known_bid_updates)
-        _apply_levels(self._asks, known_ask_updates)
-        reason = self._invalid_reason(self._bids, self._asks)
+        _apply_levels(self._bids, self._bid_prices, known_bid_updates)
+        _apply_levels(self._asks, self._ask_prices, known_ask_updates)
+        reason = self._invalid_reason(self._bid_prices, self._ask_prices)
         if reason is not None:
             return self._invalidate(record, reason)
         event_time, transaction_time, observed_time = _record_times(
@@ -1385,6 +1389,17 @@ class DepthReconstructor:
         segment_id, observation_id = self._segment_id, self._observation_id
         last = self._last_update_id
         assert last is not None
+        limit = (
+            None
+            if self.output_levels is None
+            else max(
+                0,
+                min(
+                    self.output_levels,
+                    max(len(self._bid_prices), len(self._ask_prices)),
+                ),
+            )
+        )
         state = BookState(
             source_sequence=record["source_sequence"],
             event_time_ms=event_time,
@@ -1397,17 +1412,12 @@ class DepthReconstructor:
             observation_id=observation_id,
             market_type=self.market_type,
             price_unit=self.price_unit,
-            bids=tuple(sorted(self._bids.items(), reverse=True))
-            if self.output_levels is None
-            else tuple(
+            bids=tuple(
                 (price, self._bids[price])
-                for price in heapq.nlargest(self.output_levels, self._bids)
+                for price in islice(reversed(self._bid_prices), limit)
             ),
-            asks=tuple(sorted(self._asks.items()))
-            if self.output_levels is None
-            else tuple(
-                (price, self._asks[price])
-                for price in heapq.nsmallest(self.output_levels, self._asks)
+            asks=tuple(
+                (price, self._asks[price]) for price in islice(self._ask_prices, limit)
             ),
         )
         if self.connection_close_ns is not None:
@@ -1422,8 +1432,8 @@ class DepthReconstructor:
 
     def _invalid_reason(
         self,
-        bids: dict[int, float],
-        asks: dict[int, float],
+        bids: list[int],
+        asks: list[int],
     ) -> str | None:
         if len(bids) < self.required_levels or len(asks) < self.required_levels:
             if not bids or not asks:
@@ -1431,7 +1441,7 @@ class DepthReconstructor:
                 return "one_sided_book"
             self.stats.unsupported_coverage += 1
             return "unsupported_coverage"
-        if max(bids) >= min(asks):
+        if bids[-1] >= asks[0]:
             self.stats.crossed_books += 1
             return "crossed_book"
         return None
@@ -1510,11 +1520,17 @@ def _record_times(
     )
 
 
-def _apply_levels(target: dict[int, float], updates: dict[int, float]) -> None:
+def _apply_levels(
+    target: dict[int, float], prices: list[int], updates: dict[int, float]
+) -> None:
     for price_index, quantity in updates.items():
         if quantity == 0:
-            target.pop(price_index, None)
+            if price_index in target:
+                del target[price_index]
+                prices.pop(bisect_left(prices, price_index))
         else:
+            if price_index not in target:
+                insort(prices, price_index)
             target[price_index] = quantity
 
 

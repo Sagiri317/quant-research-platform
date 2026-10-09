@@ -36,6 +36,7 @@ from quant_research_platform.contracts.predictions import (
     prediction_output_columns,
 )
 from quant_research_platform.contracts.time import is_datetime_value
+from quant_research_platform.contracts.validation import strict_timestamp_series
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.runtime.dataframes import iter_complete_session_frames
 from quant_research_platform.storage._scratch_ownership import (
@@ -71,6 +72,17 @@ def write_prediction_outputs(
     model_metadata_payload = validate_model_metadata_shape(dict(model_metadata))
     validate_model_metadata_consistency(model_metadata_payload, spec=spec)
 
+    def validate_frame(frame: pd.DataFrame) -> None:
+        timestamps = strict_timestamp_series(
+            frame["timestamp"], error="prediction_metadata_inconsistent"
+        )
+        if timestamps.min() < pd.Timestamp(spec.test_start) or (
+            spec.test_end is not None and timestamps.max() > pd.Timestamp(spec.test_end)
+        ):
+            raise ValueError("prediction_metadata_inconsistent")
+        if spec.prediction_mode == "crypto_oos":
+            validate_crypto_prediction_frame(frame, model_metadata_payload)
+
     def _write(temp_root: Path) -> None:
         paths = []
         primary = None
@@ -88,13 +100,7 @@ def write_prediction_outputs(
                 key_columns=tuple(spec.primary_key),
                 compression="zstd",
                 date_only=not is_datetime_value(spec.test_start),
-                validate_frame=(
-                    lambda frame: validate_crypto_prediction_frame(
-                        frame, model_metadata_payload
-                    )
-                )
-                if spec.prediction_mode == "crypto_oos"
-                else None,
+                validate_frame=validate_frame,
             )
         except BaseException as body_error:
             primary = body_error

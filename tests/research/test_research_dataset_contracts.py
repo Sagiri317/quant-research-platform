@@ -8,6 +8,7 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.catalog.processed import ProcessedDataCatalog
+from quant_research_platform.contracts.columns import ColumnRole
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.json_codec import canonical_json_hash
 from quant_research_platform.contracts.time import TimeWindow
@@ -186,22 +187,17 @@ def test_duplicate_output_column_fails_closed() -> None:
         ("label_columns", "factor_1", "research_input_column_overlap"),
         ("filter_columns", "context_1", "research_semantic_column_role_invalid"),
         ("context_columns", "label_1", "research_semantic_column_role_invalid"),
+        ("context_columns", "eligible", "research_semantic_column_role_invalid"),
     ],
 )
 def test_research_dataset_role_separation_is_enforced(
     field_name: str, bad_column: str, expected_error: str
 ) -> None:
-    processed_catalog = make_dummy_processed_catalog()
-    kwargs = {
-        "factor_columns": ("factor_1",),
-        "label_columns": ("label_1",),
-        "filter_columns": ("eligible",),
-        "context_columns": ("context_1",),
-    }
-    kwargs[field_name] = (bad_column,)
+    spec = make_dummy_research_dataset_spec(
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE}
+    )
     with pytest.raises(ValueError, match=expected_error):
-        spec = make_dummy_research_dataset_spec(**kwargs)
-        _validate_inputs(spec, processed_catalog)
+        replace(spec, **{field_name: (bad_column,)})
 
 
 def test_output_row_order_is_stable_sort_by_primary_key(tmp_path: Path) -> None:
@@ -443,3 +439,17 @@ def _validate_inputs(
     )
 
     _validate_research_input_specs(spec, processed_catalog)
+
+
+@pytest.mark.parametrize(
+    "overrides,expected",
+    [
+        ({}, ("dummy_dataset", "dummy_market")),
+        ({"data_id": "demo"}, ("demo", "dummy_market")),
+        ({"market_id": "a_share"}, ("dummy_dataset", "a_share")),
+        ({"data_id": "other", "market_id": "other"}, ("other", "other")),
+    ],
+)
+def test_dummy_spec_preserves_explicit_overrides(overrides, expected):
+    spec = make_dummy_research_dataset_spec(**overrides)
+    assert (spec.data_id, spec.market_id) == expected

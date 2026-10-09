@@ -102,7 +102,7 @@ def test_data_spec_snapshots_caller_roles_as_an_immutable_mapping() -> None:
         spec.column_roles["value"] = ColumnRole.FEATURE  # type: ignore[index]
 
 
-def test_bounded_snapshot_accepts_only_exact_frozen_containers():
+def test_snapshot_accepts_only_exact_frozen_containers():
     from collections import UserDict
 
     native = {"nested": [{"names": ["a", "b"]}]}

@@ -464,17 +464,18 @@ def test_native_rank_one_industry_covariance_reaches_actual_optimizer():
         ("finite", "optimizer_covariance_invalid"),
         ("symmetry", "optimizer_covariance_invalid"),
         ("non_psd", "optimizer_covariance_not_psd"),
-        ("bound", "optimizer_asset_duplicate"),
-        ("near_symmetric", "optimizer_asset_duplicate"),
+        ("bound", None),
+        ("near_symmetric", None),
+        ("duplicate", "optimizer_asset_duplicate"),
     ],
 )
-def test_optimizer_covariance_validation_keeps_error_priority(kind, error):
+def test_optimizer_covariance_boundaries_and_unique_asset_requirement(kind, error):
     from quant_research_platform.contracts.portfolios import ExecutionAssumptions
     from quant_research_platform.research.portfolios.optimizer import optimize_portfolio
 
     assets = pd.DataFrame(
         {
-            "asset_id": ["duplicate", "duplicate"],
+            "asset_id": ["a", "a" if kind == "duplicate" else "b"],
             "expected_alpha": 0.0,
             "current_weight": 0.5,
             "benchmark_weight": 0.5,
@@ -497,8 +498,10 @@ def test_optimizer_covariance_validation_keeps_error_priority(kind, error):
         values = np.array([[1.0, 1.000001], [1.0, 1.0]])
     columns = ("wrong", "b") if kind == "axis" else ("a", "b")
     covariance = pd.DataFrame(values, index=columns, columns=columns)
-    with pytest.raises(ValueError, match=f"^{error}$"):
-        optimize_portfolio(
+    from contextlib import nullcontext
+
+    with pytest.raises(ValueError, match=f"^{error}$") if error else nullcontext():
+        result = optimize_portfolio(
             assets,
             factor_covariance=covariance,
             style_columns=("a", "b"),
@@ -506,6 +509,8 @@ def test_optimizer_covariance_validation_keeps_error_priority(kind, error):
             nav=100.0,
             assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
         )
+    if error is None:
+        np.testing.assert_array_equal(result.weights, [0.5, 0.5])
 
 
 def test_named_quantile_recipe_keeps_extreme_interpolation_order_and_nulls():

@@ -1267,9 +1267,8 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
         holdout_record = read_research_run_record(
             layout.research_run_path(held["run_id"])
         )
-        assert (
-            holdout_record.holdout_evidence["qualification"] == "HOLDOUT_FIRST_EVIDENCE"
-        )
+        assert holdout_record.trial_ledgers == ()
+        assert holdout_record.research_window["access"] == "holdout"
     else:
         ledgers = [
             target
