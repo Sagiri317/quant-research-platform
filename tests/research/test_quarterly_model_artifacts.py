@@ -1999,3 +1999,83 @@ def test_filtered_raw_training_rows_still_reject_invalid_values(column, value):
             chunks=lambda *args, **kwargs: iter([frame]),
             train_end="2020-01-02",
         )
+
+
+def test_partial_quarter_native_model_binds_validation_and_maturity_to_request(
+    tmp_path,
+):
+    specs = (
+        ModelSpec(
+            model_id="linear_regression",
+            model_algorithm="linear_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+        ),
+    )
+    rows = shared_model_rows(specs)
+    later = rows.loc[rows.timestamp.eq("2019-04-03")].copy()
+    later["timestamp"] = pd.Timestamp("2019-04-04")
+    availability = next(column for column in rows if "available_at" in column)
+    later[availability] = pd.Timestamp("2019-04-05")
+    rows = pd.concat([rows, later], ignore_index=True).sort_values(
+        ["timestamp", "asset_id"]
+    )
+    changed = rows.copy()
+    changed.loc[changed.timestamp.gt("2019-04-03"), "x"] *= -100
+    changed.loc[changed[availability].gt("2019-04-03"), "label"] += 100
+    before = shared_model_case(
+        tmp_path / "before",
+        specs=specs,
+        frame=rows,
+        requested_end="2019-04-03",
+        chunk_size=5,
+    )
+    after = shared_model_case(
+        tmp_path / "after",
+        specs=specs,
+        frame=changed,
+        requested_end="2019-04-03",
+        chunk_size=1024,
+    )
+    assert not before.artifact.final_models
+    assert not before.artifact.selections["global"]
+    for first, second in zip(
+        before.artifact.candidate_models, after.artifact.candidate_models, strict=True
+    ):
+        assert first == second
+        facts = pd.concat(before.artifact.validation_chunks(first), ignore_index=True)
+        other = pd.concat(after.artifact.validation_chunks(second), ignore_index=True)
+        pd.testing.assert_frame_equal(facts, other, check_exact=True)
+        assert facts.timestamp.le("2019-04-03").all()
+        assert facts.label_available_at.dropna().le("2019-04-03").all()
+        assert pd.Timestamp(first["validation_window"]["end"]) <= pd.Timestamp(
+            "2019-04-03"
+        )
+    last = before.artifact.candidate_models[-1]
+    assert last["validation_window"]["end"] == "2019-04-03"
+    last_rows = pd.concat(before.artifact.validation_chunks(last))
+    assert last_rows.loc[last_rows.timestamp.eq("2019-04-03"), "label"].isna().all()
+    for reference in before.artifact.trial_ledgers:
+        plan, records = read_model_trial_ledger_reference(before.layout, reference)
+        assert plan.stage == "selection"
+        assert pd.Timestamp(plan.folds[0].validation.end) <= pd.Timestamp("2019-04-03")
+        if plan.folds[0].fold_id == "2019-q2":
+            assert records[0].metrics["validation_rows"] == 8
+
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+
+    full = shared_model_case(
+        tmp_path / "full", specs=specs, frame=rows, requested_end="2019-04-04"
+    )
+    payload = full.envelope.payload()
+    payload.pop("instance_identity")
+    payload.pop("status")
+    payload["research_window"]["end"] = "2019-04-03"
+    narrowed = SimpleNamespace(
+        **{**vars(full), "envelope": build_business_manifest_envelope(**payload)}
+    )
+    root = _republish(narrowed, tmp_path / "narrowed", mutate=lambda *_: None)
+    with pytest.raises(ValueError, match="model_trial_fold_binding_invalid"):
+        read_quarterly_model_artifact(root, trial_layout=full.layout)

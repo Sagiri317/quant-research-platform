@@ -52,13 +52,14 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
     dates = pd.bdate_range("2022-12-01", "2023-01-06")
     closed = pd.DatetimeIndex(
         []
-        if fault in {"normal_open", "confirmed_suspension"}
+        if fault in {"normal_open", "confirmed_suspension", "adjacent_relisting"}
         else ["2023-01-03", "2023-01-04"]
     )
     assets = [f"a{i}" for i in range(6)] + [f"b{i}" for i in range(open_assets)]
     panel = pd.DataFrame(
         [
             {
+                "listing_date": dates[0],
                 "market_id": "a_share",
                 "asset_id": asset,
                 "timestamp": day,
@@ -218,13 +219,26 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
             panel.asset_id.eq("a0") & panel.timestamp.eq(pd.Timestamp("2023-01-02")),
             "industry_level1_code",
         ] = pd.NA
+    if fault == "adjacent_relisting":
+        boundary = dates[-1]
+        changed = stocks.source_asset_id.str.startswith("a")
+        new = stocks.loc[changed].assign(timestamp=boundary, listing_date=boundary)
+        stocks.loc[changed, "delisting_date"] = dates[-2]
+        stocks = pd.concat((stocks, new), ignore_index=True)
+        rows = panel.asset_id.str.startswith("a") & panel.timestamp.eq(boundary)
+        panel.loc[rows, "listing_date"] = boundary
+        panel.loc[panel.asset_id.str.startswith("a"), ["adj_open", "adj_close"]] = 10.0
+        panel.loc[rows, ["adj_open", "adj_close"]] = 100.0
+        panel.loc[rows, "has_252_trading_sessions"] = False
+        panel.loc[rows, "listing_age_trading_days"] = 1
     execution = panel[["market_id", "asset_id", "timestamp"]].assign(
         can_enter=True, can_exit=True
     )
     initial = execution.timestamp.eq(
         pd.Timestamp("2022-12-30")
     ) & execution.asset_id.isin(["a3", "a4", "a5"])
-    execution.loc[initial, "can_enter"] = False
+    if fault != "adjacent_relisting":
+        execution.loc[initial, "can_enter"] = False
     if fault == "unknown_reopen_mask":
         execution["can_exit"] = execution.can_exit.astype("boolean")
         execution.loc[
@@ -716,3 +730,70 @@ def test_asset_ordered_source_parts_preserve_portfolio_sessions(tmp_path):
         assert left.closed_assets == right.closed_assets
         for name in ("panel", "valuation", "execution"):
             pd.testing.assert_frame_equal(getattr(left, name), getattr(right, name))
+
+
+def test_native_ledger_rejects_terminal_relisting_and_preserves_published_artifact(
+    tmp_path,
+):
+    from hashlib import sha256
+
+    layout, roots, _, _ = _native_inputs(tmp_path / "control")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="closed_market_portfolio",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "2022-12-30",
+            "end": "2023-01-06",
+            "access": "development",
+        },
+        upstream_identities=dict.fromkeys(roots, "a" * 64),
+        semantic_metadata={
+            "portfolio_capital": {
+                "candidate_id": "closed_market_portfolio",
+                "initial_capital": 100.0,
+                "valuation_currency": "CNY",
+                "valuation_method": "adjusted_notional",
+            }
+        },
+    )
+
+    def produce(emit):
+        with closing_iterator(_ledger(layout, roots)) as chunks:
+            for batch in chunks:
+                emit(batch)
+
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger", envelope=envelope, produce=produce
+    )
+    saved = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    good = list(saved.iter_chunks())
+    assert good
+    hashes = {
+        p.relative_to(root): sha256(p.read_bytes()).hexdigest()
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+    layout, roots, _, _ = _native_inputs(
+        tmp_path / "relisted", fault="adjacent_relisting"
+    )
+    with pytest.raises(
+        PortfolioTargetBlocked, match="portfolio_held_lifecycle_unproven"
+    ):
+        write_portfolio_ledger_artifact(
+            tmp_path / "rejected-ledger", envelope=envelope, produce=produce
+        )
+    assert hashes == {
+        p.relative_to(root): sha256(p.read_bytes()).hexdigest()
+        for p in root.rglob("*")
+        if p.is_file()
+    }
+    assert (
+        list(
+            read_portfolio_ledger_artifact(
+                root, expected_identity=root.name
+            ).iter_chunks()
+        )
+        == good
+    )

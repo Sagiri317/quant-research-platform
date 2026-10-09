@@ -237,6 +237,9 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
             reference,
             panel_source=panel_source,
             calendar=source["trading_calendar"] if panel_source else None,
+            stock_master=panels._canonical_stock_master(source["stock_master"])
+            if panel_source
+            else None,
             validation_window=time_window if panel_source else None,
             include_asset_sessions=spec.kind is ProcessedDataKind.LABEL
             or spec.data_id == "execution_mask"
@@ -288,10 +291,11 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
             source_sessions["market_bars_1d"],
             panel_source=True,
             calendar=source["trading_calendar"],
+            stock_master=panels._canonical_stock_master(source["stock_master"]),
             validation_window=time_window,
         )
 
-        def panels():
+        def panel_frames():
             for start in range(
                 0,
                 bisect_right(sessions, upper)
@@ -304,7 +308,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
                     reference.filtered_view(TimeWindow(core[0], core[-1]))
                 )
 
-        with closing_iterator(panels()) as frames:
+        with closing_iterator(panel_frames()) as frames:
             with closing_iterator(
                 factor_engine._market_model_frames(
                     frames,
@@ -484,6 +488,7 @@ def _processed_axis(
     calendar=None,
     validation_window=None,
     include_asset_sessions=False,
+    stock_master=None,
 ):
     if asset_column is None:
         asset_column = "source_asset_id" if panel_source else "asset_id"
@@ -493,6 +498,24 @@ def _processed_axis(
         else (asset_column, "timestamp")
     )
     view = replace(session, logical_columns=columns, physical_columns=columns)
+    if panel_source:
+        boundaries = (
+            stock_master.loc[:, ["asset_id", "listing_date"]]
+            .drop_duplicates()
+            .rename(columns={"asset_id": asset_column, "listing_date": "_listing_date"})
+            .sort_values("_listing_date", kind="mergesort")
+        )
+
+    def with_lifecycles(frame):
+        return pd.merge_asof(
+            frame.sort_values("timestamp", kind="mergesort"),
+            boundaries.astype({asset_column: frame[asset_column].dtype}),
+            left_on="timestamp",
+            right_on="_listing_date",
+            by=asset_column,
+            direction="backward",
+        )
+
     dates = set()
     assets = {}
     first_market_events = {}
@@ -528,17 +551,18 @@ def _processed_axis(
                 if not observed.empty:
                     validate_market_bar_calendar(observed, calendar)
                 del observed
+                frame = with_lifecycles(frame)
                 first = (
-                    frame.groupby([asset_column, "market_type"], sort=False)[
-                        "timestamp"
-                    ]
+                    frame.groupby(
+                        [asset_column, "_listing_date", "market_type"], sort=False
+                    )["timestamp"]
                     .min()
                     .reset_index()
                 )
-                for asset, market_type, timestamp in first.itertuples(
+                for asset, listing_date, market_type, timestamp in first.itertuples(
                     index=False, name=None
                 ):
-                    key = (asset, market_type)
+                    key = (asset, listing_date, market_type)
                     first_market_events[key] = min(
                         timestamp, first_market_events.get(key, timestamp)
                     )
@@ -566,10 +590,14 @@ def _processed_axis(
     if panel_source:
         first = pd.DataFrame(
             [
-                (asset, timestamp, market_type)
-                for (asset, market_type), timestamp in first_market_events.items()
+                (asset, timestamp, market_type, listing_date)
+                for (
+                    asset,
+                    listing_date,
+                    market_type,
+                ), timestamp in first_market_events.items()
             ],
-            columns=("asset_id", "timestamp", "market_type"),
+            columns=("asset_id", "timestamp", "market_type", "_listing_date"),
         ).sort_values(["asset_id", "timestamp"], kind="mergesort")
         asset_types = first.drop_duplicates("asset_id").set_index("asset_id")[
             "market_type"
@@ -595,19 +623,22 @@ def _processed_axis(
                     ),
                 ),
             )
-            history = materialize_dataset_session(view).rename(
+            history = with_lifecycles(materialize_dataset_session(view)).rename(
                 columns={asset_column: "asset_id"}
             )
             history = history.loc[
                 history.market_type.isin(CURRENT_MARKET_TYPES)
             ].sort_values(["asset_id", "timestamp"], kind="mergesort")
             changed = history.market_type.ne(
-                history.groupby("asset_id", sort=False).market_type.shift()
+                history.groupby(
+                    ["asset_id", "_listing_date"], sort=False
+                ).market_type.shift()
             ).fillna(True)
             market_history = pd.concat(
                 (first.loc[~first.asset_id.isin(migrating)], history.loc[changed]),
                 ignore_index=True,
             )
+        market_history = market_history.drop(columns="_listing_date")
     axes = {
         mask: tuple(
             timestamp
@@ -897,7 +928,6 @@ def _portfolio_session_evidence(
         columns=_MARKET_FACT_COLUMNS,
         time_window=None,
     )
-    _, _, membership, _, _ = _processed_axis(bars, panel_source=True, calendar=calendar)
     panel = open_dataset_session(panel_root, columns=None, time_window=None)
     asset_sessions = {}
     if include_asset_sessions:
@@ -912,6 +942,9 @@ def _portfolio_session_evidence(
                 time_window=None,
             )
         )
+    )
+    _, _, membership, _, _ = _processed_axis(
+        bars, panel_source=True, calendar=calendar, stock_master=stocks
     )
     return bars, panel, membership, asset_sessions, stocks
 

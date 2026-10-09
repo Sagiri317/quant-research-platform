@@ -121,10 +121,14 @@ def compute_listing_session_facts(
         for market in market_types.unique()
     }
     history_groups = market_history.groupby("asset_id", sort=False).indices
-    for asset, indices in frame.groupby("asset_id", sort=False).groups.items():
+    for (asset, listing), indices in frame.groupby(
+        ["asset_id", "listing_date"], sort=False, dropna=False
+    ).groups.items():
         history = market_history.iloc[history_groups.get(asset, [])].sort_values(
             "timestamp", kind="mergesort"
         )
+        if pd.notna(listing):
+            history = history.loc[history.timestamp.ge(listing)]
         if history.empty:
             continue
         records = tuple(history.itertuples(index=False))

@@ -114,6 +114,7 @@ def test_capital_sum_overflow_and_unrepresentable_final_weight_match_fraction(ca
 def _cross(count=100):
     return pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp("2023-01-02"),
             "asset_id": [f"synthetic_{i:03d}" for i in range(count)],
             "industry_standard_id": "fixture",
@@ -247,6 +248,7 @@ def test_risk_fit_rejects_insufficient_samples_and_rank_deficient_designs():
 def _panel(assets, dates):
     return pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
             "asset_id": assets * len(dates),
             "timestamp": dates.repeat(len(assets)),
@@ -428,7 +430,10 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         cash=1.0,
         nav=1.0,
         initialize_at_execution=True,
-        amount_history={asset: deque([1000.0] * 20, maxlen=20) for asset in assets},
+        amount_history={
+            (asset, panel.listing_date.iloc[0]): deque([1000.0] * 20, maxlen=20)
+            for asset in assets
+        },
         alpha=alpha,
         enhanced_decision=None,
         target_override=None,
@@ -491,3 +496,101 @@ def test_native_simple_production_and_ledger_keep_representable_positive_target(
         for row in batch.valuations
     )
     assert any(row.asset_id == "small" and row.notional > 0 for row in batch.trades)
+
+
+def test_native_market_model_relisting_resets_beta_and_residual_warmup(tmp_path):
+    from quant_research_platform.research.factors.engine import _market_model_frames
+
+    dates = pd.bdate_range("2020-01-02", periods=911)
+    assets = [f"a{i:02d}" for i in range(12)]
+    panel = _panel(assets, dates)
+    panel["listing_date"] = dates[0]
+    day = np.repeat(np.arange(len(dates)), len(assets))
+    stock = np.tile(np.arange(len(assets)), len(dates))
+    panel["period_return"] = 0.01 * np.sin(day / 7) + 0.004 * np.cos(day / 3 + stock)
+    new = panel.asset_id.eq(assets[0]) & panel.timestamp.ge(dates[600])
+    panel.loc[new, "listing_date"] = dates[600]
+    panel.loc[new, "listing_age_trading_days"] = day[new] - 599
+    panel.loc[new, "has_252_trading_sessions"] = day[new] >= 851
+    spec = _processed_specs().get("market_panel_1d")
+    root = StorageLayout(tmp_path).processed_data_root(
+        spec.market_id, spec.kind, spec.data_id
+    )
+    write_dataset(root, panel, spec=spec)
+    saved = read_dataset(root)
+    from quant_research_platform.markets.implementations.a_share.processed import (
+        catalog,
+    )
+
+    factor_spec = catalog.processed_catalog().get("market_model_factors")
+    factor_root = StorageLayout(tmp_path).processed_data_root(
+        factor_spec.market_id, factor_spec.kind, factor_spec.data_id
+    )
+    write_dataset(
+        factor_root,
+        _market_model_frames([saved], trading_calendar=None, market_history=None),
+        spec=factor_spec,
+    )
+    actual = read_dataset(factor_root)
+    # Native session boundaries must not change rolling lifecycle history.
+    split = pd.concat(
+        _market_model_frames(
+            [
+                saved.iloc[: 600 * len(assets)],
+                saved.iloc[600 * len(assets) : 851 * len(assets)],
+                saved.iloc[851 * len(assets) :],
+            ],
+            trading_calendar=None,
+            market_history=None,
+        ),
+        ignore_index=True,
+    )
+    pd.testing.assert_frame_equal(actual, split, check_dtype=False, check_exact=True)
+    control = saved.copy()
+    new = control.asset_id.eq(assets[0]) & control.timestamp.ge(dates[600])
+    control.loc[new, "asset_id"] = "new_life"
+    expected = pd.concat(
+        _market_model_frames([control], trading_calendar=None, market_history=None)
+    )
+    actual = actual.loc[actual.asset_id.eq(assets[0]) & actual.timestamp.ge(dates[600])]
+    expected = expected.loc[expected.asset_id.eq("new_life")]
+    columns = ["beta_252d", "residual_volatility_60d"]
+    np.testing.assert_array_equal(actual[columns], expected[columns])
+    assert actual.beta_252d.iloc[:251].isna().all()
+    assert np.isfinite(actual.beta_252d.iloc[251])
+    assert actual.residual_volatility_60d.iloc[:310].isna().all()
+    assert np.isfinite(actual.residual_volatility_60d.iloc[310])
+
+
+def test_lagged_risk_preserves_prior_eligibility_and_resets_new_life():
+    dates = pd.bdate_range("2023-01-02", periods=4)
+    assets = [f"a{i:02d}" for i in range(12)]
+    panel = _panel(assets, dates[:1])
+    panel["industry_level1_code"] = "one"
+    previous = production._enhanced_risk_cross(
+        panel=panel, risk_frames=[], style_columns=()
+    )
+    state = FactorRiskState(
+        style_columns=(),
+        config=FactorRiskConfig(
+            minimum_cross_section=10,
+            minimum_factor_dates=2,
+            minimum_specific_dates=2,
+        ),
+    )
+    for day in dates[:3]:
+        state.observe_return_session(previous.assign(timestamp=day))
+    assert assets[0] in state.estimate().specific_variance
+    current = panel.assign(timestamp=dates[-1])
+    current.loc[current.asset_id.eq(assets[0]), "listing_date"] = dates[-1]
+    current.loc[current.asset_id.eq(assets[0]), "period_return"] = 0.5
+    current.loc[current.asset_id.eq(assets[1]), "period_return"] = 0.11
+    current.loc[current.asset_id.isin(assets[:2]), "has_252_trading_sessions"] = False
+    cross = production._factor_return_cross(exposures=previous, panel=current)
+    assert cross.eligible.all()
+    assert pd.isna(cross.set_index("asset_id").loc[assets[0], "asset_return"])
+    fitted = state.fit_return_session(cross)
+    assert fitted.factor_returns.iloc[0] == pytest.approx(0.01)
+    state.observe_return_session(cross)
+    assert assets[0] not in state.estimate().specific_variance
+    assert assets[1] in state.estimate().specific_variance

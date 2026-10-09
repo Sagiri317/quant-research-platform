@@ -1346,9 +1346,27 @@ def _calendar_rebuild_profile(
             frame["source_state"] = ["C"] * count
         if variant == "key" and calls["count"] > 1:
             frame["source_state"] = ["O"] * count
-        write_dataset(
-            output_root, frame, spec=spec, instance_metadata=kwargs["instance_metadata"]
-        )
+        metadata = kwargs["instance_metadata"]
+        if variant == "metadata":
+            frame["source_market_type"] = 4
+            frame["source_state"] = "O"
+            metadata = {
+                **metadata,
+                "producer_diagnostics": {
+                    "reconstruction": {
+                        "BTCUSDT": {
+                            "coverage_segments": {
+                                "segment": [
+                                    pd.Timestamp("2020-01-01", tz="UTC").value,
+                                    pd.Timestamp("2020-01-01", tz="UTC").value
+                                    + (100 if calls["count"] == 1 else 90),
+                                ]
+                            }
+                        }
+                    }
+                },
+            }
+        write_dataset(output_root, frame, spec=spec, instance_metadata=metadata)
         return InterimImportResult(
             artifact_roots={data_id: output_root},
             skipped=(),
@@ -1473,6 +1491,7 @@ def test_reuse_retains_one_native_qualification_and_rejects_later_change(
         ("row", "ROW_COUNT_MISMATCH"),
         ("key", "CONTENT_MISMATCH"),
         ("schema", "SCHEMA_MISMATCH"),
+        ("metadata", "METADATA_MISMATCH"),
     ),
 )
 def test_rebuild_comparison_mismatch_families_preserve_old_good(
@@ -1521,6 +1540,41 @@ def test_rebuild_comparison_mismatch_families_preserve_old_good(
     assert before == after
     assert calls["count"] == 2
     assert tuple(filesystem_glob(tmp_path / ".run", ".r-*"))
+    if variant == "metadata":
+        from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
+        from quant_research_platform.markets.implementations.crypto.portfolio import (
+            _market_coverage_check,
+        )
+        from quant_research_platform.sources.binance import replay
+        from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+        from tests.sources.binance.test_replay import _write_coverage_history
+
+        coverage_root = tmp_path / "coverage"
+        index = replay.ObservationCoverageIndex(
+            coverage_root,
+            _write_coverage_history(coverage_root, 1, 32),
+            markets={FUTURES_MARKET_TYPE},
+            decode_interval=replay._decode_recorder_interval,
+        )
+        trades = replay.ObservationCoverage(
+            index, FUTURES_MARKET_TYPE, "agg_trades", "BTCUSDT"
+        )
+        start = pd.Timestamp("2020-01-01", tz="UTC").value
+        bounds = [(start + 5, start + 95)]
+
+        def coverage(root):
+            return read_dataset_manifest_evidence(root)["producer_diagnostics"][
+                "reconstruction"
+            ]["BTCUSDT"]["coverage_segments"]
+
+        _market_coverage_check(coverage(old_root), trades, bounds)
+        (candidate,) = filesystem_glob(
+            tmp_path / ".run", ".r-*/**/_manifest/manifest.json"
+        )
+        with pytest.raises(
+            PortfolioTargetBlocked, match="crypto_execution_book_coverage_incomplete"
+        ):
+            _market_coverage_check(coverage(candidate.parent.parent), trades, bounds)
 
 
 def test_rebuild_corrupt_old_good_returns_inspection_failed(

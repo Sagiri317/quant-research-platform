@@ -34,13 +34,13 @@ from quant_research_platform.research.datasets.validation import (
 from quant_research_platform.storage.datasets import inspect_dataset, write_dataset
 from quant_research_platform.storage.layout import StorageLayout
 from tests.helpers.research_processed_inputs import (
+    _demo_research_rows,
     make_demo_processed_catalog,
     write_demo_processed_inputs,
 )
 from tests.helpers.research_specs import make_research_dataset_catalog
 from tests.research.workflow_test_support import (
     _passthrough_session,
-    _research_rows,
     _research_rows_for_dates,
 )
 
@@ -767,7 +767,7 @@ def test_sparse_research_dataset_left_joins_missing_non_base_input_key(
         key_coverage={"demo_labels": "sparse"},
         filter_column_roles={"eligible": ColumnRole.UNIVERSE},
     )
-    frame = _research_rows()
+    frame = _demo_research_rows()
     labels = frame.drop(index=frame.index[-1]).reset_index(drop=True)
     write_demo_processed_inputs(layout, processed_catalog, label_frame=labels)
     assemble_research_dataset(

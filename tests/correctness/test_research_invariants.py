@@ -75,6 +75,7 @@ def test_formal_price_volume_definitions_use_session_windows() -> None:
     values = pd.Series(range(1, len(sessions) + 1), dtype="float64")
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": "asset",
             "timestamp": sessions,
             "adj_close": values,
@@ -332,6 +333,7 @@ def test_future_price_does_not_change_a_past_price_volume_factor() -> None:
     values = pd.Series(np.arange(10.0, 310.0), index=sessions)
     base = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": "asset",
             "timestamp": sessions,
             "adj_close": values,
@@ -560,6 +562,7 @@ def test_market_risk_uses_daily_intercept_residuals_and_previous_session_caps(
         suspended = changed_eligibility and position == 4
         panel = pd.DataFrame(
             {
+                "listing_date": pd.Timestamp("2000-01-01"),
                 "asset_id": ["a", "b"],
                 "period_return": [
                     0.0 if suspended else 0.02 + 1.5 * market,
@@ -618,6 +621,7 @@ def test_market_risk_does_not_reuse_mature_residuals_after_missing_or_constant_d
         return state.observe(
             pd.DataFrame(
                 {
+                    "listing_date": pd.Timestamp("2000-01-01"),
                     "asset_id": assets,
                     "period_return": [value] * len(assets),
                     "float_market_cap": [100.0] * len(assets),
@@ -657,6 +661,7 @@ def test_canonical_listing_null_does_not_invalidate_complete_market_history(
         state.observe(
             pd.DataFrame(
                 {
+                    "listing_date": pd.Timestamp("2000-01-01"),
                     "asset_id": assets,
                     "period_return": value,
                     "float_market_cap": 100.0,
@@ -691,6 +696,7 @@ def test_canonical_listing_null_does_not_invalidate_complete_market_history(
     )
     raw.loc[1, missing_column] = np.nan
     raw["listing_date"] = raw["timestamp"].min()
+    raw.loc[raw.source_asset_id.eq("a"), "listing_date"] = pd.Timestamp("2000-01-01")
     panel = panels._apply_suspension_semantics(panels._canonical_bars(raw))
     panel["eligible"] = panel.asset_id.eq("a")
     assert panel.loc[panel.asset_id.eq("new_listing"), missing_column].isna().all()
@@ -731,6 +737,7 @@ def test_canonical_listing_null_does_not_invalidate_complete_market_history(
 def test_ineligible_market_risk_still_rejects_invalid_nonnull_inputs(column, value):
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": ["a"],
             "period_return": [0.01],
             "float_market_cap": [100.0],
@@ -773,6 +780,7 @@ def test_enhanced_risk_state_uses_mature_estimates_and_produces_psd_risk() -> No
         )
         panel = pd.DataFrame(
             {
+                "listing_date": pd.Timestamp("2000-01-01"),
                 "asset_id": assets,
                 "period_return": returns,
                 "float_market_cap": [1_000.0 + index for index in range(len(assets))],
@@ -784,6 +792,7 @@ def test_enhanced_risk_state_uses_mature_estimates_and_produces_psd_risk() -> No
             continue
         cross = pd.DataFrame(
             {
+                "listing_date": pd.Timestamp("2000-01-01"),
                 "timestamp": timestamp,
                 "asset_id": assets,
                 "asset_return": returns,
@@ -832,6 +841,7 @@ def test_factor_risk_projects_history_to_current_industry_domain() -> None:
     x = np.arange(20, dtype="float64")
     cross = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp("2020-01-01"),
             "asset_id": [f"a{index}" for index in range(20)],
             "industry_standard_id": "CSRC2012",
@@ -911,6 +921,7 @@ def test_factor_risk_windows_and_decay_follow_observed_sessions() -> None:
     def cross(position: int) -> pd.DataFrame:
         return pd.DataFrame(
             {
+                "listing_date": pd.Timestamp("2000-01-01"),
                 "timestamp": dates[position],
                 "asset_id": [f"a{index}" for index in range(12)],
                 "industry_standard_id": "CSRC2012",
@@ -1256,6 +1267,7 @@ def test_factor_return_wls_uses_sqrt_cap_statistical_weight():
     count = 100
     cross = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp("2023-01-03"),
             "asset_id": [f"asset_{i:03d}" for i in range(count)],
             "industry_standard_id": "CSRC2012",
@@ -1573,3 +1585,29 @@ def test_flag_only_model_rejects_structural_invalidity_but_keeps_ordinary_missin
     )
     training = prepared.training
     assert training.asset_id.tolist() == ["a", "b"]
+
+
+def test_market_model_relisting_keeps_proven_market_through_immediate_closure():
+    state = MarketModelRiskState(window=2, residual_window=1)
+    cross = pd.DataFrame(
+        {
+            "asset_id": ["a", "b"],
+            "listing_date": pd.Timestamp("2000-01-01"),
+            "market_type": [1, 4],
+            "float_market_cap": 100.0,
+            "period_return": [0.01, 0.02],
+            "eligible": True,
+        }
+    )
+    state.observe(cross, open_market_types=frozenset({1, 4}))
+    cross.loc[0, "listing_date"] = pd.Timestamp("2021-01-01")
+    cross["period_return"] = [0.04, 0.01]
+    state.observe(cross, open_market_types=frozenset({1, 4}))
+    state.observe(
+        cross.iloc[1:].assign(period_return=0.02), open_market_types=frozenset({4})
+    )
+    cross["period_return"] = [0.03, 0.03]
+    result = state.observe(cross, open_market_types=frozenset({1, 4}))
+    market_interval = (1 + 0.02) * (1 + 0.03) - 1
+    assert result.beta["a"] == pytest.approx((0.03 - 0.04) / (market_interval - 0.01))
+    assert result.residual_volatility["a"] == pytest.approx(0.0, abs=1e-14)

@@ -7,12 +7,12 @@ from dataclasses import dataclass, fields
 from datetime import date
 from decimal import Decimal, localcontext
 from fractions import Fraction
+from math import lcm
 
 import numpy as np
 import pandas as pd
 from scipy.stats import t as student_t
 
-from quant_research_platform.compute.dataframe.cross_section import _CorrelationMoments
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_BLOCK_REASONS,
     PORTFOLIO_CASH_ASSET_ID,
@@ -34,6 +34,7 @@ from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_real_numeric_series,
 )
+from quant_research_platform.research.features.transforms import _integer_coordinates
 from quant_research_platform.research.portfolios.schedules import is_rebalance_session
 
 _LEDGER_COLUMNS = (
@@ -547,17 +548,23 @@ def calibrate_expected_alpha(
     boundaries = np.flatnonzero(np.diff(cluster_codes[order])) + 1
     groups = np.split(order, boundaries)
 
-    def cluster_averages():
-        for positions in groups:
-            moments = _CorrelationMoments()
-            for position in positions:
-                moments.update(float(left[position]), float(right[position]))
-            yield moments.averages()
-
+    left, left_scale = _integer_coordinates(left)
+    right, right_scale = _integer_coordinates(right)
+    left, right = np.asarray(left, dtype=object), np.asarray(right, dtype=object)
     pooled = [Fraction(0)] * 5
-    for averages in cluster_averages():
-        for index, value in enumerate(averages):
-            pooled[index] += value
+    for positions in groups:
+        x, y = left[positions], right[positions]
+        counts = len(positions)
+        totals = (sum(x), sum(y), x @ x, y @ y, x @ y)
+        scales = (
+            left_scale,
+            right_scale,
+            left_scale**2,
+            right_scale**2,
+            left_scale * right_scale,
+        )
+        for index, (total, scale) in enumerate(zip(totals, scales, strict=True)):
+            pooled[index] += Fraction(int(total), counts * scale)
     sx, sy, sxx, syy, sxy = pooled
     cluster_count = len(groups)
     determinant = cluster_count * sxx - sx * sx
@@ -566,20 +573,23 @@ def calibrate_expected_alpha(
     slope = (cluster_count * sxy - sx * sy) / determinant
     intercept = (sy - slope * sx) / cluster_count
     variance = residual_variation = Fraction(0)
-    resolution = Fraction(8 * np.finfo(np.float64).eps)
-    # Zero only row residuals within binary64 resolution, never cluster variance.
+    # One integer residual scale preserves the exact binary64 resolution test.
+    denominator = lcm(
+        right_scale, intercept.denominator, slope.denominator * left_scale
+    )
     for positions in groups:
-        score_intercept = score_slope = squared_residuals = Fraction(0)
-        for position in positions:
-            x = Fraction(float(left[position]))
-            y = Fraction(float(right[position]))
-            fitted = intercept + slope * x
-            residual = y - fitted
-            if abs(residual) <= resolution * max(abs(y), abs(fitted)):
-                continue
-            score_intercept += residual
-            score_slope += x * residual
-            squared_residuals += residual * residual
+        x = left[positions]
+        fitted = intercept.numerator * (denominator // intercept.denominator) + x * (
+            slope.numerator * (denominator // (slope.denominator * left_scale))
+        )
+        observed = right[positions] * (denominator // right_scale)
+        residual = observed - fitted
+        residual[
+            np.abs(residual) * (1 << 49) <= np.maximum(np.abs(observed), np.abs(fitted))
+        ] = 0
+        score_intercept = Fraction(int(sum(residual)), denominator)
+        score_slope = Fraction(int(x @ residual), left_scale * denominator)
+        squared_residuals = Fraction(int(residual @ residual), denominator**2)
         influence = (cluster_count * score_slope - sx * score_intercept) / (
             determinant * len(positions)
         )

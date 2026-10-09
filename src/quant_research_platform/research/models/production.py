@@ -185,9 +185,7 @@ def build_model_selection_result(
                 dataset_session,
                 dataset_spec=dataset_spec,
                 columns=("timestamp",),
-                time_window=TimeWindow(
-                    formal_dataset_window["start"], development_window["end"]
-                ),
+                time_window=TimeWindow(formal_dataset_window["start"], time_window.end),
             )
         ),
         chronology=chronology,
@@ -235,16 +233,12 @@ def _build_a_share_models(
     on_observation,
 ):
     _validate_a_share_model_family_ids(model_ids)
+    requested_end = pd.Timestamp(time_window.end)
     folds = model_folds(
-        sessions,
+        sessions[sessions <= requested_end],
         chronology=chronology,
         formal_dataset_window=formal_dataset_window,
-        development_window=development_window,
-    )
-    folds = tuple(
-        fold
-        for fold in folds
-        if pd.Timestamp(fold.validation.start) <= pd.Timestamp(time_window.end)
+        development_window={**development_window, "end": time_window.end},
     )
     if not folds:
         raise ValueError("a_share_walk_forward_window_empty")

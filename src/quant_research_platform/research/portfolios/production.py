@@ -79,6 +79,7 @@ _CALENDAR_COLUMNS = ("calendar_date", "source_market_type", "is_trading_day")
 _DATASET_COLUMNS = ("asset_id", "timestamp", "eligible", "float_market_cap")
 _PANEL_COLUMNS = (
     "asset_id",
+    "listing_date",
     "timestamp",
     "adj_open",
     "adj_close",
@@ -136,17 +137,24 @@ class _EnhancedDecision:
     calibration: AlphaCalibration
 
 
-def _price_returns(start, end, assets):
-    """Compute returns only where both proved valuation endpoints are available."""
+def _price_returns(start, end, assets, *, start_column, end_column):
+    """Value held assets only across endpoints of the same proved listing life."""
+    start, end = start.reindex(assets), end.reindex(assets)
     prices = []
-    for source in (start, end):
-        values = source.reindex(assets)
+    for source, column in ((start, start_column), (end, end_column)):
+        values = source[column]
         if values.isna().any():
             raise PortfolioTargetBlocked("portfolio_held_return_missing")
         values = pd.to_numeric(values, errors="raise").astype("float64")
         if not np.isfinite(values).all() or values.le(0).any():
             raise ValueError("portfolio_return_invalid")
         prices.append(values)
+    if (
+        start.listing_date.isna().any()
+        or end.listing_date.isna().any()
+        or not start.listing_date.eq(end.listing_date).all()
+    ):
+        raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
     with np.errstate(over="ignore"):
         result = prices[1] / prices[0] - 1.0
     if not np.isfinite(result).all():
@@ -309,7 +317,7 @@ def build_portfolio_ledger(
     holdings = pd.Series(dtype="float64")
     cash = float(assumptions.initial_nav)
     nav = cash
-    amount_history: dict[str, deque[float]] = {}
+    amount_history: dict[tuple[str, pd.Timestamp], deque[float]] = {}
     factor_risk = (
         FactorRiskState(style_columns=risk_style_columns, config=risk_config)
         if enhanced
@@ -585,7 +593,13 @@ def build_portfolio_ledger(
                 holdings, cash, nav = drift_continuous_holdings(
                     holdings,
                     cash,
-                    _price_returns(prices.adj_open, prices.adj_close, holdings.index),
+                    _price_returns(
+                        prices,
+                        prices,
+                        holdings.index,
+                        start_column="adj_open",
+                        end_column="adj_close",
+                    ),
                 )
             if enhanced:
                 assert alpha is not None and current_cross is not None
@@ -809,6 +823,7 @@ def _enhanced_risk_cross(
     assets = pd.Index(sorted(set(panel_by_asset.index)), dtype="string")
     result = pd.DataFrame(index=assets)
     result["timestamp"] = panel["timestamp"].iloc[0] if not panel.empty else pd.NaT
+    result["listing_date"] = panel_by_asset["listing_date"].reindex(assets)
     result["asset_return"] = (
         pd.to_numeric(panel_by_asset["period_return"], errors="raise")
         .reindex(assets)
@@ -851,10 +866,15 @@ def _factor_return_cross(
     assets = previous.index.intersection(current.index)
     result = previous.loc[assets].copy()
     result["timestamp"] = pd.Timestamp(panel["timestamp"].iloc[0])
+    same_life = (
+        previous.loc[assets, "listing_date"].eq(current.loc[assets, "listing_date"])
+        & current.loc[assets, "listing_date"].notna()
+    )
+    result["listing_date"] = current.loc[assets, "listing_date"]
     result["asset_return"] = (
         pd.to_numeric(current.loc[assets, "period_return"], errors="raise")
         .astype("float64")
-        .to_numpy()
+        .where(same_life)
     )
     return result.reset_index()
 
@@ -1096,7 +1116,7 @@ def _build_session(
     cash: float,
     nav: float,
     initialize_at_execution: bool,
-    amount_history: Mapping[str, deque[float]],
+    amount_history: Mapping[tuple[str, pd.Timestamp], deque[float]],
     alpha: pd.Series,
     enhanced_decision: _EnhancedDecision | None,
     target_override: pd.Series | None,
@@ -1170,10 +1190,10 @@ def _build_session(
     }
     adv = pd.Series(
         {
-            asset: float(np.mean(amount_history[asset]))
-            if asset in amount_history and len(amount_history[asset]) == 20
+            asset: float(np.mean(history))
+            if len(history := amount_history.get((asset, listing), ())) == 20
             else np.nan
-            for asset in assets
+            for asset, listing in panel_by_asset.loc[assets, "listing_date"].items()
         },
         dtype="float64",
     )
@@ -1278,9 +1298,11 @@ def _build_session(
     execution_holdings, execution_cash, execution_nav = (current, cash, nav)
     if not initialize_at_execution and (not current.empty):
         overnight = _price_returns(
-            panel_by_asset.adj_close,
-            next_panel.set_index("asset_id").adj_open,
+            panel_by_asset,
+            next_panel.set_index("asset_id"),
             current.index,
+            start_column="adj_close",
+            end_column="adj_open",
         )
         execution_holdings, execution_cash, execution_nav = drift_continuous_holdings(
             current, cash, overnight
@@ -1362,21 +1384,30 @@ def _session_keys(frame: pd.DataFrame) -> set[tuple[pd.Timestamp, str]]:
 
 def _update_amount_history(
     panel: pd.DataFrame,
-    history: dict[str, deque[float]],
+    history: dict[tuple[str, pd.Timestamp], deque[float]],
     holdings: pd.Series,
     closed_assets: frozenset[str],
 ) -> None:
-    current_assets = set(panel["asset_id"].astype(str))
-    for asset in tuple(history):
-        if asset not in current_assets and asset not in closed_assets:
+    current = dict(
+        zip(panel["asset_id"].astype(str), panel["listing_date"], strict=True)
+    )
+    for key in tuple(history):
+        asset, listing = key
+        if asset in current and current[asset] != listing:
+            if float(holdings.get(asset, 0.0)) != 0.0:
+                raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
+            del history[key]
+        elif asset not in current and asset not in closed_assets:
             if float(holdings.get(asset, 0.0)) != 0.0:
                 raise PortfolioTargetBlocked("portfolio_held_asset_missing_from_panel")
-            del history[asset]
+            del history[key]
     amounts = pd.to_numeric(panel["amount"], errors="raise").astype("float64")
     if not np.isfinite(amounts.dropna().to_numpy()).all() or amounts.lt(0).any():
         raise ValueError("portfolio_amount_invalid")
-    for asset, amount in zip(panel["asset_id"].astype(str), amounts, strict=True):
-        history.setdefault(asset, deque(maxlen=20)).append(float(amount))
+    for asset, listing, amount in zip(
+        panel["asset_id"].astype(str), panel["listing_date"], amounts, strict=True
+    ):
+        history.setdefault((asset, listing), deque(maxlen=20)).append(float(amount))
 
 
 def _mask_values(
@@ -1418,9 +1449,11 @@ def _holding_returns(
     if selected.empty:
         return returns
     returns.loc[selected] = _price_returns(
-        next_panel.set_index("asset_id").adj_open,
-        endpoint_panel.set_index("asset_id").adj_open,
+        next_panel.set_index("asset_id"),
+        endpoint_panel.set_index("asset_id"),
         selected,
+        start_column="adj_open",
+        end_column="adj_open",
     )
     return returns
 

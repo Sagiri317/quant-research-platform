@@ -5,6 +5,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.helpers.import_graph import _import_edges_from_trees, import_edges_under
+
 SOURCE_ROOT = Path("src/quant_research_platform")
 WORKFLOW_ACTIONS = (
     "data_materialize",
@@ -85,7 +87,9 @@ def test_research_and_profile_owners_have_no_provider_traversal(import_edges) ->
         assert not edge.module.startswith("pandas")
 
 
-def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
+def test_profile_is_composition_only_and_research_has_one_resolver(
+    import_edges,
+) -> None:
     profile_path = SOURCE_ROOT / "profiles" / "research.py"
     profile_tree = ast.parse(
         profile_path.read_text(encoding="utf-8"),
@@ -96,7 +100,7 @@ def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
         "quant_research_platform.runtime",
         "quant_research_platform.workflows",
     )
-    imports = _imported_modules(profile_tree)
+    imports = (edge.module for edge in import_edges_under(import_edges, profile_path))
     assert all(
         not module.startswith(forbidden)
         for module in imports
@@ -122,12 +126,14 @@ def test_profile_is_composition_only_and_research_has_one_resolver() -> None:
     assert sorted(resolver_defs) == ["plan_targets", "resolve_target_graph"]
 
 
-def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction() -> None:
+def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction(
+    import_edges,
+) -> None:
     factor_path = (
         SOURCE_ROOT / "research" / "factors" / "fundamental" / "calculations.py"
     )
-    factor_modules = _imported_modules(
-        ast.parse(factor_path.read_text(encoding="utf-8"))
+    factor_modules = (
+        edge.module for edge in import_edges_under(import_edges, factor_path)
     )
     assert all(
         not module.startswith("quant_research_platform.markets")
@@ -232,16 +238,6 @@ def _defined_symbols(tree: ast.AST) -> set[str]:
     return symbols
 
 
-def _imported_modules(tree: ast.AST) -> set[str]:
-    modules: set[str] = set()
-    for node in ast.walk(tree):
-        if isinstance(node, ast.Import):
-            modules.update(alias.name for alias in node.names)
-        elif isinstance(node, ast.ImportFrom) and node.module is not None:
-            modules.add(node.module)
-    return modules
-
-
 def _canonical_references(tree):
     bindings = {}
     for node in ast.walk(tree):
@@ -262,3 +258,22 @@ def _canonical_references(tree):
         if isinstance(node, ast.Name) and node.id in bindings:
             references.add(".".join((bindings[node.id], *reversed(parts))))
     return references
+
+
+@pytest.mark.parametrize(
+    "source",
+    (
+        "import quant_research_platform.storage.datasets",
+        "from ..storage import datasets",
+        "from quant_research_platform import storage",
+    ),
+)
+def test_profile_gate_rejects_equivalent_storage_imports(source):
+    path = SOURCE_ROOT / "profiles/research.py"
+    edges = _import_edges_from_trees({path: ast.parse(source)})
+    with pytest.raises(AssertionError):
+        test_profile_is_composition_only_and_research_has_one_resolver(edges)
+    legal = _import_edges_from_trees(
+        {path: ast.parse("from ..contracts import targets")}
+    )
+    test_profile_is_composition_only_and_research_has_one_resolver(legal)

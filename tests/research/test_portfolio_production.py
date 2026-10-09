@@ -67,6 +67,7 @@ def test_enhanced_decision_requires_history_for_current_industry_domain() -> Non
     x = np.arange(20, dtype="float64")
     cross = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp("2020-01-01"),
             "asset_id": [f"a{index}" for index in range(20)],
             "industry_standard_id": "CSRC2012",
@@ -1497,7 +1498,10 @@ def test_optimizer_explicit_cash_maps_to_stock_execution_and_persisted_cash(
         cash=10.0,
         nav=100.0,
         initialize_at_execution=False,
-        amount_history={asset: deque([1000.0] * 20, maxlen=20) for asset in ("a", "b")},
+        amount_history={
+            (asset, panel.listing_date.iloc[0]): deque([1000.0] * 20, maxlen=20)
+            for asset in ("a", "b")
+        },
         alpha=alpha,
         enhanced_decision=enhanced,
         target_override=None,
@@ -1834,6 +1838,7 @@ def test_enhanced_risk_fits_styles_on_eligible_and_retains_ineligible_asset_axis
     assets = [f"asset_{index:03}" for index in range(121)]
     cross = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp("2020-01-02"),
             "asset_id": assets,
             "industry_standard_id": "CSRC2012",
@@ -1902,6 +1907,7 @@ def test_zero_mad_risk_style_preserves_identifiable_factor_return():
     values = np.r_[np.zeros(60), np.ones(40)]
     frame = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": [f"synthetic_{i}" for i in range(100)],
             "timestamp": pd.Timestamp("2023-01-03"),
             "industry_standard_id": "CSRC2012",
@@ -1922,6 +1928,7 @@ def test_zero_mad_risk_style_preserves_identifiable_factor_return():
 def test_risk_cross_uses_all_a_facts_and_persisted_styles():
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": ["a", "b"],
             "timestamp": pd.Timestamp("2024-01-02"),
             "period_return": [0.01, -0.01],
@@ -2380,6 +2387,7 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
     x = np.arange(count, dtype=float)
     cross = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp("2020-01-02"),
             "asset_id": [f"a{i}" for i in range(count)],
             "industry_standard_id": "CSRC2012",
@@ -2444,7 +2452,13 @@ def test_enhanced_risk_scaler_uses_complete_known_industry_domain(extra_style):
 
 @pytest.mark.parametrize("invalid", (-1.0, float("inf"), -float("inf")))
 def test_amount_history_rejects_invalid_present_amounts(invalid):
-    panel = pd.DataFrame({"asset_id": ["unrelated"], "amount": [invalid]})
+    panel = pd.DataFrame(
+        {
+            "listing_date": pd.Timestamp("2000-01-01"),
+            "asset_id": ["unrelated"],
+            "amount": [invalid],
+        }
+    )
     with pytest.raises(ValueError, match="portfolio_amount_invalid"):
         production._update_amount_history(
             panel, {}, pd.Series(dtype="float64"), frozenset()
@@ -2458,23 +2472,33 @@ def test_amount_history_keeps_unknown_session_until_it_leaves_adv_window():
         amount = np.nan if index == 20 else 1000.0
         production._update_amount_history(
             pd.DataFrame(
-                {"asset_id": ["known", "unrelated"], "amount": [1000.0, amount]}
+                {
+                    "listing_date": pd.Timestamp("2000-01-01"),
+                    "asset_id": ["known", "unrelated"],
+                    "amount": [1000.0, amount],
+                }
             ),
             history,
             holdings,
             frozenset(),
         )
-        assert np.mean(history["known"]) == 1000.0
+        assert np.mean(history[("known", pd.Timestamp("2000-01-01"))]) == 1000.0
         if index >= 20:
-            assert len(history["unrelated"]) == 20
-            assert np.isnan(np.mean(history["unrelated"]))
+            assert len(history[("unrelated", pd.Timestamp("2000-01-01"))]) == 20
+            assert np.isnan(np.mean(history[("unrelated", pd.Timestamp("2000-01-01"))]))
     production._update_amount_history(
-        pd.DataFrame({"asset_id": ["known", "unrelated"], "amount": [1000.0, 1000.0]}),
+        pd.DataFrame(
+            {
+                "listing_date": pd.Timestamp("2000-01-01"),
+                "asset_id": ["known", "unrelated"],
+                "amount": [1000.0, 1000.0],
+            }
+        ),
         history,
         holdings,
         frozenset(),
     )
-    assert np.mean(history["unrelated"]) == 1000.0
+    assert np.mean(history[("unrelated", pd.Timestamp("2000-01-01"))]) == 1000.0
 
 
 def test_simple_producer_blocks_when_required_adv_contains_unknown_session(
@@ -2626,7 +2650,10 @@ def test_empty_selection_executes_zero_target_without_bypassing_market_facts(
         cash=100.0 if state == "cash" else 50.0,
         nav=100.0,
         initialize_at_execution=False,
-        amount_history={asset: deque([1000.0] * 20, maxlen=20) for asset in ("a", "b")},
+        amount_history={
+            (asset, panel(stamp).listing_date.iloc[0]): deque([1000.0] * 20, maxlen=20)
+            for asset in ("a", "b")
+        },
         alpha=alpha,
         enhanced_decision=None,
         target_override=None,
@@ -2772,6 +2799,7 @@ def test_holding_projection_does_not_change_fit_or_specific_risk_history(styles)
     rng = np.random.default_rng(198)
     cross = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp("2023-01-03"),
             "asset_id": [f"asset_{i}" for i in range(120)],
             "industry_standard_id": "CSRC2012",
@@ -3088,3 +3116,21 @@ def test_unheld_scoring_asset_calibration_binds_signal_entry_and_completion(
             next(row for row in rows if row["alpha_score"] == 2.0)["holding_return"]
             == 0.0
         )
+
+
+def test_adv_history_restarts_for_new_listing_but_survives_same_life_closure():
+    old, new = pd.to_datetime(["2020-01-02", "2024-01-02"])
+    history = {}
+    panel = pd.DataFrame({"asset_id": ["asset"], "listing_date": old, "amount": 10.0})
+    holdings = pd.Series(dtype="float64")
+    for _ in range(20):
+        production._update_amount_history(panel, history, holdings, frozenset())
+    production._update_amount_history(
+        panel.iloc[:0], history, holdings, frozenset({"asset"})
+    )
+    assert len(history[("asset", old)]) == 20
+    production._update_amount_history(
+        panel.assign(listing_date=new, amount=100.0), history, holdings, frozenset()
+    )
+    assert set(history) == {("asset", new)}
+    assert list(history[("asset", new)]) == [100.0]

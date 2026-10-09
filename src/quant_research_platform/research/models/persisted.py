@@ -220,9 +220,7 @@ class PersistedQuarterlyModelArtifact:
             self.instance_root,
             entry,
             member_identities=self.member_identities,
-            development_end=self.envelope["semantic_metadata"]["target_contract"][
-                "protocol"
-            ]["development_window"]["end"],
+            development_end=self.envelope["research_window"]["end"],
         )
 
 
@@ -300,6 +298,13 @@ def write_quarterly_model_artifact(
             if path != current_path:
                 raise ValueError("model_validation_candidate_interleaving")
 
+            future = frame["label_available_at"].gt(
+                pd.Timestamp(envelope.research_window["end"])
+            )
+            if future.any():
+                frame = frame.copy()
+                frame.loc[future, spec.label_column] = float("nan")
+                frame.loc[future, "label_available_at"] = pd.NaT
             table = pa.Table.from_pandas(
                 frame.rename(columns={spec.label_column: "label"}),
                 schema=_A_SHARE_VALIDATION_SCHEMA,
@@ -973,6 +978,8 @@ def _validate_a_share_model_payload(
             fold = plan.folds[0]
             if (
                 quarter_id_for_fold(fold) != quarter
+                or pd.Timestamp(fold.validation.end)
+                > pd.Timestamp(envelope["research_window"]["end"])
                 or str(pd.Period(fold.validation.start, freq="Q")) != quarter
                 or str(pd.Period(fold.validation.end, freq="Q")) != quarter
                 or (
@@ -1063,7 +1070,7 @@ def _validate_a_share_model_payload(
                                 root,
                                 entry,
                                 member_identities=member_identities,
-                                development_end=protocol["development_window"]["end"],
+                                development_end=envelope["research_window"]["end"],
                             )
                         ) as frames:
                             for frame in frames:

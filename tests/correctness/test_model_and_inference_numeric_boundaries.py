@@ -480,3 +480,52 @@ def test_linear_affine_underflow_preserves_representable_result(value):
     frame = pd.DataFrame({"x": [value]})
     expected = float(Fraction(1e308) * Fraction(value) / Fraction(scaler.scale_[0]))
     assert predictor.predict(frame)[0] == expected == value
+
+
+def test_fama_macbeth_white_scales_residuals_independently_of_small_target():
+    from scipy.stats import chi2
+    from statsmodels.tools.sm_exceptions import SingularMatrixWarning
+
+    from quant_research_platform.research.statistics_production import (
+        _fama_macbeth_period_records,
+    )
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.Timestamp("2020-01-02"),
+            "asset_id": list("abcde"),
+            "x": [0.0, 1e-110, 2e-110, 3e-110, 1e200],
+            "y": [0.0, 1e-110, 2e-110, 3e-110, 0.0],
+            "total_market_cap": [1e308] * 4 + [np.nextafter(0.0, 1.0)],
+        }
+    )
+    x, y, w = (
+        [Fraction(float(v)) for v in frame[column]]
+        for column in ("x", "y", "total_market_cap")
+    )
+    total = sum(w)
+    mx = sum(a * b for a, b in zip(x, w, strict=True)) / total
+    my = sum(a * b for a, b in zip(y, w, strict=True)) / total
+    slope = sum(c * (a - mx) * (b - my) for a, b, c in zip(x, y, w, strict=True)) / sum(
+        b * (a - mx) ** 2 for a, b in zip(x, w, strict=True)
+    )
+    # Redundant auxiliary columns leave White's fitted projection and LM unique.
+    with pytest.warns(SingularMatrixWarning, match="rank-deficient"):
+        actual = fama_macbeth_period(
+            frame,
+            return_column="y",
+            factor_columns=("x",),
+            weight_column="total_market_cap",
+        )
+    assert actual.coefficients.to_dict() == {
+        "const": float(my - slope * mx),
+        "x": float(slope),
+    }
+    # Binary64 White regressors identify the single dominant residual exactly.
+    assert actual.white_p_value == pytest.approx(chi2.sf(5, 1), rel=1e-12)
+    assert actual.white_reason is None
+    with pytest.warns(SingularMatrixWarning, match="rank-deficient"):
+        records = _fama_macbeth_period_records(
+            frame, return_column="y", factors=("x",), core_factors=()
+        )
+    assert records and all(row["status"] == "DEFINED" for row in records)

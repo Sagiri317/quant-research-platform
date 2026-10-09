@@ -4,6 +4,8 @@ import re
 import tomllib
 from pathlib import Path
 
+import pytest
+
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 PYPROJECT = PROJECT_ROOT / "pyproject.toml"
 ENVIRONMENT_YML = PROJECT_ROOT / "environment.yml"
@@ -36,9 +38,10 @@ DEV_DEPENDENCIES = {
     "pytest",
     "ruff",
 }
-BUILD_SYSTEM_TO_CONDA_PACKAGES = {
-    "setuptools": "setuptools",
-    "wheel": "wheel",
+CONDA_NAMES = {
+    "arch": "arch-py",
+    "matplotlib": "matplotlib-base",
+    "jupyter-client": "jupyter_client",
 }
 
 
@@ -79,26 +82,14 @@ def test_tooling_environment_dependencies_match_pyproject_dependency_specs() -> 
     build_system_requires = _dependency_specs(pyproject["build-system"]["requires"])
     conda_specs = _environment_dependency_specs(environment)
     expected = {
-        "setuptools": ("setuptools", build_system_requires["setuptools"]),
-        "wheel": ("wheel", build_system_requires["wheel"]),
-        "pyarrow": ("pyarrow", runtime["pyarrow"]),
-        "arch": ("arch-py", runtime["arch"]),
-        "matplotlib": ("matplotlib-base", dev["matplotlib"]),
-        "nbformat": ("nbformat", dev["nbformat"]),
-        "nbclient": ("nbclient", dev["nbclient"]),
-        "jupyter-client": ("jupyter_client", dev["jupyter-client"]),
-        "ipykernel": ("ipykernel", dev["ipykernel"]),
-        "scipy": ("scipy", runtime["scipy"]),
-        "statsmodels": ("statsmodels", runtime["statsmodels"]),
-        "threadpoolctl": ("threadpoolctl", runtime["threadpoolctl"]),
-        "pytest": ("pytest", dev["pytest"]),
-        "ruff": ("ruff", dev["ruff"]),
+        name: (CONDA_NAMES.get(name, name), spec)
+        for name, spec in (runtime | dev | build_system_requires).items()
     }
     mismatches = {
         pyproject_name: conda_name
         for pyproject_name, (conda_name, pyproject_spec) in expected.items()
         if conda_name not in conda_specs
-        or not _conda_spec_is_same_or_stricter(conda_specs[conda_name], pyproject_spec)
+        or not _conda_spec_has_same_bounds(conda_specs[conda_name], pyproject_spec)
     }
 
     assert mismatches == {}
@@ -114,17 +105,19 @@ def test_environment_python_pin_matches_requires_python_lower_bound() -> None:
     assert _environment_python_pin(environment) == expected_minor
 
 
-def test_local_install_backend_is_declared_in_conda() -> None:
-    pyproject = _load_pyproject()
-    conda_specs = _environment_dependency_specs(
-        ENVIRONMENT_YML.read_text(encoding="utf-8")
+def test_environment_gate_rejects_missing_runtime_dependency(tmp_path, monkeypatch):
+    environment = tmp_path / "environment.yml"
+    environment.write_text(
+        "\n".join(
+            line
+            for line in ENVIRONMENT_YML.read_text(encoding="utf-8").splitlines()
+            if not line.strip().startswith("- numpy")
+        ),
+        encoding="utf-8",
     )
-    requirements = _dependency_specs(pyproject["build-system"]["requires"])
-    for name, conda_name in BUILD_SYSTEM_TO_CONDA_PACKAGES.items():
-        assert name in requirements and conda_name in conda_specs
-        assert _conda_spec_is_same_or_stricter(
-            conda_specs[conda_name], requirements[name]
-        )
+    monkeypatch.setitem(globals(), "ENVIRONMENT_YML", environment)
+    with pytest.raises(AssertionError):
+        test_tooling_environment_dependencies_match_pyproject_dependency_specs()
 
 
 def _python_minor_from_requires(spec: str) -> str:
@@ -172,15 +165,10 @@ def _unbounded(specs: dict[str, str]) -> list[str]:
     )
 
 
-def _conda_spec_is_same_or_stricter(conda_spec: str, pyproject_spec: str) -> bool:
+def _conda_spec_has_same_bounds(conda_spec: str, pyproject_spec: str) -> bool:
     pyproject_bounds = _bounds(pyproject_spec)
     conda_bounds = _bounds(conda_spec)
-    if not pyproject_bounds:
-        return False
-    for operator, version in pyproject_bounds:
-        if (operator, version) not in conda_bounds:
-            return False
-    return True
+    return bool(pyproject_bounds) and conda_bounds == pyproject_bounds
 
 
 def _bounds(spec: str) -> set[tuple[str, str]]:

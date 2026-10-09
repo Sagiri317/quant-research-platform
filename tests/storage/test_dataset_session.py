@@ -123,7 +123,11 @@ def test_physical_decoder_rechecks_the_same_handle_after_decode(tmp_path: Path) 
     path = session.all_paths[0]
 
     def mutate_after_open(_metadata) -> None:
-        Path(native_filesystem_path(path)).touch()
+        import os
+
+        native = Path(native_filesystem_path(path))
+        before = native.stat()
+        os.utime(native, ns=(before.st_atime_ns, before.st_mtime_ns + 2_000_000_000))
 
     with pytest.raises(ValueError, match="dataset_file_identity_changed"):
         list(

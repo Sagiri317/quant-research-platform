@@ -361,6 +361,7 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
         entry = pd.Timestamp(frame.execution_date.iloc[0])
         cross = pd.DataFrame(
             {
+                "listing_date": pd.Timestamp("2000-01-01"),
                 "timestamp": entry - pd.Timedelta(days=1),
                 "asset_id": assets,
                 "industry_standard_id": "CSRC2012",
@@ -782,6 +783,7 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
     prices = 100 * np.cumprod(1 + returns, axis=0)
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
             "timestamp": dates.repeat(105),
             "asset_id": assets * 4,

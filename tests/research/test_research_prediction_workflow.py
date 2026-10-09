@@ -19,12 +19,12 @@ from quant_research_platform.research.models.supervised import (
 )
 from quant_research_platform.research.predictions.outputs import prediction_callable
 from tests.helpers.research_configuration import configured_models
+from tests.helpers.research_processed_inputs import _demo_research_rows
 from tests.research.prediction_output_helpers import write_prediction_output_and_read
-from tests.research.workflow_test_support import _research_rows
 
 
 def test_evaluation_prediction_and_report_boundary(tmp_path: Path) -> None:
-    frame = _research_rows().assign(
+    frame = _demo_research_rows().assign(
         instant_target=lambda value: value["momentum_20d"] * 0.01,
         label_available_at=lambda value: value["timestamp"],
     )
@@ -184,7 +184,7 @@ def test_a_share_model_ladder_fits_and_predicts_each_retained_algorithm() -> Non
 def test_prediction_builder_binds_backend_package_to_actual_model_owner(
     model_algorithm: str, expected_package: str, wrong_package: str
 ) -> None:
-    frame = _research_rows().assign(
+    frame = _demo_research_rows().assign(
         instant_target=lambda value: value["momentum_20d"] * 0.01,
         label_available_at=lambda value: value["timestamp"],
     )

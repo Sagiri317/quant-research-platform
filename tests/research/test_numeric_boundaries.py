@@ -18,6 +18,7 @@ from quant_research_platform.research.portfolios.risk import (
 def _risk_cross(returns, caps, timestamp="2023-01-02"):
     return pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp(timestamp),
             "asset_id": [str(i) for i in range(len(returns))],
             "industry_standard_id": "fixture",
@@ -422,6 +423,7 @@ def test_native_rank_one_industry_covariance_reaches_actual_optimizer():
     )
     frame = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp("2023-01-02"),
             "asset_id": [f"asset{index}" for index in range(15)],
             "industry_standard_id": "CSRC2012",

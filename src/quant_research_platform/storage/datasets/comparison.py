@@ -20,6 +20,9 @@ from quant_research_platform.storage.datasets.reading import (
     open_dataset_session,
     read_columns_for_time_window,
 )
+from quant_research_platform.storage.datasets.schema import (
+    _DATASET_INSTANCE_METADATA_ALLOWED_KEYS,
+)
 from quant_research_platform.storage.datasets.types import DatasetComparison
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
@@ -150,6 +153,19 @@ def compare_datasets(
             }
             summary["exact"] = exact
             status = "CONTENT_MISMATCH" if any(exact.values()) else "MATCH"
+        metadata_hashes = {
+            side: canonical_json_hash(
+                {
+                    key: context.manifest[key]
+                    for key in _DATASET_INSTANCE_METADATA_ALLOWED_KEYS
+                    if key in context.manifest
+                }
+            )
+            for side, context in (("left", left_context), ("right", right_context))
+        }
+        summary["business_metadata"] = metadata_hashes
+        if status == "MATCH" and metadata_hashes["left"] != metadata_hashes["right"]:
+            status = "METADATA_MISMATCH"
         left_context.verify()
         right_context.verify()
         return _comparison(status, summary=summary, layout_delta=layout_delta)

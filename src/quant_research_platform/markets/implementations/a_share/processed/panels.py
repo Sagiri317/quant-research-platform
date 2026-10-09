@@ -352,10 +352,16 @@ def _dense_lifecycle_panel(
             how="left",
             validate="one_to_one",
         )
+        base["asset_id"] = base["asset_id"].astype(stocks["asset_id"].dtype)
+        base = _asof_join_stock_master(base, stock)
         membership = market_history.iloc[market_groups.get(asset_id, [])]
         positions = membership.timestamp.searchsorted(dates, side="right") - 1
         base["market_type"] = pd.Series(pd.NA, index=base.index, dtype="Int64")
         known = positions >= 0
+        known[known] &= (
+            membership.timestamp.iloc[positions[known]].to_numpy()
+            >= base.loc[known, "listing_date"].to_numpy()
+        )
         base.loc[known, "market_type"] = membership.market_type.iloc[
             positions[known]
         ].to_numpy()
@@ -367,7 +373,6 @@ def _dense_lifecycle_panel(
     result["market_id"] = str(MARKET_ID)
     result["session_date"] = result["timestamp"]
     result["available_at"] = result["timestamp"]
-    result = _asof_join_stock_master(result, stocks)
     return result.loc[
         result["timestamp"].ge(result["listing_date"])
         & result["timestamp"].le(result["delisting_date"])

@@ -474,3 +474,107 @@ def test_canonical_industry_residuals_keep_same_code_standards_distinct():
     assert result["feature_observed_factor"].eq(1.0).all()
     pd.testing.assert_frame_equal(frame, before)
     assert result["industry_level1_code"].eq("A").all()
+
+
+@pytest.mark.parametrize(
+    "scale,cancellation", ((1.0, False), (1e308, False), (1e308, True))
+)
+def test_native_neutralization_zscore_publishes_representable_extreme_cross_section(
+    tmp_path, scale, cancellation
+):
+    from decimal import Decimal, localcontext
+    from fractions import Fraction
+
+    from quant_research_platform.catalog.processed import ProcessedDataCatalog
+    from quant_research_platform.contracts.columns import ColumnRole
+    from quant_research_platform.contracts.data import ProcessedDataKind
+    from quant_research_platform.research.features.transforms import feature_transforms
+    from quant_research_platform.storage.datasets import read_dataset
+    from tests.helpers.research_processed_inputs import _processed_spec
+    from tests.helpers.research_specs import make_demo_research_dataset_spec
+
+    positions = np.arange(100)
+    values = np.where(positions < 50, -1.0, 1.0)
+    values[0] = 1.0
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": [f"asset_{i:03d}" for i in positions],
+            "timestamp": pd.Timestamp("2023-01-03"),
+            "eligible": True,
+            "industry_standard_id": "CSRC2012",
+            "industry_level1_code": "A",
+            "log_float_market_cap": 4.0 + positions / 100,
+            "earnings_yield": values * scale,
+            "label": 0.1,
+        }
+    )
+    if cancellation:
+        frame["log_float_market_cap"] = [4.0] * 49 + [5.0] + [6.0] * 50
+        frame["earnings_yield"] = [-1e308] * 49 + [1e-20] + [1e308] * 50
+    x = [Fraction(float(v)) for v in frame.log_float_market_cap]
+    y = [Fraction(float(v)) for v in frame.earnings_yield]
+    mx, my = sum(x) / 100, sum(y) / 100
+    slope = sum((a - mx) * (b - my) for a, b in zip(x, y, strict=True)) / sum(
+        (a - mx) ** 2 for a in x
+    )
+    residual = [b - my - slope * (a - mx) for a, b in zip(x, y, strict=True)]
+    with localcontext() as context:
+        context.prec = 100
+        decimal = [Decimal(v.numerator) / Decimal(v.denominator) for v in residual]
+        center = sum(decimal) / 100
+        deviation = (sum((v - center) ** 2 for v in decimal) / 100).sqrt()
+        expected = np.asarray([float((v - center) / deviation) for v in decimal])
+    if scale == 1e308 and not cancellation:
+        assert max(map(abs, residual)) > Fraction(float(np.finfo("float64").max))
+        with pytest.raises(OverflowError):
+            neutralize_cross_section(frame, factor_columns=("earnings_yield",))
+    else:
+        actual_raw = neutralize_cross_section(frame, factor_columns=("earnings_yield",))
+        np.testing.assert_array_equal(
+            actual_raw.earnings_yield, [float(v) for v in residual]
+        )
+
+    recipe = feature_transforms(("earnings_yield",))
+    spec = make_demo_research_dataset_spec(
+        data_id="extreme_features",
+        input_data_ids=("feature_inputs",),
+        base_input_data_id="feature_inputs",
+        factor_columns=("earnings_yield",),
+        label_columns=("label",),
+        filter_columns=("eligible",),
+        filter_column_roles={"eligible": ColumnRole.UNIVERSE},
+        context_columns=(
+            "log_float_market_cap",
+            "industry_standard_id",
+            "industry_level1_code",
+        ),
+        feature_columns=recipe[0].output_columns,
+        feature_transforms=recipe,
+    )
+    source = _processed_spec(
+        data_id="feature_inputs",
+        market_id=MarketId("a_share"),
+        kind=ProcessedDataKind.ANNOTATION,
+        column_roles={column: spec.column_roles[column] for column in frame},
+    )
+    layout = StorageLayout(tmp_path)
+    write_dataset(
+        layout.processed_data_root(source.market_id, source.kind, source.data_id),
+        frame,
+        spec=source,
+    )
+    root = assemble_research_dataset(
+        layout=layout,
+        dataset_catalog=ResearchDatasetCatalog((spec,)),
+        processed_catalog=ProcessedDataCatalog((source,)),
+        dataset_id=spec.data_id,
+        time_window=TimeWindow("2023-01-03", "2023-01-03"),
+    )
+    actual = read_dataset(root)
+    assert len(actual) == 100
+    assert actual.feature_observed_earnings_yield.eq(1).all()
+    assert actual.feature_missing_earnings_yield.eq(0).all()
+    np.testing.assert_allclose(
+        actual.feature_earnings_yield, expected, rtol=3e-14, atol=3e-14
+    )

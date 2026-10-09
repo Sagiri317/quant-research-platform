@@ -1619,12 +1619,6 @@ def test_statistics_excludes_immature_labels_and_keeps_fixed_family_fdr(
     )
     with factor_empty_artifact.table("fama_macbeth_periods.parquet") as table:
         assert table.empty
-    artifact = read_statistics_artifact(
-        artifact_root, expected_identity=envelope.instance_identity
-    )
-    factor_artifact = read_statistics_artifact(
-        factor_artifact_root, expected_identity=factor_envelope.instance_identity
-    )
     primary = KeyboardInterrupt("table_consumer_interrupted")
     artifact = read_statistics_artifact(
         artifact_root, expected_identity=envelope.instance_identity

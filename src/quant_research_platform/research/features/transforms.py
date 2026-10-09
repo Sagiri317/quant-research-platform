@@ -136,7 +136,7 @@ def _mad_winsorize(
     )
 
 
-def _industry_size_residuals(target, industries, sizes):
+def _industry_size_residuals(target, industries, sizes, *, rescale):
     """Project binary64 inputs exactly onto industry intercepts and one size slope."""
     counts = industries.value_counts(sort=False)
     y_values, y_scale = _integer_coordinates(target)
@@ -167,15 +167,23 @@ def _industry_size_residuals(target, industries, sizes):
         if xx == 0:
             return np.full(len(target), np.nan)
         slope = xy / xx
-    residuals = np.empty(len(target), dtype="float64")
-    for index, (group, y, x) in enumerate(
-        zip(industries, y_values, x_values, strict=True)
-    ):
-        count = int(counts[group])
-        y = y * count - sums[group][0]
-        x = x * count - sums[group][1]
-        residuals[index] = float((y - slope * x) / (count * y_scale))
-    return residuals
+
+    def residuals():
+        for group, y, x in zip(industries, y_values, x_values, strict=True):
+            count = int(counts[group])
+            y = y * count - sums[group][0]
+            x = x * count - sums[group][1]
+            yield (y - slope * x) / (count * y_scale)
+
+    try:
+        return np.fromiter(map(float, residuals()), dtype="float64", count=len(target))
+    except OverflowError:
+        if not rescale:
+            raise
+        # Only an overflowing residual needs a common scale before zscore.
+        exact = list(residuals())
+        scale = max(map(abs, exact))
+        return np.array([float(value / scale) for value in exact], dtype="float64")
 
 
 def neutralize_cross_section(
@@ -186,7 +194,26 @@ def neutralize_cross_section(
     size_column: str = "log_float_market_cap",
     minimum_observations: int = 100,
 ) -> pd.DataFrame:
-    """Equal-weight, no-intercept industry/size residualization by date."""
+    """Equal-weight, no-intercept industry/size residualization in original units."""
+    return _neutralize_cross_section(
+        frame,
+        factor_columns=factor_columns,
+        industry_column=industry_column,
+        size_column=size_column,
+        minimum_observations=minimum_observations,
+        rescale=False,
+    )
+
+
+def _neutralize_cross_section(
+    frame,
+    *,
+    factor_columns,
+    industry_column,
+    size_column,
+    minimum_observations=100,
+    rescale,
+):
     required = {"timestamp", industry_column, *factor_columns}
     if not required.issubset(frame.columns):
         raise ValueError("neutralization_columns_invalid")
@@ -227,6 +254,7 @@ def neutralize_cross_section(
                 target,
                 groups,
                 None if factor == size_column else size.loc[indices].to_numpy(),
+                rescale=rescale,
             )
     return result
 
@@ -295,11 +323,12 @@ def a_share_feature_pipeline(
             else _winsorize(values, grouped)
         )
     winsorized[industry_column] = _industry_group_codes(winsorized, industry_column)
-    residualized = neutralize_cross_section(
+    residualized = _neutralize_cross_section(
         winsorized,
         factor_columns=factor_columns,
         industry_column=industry_column,
         size_column=size_column,
+        rescale=True,
     )
     feature_values: dict[str, pd.Series] = {}
     result = frame.copy()

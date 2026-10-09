@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from fractions import Fraction
 from itertools import combinations
-from math import comb, e
+from math import comb, e, lcm
 from statistics import mean as _mean
 from typing import Literal
 
@@ -25,6 +25,7 @@ from quant_research_platform.contracts.validation import (
     strict_real_numeric_series,
     strict_timestamp_series,
 )
+from quant_research_platform.research.features.transforms import _integer_coordinates
 
 
 @dataclass(frozen=True)
@@ -616,75 +617,84 @@ def fama_macbeth_period(
     )
     if np.linalg.matrix_rank(x.to_numpy(dtype="float64")) != x.shape[1]:
         raise ValueError("fama_macbeth_period_insufficient")
-    _, target_exponent = np.frexp(float(np.max(np.abs(y))))
-    target_values = np.ldexp(y, -target_exponent)
-    target_differences = target_values - target_values.iloc[0]
-    target_offset = float(np.mean(target_differences))
-    target_centered = target_differences - target_offset
-    target_scale = float(np.max(np.abs(target_centered))) or 1.0
-    target = target_centered / target_scale
-    if weight_column is None:
-        fit = sm.OLS(target, x).fit()
-    else:
-        weights = numeric[weight_column]
-        if bool((weights <= 0.0).any()):
-            raise ValueError("fama_macbeth_weights_invalid")
-        fit = sm.WLS(target, x, weights=weights).fit()
-    residual_scale = float(np.max(np.abs(fit.resid)))
-    fit_scale = max(
-        float(np.max(np.abs(target_values))),
-        float(
-            np.max(
-                np.abs(
-                    fit.fittedvalues * target_scale
-                    + target_offset
-                    + target_values.iloc[0]
-                )
-            )
-        ),
-    )
-    white_p_value = None
-    if residual_scale * target_scale > 32 * np.finfo("float64").eps * fit_scale:
-        try:
-            # White LM needs the auxiliary R-squared, not its unused F statistic.
-            left, right = np.triu_indices(x.shape[1])
-            regressors = x.to_numpy(dtype="float64", copy=False)
-            auxiliary = sm.OLS(
-                np.square(fit.resid / residual_scale),
-                regressors[:, left] * regressors[:, right],
-            ).fit()
-            white_p_value = float(
-                chi2.sf(len(numeric) * auxiliary.rsquared, auxiliary.df_model)
-            )
-            if not np.isfinite(white_p_value) or not 0 <= white_p_value <= 1:
-                white_p_value = None
-        except (AssertionError, ValueError):
-            white_p_value = None
-    coefficients = fit.params.copy()
-    unit = Fraction(2) ** int(target_exponent)
+    weights = None if weight_column is None else numeric[weight_column]
+    if weights is not None and bool((weights <= 0.0).any()):
+        raise ValueError("fama_macbeth_weights_invalid")
+    white_residuals = None
     try:
         if len(factor_columns) == 1:
-            total = sx = sy = xx = xy = Fraction()
-            weights = (
-                np.ones(len(numeric))
-                if weight_column is None
-                else numeric[weight_column].to_numpy(dtype="float64")
+            left, left_scale = _integer_coordinates(values[:, 0])
+            right, right_scale = _integer_coordinates(y)
+            w = (
+                np.ones(len(numeric), dtype=object)
+                if weights is None
+                else np.asarray(_integer_coordinates(weights)[0], dtype=object)
             )
-            for left, right, weight in zip(values[:, 0], y, weights, strict=True):
-                left, right, weight = map(Fraction, map(float, (left, right, weight)))
-                total += weight
-                sx += weight * left
-                sy += weight * right
-                xx += weight * left * left
-                xy += weight * left * right
-            slope = (total * xy - sx * sy) / (total * xx - sx * sx)
-            coefficients.loc[factor_columns[0]] = float(slope)
-            coefficients.loc["const"] = float((sy - slope * sx) / total)
+            left, right = (
+                np.asarray(left, dtype=object),
+                np.asarray(right, dtype=object),
+            )
+            total, sx, sy = int(sum(w)), int(w @ left), int(w @ right)
+            xx, xy = int(left @ (w * left)), int(left @ (w * right))
+            slope = Fraction(total * xy - sx * sy, total * xx - sx * sx) * Fraction(
+                left_scale, right_scale
+            )
+            intercept = (
+                Fraction(sy, right_scale) - slope * Fraction(sx, left_scale)
+            ) / total
+            coefficients = pd.Series([float(intercept), float(slope)], index=x.columns)
+            # Reuse exact residuals; diagnostic normalization cannot overflow.
+            denominator = lcm(
+                right_scale, intercept.denominator, slope.denominator * left_scale
+            )
+            fitted = intercept.numerator * (
+                denominator // intercept.denominator
+            ) + left * (
+                slope.numerator * (denominator // (slope.denominator * left_scale))
+            )
+            observed = right * (denominator // right_scale)
+            residual = observed - fitted
+            residual_scale = int(max(abs(residual)))
+            fit_scale = int(max(max(abs(observed)), max(abs(fitted))))
+            if residual_scale * (1 << 47) > fit_scale:
+                white_residuals = np.array(
+                    [int(value) / residual_scale for value in residual]
+                )
         else:
+            _, target_exponent = np.frexp(float(np.max(np.abs(y))))
+            target_values = np.ldexp(y, -target_exponent)
+            target_differences = target_values - target_values.iloc[0]
+            target_offset = float(np.mean(target_differences))
+            target_centered = target_differences - target_offset
+            target_scale = float(np.max(np.abs(target_centered))) or 1.0
+            target = target_centered / target_scale
+            fit = (
+                sm.OLS(target, x).fit()
+                if weights is None
+                else sm.WLS(target, x, weights=weights).fit()
+            )
+            params = fit.params
+            residual_scale = float(np.max(np.abs(fit.resid)))
+            fit_scale = max(
+                float(np.max(np.abs(target_values))),
+                float(
+                    np.max(
+                        np.abs(
+                            fit.fittedvalues * target_scale
+                            + target_offset
+                            + target_values.iloc[0]
+                        )
+                    )
+                ),
+            )
+            if residual_scale * target_scale > 32 * np.finfo("float64").eps * fit_scale:
+                white_residuals = fit.resid / residual_scale
+            coefficients = params.copy()
+            unit = Fraction(2) ** int(target_exponent)
             slopes = [
                 Fraction(float(value)) * Fraction(target_scale) / Fraction(float(scale))
                 for value, scale in zip(
-                    fit.params.loc[list(factor_columns)], scales, strict=True
+                    params.loc[list(factor_columns)], scales, strict=True
                 )
             ]
             coefficients.loc[list(factor_columns)] = [
@@ -695,7 +705,7 @@ def fama_macbeth_period(
                 (
                     Fraction(float(target_values.iloc[0]))
                     + Fraction(target_offset)
-                    + Fraction(float(fit.params["const"])) * Fraction(target_scale)
+                    + Fraction(float(params["const"])) * Fraction(target_scale)
                     - sum(
                         (
                             (Fraction(float(origin)) + Fraction(float(offset))) * slope
@@ -710,6 +720,23 @@ def fama_macbeth_period(
             )
     except OverflowError:
         raise ValueError("fama_macbeth_coefficients_unrepresentable") from None
+    white_p_value = None
+    if white_residuals is not None:
+        try:
+            # White LM needs the auxiliary R-squared, not its unused F statistic.
+            left, right = np.triu_indices(x.shape[1])
+            regressors = x.to_numpy(dtype="float64", copy=False)
+            auxiliary = sm.OLS(
+                np.square(white_residuals),
+                regressors[:, left] * regressors[:, right],
+            ).fit()
+            white_p_value = float(
+                chi2.sf(len(numeric) * auxiliary.rsquared, auxiliary.df_model)
+            )
+            if not np.isfinite(white_p_value) or not 0 <= white_p_value <= 1:
+                white_p_value = None
+        except (AssertionError, ValueError):
+            white_p_value = None
     return FamaMacBethPeriodResult(
         coefficients=coefficients,
         white_p_value=white_p_value,

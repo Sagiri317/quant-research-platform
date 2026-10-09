@@ -54,6 +54,7 @@ def test_price_volume_selections_use_one_definition_and_minimum_inputs():
     x = np.arange(1.0, 301.0)
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
             "asset_id": "asset",
             "timestamp": pd.bdate_range("2020-01-01", periods=len(x)),
@@ -104,6 +105,7 @@ def test_price_volume_unique_math_full_windows_endpoints_and_nulls():
     returns = np.resize(np.array([-0.02, 0.01, 0.03, -0.01, 0.0]), len(x))
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": "asset",
             "timestamp": pd.bdate_range("2020-01-01", periods=len(x)),
             "adj_close": x,
@@ -443,6 +445,7 @@ def test_return_correlations_preserve_units_and_persist(scale, kind, tmp_path):
     name = f"return_{kind}_corr_20d"
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
             "asset_id": "asset",
             "timestamp": pd.bdate_range("2020-01-01", periods=20),
@@ -536,6 +539,7 @@ def test_volatility_representable_result_with_extreme_units(name, scale, tmp_pat
     )
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "market_id": "a_share",
             "asset_id": "asset",
             "timestamp": pd.bdate_range("2020-01-01", periods=count).as_unit("ns"),
@@ -575,6 +579,7 @@ def test_expanded_pv_nine_formulas_complete_windows_and_nulls(tmp_path):
     returns = np.resize(np.array([-0.02, 0.0, 0.01, 0.03]), len(x))
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": "asset",
             "timestamp": pd.bdate_range("2020-01-01", periods=250),
             "close": 10.0,
@@ -652,6 +657,7 @@ def test_market_model_factors_share_risk_math_and_window_identity(tmp_path):
         dict(
             market_id="a_share",
             asset_id=asset,
+            listing_date=pd.Timestamp("2000-01-01"),
             timestamp=date,
             period_return=multiplier * (i % 11 - 5) / 1000,
             float_market_cap=1000.0,
@@ -827,6 +833,7 @@ def test_turnover_uses_canonical_suspension_zero_and_preserves_unknown(tmp_path)
 
     raw = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": "a",
             "timestamp": pd.bdate_range("2024-01-01", periods=20).as_unit("ns"),
             "market_id": "a_share",
@@ -948,6 +955,7 @@ def test_market_model_residual_volatility_matches_decimal_oracle(scale):
         observed = state.observe(
             pd.DataFrame(
                 {
+                    "listing_date": pd.Timestamp("2000-01-01"),
                     "asset_id": ("a", "b"),
                     "period_return": (left_value, right_value),
                     "float_market_cap": 1000.0,
@@ -1024,6 +1032,7 @@ def test_market_model_extreme_equal_assets_keep_unit_beta(values):
         result = state.observe(
             pd.DataFrame(
                 {
+                    "listing_date": pd.Timestamp("2000-01-01"),
                     "asset_id": list("abcd"),
                     "period_return": value,
                     "float_market_cap": 1.0,
@@ -1102,6 +1111,7 @@ def test_market_model_extreme_positive_prices_persist_usable_risk_styles(tmp_pat
             dict(
                 market_id="a_share",
                 asset_id=asset,
+                listing_date=pd.Timestamp("2000-01-01"),
                 timestamp=stamp,
                 period_return=returns[i],
                 float_market_cap=1000.0,
@@ -1162,6 +1172,7 @@ def test_market_model_preserves_small_residual_beside_extreme_historical_mean():
         state.observe(
             pd.DataFrame(
                 {
+                    "listing_date": pd.Timestamp("2000-01-01"),
                     "asset_id": ("a", "b"),
                     "period_return": (left, right),
                     "float_market_cap": 1.0,
@@ -1186,6 +1197,7 @@ def test_all_a_convex_mean_keeps_subnormal_mass_with_extreme_caps():
     state = MarketModelRiskState(window=2)
     panel = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "asset_id": ("a", "b"),
             "period_return": (0.0, 0.0),
             "float_market_cap": (small, 1e308),

@@ -14,6 +14,7 @@ from quant_research_platform.compute.dataframe.cross_section import _Correlation
 from quant_research_platform.contracts.validation import (
     strict_finite_numeric_series,
     strict_integer_series,
+    strict_timestamp_series,
 )
 
 
@@ -29,6 +30,7 @@ class MarketModelRiskState:
     def __init__(self, *, window: int = 252, residual_window: int = 60):
         self.window = window
         self.residual_window = residual_window
+        self._listings: dict[str, pd.Timestamp] = {}
         self._returns: dict[str, array] = {}
         self._moments: dict[str, _CorrelationMoments] = {}
         self._market_returns: dict[str, array] = {}
@@ -46,6 +48,7 @@ class MarketModelRiskState:
     ) -> MarketModelRiskStyles:
         required = {
             "asset_id",
+            "listing_date",
             "period_return",
             "float_market_cap",
         }
@@ -63,6 +66,9 @@ class MarketModelRiskState:
             :, list(required) + (["eligible"] if "eligible" in panel else [])
         ].copy()
         frame["asset_id"] = frame["asset_id"].astype("string")
+        frame["listing_date"] = strict_timestamp_series(
+            frame["listing_date"], error="market_model_risk_listing_invalid"
+        )
         if open_market_types is not None:
             frame["market_type"] = strict_integer_series(
                 frame["market_type"],
@@ -90,17 +96,12 @@ class MarketModelRiskState:
         if eligible[["period_return", "float_market_cap"]].isna().any().any():
             raise ValueError("market_model_risk_numeric_invalid")
         frame = frame.sort_values("asset_id", kind="mergesort").reset_index(drop=True)
-        if open_market_types is not None:
-            known = frame.loc[frame.market_type.notna()]
+        if open_market_types is not None and asset_market_types is not None:
             self._asset_markets.update(
-                zip(known.asset_id, known.market_type, strict=True)
+                (asset, asset_market_types[asset])
+                for asset in self._returns
+                if asset in asset_market_types
             )
-            if asset_market_types is not None:
-                self._asset_markets.update(
-                    (asset, asset_market_types[asset])
-                    for asset in self._returns
-                    if asset in asset_market_types
-                )
         absent = self._returns.keys() - set(frame.asset_id)
         closed_assets = {
             asset
@@ -109,7 +110,14 @@ class MarketModelRiskState:
             and asset in self._asset_markets
             and self._asset_markets[asset] not in open_market_types
         }
-        for asset in absent - closed_assets:
+        listings = dict(zip(frame.asset_id, frame.listing_date, strict=True))
+        changed = {
+            asset
+            for asset, listing in listings.items()
+            if asset in self._listings and self._listings[asset] != listing
+        }
+        for asset in (absent - closed_assets) | changed:
+            self._listings.pop(asset, None)
             del self._returns[asset]
             del self._moments[asset]
             del self._market_returns[asset]
@@ -117,6 +125,12 @@ class MarketModelRiskState:
             self._previous_weights.pop(asset, None)
             self._asset_markets.pop(asset, None)
             self._pending_market_gross.pop(asset, None)
+        self._listings.update(listings)
+        if open_market_types is not None:
+            known = frame.loc[frame.market_type.notna()]
+            self._asset_markets.update(
+                zip(known.asset_id, known.market_type, strict=True)
+            )
 
         weighted = [
             (

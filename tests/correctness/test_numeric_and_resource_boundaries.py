@@ -133,6 +133,7 @@ def test_market_beta_matches_centered_ols_for_nearly_constant_returns():
         result = state.observe(
             pd.DataFrame(
                 {
+                    "listing_date": pd.Timestamp("2000-01-01"),
                     "asset_id": ["a", "b"],
                     "period_return": values,
                     "float_market_cap": [100.0, 100.0],
@@ -639,6 +640,7 @@ def test_capital_weight_units_do_not_change_market_beta(capital):
         result = state.observe(
             pd.DataFrame(
                 {
+                    "listing_date": pd.Timestamp("2000-01-01"),
                     "asset_id": ["a", "b"],
                     "period_return": [daily_return, daily_return],
                     "float_market_cap": [capital, capital],

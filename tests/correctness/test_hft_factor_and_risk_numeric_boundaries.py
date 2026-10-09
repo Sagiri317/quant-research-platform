@@ -181,6 +181,7 @@ def test_actual_risk_estimate_retains_tail_after_latest_missing_session(
     state = FactorRiskState(style_columns=(), config=config)
     frame = pd.DataFrame(
         {
+            "listing_date": pd.Timestamp("2000-01-01"),
             "timestamp": pd.Timestamp("2020-01-01"),
             "asset_id": [f"a{i}" for i in range(10)],
             "industry_standard_id": "CSRC2012",

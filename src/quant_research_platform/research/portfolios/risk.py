@@ -13,6 +13,7 @@ import pandas as pd
 
 from quant_research_platform.contracts.validation import (
     strict_real_numeric_series,
+    strict_timestamp_series,
 )
 from quant_research_platform.research.features.transforms import (
     _industry_group_codes,
@@ -294,6 +295,7 @@ class FactorRiskState:
         self.config = FactorRiskConfig() if config is None else config
         self._industry_codes: set[str] = set()
         self._factor_rows: list[dict[str, object]] = []
+        self._listings: dict[str, pd.Timestamp] = {}
         self._residuals: dict[str, array] = {}
         self._residual_sessions: dict[str, array] = {}
         self._session_count = 0
@@ -560,6 +562,14 @@ class FactorRiskState:
     def observe_return_session(
         self, cross: pd.DataFrame, *, shared_fits=None, fit_key=None
     ) -> None:
+        listings = strict_timestamp_series(
+            cross["listing_date"], error="factor_risk_listing_invalid"
+        )
+        for asset, listing in zip(cross.asset_id.astype(str), listings, strict=True):
+            if asset in self._listings and self._listings[asset] != listing:
+                self._residuals.pop(asset, None)
+                self._residual_sessions.pop(asset, None)
+            self._listings[asset] = listing
         if shared_fits is None or fit_key not in shared_fits:
             fitted, industries = self._fit_return_session(cross)
             fact = (
@@ -797,26 +807,23 @@ def _ewma_covariance(
     )
     total = sum(weights)
     first = weights @ coordinates
-    second = coordinates.T @ (coordinates * weights[:, None])
-    numerators = total * second - first[:, None] * first[None, :]
-    denominator = total**2 * scale**2
+    weighted = coordinates * weights[:, None]
+    denominator = int(total**2 * scale**2)
     shrinkage = Fraction(float(diagonal_shrinkage))
     annualization = Fraction(float(annualization_factor))
+    covariance = np.empty((values.shape[1], values.shape[1]), dtype="float64")
     try:
-        covariance = np.array(
-            [
-                [
-                    float(
-                        Fraction(int(numerators[left, right]), int(denominator))
-                        * (1 if left == right else 1 - shrinkage)
-                        * annualization
-                    )
-                    for right in range(values.shape[1])
-                ]
-                for left in range(values.shape[1])
-            ],
-            dtype="float64",
-        )
+        for left in range(values.shape[1]):
+            for right in range(left, values.shape[1]):
+                numerator = (
+                    total * (coordinates[:, left] @ weighted[:, right])
+                    - first[left] * first[right]
+                )
+                covariance[left, right] = covariance[right, left] = float(
+                    Fraction(int(numerator), denominator)
+                    * (1 if left == right else 1 - shrinkage)
+                    * annualization
+                )
     except OverflowError:
         raise ValueError("factor_risk_covariance_non_finite") from None
     if not np.isfinite(covariance).all():

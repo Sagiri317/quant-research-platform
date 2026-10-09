@@ -230,12 +230,12 @@ def _write_runtime_manifest(
     row_count = 0
     partition_row_counts: dict[str, int] = {}
     for path in sorted(paths):
-        parquet_file = pq.ParquetFile(native_filesystem_path(path))
-        schemas.append(
-            physical_schema_from_schema(parquet_file.schema_arrow.remove_metadata())
-        )
+        with pq.ParquetFile(native_filesystem_path(path)) as parquet_file:
+            schemas.append(
+                physical_schema_from_schema(parquet_file.schema_arrow.remove_metadata())
+            )
+            rows = int(parquet_file.metadata.num_rows)
         partition = relative_partition_label(data_root, path)
-        rows = int(parquet_file.metadata.num_rows)
         row_count += rows
         partition_row_counts[partition] = partition_row_counts.get(partition, 0) + rows
     first_schema = schemas[0]

@@ -99,24 +99,6 @@ def _passthrough_session(**attributes):
     return session
 
 
-def _research_rows() -> pd.DataFrame:
-    return pd.DataFrame(
-        {
-            "market_id": ["a_share", "a_share", "a_share", "a_share"],
-            "asset_id": ["000001", "000002", "000001", "000002"],
-            "timestamp": pd.to_datetime(
-                ["2014-01-02", "2014-01-02", "2014-01-03", "2014-01-03"]
-            ),
-            "momentum_20d": [1.0, 2.0, 2.0, 1.0],
-            "forward_return_20d": [0.01, 0.03, 0.02, 0.0],
-            "eligible": [True, True, True, True],
-            "can_enter": [True, True, True, True],
-            "can_exit": [True, True, True, True],
-            "market_type": [4, 4, 4, 4],
-        }
-    )
-
-
 def _research_rows_for_dates(dates: list[str]) -> pd.DataFrame:
     rows: list[dict[str, object]] = []
     for date_index, timestamp in enumerate(pd.to_datetime(dates), start=1):
@@ -209,6 +191,7 @@ def shared_model_case(
     protocol=None,
     development_end="2019-06-30",
     chunk_size=5,
+    requested_end=None,
     verify_source=lambda: None,
     model_results_wrapper=None,
     software_identity="c" * 64,
@@ -224,6 +207,7 @@ def shared_model_case(
     )
     protocol = protocol or shared_model_protocol(specs, development_end=development_end)
     development_end = protocol["development_window"]["end"]
+    requested_end = development_end if requested_end is None else requested_end
     frame = (
         shared_model_rows(specs, development_end=development_end)
         if frame is None
@@ -261,7 +245,7 @@ def shared_model_case(
         software_identity=software_identity,
         research_window={
             "start": "2018-01-01",
-            "end": development_end,
+            "end": requested_end,
             "access": "development",
         },
         upstream_identities={dataset.data_id: "d" * 64},
@@ -287,7 +271,7 @@ def shared_model_case(
         model_catalog=ModelCatalog(specs),
         dataset_id=dataset.data_id,
         model_ids=tuple(spec.model_id for spec in specs),
-        time_window=TimeWindow("2018-01-01", development_end),
+        time_window=TimeWindow("2018-01-01", requested_end),
         chunks=chunks,
         sessions=pd.DatetimeIndex(sorted(frame.timestamp.unique())),
         chronology=protocol["model_chronology"],

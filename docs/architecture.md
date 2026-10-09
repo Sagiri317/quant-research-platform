@@ -84,7 +84,9 @@ Crypto 的训练、验证和OOS时段必须由 `research_plan` 声明；A股不�
 
 每个阶段可分别运行多个具名配置并比较其报告。程序保留原有模型推荐、验证 IC 和风险诊断；
 用户或获授权 agent 决定一个或多个下一阶段配置，分别调用同一入口。不自动合成模型，
-不展开配置笛卡尔积，不人为引入近似并列阈值。已显式选择 `research` 表示授权本次完整 DAG。
+不展开配置笛卡尔积，不人为引入近似并列阈值。已显式选择 `research` 表示授权当前市场
+protocol/access_window 内的完整 DAG。Crypto development 的终端包含模型、评估与所选校准产物；
+冻结 test 的预测、经济账本和组合统计仅属于合法冻结后的 holdout 图。
 
 下一阶段配置可附 `stage_selection`，字段为 `selected_by`（`user` 或 `agent`）、非空 `reason`、
 非空 `sources`；每个来源只有 `run_id`、`target_id`、`instance_identity`。入口核对来源运行完成、
@@ -161,7 +163,10 @@ TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指�
 
 数据集身份包含 schema、dtype、PK、逻辑窗口、来源谱系和精确内容。
 `fingerprint_dataset` 独立提供既有指纹 API；`compare_datasets` 直接在一次读取中
-核对 schema、dtype、PK 和精确值，不额外计算逻辑指纹。比较摘要不再返回 `content_hash`；
+核对 schema、dtype、PK、精确值，以及 schema owner 允许的实例业务元数据，
+包括来源/输入身份、common_manifest 和 producer_diagnostics 中的覆盖事实。
+行相同但业务元数据不同返回 METADATA_MISMATCH；分块、文件布局和运行观测不参与业务比较。
+不额外计算逻辑指纹。比较摘要不再返回 `content_hash`；
 持久化 manifest 的原始成员内容身份保持不变。只有精确比较才能给出 MATCH。
 软件、协议、种子、后端、上游以及 trial/fold/asset/refit/季度谱系按现有合同绑定；
 持久化模型读取不重新发现主机参数。数据集身份不受下游模型或组合调参污染。影响数据计算的参数属于 ProcessedDataSpec，

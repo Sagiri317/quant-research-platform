@@ -1124,10 +1124,19 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
             assert saved.loc[dates[0], column + "_available_at"] == exit_date
 
 
-@pytest.mark.parametrize("gap", ("membership", "calendar"))
-@pytest.mark.parametrize("batch_rows", (6, 300))
+@pytest.mark.parametrize(
+    "gap,batch_rows,old_market",
+    (
+        ("membership", 6, None),
+        ("membership", 6, 1),
+        ("membership", 6, 4),
+        ("calendar", 6, None),
+        ("membership", 300, None),
+        ("calendar", 300, None),
+    ),
+)
 def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions(
-    tmp_path, monkeypatch, batch_rows, gap
+    tmp_path, monkeypatch, batch_rows, gap, old_market
 ):
     dates = pd.bdate_range("2019-01-02", periods=260).as_unit("ns")
     source = _synthetic_interim_frames(dates)
@@ -1145,6 +1154,41 @@ def test_unobserved_initial_market_preserves_unknown_age_and_proven_252_sessions
             .loc[source["trading_calendar"].calendar_date.ge(dates[4])]
             .copy()
         )
+    if old_market is not None:
+        from quant_research_platform.sources.csmar.interim import (
+            _transform_interim_chunk,
+        )
+
+        old_date = dates[0] - pd.Timedelta(days=10)
+        assets = source["stock_master"].source_asset_id.unique()
+        masters = pd.DataFrame(
+            [
+                {
+                    "Stkcd": asset,
+                    "Stknme": "synthetic",
+                    "Listdt": listing,
+                    "DelistedDate": end,
+                    "Markettype": market,
+                    "Nnindcd": "C",
+                    "Nnindnme": "synthetic",
+                    "Statco": "normal",
+                    "Statdt": pd.NaT,
+                }
+                for asset in assets
+                for listing, end, market in (
+                    (old_date, dates[0] - pd.Timedelta(days=1), old_market),
+                    (dates[0], pd.NaT, 1),
+                )
+            ]
+        )
+        source["stock_master"], _ = _transform_interim_chunk(
+            masters, data_id="stock_master", start_date=None, end_date=None
+        )
+        bars = source["market_bars_1d"]
+        old = bars.drop_duplicates("source_asset_id").assign(
+            timestamp=old_date, market_type=old_market
+        )
+        source["market_bars_1d"] = pd.concat((old, bars), ignore_index=True)
     profile = research_profile()
     spec = profile.processed.get("market_panel_1d")
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", batch_rows)
