@@ -1819,11 +1819,14 @@ def test_source_backed_reuse_binds_one_content_check_to_native_consumption(
         return native_hash(path, *args, **kwargs)
 
     monkeypatch.setattr(semantic_artifacts, "_hash_file_content", counted)
+    reuse_sessions = {}
     assert research._matching_instance(
         profile=profile,
         layout=layout,
-        target_id=target_id,
+        spec=TargetSpec(target_id),
+        protocol=SimpleNamespace(protocol_id="a_share"),
         requested_identity=root.name,
+        reuse_sessions=reuse_sessions,
     ) == (root.name, None)
     planned_counts = counts.copy()
     assert planned_counts and set(planned_counts.values()) == {1}
@@ -1845,6 +1848,7 @@ def test_source_backed_reuse_binds_one_content_check_to_native_consumption(
             planned=planned,
             raw_root=tmp_path,
             time_window=TimeWindow("2019-01-01", "2019-01-02"),
+            session=reuse_sessions[root],
         )
 
     primary = KeyboardInterrupt("primary_native_read")
@@ -1865,10 +1869,15 @@ def test_source_backed_reuse_binds_one_content_check_to_native_consumption(
         assert research._matching_instance(
             profile=profile,
             layout=layout,
-            target_id=target_id,
+            spec=TargetSpec(target_id),
+            protocol=SimpleNamespace(protocol_id="a_share"),
             requested_identity=root.name,
         ) == (None, "persisted_instance_invalid")
-    elif mutation in {"directory", "primary"}:
+    elif mutation == "directory":
+        (root / "extra-directory").mkdir()
+        with pytest.raises(ValueError, match="semantic_artifact_member_set_changed"):
+            reuse()
+    elif mutation == "primary":
         native_batches = ledger_artifact._iter_batches
 
         def changed_batches(*args, **kwargs):
@@ -1881,12 +1890,19 @@ def test_source_backed_reuse_binds_one_content_check_to_native_consumption(
         with pytest.raises(
             KeyboardInterrupt if mutation == "primary" else ValueError
         ) as caught:
-            reuse()
+            research._matching_instance(
+                profile=profile,
+                layout=layout,
+                spec=TargetSpec(target_id),
+                protocol=SimpleNamespace(protocol_id="a_share"),
+                requested_identity=root.name,
+                reuse_sessions={},
+            )
         if mutation == "primary":
             assert caught.value is primary
             assert primary.__notes__
     else:
         assert reuse().status.value == "REUSED"
-        assert counts == {name: 2 for name in planned_counts}
+        assert counts == planned_counts
         assert reuse().status.value == "REUSED"
-        assert counts == {name: 3 for name in planned_counts}
+        assert counts == planned_counts

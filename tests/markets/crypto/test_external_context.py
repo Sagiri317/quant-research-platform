@@ -465,3 +465,61 @@ def test_okx_dated_face_value_native_csv_to_persisted_flow(
     assert row.okx_observed_signed_notional_flow_500ms == pytest.approx(
         1_000_000 * unit
     )
+
+
+@pytest.mark.parametrize(
+    "bid,ask,anchor",
+    (
+        (
+            float.fromhex("0x0.0000000000001p-1022"),
+            float.fromhex("0x0.0000000000002p-1022"),
+            float.fromhex("0x0.0000000000002p-1022"),
+        ),
+        (
+            float.fromhex("0x0.0000000000002p-1022"),
+            float.fromhex("0x0.0000000000004p-1022"),
+            float.fromhex("0x0.0000000000002p-1022"),
+        ),
+        (99.0, 101.0, 100.0),
+        (1e308, 1.1e308, 1.2e308),
+    ),
+)
+def test_external_price_expressions_match_complete_fraction(bid, ask, anchor):
+    from fractions import Fraction
+
+    stamp = pd.Timestamp("2026-08-01")
+    frame = pd.DataFrame(
+        {
+            "market_id": ["crypto"],
+            "asset_id": ["btc_usdt"],
+            "timestamp": [stamp],
+            "segment_id": ["a"],
+            "mid": [anchor],
+        }
+    )
+    quotes = [
+        {
+            "local_timestamp": stamp.value // 1000,
+            "timestamp": stamp.value // 1000,
+            "bid_price": bid,
+            "ask_price": ask,
+        }
+    ]
+    actual = next(
+        iter_external_context_frames(
+            [frame],
+            quotes=quotes,
+            trades=(),
+            venue="bybit",
+            base_units_per_amount=1.0,
+            max_age_ms=100,
+        )
+    ).iloc[0]
+    mid = float((Fraction(bid) + Fraction(ask)) / 2)
+    dispersion = float(
+        abs(Fraction(mid) - Fraction(anchor)) / (Fraction(mid) + Fraction(anchor))
+    )
+    assert actual.bybit_mid_usdt == mid
+    assert actual.bybit_relative_mid_dispersion == pytest.approx(
+        dispersion, rel=1e-15, abs=0
+    )

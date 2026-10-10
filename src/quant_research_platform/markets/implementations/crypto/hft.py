@@ -767,7 +767,9 @@ def iter_derivative_factor_frames(
                     flow_start_ns = decision_ns - 100_000_000
                 while event is not None and event[0] <= information_ns:
                     observed_ns, channel, payload, epoch = event
-                    if active_epoch is not None and epoch != active_epoch:
+                    if epoch != active_epoch and (
+                        active_epoch is not None or channel is None
+                    ):
                         states.clear()
                         liquidations.clear()
                         count = invalid = 0
@@ -1233,15 +1235,23 @@ def iter_external_context_frames(
                     and 0 < bid < ask
                     and row["quote_age_ms"] <= max_age_ms
                 ):
-                    mid = bid / 2 + ask / 2
+                    mid = (
+                        (bid + ask) / 2
+                        if ask <= np.finfo(float).max / 2
+                        else bid / 2 + ask / 2
+                    )
                     mids.append(mid)
                     binance_mid = float(frame["mid"].iloc[index])
                     row.update(
                         mid_usdt=mid,
                         spread_usdt=ask - bid,
                         price_difference=mid / binance_mid - 1,
-                        relative_mid_dispersion=abs(mid / 2 - binance_mid / 2)
-                        / (mid / 2 + binance_mid / 2),
+                        relative_mid_dispersion=(
+                            abs(mid - binance_mid) / (mid + binance_mid)
+                            if max(mid, binance_mid) <= np.finfo(float).max / 2
+                            else abs(mid / 2 - binance_mid / 2)
+                            / (mid / 2 + binance_mid / 2)
+                        ),
                     )
                     if len(mids) >= 2:
                         row["return_100ms"] = mid / mids[-2] - 1

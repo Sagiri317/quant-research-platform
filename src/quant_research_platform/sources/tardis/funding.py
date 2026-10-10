@@ -139,6 +139,7 @@ def import_funding_history(
                 None,
             )
         previous_observed = -1
+        previous_projection = None
         for member in archive.manifest["files"]:
             records = iter_native_slice(
                 archive.root / member["path"],
@@ -162,9 +163,6 @@ def import_funding_history(
                         timestamp,
                         error="tardis_funding_observed_time_invalid",
                     ).value
-                    if observed <= previous_observed:
-                        raise ValueError("tardis_funding_forecast_order_invalid")
-                    previous_observed = observed
                     mark = value["data"]
                     until = (
                         strict_non_negative_integer(
@@ -181,6 +179,14 @@ def import_funding_history(
                         mark.get("p"),
                         error="tardis_funding_forecast_mark_invalid",
                     )
+                    projection = (until, rate, price)
+                    if observed < previous_observed:
+                        raise ValueError("tardis_funding_forecast_order_invalid")
+                    if observed == previous_observed:
+                        if projection != previous_projection:
+                            raise ValueError("tardis_funding_forecast_conflict")
+                        continue
+                    previous_observed, previous_projection = observed, projection
                     if until > observed:
                         forecast = FundingForecast(
                             observed, until, ((until, -rate * price),)

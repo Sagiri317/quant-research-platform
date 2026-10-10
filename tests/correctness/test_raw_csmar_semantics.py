@@ -338,12 +338,9 @@ def test_invalid_analyst_raw_does_not_publish_candidate(tmp_path, column, value)
             raw_root=raw,
             data_ids=("analyst_forecast",),
         )
-    assert not tuple(
-        filesystem_glob(
-            StorageLayout(tmp_path / "candidate").interim_data_root(
-                "csmar", "analyst_forecast"
-            ),
-            "instances/*",
+    assert not filesystem_exists(
+        StorageLayout(tmp_path / "candidate").interim_data_root(
+            "csmar", "analyst_forecast"
         )
     )
     assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
@@ -375,12 +372,9 @@ def test_calendar_raw_rejects_nonintegers_without_publication(tmp_path, column, 
             raw_root=raw,
             data_ids=("trading_calendar",),
         )
-    assert not tuple(
-        filesystem_glob(
-            StorageLayout(tmp_path / "candidate").interim_data_root(
-                "csmar", "trading_calendar"
-            ),
-            "instances/*",
+    assert not filesystem_exists(
+        StorageLayout(tmp_path / "candidate").interim_data_root(
+            "csmar", "trading_calendar"
         )
     )
     assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
@@ -504,12 +498,9 @@ def test_after_hours_materialization_preserves_totals_and_old_good(tmp_path) -> 
             data_ids=("market_bars_1d",),
         )
     assert _file_bytes(root) == before
-    assert not tuple(
-        filesystem_glob(
-            StorageLayout(tmp_path / "candidate").interim_data_root(
-                "csmar", "market_bars_1d"
-            ),
-            "instances/*",
+    assert not filesystem_exists(
+        StorageLayout(tmp_path / "candidate").interim_data_root(
+            "csmar", "market_bars_1d"
         )
     )
     assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
@@ -1229,12 +1220,9 @@ def test_index_info_unknown_enum_rejects_and_preserves_published(
                 data_ids=("index_info",),
             )
         assert _file_bytes(root) == before
-        assert not tuple(
-            filesystem_glob(
-                StorageLayout(tmp_path / "candidate").interim_data_root(
-                    "csmar", "index_info"
-                ),
-                "instances/*",
+        assert not filesystem_exists(
+            StorageLayout(tmp_path / "candidate").interim_data_root(
+                "csmar", "index_info"
             )
         )
         assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))

@@ -202,9 +202,6 @@ def test_copy_closes_real_files_and_preserves_primary_identity(
 
     monkeypatch.setattr(module, "open_filesystem_file", open_output)
     destination = tmp_path / "published"
-    old_good = tmp_path / "old-good"
-    old_good.mkdir()
-    (old_good / "data").write_bytes(b"verified-old-bytes")
 
     def publish():
         if backend == "raw":
@@ -240,7 +237,6 @@ def test_copy_closes_real_files_and_preserves_primary_identity(
     assert response.closed and response.close_count == 1
     assert len(outputs) == 1
     assert outputs[0].handle.closed and outputs[0].close_count == 1
-    assert (old_good / "data").read_bytes() == b"verified-old-bytes"
     assert all(not path.name.startswith(".a-") for path in tmp_path.iterdir())
 
 

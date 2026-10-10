@@ -201,6 +201,17 @@ def build_a_share_report(
     }
     for group, result in statistics.items():
         if result.get("status") == "DEFINED":
+            sections["OOS prediction"][group].update(
+                {
+                    key: result[key]
+                    for key in (
+                        "inference_clock",
+                        "inference_population",
+                        "input_date_domain",
+                        "research_window",
+                    )
+                }
+            )
             sections["OOS prediction"][group]["prediction_diagnostics"] = result[
                 "prediction_diagnostics"
             ]

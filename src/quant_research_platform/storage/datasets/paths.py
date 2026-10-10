@@ -18,7 +18,6 @@ from quant_research_platform.contracts.data import (
 )
 from quant_research_platform.contracts.datasets import ResearchDatasetSpec
 from quant_research_platform.contracts.validation import strict_timestamp_series
-from quant_research_platform.policy.share_safety import is_local_only_path
 from quant_research_platform.storage.identity import validate_instance_identity
 
 _YEAR_PARTITION_PATTERN = re.compile("^year=([0-9]{4})$")
@@ -89,8 +88,6 @@ def partition_part_path(root: Path, partition: str, part_index: int) -> Path:
 
 
 def validate_dataset_artifact_root(root: Path, spec: DataSpec) -> None:
-    if not is_local_only_path(root):
-        raise ValueError("outside_local_only_boundary")
     path_parts = tuple(
         part for part in PurePosixPath(root.as_posix()).parts if part != "/"
     )

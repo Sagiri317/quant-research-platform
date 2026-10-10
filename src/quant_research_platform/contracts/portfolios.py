@@ -257,9 +257,8 @@ class PortfolioLedgerBatch:
             if row.asset_id == PORTFOLIO_CASH_ASSET_ID
         ):
             raise ValueError("portfolio_ledger_cash_valuation_invalid")
-        tolerance = max(
-            sum(abs(row.value) * (ulp(1.0) * 512.0) for row in before.values()),
-            1e-12,
+        tolerance = sum(
+            portfolio_notional_tolerance(abs(row.value)) for row in before.values()
         )
         cash_before = before[PORTFOLIO_CASH_ASSET_ID].value
         cash_after = after[PORTFOLIO_CASH_ASSET_ID].value
@@ -381,7 +380,7 @@ class FundingForecast:
 
 
 def portfolio_notional_tolerance(nav: float) -> float:
-    return max(ulp(1.0) * max(1.0, nav) * 512.0, 1e-12)
+    return min(ulp(nav) * 512.0, abs(nav) * (ulp(1.0) * 512.0))
 
 
 def _quantity_tolerance(*quantities: float) -> float:

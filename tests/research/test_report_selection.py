@@ -137,6 +137,7 @@ def _check_notebook_unrequested_diagnostics(result, *, is_crypto, sections):
 @pytest.mark.parametrize("stage", ["dataset", "evaluation"])
 def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path, stage):
     from quant_research_platform.artifacts import research
+    from quant_research_platform.research.protocols import a_share
     from quant_research_platform.storage.layout import StorageLayout
 
     run = record()
@@ -198,6 +199,12 @@ def test_a_share_evidence_loads_only_requested_targets(monkeypatch, tmp_path, st
                 "logical_artifact_id": "factors_only_factor_statistics",
                 "instance_identity": "a" * 64,
                 "schema_identity": "b" * 64,
+                "research_window": run.research_window,
+                "semantic_metadata": {
+                    "target_contract": {
+                        "protocol": a_share.protocol("pv_all").manifest()
+                    }
+                },
             },
             table=lambda member: nullcontext(pd.DataFrame()),
         ),
@@ -308,6 +315,21 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked(candidat
         member.removesuffix(".parquet"): []
         for member in STATISTICS_TABLE_GROUPS["crypto_portfolio"]
     }
+    qualification = {
+        "sources": [
+            {
+                "coverage": {
+                    "start_ns": 0,
+                    "end_ns": 86400000000000,
+                    "status": "COMPLETE",
+                },
+                "settlement_source": {"provider": "XOOMAR"},
+                "verification": (
+                    "supplier_completeness_assumption_not_independently_verified"
+                ),
+            }
+        ]
+    }
     tables["crypto_portfolio_intervals"] = [
         {
             "candidate_id": candidate_id,
@@ -355,7 +377,13 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked(candidat
                     "asset_id": "btc_usdt",
                     "status": "DEFINED",
                     "execution_mode": "independent_segments",
-                    "episodes": [{"episode_id": "a" * 64, "termination": "TRUNCATED"}],
+                    "episodes": [
+                        {
+                            "episode_id": "a" * 64,
+                            "termination": "TRUNCATED",
+                            "funding_qualification": qualification,
+                        }
+                    ],
                 },
             ],
             "issues": [blocked],
@@ -370,6 +398,10 @@ def test_crypto_report_keeps_segment_results_when_continuous_is_blocked(candidat
         == tables["crypto_portfolio_coverage"]
     )
     assert portfolio["candidates"][1]["episodes"][0]["termination"] == "TRUNCATED"
+    assert (
+        portfolio["candidates"][1]["episodes"][0]["funding_qualification"]
+        == qualification
+    )
     coverage = portfolio["coverage_comparison"][0]
     assert coverage["asset_id"] == "btc_usdt"
     assert coverage["groups"][0]["candidates"] == [

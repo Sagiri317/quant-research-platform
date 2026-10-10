@@ -101,7 +101,11 @@ def compute_market_panel(
     open_session = dense["market_type"].isna()
     for market_type, group in dense.groupby("market_type", sort=False):
         open_session.loc[group.index] = group["timestamp"].isin(
-            market_type_trading_sessions(trading_calendar, market_type)
+            market_type_trading_sessions(
+                trading_calendar,
+                market_type,
+                required_dates=pd.DatetimeIndex(group["timestamp"]),
+            )
         )
     dense = dense.loc[open_session].copy()
     if dense.empty:
@@ -405,6 +409,15 @@ def _asof_join_stock_master(panel: pd.DataFrame, stocks: pd.DataFrame) -> pd.Dat
                     else pd.NaT
                 )
         else:
+            # Listing is a life fact; a later status cannot erase or backfill it.
+            lives = right.drop_duplicates("listing_date", keep="last").loc[
+                :, ["asset_id", "listing_date", "delisting_date"]
+            ]
+            lives["stock_effective_date"] = lives["listing_date"]
+            lives = lives.loc[
+                ~lives["stock_effective_date"].isin(right["stock_effective_date"])
+            ]
+            right = pd.concat([lives, right], ignore_index=True)
             current = pd.merge_asof(
                 group.sort_values("timestamp"),
                 right.loc[
@@ -1121,7 +1134,9 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
         free_shares = cap.div(close.where(close.gt(0.0)))
         turnover = volume.div(free_shares.where(free_shares.gt(0.0)))
         unstable = (
-            cap.gt(0) & close.gt(0) & (~np.isfinite(free_shares) | free_shares.eq(0))
+            cap.gt(0)
+            & close.gt(0)
+            & (~np.isfinite(free_shares) | free_shares.lt(np.finfo(float).tiny))
         )
         # Scale only the exceptional intermediate; keep ordinary row arithmetic.
         if unstable.any():

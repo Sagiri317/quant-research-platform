@@ -1861,6 +1861,7 @@ def test_partial_connection_overlap_has_one_panel_and_execution_domain(
         ((start.value, start.value + 300 * 10**6),),
         (),
         iter(()),
+        (),
     )
     episodes = list(_qualified_episodes(book_coverage, coverage(), funding, bounds))
     expected_end = start.value + (50 * 10**6 if overlap else 100 * 10**6 + 1)

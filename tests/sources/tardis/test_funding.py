@@ -712,3 +712,73 @@ def test_import_settlement_handle_close_preserves_primary(
         assert primary.__notes__ == ["iterator close also failed: OSError"]
     assert handles and all(handle.closed for handle in handles)
     assert not (destination / "funding/BTCUSDT").exists()
+
+
+@pytest.mark.parametrize(
+    "expired,conflict", ((False, False), (True, False), (False, True), (True, True))
+)
+def test_equivalent_utc_funding_retransmission_is_idempotent(
+    tmp_path, expired, conflict
+):
+    start = pd.Timestamp("2026-09-01T00:00:00Z").value // 1_000_000
+    data = {
+        "e": "markPriceUpdate",
+        "s": "BTCUSDT",
+        "E": start + 900,
+        "p": "100",
+        "r": "0.05",
+        "T": start + (1000 if expired else 10000),
+    }
+    native = _line(1, "markPrice@1s", data) + _line(
+        1, "markPrice@1s", {**data, "r": "0.06" if conflict else "0.05"}
+    )
+    slices = _slices(tmp_path / "native", native, count=1)
+    response = tmp_path / "official.json"
+    response.write_text(
+        json.dumps(
+            [
+                {
+                    "symbol": "BTCUSDT",
+                    "fundingTime": start + 10000,
+                    "fundingRate": "0.1",
+                    "markPrice": "200",
+                }
+            ]
+        )
+    )
+    published = tmp_path / "archive"
+    import_slices(published, date="2026-09-01", slices=slices)
+    with open_tardis_archive(published) as day:
+
+        def publish():
+            import_funding_history(
+                day,
+                symbol="BTCUSDT",
+                source_id="binance",
+                request_limit=1000,
+                response_path=response,
+                http_status=200,
+                start_ms=start,
+                end_ms=start + 599999,
+            )
+
+        if conflict:
+            with pytest.raises(ValueError, match="tardis_funding_forecast_conflict"):
+                publish()
+            return
+        publish()
+        roots = day.funding_roots(
+            "BTCUSDT",
+            time_window=TimeWindow(
+                pd.Timestamp(start, unit="ms"), pd.Timestamp(start + 599999, unit="ms")
+            ),
+        )
+        with read_funding_observations(roots, symbol="BTCUSDT") as source:
+            forecasts = tuple(source.forecasts)
+            assert len(forecasts) == (0 if expired else 1)
+            if not expired:
+                assert forecasts[0].cashflows == (((start + 10000) * 1_000_000, -5.0),)
+            assert (
+                source.settlement_qualification[0]["verification"]
+                == "official_response_validated"
+            )

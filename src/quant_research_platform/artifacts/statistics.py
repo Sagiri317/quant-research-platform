@@ -568,6 +568,18 @@ _EMPTY_TABLE_MEMBERS = frozenset(
         "portfolio_exposures.parquet",
     }
 )
+for _member in (
+    "factor_diagnostics.parquet",
+    "prediction_diagnostics.parquet",
+    "fama_macbeth.parquet",
+    "model_comparison.parquet",
+    "model_reality_checks.parquet",
+    "robustness.parquet",
+):
+    _ARROW_SCHEMAS[_member] = _ARROW_SCHEMAS[_member].append(
+        pa.field("input_date_count", pa.int64(), nullable=False)
+    )
+
 _TABLE_COLUMNS = {
     member: tuple(schema.names) for member, schema in _ARROW_SCHEMAS.items()
 }
@@ -954,6 +966,12 @@ def _validated_frame(frame: pd.DataFrame, *, member: str, envelope) -> pd.DataFr
         if values.lt(0).any():
             raise ValueError("statistics_table_count_invalid")
         result[column] = values
+    if "input_date_count" in result:
+        valid_count = result[
+            "period_count" if member == "fama_macbeth.parquet" else "observation_count"
+        ]
+        if (result["input_date_count"] < valid_count).any():
+            raise ValueError("statistics_input_date_count_invalid")
     for column in _TIMESTAMP_COLUMNS.get(member, ()):
         values = pd.to_datetime(result[column], errors="raise")
         if values.isna().any():

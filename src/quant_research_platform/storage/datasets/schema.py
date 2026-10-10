@@ -72,6 +72,7 @@ _DATASET_SPEC_PROCESSED_KEYS = _DATASET_SPEC_COMMON_KEYS | {
     "market_id",
     "kind",
     "source_input_data_ids",
+    "optional_source_input_data_ids",
     "processed_input_data_ids",
     "parameters",
 }
@@ -861,6 +862,9 @@ def data_spec_payload(spec: DataSpec) -> dict[str, Any]:
                 "market_id": spec.market_id,
                 "kind": spec.kind.value,
                 "source_input_data_ids": list(spec.source_input_data_ids),
+                "optional_source_input_data_ids": list(
+                    spec.optional_source_input_data_ids
+                ),
                 "processed_input_data_ids": list(spec.processed_input_data_ids),
                 "parameters": parse_qrp_json_object(
                     spec.parameters_json.encode("utf-8")
@@ -988,6 +992,13 @@ def validate_dataset_spec_payload(spec: Mapping[str, Any]) -> None:
             market_id=MarketId(market_id),
             kind=ProcessedDataKind(kind),
             source_input_data_ids=tuple(source_input_data_ids),
+            optional_source_input_data_ids=tuple(
+                _require_string_list(
+                    spec.get("optional_source_input_data_ids"),
+                    "dataset_optional_source_input_data_ids_invalid",
+                    allow_empty=True,
+                )
+            ),
             processed_input_data_ids=tuple(processed_input_data_ids),
             parameters_json=render_qrp_json_object(spec["parameters"]),
         )

@@ -575,8 +575,16 @@ def test_ic_summary_nonzero_variance_survives_rounding_and_persistence(
         if expected_std == 0.0:
             assert len(set(values)) > 1
             assert pd.isna(row[f"std_{prefix}"])
-            assert pd.isna(row[f"{prefix}ir"])
-            assert row[f"{prefix}ir_reason"] == "nonfinite_result"
+            from decimal import Decimal, localcontext
+
+            with localcontext() as context:
+                context.prec = 80
+                exact = [Decimal.from_float(value) for value in values]
+                center = sum(exact) / len(exact)
+                variance = sum((value - center) ** 2 for value in exact) / len(exact)
+                expected_ratio = float(center / variance.sqrt())
+            assert row[f"{prefix}ir"] == pytest.approx(expected_ratio)
+            assert row[f"{prefix}ir_reason"] is None
         else:
             assert row[f"std_{prefix}"] == pytest.approx(expected_std, rel=1e-15, abs=0)
             assert row[f"{prefix}ir"] == pytest.approx(

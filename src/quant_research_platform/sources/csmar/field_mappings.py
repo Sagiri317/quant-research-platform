@@ -561,19 +561,13 @@ def validate_raw_column_names(columns: tuple[str, ...], dataset: str) -> None:
             raise ValueError("csmar_raw_export_schema_invalid")
 
 
-def column_mapping(dataset: str) -> Mapping[str, str]:
-    """Return raw-provider to source-local normalized column mappings."""
-
-    return COLUMN_MAPPINGS[dataset]
-
-
 def map_columns(frame: pd.DataFrame, dataset: str) -> pd.DataFrame:
     """Rename raw provider columns to source-local normalized aliases."""
 
     columns = tuple(str(column) for column in frame.columns)
     if len(columns) != len(set(columns)):
         raise ValueError("duplicate_csmar_provider_column")
-    mapping = column_mapping(dataset)
+    mapping = COLUMN_MAPPINGS[dataset]
     aliases = COLUMN_ALIASES.get(dataset, {})
     available = set(columns)
     for primary, alias_columns in aliases.items():

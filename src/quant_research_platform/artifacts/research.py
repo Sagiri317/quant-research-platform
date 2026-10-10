@@ -13,6 +13,7 @@ import pandas as pd
 
 from quant_research_platform.artifacts.crypto_hft import (
     read_crypto_episode_artifact,
+    summarize_crypto_ledger,
 )
 from quant_research_platform.artifacts.evidence import (
     read_json_evidence,
@@ -110,15 +111,27 @@ def read_research_run_record(
     return record
 
 
-def _report_rows(frame):
-    return [
+def _report_rows(frame, *, keep_null=False):
+    rows = [
         {
-            key: value.isoformat() if isinstance(value, pd.Timestamp) else value
+            key: None
+            if pd.isna(value)
+            else (value.isoformat() if isinstance(value, pd.Timestamp) else value)
             for key, value in row.items()
-            if not pd.isna(value)
+            if keep_null or not pd.isna(value)
         }
         for row in frame.to_dict("records")
     ]
+    for row in rows:
+        input_count = row.get("input_date_count", row.get("calendar_count"))
+        if input_count is not None:
+            count = (
+                row["period_count"]
+                if "period_count" in row
+                else row["observation_count"]
+            )
+            row["missing_observation_count"] = input_count - count
+    return rows
 
 
 def read_evaluation_report_evidence(
@@ -235,7 +248,7 @@ def load_a_share_run_evidence(
 
     def table_records(artifact, member):
         with artifact.table(member) as frame:
-            return frame.astype(object).where(frame.notna(), None).to_dict("records")
+            return _report_rows(frame, keep_null=True)
 
     scenario = record.scenario_id
     configuration = record.payload()["protocol"]["research_configuration"]
@@ -389,6 +402,17 @@ def load_a_share_run_evidence(
                 "status": "DEFINED",
                 "identity": factor_ref.instance_identity,
                 **{
+                    key: artifact.envelope["semantic_metadata"]["target_contract"][
+                        "protocol"
+                    ]["statistics"][key]
+                    for key in (
+                        "inference_clock",
+                        "inference_population",
+                        "input_date_domain",
+                    )
+                },
+                "research_window": dict(artifact.envelope["research_window"]),
+                **{
                     name: table_records(artifact, name + ".parquet")
                     for name in (
                         "factor_diagnostics",
@@ -433,6 +457,17 @@ def load_a_share_run_evidence(
                 group_statistics = {
                     "status": "DEFINED",
                     "identity": statistics_ref.instance_identity,
+                    **{
+                        key: artifact.envelope["semantic_metadata"]["target_contract"][
+                            "protocol"
+                        ]["statistics"][key]
+                        for key in (
+                            "inference_clock",
+                            "inference_population",
+                            "input_date_domain",
+                        )
+                    },
+                    "research_window": dict(artifact.envelope["research_window"]),
                     **tables,
                 }
             except (FileNotFoundError, OSError, KeyError, TypeError, ValueError):
@@ -500,6 +535,13 @@ def load_a_share_run_evidence(
                         ["candidate_id", "component_id", "component_type"], sort=True
                     ):
                         defined = rows.status.eq("DEFINED").all()
+                        status = (
+                            "DEFINED"
+                            if defined
+                            else "BLOCKED"
+                            if rows.status.eq("BLOCKED").any()
+                            else "UNDEFINED"
+                        )
                         attribution_summary.append(
                             dict(
                                 candidate_id=candidate,
@@ -508,17 +550,11 @@ def load_a_share_run_evidence(
                                 pnl=float((rows.value * rows.nav_before).sum())
                                 if defined
                                 else None,
-                                status="DEFINED"
-                                if defined
-                                else "BLOCKED"
-                                if rows.status.eq("BLOCKED").any()
-                                else "UNDEFINED",
+                                status=status,
                                 reason=""
                                 if defined
                                 else str(
-                                    rows.loc[rows.status.ne("DEFINED"), "reason"].iloc[
-                                        0
-                                    ]
+                                    rows.loc[rows.status.eq(status), "reason"].iloc[0]
                                 ),
                                 observation_count=len(rows),
                             )
@@ -1086,6 +1122,7 @@ def produce_crypto_report(
         "reconstruction_status": "DEFINED" if reconstruction_defined else "UNDEFINED",
     }
     model_target = f"{record.scenario_id}_models"
+    verified_trials = {}
     models = _unavailable(issues, model_target)
     if model_target in references:
         reference = references[model_target]
@@ -1097,6 +1134,10 @@ def produce_crypto_report(
                 trial_layout=layout,
             )
             _validate_reference_envelope(reference, artifact.envelope)
+            verified_trials.update(
+                ((ref["run_id"], ref["experiment_id"]), (ref, plan, records))
+                for ref, plan, records in artifact.trial_ledgers
+            )
             models = {
                 "status": "DEFINED",
                 "identity": reference.instance_identity,
@@ -1109,6 +1150,48 @@ def produce_crypto_report(
         except (OSError, KeyError, TypeError, ValueError):
             issues.append(_issue(model_target, "FAILED", "model_artifact_invalid"))
             models = _unavailable(issues, model_target)
+    trial_rows = []
+    trial_status = "DEFINED"
+    for reference in record.trial_ledgers:
+        key = (reference["run_id"], reference["experiment_id"])
+        if key in verified_trials:
+            continue
+        try:
+            plan, records = read_model_trial_ledger_reference(layout, dict(reference))
+            verified_trials[key] = (reference, plan, records)
+        except (OSError, KeyError, TypeError, ValueError):
+            trial_status = "FAILED"
+            issues.append(
+                _issue(model_target, "FAILED", "trial_ledger_reference_invalid")
+            )
+    for reference, plan, records in verified_trials.values():
+        for trial in records:
+            payload = trial.payload()
+            trial_rows.append(
+                {
+                    "source_run_id": reference["run_id"],
+                    "experiment_id": reference["experiment_id"],
+                    "trial_semantic_identity": reference["semantic_identity"],
+                    "role": plan.stage,
+                    **{
+                        key: payload[key]
+                        for key in (
+                            "trial_id",
+                            "fold_id",
+                            "candidate_family_id",
+                            "candidate_id",
+                            "model_definition_id",
+                            "status",
+                            "metrics",
+                            "undefined_reasons",
+                            "horizon_id",
+                            "common_coverage_id",
+                            "attempt_index",
+                        )
+                    },
+                }
+            )
+    models.update({"trial_status": trial_status, "trials": trial_rows})
     prediction_target = f"{record.scenario_id}_predictions"
     predictions = (
         _unavailable(issues, prediction_target)
@@ -1259,15 +1342,18 @@ def produce_crypto_report(
                         expected_identity=reference.instance_identity,
                         expected_member_identities=captured[reference.target_id],
                         consume_batches=lambda ledger, batches, result=economics: (
-                            result.update(
-                                summarize_portfolio_ledger(ledger.capital, batches)
-                            )
+                            result.update(summarize_crypto_ledger(ledger, batches))
                         ),
                     )
                     _validate_reference_envelope(reference, ledger.envelope)
                     result = {
                         "episode_id": "continuous",
-                        "economics": economics,
+                        "economics": economics["economics"],
+                        "funding_qualification": economics["funding_qualification"]
+                        or {
+                            "status": "UNDEFINED",
+                            "reason": "funding_qualification_not_recorded",
+                        },
                         "execution_curve": {
                             "artifact_root": reference.artifact_root,
                             "identity": reference.instance_identity,
@@ -1287,6 +1373,7 @@ def produce_crypto_report(
                         reference=reference,
                         episode_rows=episode_rows,
                     ):
+                        summary = summarize_crypto_ledger(ledger, batches)
                         row = {
                             "episode_id": index["episode_id"],
                             "start_at": pd.Timestamp(index["start_ns"]).isoformat(),
@@ -1296,9 +1383,12 @@ def produce_crypto_report(
                             ).isoformat(),
                             "termination": index["termination"],
                             "stop_reasons": index["stop_reasons"],
-                            "economics": summarize_portfolio_ledger(
-                                ledger.capital, batches
-                            ),
+                            "economics": summary["economics"],
+                            "funding_qualification": summary["funding_qualification"]
+                            or {
+                                "status": "UNDEFINED",
+                                "reason": "funding_qualification_not_recorded",
+                            },
                             "execution_curve": {
                                 "artifact_root": reference.artifact_root,
                                 "identity": index["ledger_identity"],

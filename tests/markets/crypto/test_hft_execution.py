@@ -858,7 +858,7 @@ def test_observation_stop_does_not_rewrite_maker_decision_or_cancel_pending_quot
 
 
 @pytest.mark.parametrize("kind", ["maker", "taker"])
-def test_complete_observation_window_preserves_continuous_economic_batches(kind):
+def test_complete_observation_window_preserves_batches_without_fills(kind):
     produced = []
     for observed in (None, (0, 1000000001)):
         batches = []

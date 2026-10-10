@@ -53,6 +53,74 @@ _LEDGER_COLUMNS = (
 )
 
 
+class _LedgerEconomics:
+    """Accumulate economic facts without subtracting rounded capital or totals."""
+
+    def __init__(self, capital):
+        self.capital = capital
+        self.position_value = None
+        self.totals = {
+            name: Fraction()
+            for name in ("net_pnl", "fees", "funding", "turnover", "fill_quantity")
+        }
+        self.fill_events = 0
+        self.timestamp_ns = 0
+
+    def consume(self, batch):
+        end = [row for row in batch.valuations if row.phase == "end"]
+        position = sum(
+            (
+                Fraction(row.value)
+                for row in end
+                if row.asset_id != PORTFOLIO_CASH_ASSET_ID
+            ),
+            Fraction(),
+        )
+        if self.position_value is None:
+            self.position_value = sum(
+                (
+                    Fraction(row.value)
+                    for row in batch.valuations
+                    if row.phase == "before" and row.asset_id != PORTFOLIO_CASH_ASSET_ID
+                ),
+                Fraction(),
+            )
+        increment = dict.fromkeys(self.totals, 0)
+        increment["net_pnl"] = position - self.position_value
+        for row in batch.cashflows:
+            if row.amount:
+                amount = Fraction(row.amount)
+                increment["net_pnl"] += amount
+                if row.kind.endswith("_cost"):
+                    increment["fees"] -= amount
+                elif row.kind == "funding":
+                    increment["funding"] += amount
+        for row in batch.trades:
+            increment["turnover"] += abs(Fraction(row.notional))
+            increment["fill_quantity"] += abs(Fraction(row.quantity))
+        for name, amount in increment.items():
+            if amount:
+                self.totals[name] += amount
+        increment["fill_events"] = len(batch.trades)
+        self.fill_events += len(batch.trades)
+        self.position_value = position
+        self.timestamp_ns = max(row.timestamp_ns for row in end)
+        return increment
+
+    def summary(self):
+        net, fees, funding = (
+            self.totals[name] for name in ("net_pnl", "fees", "funding")
+        )
+        return {
+            **{name: float(value) for name, value in self.totals.items()},
+            "gross_pnl": float(net + fees - funding),
+            "nav": float(Fraction(self.capital.initial_capital) + net),
+            "capital_return": float(net / Fraction(self.capital.initial_capital)),
+            "fill_events": self.fill_events,
+            "valuation_timestamp_ns": self.timestamp_ns,
+        }
+
+
 class PortfolioEconomics:
     """Bounded linear-perpetual state shared by maker and taker execution."""
 
@@ -68,14 +136,29 @@ class PortfolioEconomics:
         self.asset_id = asset_id
         self.emit = emit
         self.quantity = 0.0
-        self.cost_basis = 0.0
-        self.cash = capital.initial_capital
-        self.cost_cashflows = 0.0
-        self.funding_cashflows = 0.0
+        self._cost_basis = Fraction()
+        self._cash = Fraction(capital.initial_capital)
+        self._economics = _LedgerEconomics(capital)
         self.sequence = 0
         self.fill_count = 0
         self.last_timestamp = 0
         self.last_mark: float | None = None
+
+    @property
+    def cost_basis(self):
+        return float(self._cost_basis)
+
+    @property
+    def cash(self):
+        return float(self._cash)
+
+    @property
+    def cost_cashflows(self):
+        return -float(self._economics.totals["fees"])
+
+    @property
+    def funding_cashflows(self):
+        return float(self._economics.totals["funding"])
 
     def _values(
         self, timestamp: int, phase: str, mark: float | None
@@ -91,7 +174,7 @@ class PortfolioEconomics:
                 self.asset_id,
                 phase,
                 self.quantity,
-                self.quantity * mark - self.cost_basis,
+                float(Fraction(self.quantity) * Fraction(mark) - self._cost_basis),
                 mark,
                 self.cost_basis,
             ),
@@ -120,25 +203,26 @@ class PortfolioEconomics:
         trade = ExecutedTrade(
             fill_id, order_id, timestamp_ns, self.asset_id, quantity, quantity * price
         )
-        realized = 0.0
+        realized = Fraction()
         if self.quantity and (self.quantity > 0) != (quantity > 0):
             closed = min(abs(self.quantity), abs(quantity))
+            entry = self._cost_basis / Fraction(self.quantity)
             realized = (
-                closed
-                * np.sign(self.quantity)
-                * (price - self.cost_basis / self.quantity)
+                Fraction(closed)
+                * (1 if self.quantity > 0 else -1)
+                * (Fraction(price) - entry)
             )
             remaining = self.quantity + quantity
-            self.cost_basis = remaining * (
-                self.cost_basis / self.quantity
+            self._cost_basis = Fraction(remaining) * (
+                entry
                 if remaining != 0 and (remaining > 0) == (self.quantity > 0)
-                else price
+                else Fraction(price)
             )
         else:
-            self.cost_basis += quantity * price
+            self._cost_basis += Fraction(quantity) * Fraction(price)
         self.quantity += quantity
-        self.cash += realized - fee
-        self.cost_cashflows -= fee
+        realized = float(realized)
+        self._cash += Fraction(realized) - Fraction(fee)
         cashflows = (
             PortfolioCashFlow(
                 f"{fill_id}:settlement",
@@ -166,9 +250,10 @@ class PortfolioEconomics:
         if event.rate is None or event.mark_price is None:
             raise PortfolioTargetBlocked("portfolio_required_funding_missing")
         before = self._values(event.timestamp_ns, "before", event.mark_price)
-        amount = -self.quantity * event.mark_price * event.rate
-        self.cash += amount
-        self.funding_cashflows += amount
+        amount = float(
+            -Fraction(self.quantity) * Fraction(event.mark_price) * Fraction(event.rate)
+        )
+        self._cash += Fraction(amount)
         self._emit(
             (),
             (
@@ -199,15 +284,17 @@ class PortfolioEconomics:
             raise ValueError("portfolio_valuation_mark_invalid")
         before = self._values(timestamp_ns, "before", mark_price)
         self._emit((), (), before, timestamp_ns, mark_price, diagnostics)
-        nav = sum(row.value for row in before)
-        net = nav - self.capital.initial_capital
+        summary = self._economics.summary()
         return {
-            "gross_pnl": net - self.cost_cashflows - self.funding_cashflows,
-            "net_pnl": net,
-            "nav": nav,
-            "capital_return": net / self.capital.initial_capital,
-            "fees": -self.cost_cashflows,
-            "funding": self.funding_cashflows,
+            name: summary[name]
+            for name in (
+                "gross_pnl",
+                "net_pnl",
+                "nav",
+                "capital_return",
+                "fees",
+                "funding",
+            )
         }
 
     def diagnostic(self, fill: dict[str, object]) -> None:
@@ -239,6 +326,7 @@ class PortfolioEconomics:
             ),
             diagnostics,
         )
+        self._economics.consume(batch)
         self.sequence += 1
         self.last_timestamp = timestamp
         self.last_mark = mark
@@ -674,12 +762,13 @@ def execute_continuous_target(
     target = _weight_values(target_weights, assets, "target_weights_invalid")
     if current.lt(0.0).any() or target.lt(0.0).any():
         raise ValueError("execution_weights_invalid")
-    tolerance = portfolio_notional_tolerance(nav_value)
+    weight_bound = 1.0 + 512.0 * np.finfo(float).eps
     if (
-        current.sum() * nav_value > nav_value + tolerance
-        or target.sum() * nav_value > nav_value + tolerance
+        sum(map(float, current)) > weight_bound
+        or sum(map(float, target)) > weight_bound
     ):
         raise ValueError("execution_weights_sum_invalid")
+    tolerance = portfolio_notional_tolerance(nav_value)
     enter = _bool_values(can_enter, assets, "execution_entry_mask_invalid")
     exit_ = _bool_values(can_exit, assets, "execution_exit_mask_invalid")
     pre_notional = current * nav_value
@@ -795,7 +884,7 @@ def execute_continuous_target(
 
     scale = 0.0
     if buy_candidates and cash_after_sells > 0.0:
-        if buy_spend_total(1.0) <= cash_after_sells + tolerance:
+        if buy_spend_total(1.0) <= cash_after_sells:
             scale = 1.0
         else:
             low, high = 0.0, 1.0
@@ -840,7 +929,7 @@ def execute_continuous_target(
     post_trade = pre_notional + sell_delta + buy_delta
     nav_after = float(post_trade.sum() + post_trade_cash)
     expected_nav_after = nav_value - total_cost
-    if post_trade_cash < -tolerance or nav_after <= tolerance:
+    if post_trade_cash < -tolerance or not np.isfinite(nav_after) or nav_after <= 0.0:
         raise ValueError("execution_cash_invalid")
     if not np.isclose(nav_after, expected_nav_after, rtol=0.0, atol=tolerance):
         raise ValueError("execution_self_financing_invalid")

@@ -163,6 +163,13 @@ PANEL 在真实交易日轴上实施可用日规则。分类词典、历史资�
 ## 持久化与就绪
 
 数据层分为 raw、interim、processed、research、artifacts、runs，由 storage 布局派生路径。
+
+ProcessedDataSpec以`source_input_data_ids`声明消费来源，以其子集`optional_source_input_data_ids`
+声明允许不存在的来源，生产者与DAG共用这一份合同。可选来源真正缺省时，其ABSENT事实进入父产物身份，
+不创建伪成功源节点，也不回落到另一个默认目录；来源后来出现会改变父身份。已存在但损坏的来源仍失败，
+直接请求缺省的源目标仍BLOCKED。缺省不等于行业等业务事实已获资格，实际必需事实仍由对应消费者判断。
+该可选来源字段属于processed spec的规范序列化；空集合也进入schema身份。合同变化后的旧spec与受影响下游须按原生DAG重建，不能直接修改旧manifest使其通过。
+
 每个 QRP 数据集有 spec.json 和 _manifest/manifest.json，
 `spec.json` 是列、角色、主键、分区、特征配方等静态合同的唯一持久化来源；
 manifest 只保存运行事实和 `spec_identity`，读取投影从规格派生静态字段。

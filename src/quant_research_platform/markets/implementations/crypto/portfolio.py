@@ -1,9 +1,11 @@
 """Persisted research inputs to the event-driven perpetual ledger."""
 
+import json
 from array import array
 from bisect import bisect_left
 from collections import deque
 from contextlib import ExitStack
+from dataclasses import replace
 from functools import partial
 from itertools import chain, groupby, islice, zip_longest
 from math import isfinite
@@ -21,7 +23,9 @@ from quant_research_platform.contracts.order_book import (
     validate_price_unit,
 )
 from quant_research_platform.contracts.portfolios import (
+    PORTFOLIO_CASH_ASSET_ID,
     PortfolioCapital,
+    PortfolioDiagnostic,
     PortfolioTargetBlocked,
 )
 from quant_research_platform.contracts.time import crypto_execution_windows
@@ -429,6 +433,38 @@ def _execute_portfolio(
 ):
     if funding.identity != expected_funding_identity:
         raise ValueError("crypto_execution_funding_identity_mismatch")
+    simulate = execute
+
+    def execute(**kwargs):
+        emit = kwargs["on_ledger"]
+        first = True
+
+        def qualified(batch):
+            nonlocal first
+            if first:
+                batch = replace(
+                    batch,
+                    diagnostics=(
+                        *batch.diagnostics,
+                        PortfolioDiagnostic(
+                            PORTFOLIO_CASH_ASSET_ID,
+                            None,
+                            "funding_qualification",
+                            text=json.dumps(
+                                {"sources": funding.settlement_qualification},
+                                sort_keys=True,
+                                allow_nan=False,
+                            ),
+                        ),
+                    ),
+                )
+                first = False
+            emit(batch)
+
+        return simulate(
+            **{**kwargs, "on_ledger": qualified if emit is not None else None}
+        )
+
     if execution_mode == "independent_segments":
         with closing_iterator(ExitStack()) as resources:
             return _execute_episodes(

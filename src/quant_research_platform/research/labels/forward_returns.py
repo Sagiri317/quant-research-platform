@@ -85,7 +85,9 @@ def add_forward_return_labels(
         )
         valid_positions, exit_dates = valid_positions[positive], exit_dates[positive]
         with np.errstate(over="ignore"):
-            values = exit_prices[positive] / entry_prices[positive] - 1.0
+            values = (exit_prices[positive] - entry_prices[positive]) / entry_prices[
+                positive
+            ]
         finite = np.isfinite(values)
         labels[valid_positions[finite]] = values[finite]
         available[valid_positions[finite]] = exit_dates[finite].to_numpy(

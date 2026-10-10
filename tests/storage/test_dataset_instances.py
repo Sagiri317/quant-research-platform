@@ -342,10 +342,18 @@ def test_exact_requested_instance_ignores_corrupt_history_but_discovery_rejects(
         bad / "_manifest" / "manifest.json", "invalid", encoding="utf-8"
     )
     assert research._matching_instance(
-        profile=profile, layout=layout, target_id="demo", requested_identity=good.name
+        profile=profile,
+        layout=layout,
+        spec=research.TargetSpec("demo"),
+        protocol=None,
+        requested_identity=good.name,
     ) == (good.name, None)
     assert research._matching_instance(
-        profile=profile, layout=layout, target_id="demo", requested_identity=bad.name
+        profile=profile,
+        layout=layout,
+        spec=research.TargetSpec("demo"),
+        protocol=None,
+        requested_identity=bad.name,
     ) == (None, "persisted_instance_invalid")
     with pytest.raises(ValueError):
         discover_dataset_instances(root)
@@ -361,6 +369,113 @@ def test_exact_requested_instance_ignores_corrupt_history_but_discovery_rejects(
         research._matching_instance(
             profile=profile,
             layout=layout,
-            target_id="demo",
+            spec=research.TargetSpec("demo"),
+            protocol=None,
             requested_identity=good.name,
         )
+
+
+@pytest.mark.parametrize("mutation", (None, "trial_file", "trial_directory"))
+def test_model_reuse_keeps_validated_external_trial_snapshot(
+    tmp_path, monkeypatch, mutation
+):
+    import shutil
+    from collections import Counter
+    from dataclasses import replace
+    from types import SimpleNamespace
+
+    from quant_research_platform.catalog.models import ModelCatalog
+    from quant_research_platform.contracts.targets import (
+        ProducerBinding,
+        ProducerKind,
+        TargetPlan,
+        TargetSpec,
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.storage import experiments, semantic_artifacts
+    from quant_research_platform.workflows import research
+    from tests.research.workflow_test_support import shared_model_case
+
+    case = shared_model_case(tmp_path)
+    target = case.envelope.logical_artifact_id
+    profile = replace(
+        research_profile(),
+        models=ModelCatalog(case.specs),
+        producer_bindings={
+            target: ProducerBinding(ProducerKind.MODEL, lambda **_: None)
+        },
+    )
+    root = case.layout.instance_root(
+        case.layout.semantic_artifact_root(profile.market_id, target), case.root.name
+    )
+    root.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(case.root, root)
+    protocol = SimpleNamespace(
+        protocol_id="a_share",
+        model_ids_for_target=lambda _: tuple(s.model_id for s in case.specs),
+    )
+    counts = Counter()
+    native_hash = semantic_artifacts._hash_file_content
+    native_json = experiments.read_qrp_json_file
+
+    def hashed(path, *args, **kwargs):
+        counts["hash"] += 1
+        return native_hash(path, *args, **kwargs)
+
+    def loaded(path, *args, **kwargs):
+        counts["trial_json"] += 1
+        return native_json(path, *args, **kwargs)
+
+    monkeypatch.setattr(semantic_artifacts, "_hash_file_content", hashed)
+    monkeypatch.setattr(experiments, "read_qrp_json_file", loaded)
+    sessions = {}
+    spec = TargetSpec(target)
+    assert research._matching_instance(
+        profile=profile,
+        layout=case.layout,
+        spec=spec,
+        protocol=protocol,
+        requested_identity=root.name,
+        reuse_sessions=sessions,
+    ) == (root.name, None)
+    planned_counts = counts.copy()
+    assert counts["hash"] and counts["trial_json"]
+    _envelope, _semantic_snapshots, trial_snapshots, _native = sessions[root]
+    assert trial_snapshots
+    trial_root = next(iter(trial_snapshots))
+    if mutation == "trial_file":
+        path = trial_root / "plan.json"
+        path.write_bytes(path.read_bytes() + b" ")
+    elif mutation == "trial_directory":
+        (trial_root / "extra").mkdir()
+    planned = TargetPlan(
+        target_id=target,
+        decision="REUSE",
+        requested_identity=root.name,
+        matching_instance_identity=root.name,
+        upstream_target_ids=(),
+        upstream_identities={},
+    )
+
+    def reuse():
+        return research._reuse_target(
+            profile=profile,
+            protocol=protocol,
+            layout=case.layout,
+            spec=spec,
+            planned=planned,
+            raw_root=tmp_path,
+            time_window=TimeWindow("2018-01-01", "2019-06-30"),
+            session=sessions[root],
+        )
+
+    if mutation:
+        with pytest.raises(
+            ValueError, match="dataset_metadata_(file|directory)_identity_changed"
+        ):
+            reuse()
+    else:
+        assert reuse().status.value == "REUSED"
+        assert reuse().status.value == "REUSED"
+    assert counts == planned_counts

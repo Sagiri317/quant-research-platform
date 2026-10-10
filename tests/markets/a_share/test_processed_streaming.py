@@ -257,7 +257,7 @@ def test_persisted_panel_market_codes_reach_real_fee_mapping(tmp_path):
             } == {"000001": "shanghai", "000002": "shenzhen", "000003": "shenzhen"}
 
 
-def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
+def test_processed_blocks_preserve_full_history_math(
     tmp_path,
     monkeypatch,
 ):
@@ -308,11 +308,17 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
         write_dataset(
             layout.interim_data_root(spec.source_id, data_id), frame, spec=spec
         )
+    full_history_ids = producer._FULL_HISTORY_SOURCE_IDS.union(
+        *(
+            profile.processed.get(target_id).optional_source_input_data_ids
+            for target_id in target_ids
+        )
+    )
     source = {
         data_id: read_dataset(
             layout.interim_data_root(profile.interim.get(data_id).source_id, data_id),
             time_window=None
-            if data_id in producer._FULL_HISTORY_SOURCE_IDS
+            if data_id in full_history_ids
             else producer.a_share.source_history_window(
                 profile.interim.get(data_id), window
             ),
@@ -1076,7 +1082,8 @@ def test_asynchronous_own_market_label_endpoints_and_mask_batches(
         exit_date = panel.index[1 + horizon]
         assert (
             label.loc[dates[0], column]
-            == panel.loc[exit_date, "adj_open"] / panel.iloc[1].adj_open - 1.0
+            == (panel.loc[exit_date, "adj_open"] - panel.iloc[1].adj_open)
+            / panel.iloc[1].adj_open
         )
         assert label.loc[dates[0], column + "_available_at"] == exit_date
     assert mask.iloc[-1][["can_enter", "can_exit"]].isna().all()
@@ -1148,9 +1155,11 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
             exit_date = axes["000001"][horizon + 1]
             assert (
                 saved.loc[dates[0], column]
-                == own_panel.loc[exit_date, "adj_open"]
+                == (
+                    own_panel.loc[exit_date, "adj_open"]
+                    - own_panel.loc[dates[1], "adj_open"]
+                )
                 / own_panel.loc[dates[1], "adj_open"]
-                - 1.0
             )
             assert saved.loc[dates[0], column + "_available_at"] == exit_date
 
@@ -1753,7 +1762,13 @@ def test_native_lifecycle_history_does_not_join_relisting(
 
 
 @pytest.mark.parametrize(
-    "cap,close,volume", ((1e308, 1e-308, 1e308), (1e-308, 1e308, 1e-308))
+    "cap,close,volume",
+    (
+        (1e308, 1e-308, 1e308),
+        (1e-308, 1e308, 1e-308),
+        (3 * np.nextafter(0.0, 1.0), 2.0, 3 * np.nextafter(0.0, 1.0)),
+        (3.0, 2.0, 3.0),
+    ),
 )
 def test_native_panel_persists_finite_turnover_at_share_count_boundaries(
     tmp_path, cap, close, volume
@@ -1823,3 +1838,134 @@ def test_processed_axis_keeps_raw_dates_and_assets_before_membership_filter(tmp_
     assert panel_axis[5] == (raw[0], frozenset(raw[1].index))
     assert extra_date in panel_axis[5][0] and extra_date not in panel_axis[0]
     assert "999999" in panel_axis[5][1] and "999999" not in set(panel_axis[2].asset_id)
+
+
+@pytest.mark.parametrize("calendar_state", ("unknown", "closed", "open"))
+def test_native_panel_does_not_treat_unknown_calendar_as_closed(
+    tmp_path, calendar_state
+):
+    dates = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    bars = source["market_bars_1d"]
+    bars.loc[bars.source_asset_id.eq("000001"), "market_type"] = 4
+    source["market_bars_1d"] = bars.loc[
+        ~(bars.source_asset_id.eq("000001") & bars.timestamp.eq(dates[2]))
+    ]
+    own = source["trading_calendar"].assign(source_market_type=4)
+    if calendar_state == "unknown":
+        own = own.loc[own.calendar_date.ne(dates[2])]
+    elif calendar_state == "closed":
+        own.loc[own.calendar_date.eq(dates[2]), "is_trading_day"] = False
+    source["trading_calendar"] = pd.concat(
+        (source["trading_calendar"], own), ignore_index=True
+    )
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    for data_id in spec.source_input_data_ids:
+        native = profile.interim.get(data_id)
+        write_dataset(
+            layout.interim_data_root(native.source_id, data_id),
+            source[data_id],
+            spec=native,
+        )
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+
+    def publish():
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(dates[0], dates[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+        ) as (frames, metadata, verify):
+            write_dataset(
+                root,
+                frames,
+                spec=spec,
+                instance_metadata=metadata,
+                staged_validator=verify,
+            )
+
+    if calendar_state == "unknown":
+        with pytest.raises(
+            ValueError, match="a_share_trading_calendar_unknown_session"
+        ):
+            publish()
+    else:
+        publish()
+        actual = read_dataset(root)
+        row = actual.loc[actual.asset_id.eq("000001") & actual.timestamp.eq(dates[2])]
+        if calendar_state == "closed":
+            assert row.empty
+        else:
+            assert len(row) == 1 and row.close.isna().all()
+
+
+def test_native_panel_retains_listing_before_first_known_company_status(tmp_path):
+    dates = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    source["stock_master"] = source["stock_master"].assign(
+        timestamp=dates[3], status_change_date=dates[3], company_status="suspended"
+    )
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    for data_id in spec.source_input_data_ids:
+        native = profile.interim.get(data_id)
+        write_dataset(
+            layout.interim_data_root(native.source_id, data_id),
+            source[data_id],
+            spec=native,
+        )
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with producer.produce_a_share_processed_data(
+        spec,
+        layout=layout,
+        time_window=TimeWindow(dates[0], dates[-1]),
+        processed_catalog=profile.processed,
+        source_catalog=profile.interim,
+    ) as (frames, metadata, verify):
+        write_dataset(
+            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
+        )
+    actual = read_dataset(root)
+    assert len(actual) == 15
+    assert actual.listing_date.notna().all()
+    joined = producer.panels._asof_join_stock_master(
+        actual.loc[:, ["asset_id", "timestamp"]],
+        producer.panels._canonical_stock_master(source["stock_master"]),
+    )
+    assert joined.loc[joined.timestamp.lt(dates[3]), "company_status"].isna().all()
+    assert (
+        joined.loc[joined.timestamp.ge(dates[3]), "company_status"]
+        .eq("suspended")
+        .all()
+    )
+
+
+def test_bound_optional_source_cannot_disappear_into_absence(tmp_path):
+    dates = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    for data_id in spec.source_input_data_ids:
+        native = profile.interim.get(data_id)
+        write_dataset(
+            layout.interim_data_root(native.source_id, data_id),
+            source[data_id],
+            spec=native,
+        )
+    layout = layout.with_target_roots(
+        {"industry_classification": tmp_path / "missing-bound-instance"}
+    )
+    with pytest.raises((ValueError, FileNotFoundError)):
+        with producer.produce_a_share_processed_data(
+            spec,
+            layout=layout,
+            time_window=TimeWindow(dates[0], dates[-1]),
+            processed_catalog=profile.processed,
+            source_catalog=profile.interim,
+        ) as (frames, _metadata, _verify):
+            list(frames)

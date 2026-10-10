@@ -140,6 +140,12 @@ def processed_catalog() -> ProcessedDataCatalog:
                 MARKET_PANEL_ID,
                 ProcessedDataKind.PANEL,
                 PANEL_COLUMNS,
+                optional_source_input_data_ids=(
+                    "industry_classification",
+                    "industry_classification_sets",
+                    "industry_classification_versions",
+                    "stock_info_changes",
+                ),
                 source_input_data_ids=(
                     "market_bars_1d",
                     "stock_master",
@@ -240,6 +246,7 @@ def _spec(
     columns: tuple[str, ...],
     *,
     source_input_data_ids: tuple[str, ...] = (),
+    optional_source_input_data_ids: tuple[str, ...] = (),
     processed_input_data_ids: tuple[str, ...] = (),
     factor_columns: tuple[str, ...] = (),
     label_columns: tuple[str, ...] = (),
@@ -260,6 +267,7 @@ def _spec(
         primary_key=selected_primary_key,
         partition_columns=("year",),
         source_input_data_ids=source_input_data_ids,
+        optional_source_input_data_ids=optional_source_input_data_ids,
         processed_input_data_ids=processed_input_data_ids,
     )
 

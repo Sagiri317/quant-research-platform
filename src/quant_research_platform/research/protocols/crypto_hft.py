@@ -979,7 +979,7 @@ class CryptoProtocol:
             ),
             TargetSpec(
                 models,
-                dependencies=(dataset,),
+                dependencies=() if self.frozen_development is not None else (dataset,),
             ),
             TargetSpec(
                 predictions,
@@ -988,7 +988,9 @@ class CryptoProtocol:
             *(
                 TargetSpec(
                     candidate.calibration_target_id,
-                    dependencies=(models, dataset, panel),
+                    dependencies=()
+                    if self.frozen_development is not None
+                    else (models, dataset, panel),
                 )
                 for candidate in self.portfolio_candidates()
                 if isinstance(candidate, CryptoMakerCandidate) and candidate.calibrated

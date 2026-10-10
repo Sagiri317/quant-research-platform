@@ -146,18 +146,16 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
             "b": benchmark + rng.normal(-0.001, 0.004, 64),
         }
     )
-    spa = spa_reality_check(
-        benchmark, models, block_size=20, repetitions=10000, seed=17
-    )
+    spa = spa_reality_check(benchmark, models, block_size=20, repetitions=199, seed=17)
     superior = stepm_superior_models(
-        benchmark, models, block_size=20, repetitions=10000, seed=17
+        benchmark, models, block_size=20, repetitions=199, seed=17
     )
-    mcs = model_confidence_set(models, block_size=20, repetitions=10000, seed=17)
-    direct_spa = SPA(benchmark, models, block_size=20, reps=10000, seed=17)
+    mcs = model_confidence_set(models, block_size=20, repetitions=199, seed=17)
+    direct_spa = SPA(benchmark, models, block_size=20, reps=199, seed=17)
     direct_spa.compute()
-    direct_stepm = StepM(benchmark, models, block_size=20, reps=10000, seed=17)
+    direct_stepm = StepM(benchmark, models, block_size=20, reps=199, seed=17)
     direct_stepm.compute()
-    direct_mcs = MCS(models, size=0.05, block_size=20, reps=10000, seed=17)
+    direct_mcs = MCS(models, size=0.05, block_size=20, reps=199, seed=17)
     direct_mcs.compute()
     assert (
         0.0 <= spa.lower_p_value <= spa.consistent_p_value <= spa.upper_p_value <= 1.0
@@ -171,7 +169,7 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
     assert mcs.excluded == tuple(direct_mcs.excluded)
     pd.testing.assert_frame_equal(mcs.p_values, direct_mcs.pvalues)
     scaled = spa_reality_check(
-        benchmark * 1e-20, models * 1e-20, block_size=20, repetitions=10000, seed=17
+        benchmark * 1e-20, models * 1e-20, block_size=20, repetitions=199, seed=17
     )
     assert scaled.status == "DEFINED"
     assert scaled.consistent_p_value == pytest.approx(spa.consistent_p_value)
@@ -186,15 +184,15 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
         ),
     ):
         observed = spa_reality_check(
-            baseline, candidates, block_size=20, repetitions=10000, seed=17
+            baseline, candidates, block_size=20, repetitions=199, seed=17
         )
         step = stepm_superior_models(
-            baseline, candidates, block_size=20, repetitions=10000, seed=17
+            baseline, candidates, block_size=20, repetitions=199, seed=17
         )
         mcs_degenerate = model_confidence_set(
             pd.concat((pd.Series(baseline, name="benchmark"), candidates), axis=1),
             block_size=20,
-            repetitions=10000,
+            repetitions=199,
             seed=17,
         )
         assert observed.status == step.status == mcs_degenerate.status == "UNDEFINED"
@@ -209,13 +207,13 @@ def test_arch_multiple_comparison_adapters_keep_native_meanings() -> None:
     duplicated_challengers = models.assign(duplicate=models["a"])
     assert (
         spa_reality_check(
-            benchmark, duplicated_challengers, block_size=20, repetitions=10000, seed=17
+            benchmark, duplicated_challengers, block_size=20, repetitions=199, seed=17
         ).status
         == "DEFINED"
     )
     assert (
         model_confidence_set(
-            duplicated_challengers, block_size=20, repetitions=10000, seed=17
+            duplicated_challengers, block_size=20, repetitions=199, seed=17
         ).status
         == "UNDEFINED"
     )

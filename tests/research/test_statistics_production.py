@@ -220,7 +220,10 @@ def test_fmb_primary_horizon_uses_native_models_predictions_and_maturity(tmp_pat
                 + 0.4 * asset
                 + 0.03 * asset**2
                 + 0.02 * np.sin(index + asset),
-                "forward_return_20d": -0.2 - 0.7 * asset + 0.02 * np.cos(index + asset),
+                "forward_return_20d": (
+                    80.0 - 5.0 * asset + 2.0 * np.cos(index + asset) - 100.0
+                )
+                / 100.0,
                 "forward_return_5d_available_at": timestamp + pd.offsets.BDay(6),
                 "forward_return_20d_available_at": timestamp + pd.offsets.BDay(21),
             }

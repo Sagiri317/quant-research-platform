@@ -1425,13 +1425,11 @@ def test_mixed_group_ledgers_publish_qualified_universe_robustness(
             assert comparison.p_value.notna().all()
             assert comparison.fdr_method.eq("NOT_APPLICABLE").all()
             assert comparison.fdr_adjusted_p_value.isna().all()
-            expected = f"{variant}_robustness_excluded"
-            assert (
-                holdout_tables["portfolio_robustness"]
-                .query("test_id == 'cscv_pbo'")
-                .reason.eq(expected)
-                .all()
-            )
+            excluded = holdout_tables["portfolio_robustness"]
+            assert len(excluded) == 1
+            assert excluded.test_id.tolist() == ["development_only"]
+            assert excluded.status.tolist() == ["UNDEFINED"]
+            assert excluded.reason.tolist() == ["holdout_excluded"]
             holdout_root = write_statistics_artifact(
                 tmp_path / variant,
                 envelope=holdout_envelope,

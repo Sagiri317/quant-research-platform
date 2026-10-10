@@ -327,8 +327,6 @@ def _summarize_correlation_aggregates(
     if 0 < variance <= (Fraction(ulp(0.0)) / 2) ** 2:
         std = np.nan
     mean = float(mean)
-    if not np.isfinite(std):
-        ratio = np.nan
     return {
         "mean": mean,
         "std": std,

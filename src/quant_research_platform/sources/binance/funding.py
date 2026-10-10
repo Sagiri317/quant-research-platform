@@ -57,6 +57,7 @@ class FundingObservations:
     coverage: tuple[tuple[int, int], ...]
     events: tuple[FundingEvent, ...]
     forecasts: Iterator[FundingForecast]
+    settlement_qualification: tuple[dict, ...]
 
 
 def settlement_endpoint(source_id, symbol):
@@ -445,7 +446,27 @@ def read_funding_observations(funding_roots, *, symbol):
     primary = None
     try:
         with closing_iterator(forecasts()) as source:
-            yield FundingObservations(identity, tuple(coverage), tuple(events), source)
+            qualification = []
+            for _root, _expected, manifest, *_rest in sources:
+                metadata = manifest["metadata"]
+                native = metadata["settlement_source"]
+                qualification.append(
+                    {
+                        "coverage": metadata["coverage"],
+                        "settlement_source": native,
+                        "verification": "declared_archive_not_independently_verified"
+                        if native is None
+                        else "official_response_validated"
+                        if native["source_id"] == "binance"
+                        else (
+                            "supplier_completeness_assumption_"
+                            "not_independently_verified"
+                        ),
+                    }
+                )
+            yield FundingObservations(
+                identity, tuple(coverage), tuple(events), source, tuple(qualification)
+            )
     except BaseException as body_error:
         primary = body_error
         raise

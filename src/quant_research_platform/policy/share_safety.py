@@ -9,22 +9,6 @@ from pathlib import Path, PurePosixPath, PureWindowsPath
 from quant_research_platform.contracts.outputs import validate_output_identifier
 from quant_research_platform.contracts.run_id import validate_run_id
 
-_RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES: tuple[str, ...] = (
-    "private_real",
-    "private_data",
-    "private_research",
-)
-
-
-LOCAL_ONLY_DATA_LAYERS: tuple[str, ...] = (
-    "raw",
-    "interim",
-    "processed",
-    "research",
-    "reference_docs",
-)
-
-
 _WINDOWS_DRIVE_PATH_RE = re.compile(r"(?i)\b[a-z]:[\\/][^\r\n\t\"'<>|]+")
 
 
@@ -55,33 +39,6 @@ _CREDENTIAL_KEY_RE = re.compile(
 
 
 _TRACEBACK_RE = re.compile(r"(?is)Traceback \(most recent call last\):.*")
-
-
-def _parts(path: Path) -> tuple[str, ...]:
-    text = path.as_posix()
-    if ":" in text:
-        text = text.split(":", 1)[1]
-    return tuple(part for part in PurePosixPath(text).parts if part not in {"", "/"})
-
-
-def is_local_only_path(path: Path) -> bool:
-    parts = _parts(path)
-    if not parts:
-        return False
-    for index, part in enumerate(parts):
-        if part == "outputs":
-            return True
-        if (
-            index < len(parts) - 1
-            and part == "data"
-            and parts[index + 1] in LOCAL_ONLY_DATA_LAYERS
-        ):
-            return True
-    return any(
-        parts[index] == "reports"
-        and parts[index + 1] in _RETIRED_LOCAL_ONLY_REPORT_PATH_NAMES
-        for index in range(max(len(parts) - 1, 0))
-    )
 
 
 def unsafe_for_share_reason(text: object) -> str | None:

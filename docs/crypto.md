@@ -246,7 +246,7 @@ basis 为无量纲比值减一。频道名 premiumIndex 不代表供应商存在
 forceOrder 仅代表供应商观测到的 proxy。每条发布快照以 z（累计已成交 base 数量）加权，
 BUY 为正、SELL 为负；不以订单数量 q 代替成交数量，不声称完整或去重后的全市场清算量。
 无观测或分母为零保持 NULL；断连 generation、grid gap 和 episode 边界重置窗口。
-执行 PANEL 的 segment/grid 边界只重置滚动窗口及预热；独立衍生品源的最新观测和观测时钟仍按自身 age 上限保留，只有该源 epoch 变化才失效。来源换 epoch 后，forceOrder 的完整 5s/30s 窗口从真实 observed 边界重新预热，不能回锚到当前信息时点前一个格。forceOrder elapsed 由同一最新观测时钟派生，窗口首个100ms只纳入该区间内的已观测成交。
+执行 PANEL 的 segment/grid 边界只重置滚动窗口及预热；独立衍生品源的最新观测和观测时钟仍按自身 age 上限保留，只有该源 epoch 变化才失效。来源换 epoch 后，forceOrder 的完整 5s/30s 窗口从真实 observed 边界重新预热，不能回锚到当前信息时点前一个格。若收到的首条来源事件本身标记reset，同样按该真实边界预热；只有无reset的正常PANEL首格沿用首格规则。forceOrder elapsed 由同一最新观测时钟派生，窗口首个100ms只纳入该区间内的已观测成交。
 双边深度和滚动流量比值在最终除法后舍入；请求的绝对 OFI 若确实超出 float64 表示范围仍明确失败，不改成零或缺失值。
 缺 state 归档只阻塞依赖它的分支，微观结构因子不引入该依赖。
 
@@ -369,7 +369,8 @@ derivatives_state.json 加入衍生品状态因子；不做块或参数的笛卡
 两个窗口保持独立，不能用包络补齐中间空白，也不构造重叠或虚假的 fold。
 development_run_id 必须指向已完成且参数完全一致的开发运行；
 最终 test 复用冻结模型及 maker calibration，只构建新的预测、评估、账本、统计和报告，
-并保存正常运行记录；禁止在 test 训练、选模型、调参或重新校准。
+并保存正常运行记录；禁止在 test 训练、选模型、调参或重新校准。冻结MODEL与calibration的执行依赖为空；
+新test数据不可用时，已验证冻结模型仍可REUSE，依赖新数据的预测/评估保持BLOCKED，不能由计划与执行两套不同依赖改变此结果。
 
 ### 数值缩放与排名模型标定
 
@@ -442,6 +443,8 @@ Crypto 研究计划的 `execution` 显式提供 `taker_fee_bps`、`latency_ms`�
 `latency_scenarios_ms` 枚举使用计划默认延迟的 taker 候选，默认场景为 `[0, 100, 200]` ms。
 保留显式候选延迟；按资产、模型、实际延迟去除与基准、显式候选和已派生场景重复的派生项。
 新增场景复用同一候选、执行目标、账本、统计与报告链，实际延迟进入各自持久化身份。
+净损益由成交、费用、资金费与估值变化的共同经济事实累积，再转换为展示用float；
+不能从大本金NAV的浮点差分反推微小损益。OOS与空档贡献直接按事件区间求和，不相减两个已舍入累计值。
 maker 继续使用独立的 `maker.latency_ms` 及同一时钟下的冻结校准。资金和仓位上限仍来自同一计划的
 `initial_capital`、`valuation_currency` 与 `exposure_limits`。
 
@@ -487,6 +490,10 @@ XOOMAR 的 `data.history` 最多 5000 条、跨场所并按时间倒序；原响
 只有决策时已经可得、覆盖预测终点且相关现金流均已知的 forecast 才参与增量下单。
 实际结算不能反向影响下单量；显式完整覆盖内的空事件表才能表示无结算，
 没有输入不能当作零资金费。本模块消费外部归档，不新增联网采集端点。
+账本summary与报告保留`funding_qualification.sources`中的coverage、settlement_source及verification。
+verification区分显式归档尚未独立核对、官方响应已验证、供应商完整性假设尚未独立核对三种证据；
+它们分别为`declared_archive_not_independently_verified`、`official_response_validated`、
+`supplier_completeness_assumption_not_independently_verified`。没有资格记录的手工账本样例为null，不能补造独立核验证据。
 
 ### 连续与独立分段执行
 

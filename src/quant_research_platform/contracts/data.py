@@ -190,6 +190,7 @@ class ProcessedDataSpec(DataSpec):
     market_id: MarketId
     kind: ProcessedDataKind | str
     source_input_data_ids: tuple[str, ...] = ()
+    optional_source_input_data_ids: tuple[str, ...] = ()
     processed_input_data_ids: tuple[str, ...] = ()
     parameters_json: str = "{}"
 
@@ -208,11 +209,16 @@ class ProcessedDataSpec(DataSpec):
         )
         for field_name, values in (
             ("source_input_data_ids", self.source_input_data_ids),
+            ("optional_source_input_data_ids", self.optional_source_input_data_ids),
             ("processed_input_data_ids", self.processed_input_data_ids),
         ):
             _validate_string_tuple(values, field_name)
             if len(values) != len(set(values)):
                 raise ValueError(f"{field_name}_must_be_unique")
+        if not set(self.optional_source_input_data_ids) <= set(
+            self.source_input_data_ids
+        ):
+            raise ValueError("optional_source_input_not_declared")
 
 
 def _validate_string_tuple(values: object, field_name: str) -> None:

@@ -23,6 +23,7 @@ from quant_research_platform.contracts.portfolios import (
     validate_portfolio_transition,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
+from quant_research_platform.research.portfolios.accounting import _LedgerEconomics
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (
@@ -291,23 +292,17 @@ def summarize_portfolio_ledger(
     capital: PortfolioCapital,
     batches: Iterator[PortfolioLedgerBatch],
     *,
-    consume_batch: Callable[[PortfolioLedgerBatch, Mapping[str, object]], None]
+    consume_batch: Callable[
+        [PortfolioLedgerBatch, Mapping[str, object], Mapping[str, object]], None
+    ]
     | None = None,
 ) -> dict[str, object]:
+    economics = _LedgerEconomics(capital)
     result = {
         "candidate_id": capital.candidate_id,
         "initial_capital": capital.initial_capital,
         "valuation_currency": capital.valuation_currency,
-        "gross_pnl": 0.0,
-        "net_pnl": 0.0,
-        "nav": capital.initial_capital,
-        "capital_return": 0.0,
-        "fees": 0.0,
-        "funding": 0.0,
-        "turnover": 0.0,
-        "fill_events": 0,
-        "fill_quantity": 0.0,
-        "valuation_timestamp_ns": 0,
+        **economics.summary(),
     }
     with closing_iterator(batches):
         for batch in batches:
@@ -321,26 +316,10 @@ def summarize_portfolio_ledger(
             }
             if "status" in calibration:
                 result["alpha_calibration"] = calibration
-            result["fill_events"] += len(batch.trades)
-            result["fill_quantity"] += sum(abs(row.quantity) for row in batch.trades)
-            result["turnover"] += sum(abs(row.notional) for row in batch.trades)
-            result["fees"] -= sum(
-                row.amount for row in batch.cashflows if row.kind.endswith("_cost")
-            )
-            result["funding"] += sum(
-                row.amount for row in batch.cashflows if row.kind == "funding"
-            )
-            result["nav"] = sum(
-                row.value for row in batch.valuations if row.phase == "end"
-            )
-            result["valuation_timestamp_ns"] = max(
-                row.timestamp_ns for row in batch.valuations if row.phase == "end"
-            )
-            result["net_pnl"] = result["nav"] - capital.initial_capital
-            result["gross_pnl"] = result["net_pnl"] + result["fees"] - result["funding"]
-            result["capital_return"] = result["net_pnl"] / capital.initial_capital
+            increment = economics.consume(batch)
+            result.update(economics.summary())
             if consume_batch is not None:
-                consume_batch(batch, result)
+                consume_batch(batch, result, increment)
     return result
 
 

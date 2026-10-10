@@ -1413,3 +1413,122 @@ def test_public_expectations_window_preserves_fresh_preceding_forecasts(tmp_path
     pd.testing.assert_frame_equal(outputs[0], outputs[1], check_exact=True)
     selected = outputs[1].loc[outputs[1].asset_id.eq("000001")]
     assert selected.forward_earnings_yield_fy1.notna().all()
+
+
+def test_optional_source_absence_is_bound_and_changes_identity_when_present(tmp_path):
+    sessions = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
+    frames = _synthetic_interim_frames(sessions)
+    base = research_profile()
+    panel = base.processed.get("market_panel_1d")
+    absent = set(panel.optional_source_input_data_ids)
+    calls = []
+    layout = StorageLayout(tmp_path)
+    # A default-root artifact must never override the bound absent source.
+    for data_id in absent:
+        spec = base.interim.get(data_id)
+        write_dataset(
+            layout.interim_data_root(spec.source_id, data_id),
+            frames[data_id],
+            spec=spec,
+        )
+
+    def identity(_root, data_id):
+        return (
+            None if data_id in absent else hashlib.sha256(data_id.encode()).hexdigest()
+        )
+
+    def produce(**kwargs):
+        (data_id,) = kwargs["data_ids"]
+        calls.append(data_id)
+        spec = base.interim.get(data_id)
+        root = kwargs["layout"].target_root(
+            data_id, kwargs["layout"].interim_data_root(spec.source_id, data_id)
+        )
+        write_dataset(
+            root,
+            frames[data_id],
+            spec=spec,
+            instance_metadata=kwargs["instance_metadata"],
+        )
+        return InterimImportResult(artifact_roots={data_id: root}, skipped=())
+
+    profile = replace(
+        base,
+        producer_bindings={
+            **base.producer_bindings,
+            **{
+                key: ProducerBinding(
+                    ProducerKind.INTERIM, produce, source_identity=identity
+                )
+                for key in frames
+            },
+        },
+    )
+
+    def run(data_id):
+        return research.data_materialize(
+            profile=profile,
+            layout=layout,
+            raw_root=tmp_path / "raw",
+            start_date="2020-01-02",
+            end_date="2020-01-08",
+            data_ids=(data_id,),
+        )
+
+    first = run("market_panel_1d")
+    assert first["status"] == "COMPLETE"
+    first_targets = {x["target_id"]: x for x in first["target_results"]}
+    assert absent.isdisjoint(first_targets) and absent.isdisjoint(calls)
+    first_identity = first_targets["market_panel_1d"]["instance_identity"]
+    root = layout.instance_root(
+        layout.processed_data_root(panel.market_id, panel.kind, panel.data_id),
+        first_identity,
+    )
+    restored = read_dataset(root)
+    assert len(restored) == 15
+    assert restored.industry_level1_code.isna().all()
+    direct = run("industry_classification")
+    assert direct["status"] == "BLOCKED"
+    absent.remove("industry_classification")
+    second = run("market_panel_1d")
+    assert second["status"] == "COMPLETE"
+    second_targets = {x["target_id"]: x for x in second["target_results"]}
+    assert second_targets["market_panel_1d"]["instance_identity"] != first_identity
+    assert second_targets["industry_classification"]["status"] == "BUILT"
+    assert read_dataset(root).equals(restored)
+
+
+@pytest.mark.parametrize("failure", ("present_invalid", "required_absent"))
+def test_optional_source_only_absence_is_qualified(tmp_path, failure):
+    sessions = pd.bdate_range("2020-01-02", periods=5).as_unit("ns")
+    frames = _synthetic_interim_frames(sessions)
+    profile = _windowed_source_profile(frames, [])
+    original = profile.producer_bindings["industry_classification"]
+    if failure == "present_invalid":
+
+        def invalid(**kwargs):
+            raise ValueError("synthetic_bad_source")
+
+        binding = replace(original, producer=invalid)
+        key = "industry_classification"
+    else:
+        key = "market_cap"
+        binding = replace(
+            profile.producer_bindings[key], source_identity=lambda *_: None
+        )
+    profile = replace(
+        profile, producer_bindings={**profile.producer_bindings, key: binding}
+    )
+    result = research.data_materialize(
+        profile=profile,
+        layout=StorageLayout(tmp_path),
+        raw_root=tmp_path / "raw",
+        start_date="2020-01-02",
+        end_date="2020-01-08",
+        data_ids=("market_panel_1d",),
+    )
+    assert result["status"] != "COMPLETE"
+    assert not any(
+        x["target_id"] == "market_panel_1d" and x["status"] in {"BUILT", "REUSED"}
+        for x in result["target_results"]
+    )

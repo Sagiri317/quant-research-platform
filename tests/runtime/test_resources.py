@@ -113,3 +113,16 @@ def test_model_thread_rule_uses_capacity_without_rewriting_request(requested, ex
             )
             == expected
         )
+
+
+def test_windows_model_capacity_respects_process_affinity(monkeypatch):
+    from types import SimpleNamespace
+
+    import psutil
+
+    monkeypatch.setattr(sys, "platform", "win32")
+    monkeypatch.setattr(psutil, "cpu_count", lambda **_: 14)
+    monkeypatch.setattr(
+        psutil, "Process", lambda: SimpleNamespace(cpu_affinity=lambda: [7])
+    )
+    assert resources.model_cpu_capacity() == (14, 1)

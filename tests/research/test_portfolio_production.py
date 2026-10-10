@@ -2245,14 +2245,17 @@ def test_final_alpha_includes_last_mature_session_and_persists_without_fake_trad
 
 
 @pytest.mark.parametrize("nav", [100.0, 1000000000.0])
-@pytest.mark.parametrize("weight", [1e-15, 5e-14, 7.5e-14, 1e-08])
+@pytest.mark.parametrize(
+    "weight,material",
+    [(1e-15, False), (5e-14, False), (7.5e-14, True), (1e-08, True)],
+)
 @pytest.mark.parametrize("blocked", ["market", "adv"])
 def test_tiny_blocked_orders_keep_reason_consistent_through_real_writer(
-    tmp_path, nav, weight, blocked
+    tmp_path, nav, weight, material, blocked
 ):
     expected_reason = (
         None
-        if weight < 1e-10
+        if not material
         else "market_blocked"
         if blocked == "market"
         else "adv_capacity"

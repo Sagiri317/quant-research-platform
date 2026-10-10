@@ -514,7 +514,8 @@ def test_delayed_flow_windows_wait_for_complete_history_after_each_reset(delay):
         assert force.iloc[49 + lag] == 1.0
 
 
-def test_delayed_force_order_epoch_reset_does_not_restart_delay_twice():
+@pytest.mark.parametrize("prior_epoch", (False, True))
+def test_delayed_force_order_epoch_reset_does_not_restart_delay_twice(prior_epoch):
     from quant_research_platform.markets.implementations.crypto.hft import (
         iter_derivative_factor_frames,
     )
@@ -538,6 +539,9 @@ def test_delayed_force_order_epoch_reset_does_not_restart_delay_twice():
         ),
     ]
 
+    if not prior_epoch:
+        events = events[1:]
+
     def compute(delay):
         return pd.concat(
             iter_derivative_factor_frames(
@@ -550,9 +554,10 @@ def test_delayed_force_order_epoch_reset_does_not_restart_delay_twice():
         )
 
     baseline, delayed = compute(0), compute(200)
-    assert baseline.observed_force_order_imbalance_5s.iloc[58] == 1.0
-    assert delayed.observed_force_order_imbalance_5s.iloc[60] == 1.0
-    assert delayed.observed_force_order_imbalance_5s.iloc[:60].isna().all()
+    assert baseline.observed_force_order_imbalance_5s.iloc[:59].isna().all()
+    assert baseline.observed_force_order_imbalance_5s.iloc[59] == 1.0
+    assert delayed.observed_force_order_imbalance_5s.iloc[61] == 1.0
+    assert delayed.observed_force_order_imbalance_5s.iloc[:61].isna().all()
 
 
 def test_delayed_source_epoch_cannot_move_panel_flow_boundary_backwards():

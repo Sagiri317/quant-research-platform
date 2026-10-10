@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from fractions import Fraction
 from pathlib import Path
 
 import pandas as pd
@@ -418,14 +419,28 @@ def summarize_crypto_ledger(artifact, batches, *, windows_ns=None, consume_batch
     )
     if expected == []:
         raise ValueError("crypto_ledger_windows_missing")
-    execution = None
+    execution = funding_qualification = None
     marker_index = 0
     previous = None
     intervals = []
+    accumulated = dict.fromkeys(
+        ("net_pnl", "fees", "funding", "turnover", "fill_events"), Fraction()
+    )
 
-    def observe(batch, economics):
-        nonlocal execution, marker_index, previous
+    def observe(batch, economics, increment):
+        nonlocal execution, funding_qualification, marker_index, previous
+        for name in accumulated:
+            accumulated[name] += increment[name]
         for diagnostic in batch.diagnostics:
+            if diagnostic.name == "funding_qualification":
+                if (
+                    funding_qualification is not None
+                    or type(diagnostic.text) is not str
+                ):
+                    raise ValueError("crypto_funding_qualification_invalid")
+                funding_qualification = parse_qrp_json_object(
+                    diagnostic.text.encode("utf-8")
+                )
             if diagnostic.name == "execution_summary":
                 if execution is not None or type(diagnostic.text) is not str:
                     raise ValueError("crypto_execution_summary_invalid")
@@ -455,13 +470,16 @@ def summarize_crypto_ledger(artifact, batches, *, windows_ns=None, consume_batch
                 for name in ("nav", "fees", "funding", "turnover", "fill_events")
             )
             if previous is None:
-                if current != (artifact.capital.initial_capital, 0.0, 0.0, 0.0, 0):
+                if current != (
+                    artifact.capital.initial_capital,
+                    0.0,
+                    0.0,
+                    0.0,
+                    0,
+                ) or any(accumulated.values()):
                     raise ValueError("crypto_ledger_before_window_economics")
             else:
-                net, cost, cash, traded, count = (
-                    value - before
-                    for value, before in zip(current, previous, strict=True)
-                )
+                net, cost, cash, traded, count = accumulated.values()
                 intervals.append(
                     {
                         "kind": "oos" if marker_index % 2 else "gap",
@@ -469,15 +487,16 @@ def summarize_crypto_ledger(artifact, batches, *, windows_ns=None, consume_batch
                         "end_ns": expected[marker_index][2],
                         "start_nav": previous[0],
                         "end_nav": economics["nav"],
-                        "net_pnl": net,
-                        "gross_pnl": net + cost - cash,
-                        "fees": cost,
-                        "funding": cash,
-                        "turnover": traded,
-                        "fill_events": count,
+                        "net_pnl": float(net),
+                        "gross_pnl": float(net + cost - cash),
+                        "fees": float(cost),
+                        "funding": float(cash),
+                        "turnover": float(traded),
+                        "fill_events": int(count),
                     }
                 )
             previous = current
+            accumulated.update(dict.fromkeys(accumulated, Fraction()))
             marker_index += 1
         if consume_batch is not None:
             consume_batch(batch)
@@ -490,9 +509,14 @@ def summarize_crypto_ledger(artifact, batches, *, windows_ns=None, consume_batch
     if expected is not None:
         if marker_index != len(expected):
             raise ValueError("crypto_ledger_window_marker_missing")
-        if previous != tuple(
+        if any(accumulated.values()) or previous != tuple(
             economics[name]
             for name in ("nav", "fees", "funding", "turnover", "fill_events")
         ):
             raise ValueError("crypto_ledger_after_window_economics")
-    return {"economics": economics, "execution": execution, "intervals": intervals}
+    return {
+        "economics": economics,
+        "execution": execution,
+        "intervals": intervals,
+        "funding_qualification": funding_qualification,
+    }

@@ -128,7 +128,13 @@ def _calculate_values(
         denominator = source[first - size : stop - size]
         valid = np.isfinite(numerator) & np.isfinite(denominator) & (denominator != 0)
         current = output[first - start :]
-        current[valid] = numerator[valid] / denominator[valid] - 1.0
+        with np.errstate(over="ignore"):
+            difference = numerator[valid] - denominator[valid]
+            current[valid] = np.where(
+                np.isfinite(difference),
+                difference / denominator[valid],
+                numerator[valid] / denominator[valid] - 1.0,
+            )
         if factor.startswith("reversal_"):
             current *= -1.0
         return output

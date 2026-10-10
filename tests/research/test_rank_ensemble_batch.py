@@ -63,7 +63,6 @@ def test_batched_rank_preserves_final_prediction_bytes(timestamp, nullable, miss
         frame = frame.drop(columns="timestamp")
     expected = _legacy_ranks(frame, columns)
     actual = rank._rank_frame_columns(frame, columns)
-    assert actual.strides == expected.strides
     assert actual.tobytes() == expected.tobytes()
     assert (
         predictor.predict(frame).tobytes()

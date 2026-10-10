@@ -513,7 +513,7 @@ def _dataset_sessions(chunks: Iterable[pd.DataFrame]) -> pd.DatetimeIndex:
     with closing_iterator(iter(chunks)) as source:
         for frame in source:
             timestamps = pd.to_datetime(frame["timestamp"], errors="raise")
-            values.update(pd.Timestamp(value).normalize() for value in timestamps)
+            values.update(pd.DatetimeIndex(timestamps.unique()).normalize())
     if not values:
         raise ValueError("a_share_walk_forward_sessions_empty")
     return pd.DatetimeIndex(sorted(values))

@@ -175,15 +175,14 @@ def _industry_size_residuals(target, industries, sizes, *, rescale):
             x = x * count - sums[group][1]
             yield (y - slope * x) / (count * y_scale)
 
-    try:
-        return np.fromiter(map(float, residuals()), dtype="float64", count=len(target))
-    except OverflowError:
-        if not rescale:
-            raise
-        # Only an overflowing residual needs a common scale before zscore.
+    if rescale:
         exact = list(residuals())
         scale = max(map(abs, exact))
-        return np.array([float(value / scale) for value in exact], dtype="float64")
+        return np.array(
+            [float(value / scale) for value in exact] if scale else [0.0] * len(target),
+            dtype="float64",
+        )
+    return np.fromiter(map(float, residuals()), dtype="float64", count=len(target))
 
 
 def neutralize_cross_section(

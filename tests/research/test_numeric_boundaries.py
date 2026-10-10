@@ -205,9 +205,9 @@ def test_bh_by_reuse_individual_hac_and_keep_full_family_order(monkeypatch):
         max_lags=2,
     )
     assert calls == ["b", "a", "constant", "diagnostic"]
-    pd.testing.assert_frame_equal(
-        actual, pd.concat(expected_parts, ignore_index=True), check_exact=True
-    )
+    expected = pd.concat(expected_parts, ignore_index=True)
+    expected["input_date_count"] = len(frame)
+    pd.testing.assert_frame_equal(actual, expected, check_exact=True)
     for method in ("BH", "BY"):
         part = actual.loc[actual.fdr_method.eq(method)]
         assert part.factor_id.tolist() == list(planned)

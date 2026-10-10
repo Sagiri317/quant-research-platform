@@ -34,6 +34,10 @@ from quant_research_platform.artifacts.portfolio_ledger import (
     write_portfolio_ledger_artifact,
 )
 from quant_research_platform.artifacts.research import (
+    _instance_root as _reference_instance_root,
+)
+from quant_research_platform.artifacts.research import (
+    _validate_reference_envelope,
     build_report_from_run,
     read_research_run_record,
     read_validated_reference,
@@ -124,7 +128,10 @@ from quant_research_platform.storage.datasets.schema import (
     data_spec_payload,
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
-from quant_research_platform.storage.experiments import research_run_trial_references
+from quant_research_platform.storage.experiments import (
+    research_run_trial_references,
+    verify_trial_ledger_snapshot,
+)
 from quant_research_platform.storage.identity import (
     filesystem_exists,
     filesystem_stat,
@@ -140,10 +147,12 @@ from quant_research_platform.storage.rebuild import (
     rebuild_candidate_workspace,
 )
 from quant_research_platform.storage.semantic_artifacts import (
+    _member_identity,
     _read_artifact_manifest,
+    _visit_member_paths,
     compare_semantic_artifacts,
-    read_semantic_artifact,
     read_semantic_artifact_record,
+    verify_semantic_artifact_snapshot,
     write_semantic_artifact,
 )
 from quant_research_platform.storage.software_identity import (
@@ -338,7 +347,10 @@ def _plan_targets(
     raw_root: Path | None = None,
     research_window: Mapping[str, object],
     software_identity: ProductionSoftwareIdentity | None = None,
-) -> tuple[tuple[tuple[_TargetRequest, TargetPlan], ...], dict[Path, DatasetSession]]:
+    reuse_sessions=None,
+) -> tuple[
+    tuple[tuple[_TargetRequest, TargetPlan], ...], dict[Path, DatasetSession | tuple]
+]:
     if action == "report build":
         raise ValueError("report_run_id_required")
     terminals = tuple(sorted(set(terminal_targets)))
@@ -347,7 +359,7 @@ def _plan_targets(
         raise ValueError("protocol_terminal_targets_invalid")
     software = software_identity or production_software_identity()
     window = research_window
-    reuse_sessions: dict[Path, DatasetSession] = {}
+    reuse_sessions = {} if reuse_sessions is None else reuse_sessions
     source_root = raw_root or _default_raw_root(layout)
     specs = _target_specs(
         profile,
@@ -359,6 +371,7 @@ def _plan_targets(
     by_request: dict[tuple[str, TimeWindow], TargetPlan] = {}
     requests = _target_requests(profile, action, protocol, ordered, terminals, window)
     frozen = protocol.manifest().get("frozen_development")
+    effective_requests = []
     for request in requests:
         spec = request.spec
         rebuild_target = rebuild and request.publish and spec.target_id in requested
@@ -382,8 +395,33 @@ def _plan_targets(
                 artifact_root=reference["path"],
             )
             by_request[request.key] = plan
+            effective_requests.append(request)
             continue
         data_spec = _catalog_data_spec(profile, spec.target_id)
+        absent = (
+            tuple(
+                name
+                for name in data_spec.optional_source_input_data_ids
+                if dependencies[name].blocker == "raw_content_identity_unavailable"
+            )
+            if isinstance(data_spec, ProcessedDataSpec)
+            else ()
+        )
+        if absent:
+            spec = replace(
+                spec,
+                dependencies=tuple(
+                    name for name in spec.dependencies if name not in absent
+                ),
+            )
+            request = replace(
+                request,
+                spec=spec,
+                dependencies=tuple(
+                    item for item in request.dependencies if item[0] not in absent
+                ),
+            )
+        effective_requests.append(request)
         target_window = request.time_window
         target_research_window = _window_payload(
             target_window,
@@ -394,6 +432,12 @@ def _plan_targets(
             for dependency in spec.dependencies
             if dependencies[dependency].requested_identity is not None
         }
+        upstream_identities.update(
+            {
+                name: canonical_json_hash({"source_id": name, "presence": "ABSENT"})
+                for name in absent
+            }
+        )
         blocker: str | None = None
         requested_identity: str | None = None
         matching_instance_identity: str | None = None
@@ -503,7 +547,8 @@ def _plan_targets(
                     matching_instance_identity, blocker = _matching_instance(
                         profile=profile,
                         layout=layout,
-                        target_id=spec.target_id,
+                        spec=spec,
+                        protocol=protocol,
                         requested_identity=requested_identity,
                         reuse_sessions=reuse_sessions,
                     )
@@ -541,8 +586,22 @@ def _plan_targets(
             artifact_root=artifact_root,
         )
         by_request[request.key] = plan
+    needed = set()
+    effective_by_key = {request.key: request for request in effective_requests}
+
+    def include(key):
+        if key not in needed:
+            needed.add(key)
+            for dependency in effective_by_key[key].dependencies:
+                include(dependency)
+
+    for request in effective_requests:
+        if request.publish and request.spec.target_id in terminals:
+            include(request.key)
     return tuple(
-        (request, by_request[request.key]) for request in requests
+        (request, by_request[request.key])
+        for request in effective_requests
+        if request.key in needed
     ), reuse_sessions
 
 
@@ -727,9 +786,16 @@ def research_run(
             )
         preflight_model_specs(specs)
     preflight_blocker = None
+    reuse_sessions = {}
     if holdout:
         protocol, preflight_blocker = _frozen_holdout_protocol(
-            profile, layout, protocol, development_run_id, start_date, end_date
+            profile,
+            layout,
+            protocol,
+            development_run_id,
+            start_date,
+            end_date,
+            reuse_sessions=reuse_sessions,
         )
         profile = replace(profile, protocol=lambda **kwargs: protocol)
     else:
@@ -817,6 +883,7 @@ def research_run(
             result_sink=result_sink,
             reference_sink=reference_sink,
             operation_evidence_sink=operation_evidence,
+            reuse_sessions=reuse_sessions,
         )
     except BaseException as primary:
         try:
@@ -862,6 +929,8 @@ def _frozen_holdout_protocol(
     development_run_id: str | None,
     start_date: str,
     end_date: str,
+    *,
+    reuse_sessions=None,
 ) -> tuple[Any, str | None]:
     if development_run_id is None:
         raise PermissionError("holdout_frozen_development_identity_unavailable")
@@ -900,62 +969,64 @@ def _frozen_holdout_protocol(
         raise ValueError("holdout_development_run_invalid")
     references = {item.target_id: item for item in record.target_results}
     artifacts = {}
-    validated = {}
-    for target_id in dict.fromkeys(
-        (*record.terminal_targets, *protocol.frozen_target_ids())
-    ):
-        reference = references.get(target_id)
-        if reference is None:
-            raise ValueError("holdout_development_reference_missing")
-        identities = {}
-        root, envelope = read_validated_reference(
-            layout, reference, member_identities=identities
-        )
-        validated[target_id] = root, envelope, identities
-        if reference.producer_kind is ProducerKind.PORTFOLIO:
-            reader = read_portfolio_ledger_artifact
-            if (
-                str(profile.market_id) == "crypto"
-                and protocol.execution_target_for_target(target_id).execution_mode
-                == "independent_segments"
-            ):
-                from quant_research_platform.artifacts.crypto_hft import (
-                    read_crypto_episode_artifact,
-                )
-
-                reader = read_crypto_episode_artifact
-            artifacts[target_id] = partial(
-                reader,
-                root,
-                expected_identity=reference.instance_identity,
-                expected_member_identities=identities,
-            )
+    reuse_sessions = {} if reuse_sessions is None else reuse_sessions
+    frozen_targets = protocol.frozen_target_ids()
+    specs = {item.target_id: item for item in protocol.target_specs("research run")}
     frozen = {
         "run_id": record.run_id,
         "run_identity": canonical_json_hash(record.payload()),
         "targets": {},
     }
-    for target_id in protocol.frozen_target_ids():
-        reference = references[target_id]
-        root, envelope, identities = validated[target_id]
+    for target_id in dict.fromkeys((*record.terminal_targets, *frozen_targets)):
+        reference = references.get(target_id)
+        if reference is None:
+            raise ValueError("holdout_development_reference_missing")
+        if (
+            target_id not in frozen_targets
+            and reference.producer_kind is not ProducerKind.PORTFOLIO
+        ):
+            read_validated_reference(layout, reference)
+            continue
+        root = _reference_instance_root(layout, reference)
+        envelope, _members, manifest_identity, _operational = _read_artifact_manifest(
+            root, expected_identity=reference.instance_identity
+        )
+        _validate_reference_envelope(reference, envelope)
+        identities = {"manifest.json": manifest_identity}
+        directories = _visit_member_paths(
+            root,
+            lambda name, path, identities=identities: identities.__setitem__(
+                name, _member_identity(path)
+            ),
+        )
+        semantic_snapshots = {root: (identities, directories)}
+        trial_snapshots = {}
         artifacts[target_id] = _validate_semantic_target_root(
             profile,
             protocol,
-            next(
-                item
-                for item in protocol.target_specs("research run")
-                if item.target_id == target_id
-            ),
+            specs[target_id],
             root,
             reference.instance_identity,
             trial_layout=layout,
             expected_member_identities=identities,
+            semantic_snapshots=semantic_snapshots,
+            trial_snapshots=trial_snapshots,
+            reuse_sessions=reuse_sessions,
         )
-        frozen["targets"][target_id] = {
-            "reference": reference.payload(),
-            "upstream_identities": envelope["upstream_identities"],
-        }
-    return protocol.freeze_development(record, references, frozen, artifacts)
+        session = (envelope, semantic_snapshots, trial_snapshots, artifacts[target_id])
+        _verify_semantic_reuse(session)
+        reuse_sessions[root] = session
+        if target_id in frozen_targets:
+            frozen["targets"][target_id] = {
+                "reference": reference.payload(),
+                "upstream_identities": envelope["upstream_identities"],
+            }
+    result = protocol.freeze_development(record, references, frozen, artifacts)
+    for target_id in artifacts:
+        _verify_semantic_reuse(
+            reuse_sessions[_reference_instance_root(layout, references[target_id])]
+        )
+    return result
 
 
 def _require_development_window(protocol: Any, start_date: str, end_date: str) -> None:
@@ -1025,6 +1096,7 @@ def _execute_action(
     reference_sink: dict[str, TargetPlan] | None = None,
     run_id: str | None = None,
     operation_evidence_sink: dict[str, object] | None = None,
+    reuse_sessions=None,
 ) -> dict[str, object]:
     with (
         record_run_observations(operation_evidence_sink)
@@ -1045,6 +1117,7 @@ def _execute_action(
             result_sink=result_sink,
             reference_sink=reference_sink,
             observe=observe,
+            reuse_sessions=reuse_sessions,
         )
 
 
@@ -1063,6 +1136,7 @@ def _execute_targets(
     reference_sink: dict[str, TargetPlan] | None = None,
     run_id: str | None = None,
     observe=None,
+    reuse_sessions=None,
 ) -> dict[str, object]:
     source_root = raw_root or _default_raw_root(layout)
     software = software_identity or production_software_identity()
@@ -1077,6 +1151,7 @@ def _execute_targets(
         raw_root=source_root,
         research_window=window,
         software_identity=software,
+        reuse_sessions=reuse_sessions,
     )
     plans = {request.key: plan for request, plan in instance_plans}
     instance_results: dict[tuple[str, TimeWindow], TargetResult] = {}
@@ -1434,6 +1509,9 @@ def _build_target(
             instance_identity=requested_identity,
         )
     if binding.kind is ProducerKind.PROCESSED:
+        _verify_absent_sources(
+            profile, data_spec, planned.upstream_identities, raw_root
+        )
         processed_spec = data_spec
         produced = producer(
             processed_spec,
@@ -1455,6 +1533,14 @@ def _build_target(
                     status=TargetStatus.BLOCKED,
                     reason="processed_target_empty",
                 )
+
+            def verify_inputs(receipt):
+                if verify is not None:
+                    verify(receipt)
+                _verify_absent_sources(
+                    profile, data_spec, planned.upstream_identities, raw_root
+                )
+
             # The producer may finish its diagnostics while the writer drains it.
             producer_metadata.update(instance_metadata)
             write_dataset(
@@ -1462,7 +1548,7 @@ def _build_target(
                 frame,
                 spec=processed_spec,
                 instance_metadata=producer_metadata,
-                staged_validator=verify,
+                staged_validator=verify_inputs,
             )
         _validate_published_target(output_root, requested_identity)
         return TargetResult(
@@ -2131,6 +2217,25 @@ def _semantic_failure_code(exc: BaseException) -> str:
     return reason if origin is None else f"{reason}:{origin}"
 
 
+def _verify_absent_sources(profile, data_spec, upstream_identities, raw_root):
+    if not isinstance(data_spec, ProcessedDataSpec):
+        return
+    for name in data_spec.optional_source_input_data_ids:
+        if upstream_identities.get(name) != canonical_json_hash(
+            {"source_id": name, "presence": "ABSENT"}
+        ):
+            continue
+        source_spec = profile.interim.get(name)
+        binding = profile.producer_bindings[name]
+        if (
+            binding.source_identity(
+                binding.raw_root or _interim_raw_root(raw_root, source_spec), name
+            )
+            is not None
+        ):
+            raise PortfolioTargetBlocked("optional_source_presence_changed")
+
+
 def _reuse_target(
     *,
     profile: ResearchProfile,
@@ -2140,7 +2245,7 @@ def _reuse_target(
     planned: TargetPlan,
     raw_root: Path,
     time_window: TimeWindow,
-    session: DatasetSession | None = None,
+    session: DatasetSession | tuple | None = None,
 ) -> TargetResult:
     requested_identity = planned.requested_identity
     matching_identity = planned.matching_instance_identity
@@ -2162,7 +2267,7 @@ def _reuse_target(
                 )
                 manifest_path = root / "manifest.json"
                 handle = operation.enter_context(
-                    open_filesystem_file(manifest_path, "rb")
+                    closing_iterator(open_filesystem_file(manifest_path, "rb"))
                 )
                 operation.enter_context(
                     verified_file_handle(
@@ -2191,15 +2296,24 @@ def _reuse_target(
                         TargetStatus.BLOCKED,
                         reason="source_identity_invalid",
                     )
-            _validate_semantic_target_root(
-                profile, protocol, spec, root, requested_identity, trial_layout=layout
-            )
+            if session is None:
+                _validate_semantic_target_root(
+                    profile,
+                    protocol,
+                    spec,
+                    root,
+                    requested_identity,
+                    trial_layout=layout,
+                )
+            else:
+                _verify_semantic_reuse(session)
         return TargetResult(
             target_id=spec.target_id,
             status=TargetStatus.REUSED,
             instance_identity=requested_identity,
         )
-    envelope = _validate_published_target(root, requested_identity)
+    _verify_absent_sources(profile, data_spec, planned.upstream_identities, raw_root)
+    envelope = _validate_published_target(root, requested_identity, session=session)
     binding = profile.producer_bindings.get(spec.target_id)
     if isinstance(data_spec, InterimDataSpec) or (
         binding is not None and binding.source_identity is not None
@@ -2264,6 +2378,7 @@ def _reuse_target(
         )
     else:
         session.verify()
+    _verify_absent_sources(profile, data_spec, planned.upstream_identities, raw_root)
     return TargetResult(
         target_id=spec.target_id,
         status=TargetStatus.REUSED,
@@ -2302,7 +2417,46 @@ def _validate_semantic_target_root(
     *,
     trial_layout: StorageLayout | None = None,
     expected_member_identities=None,
+    semantic_snapshots=None,
+    trial_snapshots=None,
+    reuse_sessions=None,
 ) -> None:
+    def read_model(model_root, identity, *, member_identities=None):
+        saved = None if reuse_sessions is None else reuse_sessions.get(model_root)
+        if saved is not None and saved[3] is not None:
+            _verify_semantic_reuse(saved)
+            semantic_snapshots.update(saved[1])
+            trial_snapshots.update(saved[2])
+            return saved[3]
+        snapshot = None
+        if semantic_snapshots is not None and member_identities is None:
+            _header, _members, manifest_identity, _operational = (
+                _read_artifact_manifest(model_root, expected_identity=identity)
+            )
+            member_identities = {"manifest.json": manifest_identity}
+            directories = _visit_member_paths(
+                model_root,
+                lambda name, path: member_identities.__setitem__(
+                    name, _member_identity(path)
+                ),
+            )
+            snapshot = member_identities, directories
+        persisted = (
+            read_crypto_model_artifact
+            if protocol.protocol_id == "crypto_hft"
+            else read_quarterly_model_artifact
+        )(
+            model_root,
+            expected_identity=identity,
+            trial_layout=trial_layout,
+            expected_member_identities=member_identities,
+            trial_snapshots=trial_snapshots,
+        )
+        if snapshot is not None:
+            verify_semantic_artifact_snapshot(model_root, *snapshot)
+            semantic_snapshots[model_root] = snapshot
+        return persisted
+
     binding = profile.producer_bindings.get(spec.target_id)
     if binding is None:
         raise ValueError("producer_binding_missing")
@@ -2342,15 +2496,8 @@ def _validate_semantic_target_root(
             )
             envelope = artifact.envelope
     elif binding.kind is ProducerKind.MODEL:
-        persisted = (
-            read_crypto_model_artifact
-            if protocol.protocol_id == "crypto_hft"
-            else read_quarterly_model_artifact
-        )(
-            root,
-            expected_identity=expected_identity,
-            trial_layout=trial_layout,
-            expected_member_identities=expected_member_identities,
+        persisted = read_model(
+            root, expected_identity, member_identities=expected_member_identities
         )
         envelope = persisted.envelope
     else:
@@ -2364,7 +2511,7 @@ def _validate_semantic_target_root(
     if envelope["logical_artifact_id"] != spec.target_id:
         raise ValueError("semantic_artifact_logical_id_mismatch")
     if binding.kind in {ProducerKind.STATISTIC, ProducerKind.PORTFOLIO}:
-        return
+        return artifact
 
     def output_identities(output_id):
         prefix = f"outputs/{output_id}/"
@@ -2383,15 +2530,14 @@ def _validate_semantic_target_root(
         else:
             model_target = f"{protocol.scenario_id}_models"
             model_identity = envelope["upstream_identities"][model_target]
-            persisted = read_crypto_model_artifact(
+            persisted = read_model(
                 _target_instance_root(
                     profile,
                     trial_layout or StorageLayout(root),
                     model_target,
                     model_identity,
                 ),
-                expected_identity=model_identity,
-                trial_layout=trial_layout,
+                model_identity,
             )
             for model_id in protocol.model_ids_for_target(model_target):
                 output_id = f"{model_id}_prediction"
@@ -2477,15 +2623,14 @@ def _validate_semantic_target_root(
                 raise ValueError("prediction_model_lineage_mismatch")
             if trial_layout is None:
                 raise ValueError("prediction_model_layout_required")
-            model_artifact = read_quarterly_model_artifact(
+            model_artifact = read_model(
                 _target_instance_root(
                     profile,
                     trial_layout,
                     model_target,
                     lineage["model_artifact_identity"],
                 ),
-                expected_identity=lineage["model_artifact_identity"],
-                trial_layout=trial_layout,
+                lineage["model_artifact_identity"],
             )
             if lineage != model_artifact.prediction_lineage(
                 TimeWindow(
@@ -2967,14 +3112,25 @@ def _semantic_target_time_window(
     return protocol.target_window(action, None, window, target_spec.target_id)
 
 
+def _verify_semantic_reuse(session):
+    """Keep one request's validated native result bound to all of its files."""
+    _envelope, semantic_snapshots, trial_snapshots, _native = session
+    for saved_root, snapshot in semantic_snapshots.items():
+        verify_semantic_artifact_snapshot(saved_root, *snapshot)
+    for saved_root, snapshot in trial_snapshots.items():
+        verify_trial_ledger_snapshot(saved_root, snapshot)
+
+
 def _matching_instance(
     *,
     profile: ResearchProfile,
     layout: StorageLayout,
-    target_id: str,
+    spec: TargetSpec,
+    protocol: Any,
     requested_identity: str,
-    reuse_sessions: dict[Path, DatasetSession] | None = None,
+    reuse_sessions: dict | None = None,
 ) -> tuple[str | None, str | None]:
+    target_id = spec.target_id
     logical_root = _target_logical_root(profile, layout, target_id)
     if logical_root is None:
         return None, "target_logical_root_missing"
@@ -2988,10 +3144,43 @@ def _matching_instance(
         except FileNotFoundError:
             return None, None
         data_spec = _catalog_data_spec(profile, target_id)
-        if data_spec is None:
-            envelope = read_semantic_artifact(
-                instance_root, expected_identity=requested_identity
+        if (
+            data_spec is None
+            and reuse_sessions is not None
+            and instance_root in reuse_sessions
+        ):
+            session = reuse_sessions[instance_root]
+            _verify_semantic_reuse(session)
+            envelope = session[0]
+        elif data_spec is None:
+            envelope, _members, manifest_identity, _operational = (
+                _read_artifact_manifest(
+                    instance_root, expected_identity=requested_identity
+                )
             )
+            identities = {"manifest.json": manifest_identity}
+            directories = _visit_member_paths(
+                instance_root,
+                lambda name, path, identities=identities: identities.__setitem__(
+                    name, _member_identity(path)
+                ),
+            )
+            semantic_snapshots = {instance_root: (identities, directories)}
+            trial_snapshots = {}
+            native = _validate_semantic_target_root(
+                profile,
+                protocol,
+                spec,
+                instance_root,
+                requested_identity,
+                trial_layout=layout,
+                expected_member_identities=identities,
+                semantic_snapshots=semantic_snapshots,
+                trial_snapshots=trial_snapshots,
+                reuse_sessions=reuse_sessions,
+            )
+            session = (envelope, semantic_snapshots, trial_snapshots, native)
+            _verify_semantic_reuse(session)
         else:
             session = (
                 None if reuse_sessions is None else reuse_sessions.get(instance_root)
@@ -3008,7 +3197,7 @@ def _matching_instance(
             )
         if envelope["logical_artifact_id"] != target_id:
             raise ValueError("persisted_instance_logical_id_mismatch")
-        if reuse_sessions is not None and data_spec is not None:
+        if reuse_sessions is not None:
             reuse_sessions[instance_root] = session
     except (ValueError, KeyError, FileNotFoundError, NotADirectoryError):
         return None, "persisted_instance_invalid"
@@ -3052,7 +3241,16 @@ def _target_layout(
     spec: TargetSpec,
     plans: Mapping[str, TargetPlan],
 ) -> StorageLayout:
-    roots: dict[str, Path] = {}
+    data_spec = _catalog_data_spec(profile, spec.target_id)
+    roots = (
+        {
+            name: None
+            for name in data_spec.optional_source_input_data_ids
+            if name not in spec.dependencies
+        }
+        if isinstance(data_spec, ProcessedDataSpec)
+        else {}
+    )
     for target_id in (*spec.dependencies, spec.target_id):
         planned = plans.get(target_id)
         if planned is None:

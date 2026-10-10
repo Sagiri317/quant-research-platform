@@ -16,8 +16,10 @@ from tests.helpers.portfolio_ledger import capture_fill_rows
 from tests.markets.crypto.test_hft_execution import _state, _taker_config
 
 
+@pytest.mark.parametrize("initial_capital", (1000.0, 1e16))
 def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
     tmp_path,
+    initial_capital,
 ):
     from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
     from quant_research_platform.artifacts.portfolio_ledger import (
@@ -54,7 +56,9 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
             prediction_horizon_ms=50,
             config=_taker_config(latency_ms=10),
             observed_coverage={"s1": (0, 2000000000)},
-            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            capital=PortfolioCapital(
+                "fixture", initial_capital, "USDT", "linear_perpetual"
+            ),
             asset_id="btc_usdt",
             funding_events=events,
             funding_forecasts=known,
@@ -91,8 +95,9 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
     assert result["funding"] == pytest.approx(-0.209)
     assert result["fees"] == pytest.approx(0.0205)
     assert result["net_pnl"] == pytest.approx(3.7705)
-    assert boundaries == pytest.approx([1000, 1000.48995, 1003.49095, 1003.7705])
-    assert boundaries[2] - boundaries[1] == pytest.approx(3.001)
+    if initial_capital == 1000.0:
+        assert boundaries == pytest.approx([1000, 1000.48995, 1003.49095, 1003.7705])
+        assert boundaries[2] - boundaries[1] == pytest.approx(3.001)
     envelope = build_business_manifest_envelope(
         logical_artifact_id="fixture",
         schema_identity="a" * 64,
@@ -106,7 +111,7 @@ def test_taker_known_funding_and_continuous_gap_have_hand_calculated_economics(
         upstream_identities={},
         semantic_metadata={
             "portfolio_capital": asdict(
-                PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+                PortfolioCapital("fixture", initial_capital, "USDT", "linear_perpetual")
             )
         },
     )
@@ -187,9 +192,6 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
         read_crypto_episode_artifact,
         write_crypto_episode_artifact,
     )
-    from quant_research_platform.artifacts.portfolio_ledger import (
-        summarize_portfolio_ledger,
-    )
     from quant_research_platform.contracts.business_manifest import (
         build_business_manifest_envelope,
     )
@@ -243,6 +245,13 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
     funding = SimpleNamespace(
         identity="d" * 64,
         coverage=((0, 70000000),),
+        settlement_qualification=(
+            {
+                "coverage": {"start_ns": 0, "end_ns": 70000000, "status": "COMPLETE"},
+                "settlement_source": None,
+                "verification": "declared_archive_not_independently_verified",
+            },
+        ),
         events=events,
         forecasts=iter((FundingForecast(0, 1000000000, ()),)),
     )
@@ -282,9 +291,15 @@ def test_independent_episode_collection_resets_capital_and_funding_boundaries(tm
     summaries = []
     with closing_iterator(artifact.iter_episodes()) as rows:
         for index, ledger in rows:
-            summaries.append(
-                summarize_portfolio_ledger(ledger.capital, ledger.iter_chunks())
+            from quant_research_platform.artifacts.crypto_hft import (
+                summarize_crypto_ledger,
             )
+
+            restored = summarize_crypto_ledger(ledger, ledger.iter_chunks())
+            assert restored["funding_qualification"]["sources"] == list(
+                funding.settlement_qualification
+            )
+            summaries.append(restored["economics"])
             assert ledger.capital == capital
             assert index["termination"] == "TRUNCATED"
             with closing_iterator(ledger.iter_chunks()) as batches:
@@ -500,6 +515,13 @@ def test_funding_cut_between_books_carries_information_without_account_state():
     funding = SimpleNamespace(
         identity="a" * 64,
         coverage=((0, 70000000),),
+        settlement_qualification=(
+            {
+                "coverage": {"start_ns": 0, "end_ns": 70000000, "status": "COMPLETE"},
+                "settlement_source": None,
+                "verification": "declared_archive_not_independently_verified",
+            },
+        ),
         events=(
             FundingEvent(30000000, None, None),
             FundingEvent(40000000, 0.01, 100.0),

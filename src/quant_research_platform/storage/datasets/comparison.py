@@ -156,12 +156,15 @@ def compare_datasets(
         metadata_hashes = {
             side: canonical_json_hash(
                 {
-                    key: context.manifest[key]
+                    key: manifest[key]
                     for key in _DATASET_INSTANCE_METADATA_ALLOWED_KEYS
-                    if key in context.manifest
+                    if key in manifest
                 }
             )
-            for side, context in (("left", left_context), ("right", right_context))
+            for side, manifest in (
+                ("left", left_context.manifest),
+                ("right", right_context.manifest),
+            )
         }
         summary["business_metadata"] = metadata_hashes
         if status == "MATCH" and metadata_hashes["left"] != metadata_hashes["right"]:

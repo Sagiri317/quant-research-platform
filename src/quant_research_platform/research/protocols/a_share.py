@@ -320,6 +320,9 @@ class AShareProtocol:
             "risk": asdict(self.risk_config),
             "optimizer": asdict(self.optimizer_config),
             "statistics": {
+                "inference_clock": "ordered_defined_observations",
+                "inference_population": "dates_with_defined_statistic",
+                "input_date_domain": "dataset_dates_in_analysis_window",
                 "hac_lag": HAC_LAG,
                 "bootstrap_block": STATISTICS_BLOCK,
                 "bootstrap_repetitions": STATISTICS_REPETITIONS,
@@ -574,7 +577,7 @@ class AShareProtocol:
                     f"{self.scenario_id}_{candidate.candidate_id}_ledger"
                 ]
                 try:
-                    ledger = artifacts[source.target_id]()
+                    ledger = artifacts[source.target_id]
                     current, observed_at = frozen_alpha_calibration(
                         ledger.final_alpha_calibration,
                         cutoff=pd.Timestamp(record.research_window["end"]),
@@ -848,8 +851,9 @@ class AShareProtocol:
 
 def _inference_blocker(manifest):
     """Exclude independent robustness runs only from formal joint inference."""
-    if "stage_selection" in manifest or "stage_selection" in manifest.get(
-        "research_configuration", {}
+    if manifest["access_window"] == "development" and (
+        "stage_selection" in manifest
+        or "stage_selection" in manifest.get("research_configuration", {})
     ):
         return "development_stage_selection_exploratory"
     if manifest.get("expectations", {}).get("role") == "robustness":

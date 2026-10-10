@@ -16,7 +16,7 @@ from quant_research_platform.storage.identity import validate_instance_identity
 @dataclass(frozen=True)
 class StorageLayout:
     project_root: Path = Path(".")
-    _target_roots: Mapping[str, Path] = field(
+    _target_roots: Mapping[str, Path | None] = field(
         default_factory=dict, repr=False, compare=False
     )
 
@@ -25,7 +25,7 @@ class StorageLayout:
             (
                 type(target_id) is not str
                 or not target_id
-                or (not isinstance(root, Path))
+                or (root is not None and not isinstance(root, Path))
                 for target_id, root in self._target_roots.items()
             )
         ):
@@ -34,14 +34,14 @@ class StorageLayout:
             self, "_target_roots", MappingProxyType(dict(self._target_roots))
         )
 
-    def with_target_roots(self, roots: Mapping[str, Path]) -> StorageLayout:
+    def with_target_roots(self, roots: Mapping[str, Path | None]) -> StorageLayout:
         if not isinstance(roots, Mapping):
             raise ValueError("target_roots_invalid")
         merged = dict(self._target_roots)
         merged.update(roots)
         return replace(self, _target_roots=merged)
 
-    def target_root(self, target_id: str, default: Path) -> Path:
+    def target_root(self, target_id: str, default: Path | None) -> Path | None:
         return self._target_roots.get(target_id, default)
 
     def raw_source_root(self, source_id: SourceId) -> Path:

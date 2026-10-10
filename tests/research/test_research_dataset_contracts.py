@@ -136,7 +136,9 @@ def test_research_dataset_columns_extend_without_assembler_change(
     ]
 
 
-def test_dummy_market_assembles_without_a_share_import(tmp_path: Path) -> None:
+def test_dummy_market_assembly_preserves_generic_market_identity(
+    tmp_path: Path,
+) -> None:
     layout = StorageLayout(project_root=tmp_path)
     processed_catalog = make_dummy_processed_catalog()
     dataset_catalog = make_research_dataset_catalog(make_dummy_research_dataset_spec())

@@ -80,15 +80,7 @@ from quant_research_platform.storage.layout import StorageLayout
 DEFAULT_BATCH_ROWS = 8 * resources.DEFAULT_BATCH_ROWS
 
 
-_OPTIONAL_SOURCE_IDS = frozenset(
-    {
-        "industry_classification",
-        "industry_classification_sets",
-        "industry_classification_versions",
-        "stock_info_changes",
-    }
-)
-_FULL_HISTORY_SOURCE_IDS = _OPTIONAL_SOURCE_IDS | {
+_FULL_HISTORY_SOURCE_IDS = {
     "stock_master",
     "market_cap",
     "trading_no_limit",
@@ -114,11 +106,12 @@ def produce_a_share_processed_data(
     source = {}
     for data_id in spec.source_input_data_ids:
         source_spec = source_catalog.get(data_id)
+        default_root = layout.interim_data_root(source_spec.source_id, data_id)
         root = layout.target_root(
-            data_id, layout.interim_data_root(source_spec.source_id, data_id)
+            data_id, default_root if filesystem_exists(default_root) else None
         )
-        if not filesystem_exists(root):
-            if data_id in _OPTIONAL_SOURCE_IDS:
+        if root is None:
+            if data_id in spec.optional_source_input_data_ids:
                 source[data_id] = pd.DataFrame(columns=source_spec.required_columns)
                 continue
             continue
@@ -127,6 +120,7 @@ def produce_a_share_processed_data(
             columns=None,
             time_window=None
             if data_id in _FULL_HISTORY_SOURCE_IDS
+            or data_id in spec.optional_source_input_data_ids
             else a_share.source_history_window(
                 source_spec,
                 time_window,

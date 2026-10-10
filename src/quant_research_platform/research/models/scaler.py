@@ -59,16 +59,14 @@ class ModelMatrixScaler:
         weighted = weights[:, None] * normalized
         center = weighted.sum(axis=0) / total
         offset = center * magnitude
-        scale = (
-            np.array(
-                [
-                    norm(column, check_finite=False)
-                    for column in (root_weights[:, None] * (normalized - center)).T
-                ]
-            )
-            / np.sqrt(total)
-            * magnitude
-        )
+        normalized_scale = np.array(
+            [
+                norm(column, check_finite=False)
+                for column in (root_weights[:, None] * (normalized - center)).T
+            ]
+        ) / np.sqrt(total)
+        # Values are in [-1, 1], so the population deviation cannot exceed one.
+        scale = np.minimum(normalized_scale, 1.0) * magnitude
         # Preserve original-unit centers across underflow and anchor cancellation.
         exact_columns = ~constant & (
             ((normalized != 0) & (np.abs(weighted) < np.finfo(float).tiny)).any(axis=0)

@@ -73,7 +73,9 @@ def append_trial_record(root: Path, plan: ExperimentPlan, record: TrialRecord) -
     return atomic_write_json(path, record_payload)
 
 
-def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
+def read_trial_ledger(
+    root: Path, plan: ExperimentPlan | None = None, *, snapshots=None
+):
     """Read and validate the complete append-only trial ledger."""
     root = Path(root)
     if not filesystem_exists(root):
@@ -137,7 +139,20 @@ def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
         raise ValueError("trial_ledger_order_invalid")
     for record in records:
         validate_trial_record_against_plan(plan, record)
-    if _qrp_json_file_identity(root / "plan.json") != identity or any(
+    snapshot = (identity, record_identities, root_identity, records_identity, members)
+    verify_trial_ledger_snapshot(root, snapshot)
+    if snapshots is not None:
+        snapshots[root] = snapshot
+    return (saved, records)
+
+
+def verify_trial_ledger_snapshot(root, snapshot):
+    """Recheck a ledger validated earlier in the same operation."""
+    plan_identity, record_identities, root_identity, records_identity, members = (
+        snapshot
+    )
+    records_root = root / "records"
+    if _qrp_json_file_identity(root / "plan.json") != plan_identity or any(
         _qrp_json_file_identity(records_root / name) != expected
         for name, expected in record_identities.items()
     ):
@@ -159,7 +174,6 @@ def read_trial_ledger(root: Path, plan: ExperimentPlan | None = None):
             != expected_identity
         ):
             raise ValueError("dataset_metadata_directory_identity_changed")
-    return (saved, records)
 
 
 def _validate_trial_completion(start: TrialRecord, terminal: TrialRecord) -> None:
@@ -179,10 +193,12 @@ def _validate_trial_completion(start: TrialRecord, terminal: TrialRecord) -> Non
         raise ValueError("trial_terminal_identity_mismatch")
 
 
-def read_trial_ledger_reference(layout: StorageLayout, reference: dict[str, str]):
+def read_trial_ledger_reference(
+    layout: StorageLayout, reference: dict[str, str], *, snapshots=None
+):
     reference = validate_trial_ledger_reference(reference)
     root = layout.trial_ledger_root(reference["run_id"], reference["experiment_id"])
-    plan, records = read_trial_ledger(root)
+    plan, records = read_trial_ledger(root, snapshots=snapshots)
     if plan is None:
         raise FileNotFoundError("trial_ledger_missing")
     if (
@@ -225,8 +241,10 @@ def research_run_trial_references(layout: StorageLayout, run_id: str):
     return tuple(references)
 
 
-def read_model_trial_ledger_reference(layout: StorageLayout, reference: dict[str, str]):
-    plan, records = read_trial_ledger_reference(layout, reference)
+def read_model_trial_ledger_reference(
+    layout: StorageLayout, reference: dict[str, str], *, snapshots=None
+):
+    plan, records = read_trial_ledger_reference(layout, reference, snapshots=snapshots)
     for record in records:
         if record.status == "completed":
             if plan.stage == "selection":

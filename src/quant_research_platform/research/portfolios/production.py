@@ -7,6 +7,7 @@ from collections.abc import Callable, Iterator, Mapping
 from contextlib import ExitStack
 from dataclasses import asdict, dataclass
 from pathlib import Path
+from statistics import mean
 
 import numpy as np
 import pandas as pd
@@ -27,6 +28,7 @@ from quant_research_platform.contracts.portfolios import (
     PortfolioTargetBlocked,
     PortfolioValuation,
     _portfolio_session_frame,
+    portfolio_notional_tolerance,
 )
 from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.contracts.validation import strict_finite_float
@@ -1140,7 +1142,7 @@ def _build_session(
         float(holdings.sum()) + cash,
         nav,
         rtol=0.0,
-        atol=max(np.finfo("float64").eps * max(abs(nav), 1.0) * 512.0, 1e-12),
+        atol=portfolio_notional_tolerance(nav),
     ):
         raise ValueError("portfolio_state_invalid")
     eligible = _bool_series(dataset["eligible"], "portfolio_eligibility_invalid")
@@ -1190,7 +1192,7 @@ def _build_session(
     }
     adv = pd.Series(
         {
-            asset: float(np.mean(history))
+            asset: float(mean(history))
             if len(history := amount_history.get((asset, listing), ())) == 20
             else np.nan
             for asset, listing in panel_by_asset.loc[assets, "listing_date"].items()

@@ -239,7 +239,7 @@ def evaluate_model_trial_metrics_from_chunks(
                 if validation_axis == "cross_sectional":
                     ranks = values.groupby("timestamp_ns", sort=False)[
                         ["label", "prediction"]
-                    ].rank(method="average", pct=True)
+                    ].rank(method="average")
                     values["label_rank"] = ranks["label"]
                     values["prediction_rank"] = ranks["prediction"]
                 else:

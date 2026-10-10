@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import math
 from collections import deque
 from collections.abc import Callable, Iterable, Iterator, Mapping
 from dataclasses import dataclass
@@ -390,10 +391,30 @@ def _taker_order_quantity(
             if size <= 0:
                 continue
             price = index_to_price(tick, state.price_unit)
-            gain += size * (
-                sign * (forecast - price + funding_per_unit)
-                - price * config.taker_fee_bps / 10_000.0
-            )
+            fee_per_unit = price * config.taker_fee_bps / 10_000.0
+            unit_gain = sign * (forecast - price + funding_per_unit) - fee_per_unit
+            increment = size * unit_gain
+            if (
+                not math.isfinite(increment)
+                or config.taker_fee_bps != 0
+                and abs(fee_per_unit) < float.fromhex("0x1p-1022")
+            ):
+                exact = Fraction(size) * (
+                    Fraction(sign)
+                    * (
+                        Fraction(forecast)
+                        - Fraction(price)
+                        + Fraction(funding_per_unit)
+                    )
+                    - Fraction(price) * Fraction(config.taker_fee_bps) / 10_000
+                )
+                try:
+                    increment = float(exact)
+                except OverflowError:
+                    raise ValueError("hft_expected_gain_unrepresentable") from None
+            gain += increment
+            if not math.isfinite(gain):
+                raise ValueError("hft_expected_gain_unrepresentable")
             quantity += size
             remaining -= size
             if gain > best_gain:
@@ -1314,7 +1335,8 @@ class MakerCalibration:
                 event_time = event.event_at if event is not None else None
                 command_time = pending[0][0] if pending else None
                 stamp = _maker_next_time(event_time, command_time)
-                if stamp >= end:
+                # Include known OOS endpoint events; expire each order first at TTL.
+                if stamp > end:
                     break
                 for _expired in _maker_expired_orders(active, stamp):
                     if _expired is candidate:

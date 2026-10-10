@@ -611,7 +611,9 @@ def normalize_raw_frame(
                     column,
                     error_code="invalid_stock_master_date",
                 )
-        result["timestamp"] = result["listing_date"]
+        result["timestamp"] = result["status_change_date"].fillna(
+            result["listing_date"]
+        )
         if result["timestamp"].isna().any():
             raise ValueError("missing_stock_master_effective_timestamp")
         result["source_asset_id"] = result["stock_code"]

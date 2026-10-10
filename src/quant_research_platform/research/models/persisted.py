@@ -452,6 +452,13 @@ def write_quarterly_model_artifact(
                         "selection": decision,
                     },
                 )
+        family_order = {
+            item["model_id"]: index
+            for index, item in enumerate(
+                envelope.semantic_metadata["target_contract"]["model_specs"]
+            )
+        }
+        final_models.sort(key=lambda entry: family_order[entry["family_id"]])
         final_groups = tuple(
             dict.fromkeys(entry["selection_group"] for entry in final_models)
         )
@@ -752,6 +759,7 @@ def read_quarterly_model_artifact(
     expected_identity=None,
     trial_layout=None,
     expected_member_identities=None,
+    trial_snapshots=None,
 ):
     instance_root = Path(instance_root)
     member_identities = {}
@@ -775,6 +783,7 @@ def read_quarterly_model_artifact(
             member_identities=member_identities,
             operational_metadata=operational,
             directory_identities=directories,
+            trial_snapshots=trial_snapshots,
         )
 
 
@@ -789,6 +798,7 @@ def _validate_a_share_model_payload(
     operational_metadata,
     directory_identities,
     member_identities=None,
+    trial_snapshots=None,
 ):
     if trial_layout is None:
         raise ValueError("model_trial_layout_required")
@@ -950,7 +960,7 @@ def _validate_a_share_model_payload(
                 raise ValueError("model_trial_references_missing")
             used_references.add(identity)
             plan, records = read_model_trial_ledger_reference(
-                trial_layout, by_identity[identity]
+                trial_layout, by_identity[identity], snapshots=trial_snapshots
             )
             if (
                 plan.stage != "selection"
@@ -1253,7 +1263,7 @@ def _validate_a_share_model_payload(
             raise ValueError("model_trial_references_missing")
         used_references.add(identity)
         plan, records = read_model_trial_ledger_reference(
-            trial_layout, by_identity[identity]
+            trial_layout, by_identity[identity], snapshots=trial_snapshots
         )
         if (
             plan.stage != "refit"
@@ -1423,6 +1433,7 @@ class PersistedCryptoModelArtifact:
     models: tuple[dict, ...]
     final_models: tuple[dict, ...]
     member_identities: dict
+    trial_ledgers: tuple
 
     def validation_chunks(self, *, fold_id, model_id):
         entry = next(
@@ -1653,7 +1664,12 @@ def _intraday_window(window):
 
 
 def read_crypto_model_artifact(
-    root, *, expected_identity=None, trial_layout=None, expected_member_identities=None
+    root,
+    *,
+    expected_identity=None,
+    trial_layout=None,
+    expected_member_identities=None,
+    trial_snapshots=None,
 ):
     root = Path(root)
     member_identities = {}
@@ -1673,6 +1689,7 @@ def read_crypto_model_artifact(
             refs,
             trial_layout,
             member_identities=member_identities,
+            trial_snapshots=trial_snapshots,
         )
 
 
@@ -1691,7 +1708,14 @@ def _crypto_model_scope(envelope):
 
 
 def _validate_crypto_model_payload(
-    root, envelope, members, refs, trial_layout, *, member_identities=None
+    root,
+    envelope,
+    members,
+    refs,
+    trial_layout,
+    *,
+    member_identities=None,
+    trial_snapshots=None,
 ):
     from quant_research_platform.research.protocols.crypto_hft import (
         build_hft_prediction_catalog,
@@ -1730,6 +1754,7 @@ def _validate_crypto_model_payload(
     if type(refs) is not list or len(refs) != expected_references:
         raise ValueError("crypto_model_trial_references_invalid")
     references = {ref["semantic_identity"]: ref for ref in refs}
+    trial_ledgers = []
     if len(references) != len(refs):
         raise ValueError("crypto_model_trial_references_invalid")
     registered_specs = {
@@ -1820,7 +1845,10 @@ def _validate_crypto_model_payload(
             ref = references.pop(entry["trial_semantic_identity"], None)
             if ref is None:
                 raise ValueError("crypto_model_trial_references_invalid")
-            plan, records = read_model_trial_ledger_reference(trial_layout, ref)
+            plan, records = read_model_trial_ledger_reference(
+                trial_layout, ref, snapshots=trial_snapshots
+            )
+            trial_ledgers.append((ref, plan, records))
             expected_spec = replace(
                 registered_specs[entry["model_id"]],
                 random_seed=derive_seed(
@@ -1950,10 +1978,15 @@ def _validate_crypto_model_payload(
         refit_ref = references.pop(entry["refit_trial_semantic_identity"], None)
         if refit_ref is None:
             raise ValueError("crypto_model_trial_references_invalid")
-        selection_plan, selection_records = read_model_trial_ledger_reference(
-            trial_layout, selection_ref
+        _reference, selection_plan, selection_records = next(
+            item
+            for item in trial_ledgers
+            if item[0]["semantic_identity"] == selection_ref["semantic_identity"]
         )
-        refit_plan, records = read_model_trial_ledger_reference(trial_layout, refit_ref)
+        refit_plan, records = read_model_trial_ledger_reference(
+            trial_layout, refit_ref, snapshots=trial_snapshots
+        )
+        trial_ledgers.append((refit_ref, refit_plan, records))
         parameters = selection_records[0].payload()["normalized_parameters"]
         metadata = entry["model_metadata"]
         refit_protocol, selection_protocol = (
@@ -2021,6 +2054,7 @@ def _validate_crypto_model_payload(
         tuple(models),
         tuple(payload["final_models"]),
         member_identities,
+        tuple(trial_ledgers),
     )
 
 

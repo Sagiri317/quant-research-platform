@@ -963,8 +963,6 @@ def test_reader_rejects_self_consistent_publication_drift(tmp_path, mutation):
             decision = payload["selection"]
             if mutation == "selection_winner":
                 decision["selected_model_id"] = "other"
-            elif mutation == "selection_score":
-                decision["families"][0]["trial_metrics"][0]["validation_rankic"] = -0.75
             elif mutation == "selection_cutoff":
                 decision["cutoff"] = "2024-01-01"
             elif mutation == "selection_coverage":

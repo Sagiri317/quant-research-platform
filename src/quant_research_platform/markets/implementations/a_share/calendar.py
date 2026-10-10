@@ -41,8 +41,10 @@ def unified_trading_sessions(
 def market_type_trading_sessions(
     calendar: pd.DataFrame,
     market_type: int,
+    *,
+    required_dates: pd.DatetimeIndex | None = None,
 ) -> pd.DatetimeIndex:
-    """Return sorted unique trading sessions for one source market type."""
+    """Return open sessions and reject unknown required dates."""
 
     normalized = _require_normalized_calendar(calendar)
     source_market_types = strict_integer_series(
@@ -57,7 +59,13 @@ def market_type_trading_sessions(
         pd.Series([market_type]),
         error="invalid_source_market_type",
     ).iloc[0]
-    mask = source_market_types.eq(requested_market_type) & trading
+    selected = source_market_types.eq(requested_market_type)
+    if (
+        required_dates is not None
+        and not required_dates.isin(normalized.loc[selected, "calendar_date"]).all()
+    ):
+        raise ValueError("a_share_trading_calendar_unknown_session")
+    mask = selected & trading
     return _sorted_unique_sessions(normalized.loc[mask, "calendar_date"])
 
 

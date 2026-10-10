@@ -70,6 +70,7 @@ def tables(request):
         white_reason="",
         timestamp=pd.Timestamp("2023-01-02"),
         observation_count=32,
+        input_date_count=32,
         period_count=32,
         mean=0.2,
         standard_error=0.1,
@@ -2199,7 +2200,17 @@ def test_paired_rankic_and_champion_diagnostics_reach_native_report(
     report = build_a_share_report(record=record, evidence=evidence)
     for group, reference in zip(("global", "quarterly"), references, strict=True):
         shown = report["sections"]["OOS prediction"][group]
+        for row in expected[group]:
+            row["missing_observation_count"] = (
+                row["input_date_count"] - row["observation_count"]
+            )
         assert shown["prediction_diagnostics"] == expected[group]
+        assert shown["inference_clock"] == "ordered_defined_observations"
+        assert shown["inference_population"] == "dates_with_defined_statistic"
+        assert shown["prediction_diagnostics"][0]["input_date_count"] == 5
+        assert shown["prediction_diagnostics"][0]["missing_observation_count"] == (
+            1 if group == "global" else 0
+        )
         assert shown["statistics_identity"] == reference.instance_identity
         assert shown["prediction_diagnostics"][0]["status"] == (
             "UNDEFINED" if group == "global" and access == "development" else "DEFINED"

@@ -44,6 +44,8 @@ def model_cpu_capacity() -> tuple[int, int]:
     try:
         if sys.platform == "linux":
             available = min(available, len(os.sched_getaffinity(0)))
+        elif sys.platform == "win32":
+            available = min(available, len(psutil.Process().cpu_affinity()))
         for directory in _cgroup_v2_directories():
             maximum = directory / "cpu.max"
             if not maximum.exists():

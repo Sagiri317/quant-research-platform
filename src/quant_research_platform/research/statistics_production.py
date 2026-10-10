@@ -94,7 +94,7 @@ def build_a_share_factor_statistics_tables(
             )
         )
     )
-    ranks, periods = [], []
+    ranks, periods, input_dates = [], [], []
     chunks = iter_complete_session_frames(
         iter_research_dataset_chunks(
             layout,
@@ -108,6 +108,7 @@ def build_a_share_factor_statistics_tables(
     )
     with closing_iterator(chunks):
         for session in chunks:
+            input_dates.append(pd.Timestamp(session["timestamp"].iloc[0]))
             mature = legal_training_rows(
                 session,
                 fitting_cutoff=window.end,
@@ -136,7 +137,11 @@ def build_a_share_factor_statistics_tables(
     )
     return {
         "factor_diagnostics": _factor_summary(
-            pd.DataFrame.from_records(ranks, columns=["timestamp", *factors]),
+            pd.DataFrame.from_records(ranks, columns=["timestamp", *factors])
+            .set_index("timestamp")
+            .reindex(input_dates)
+            .rename_axis("timestamp")
+            .reset_index(),
             factors=factors,
             families=families,
             methods=methods
@@ -150,6 +155,7 @@ def build_a_share_factor_statistics_tables(
             factors=factors,
             core_factors=core,
             max_lags=max_lags,
+            input_date_count=len(input_dates),
         ),
         "fama_macbeth_periods": period_frame,
     }
@@ -287,8 +293,6 @@ def build_a_share_statistics_tables(
                         np.asarray(values, dtype="float64"), index=keys.index
                     )
                     mature[family_columns[family_id]] = scores.reindex(mature.index)
-                if mature.empty:
-                    continue
                 mature[_PREDICTION_COLUMN] = mature[
                     family_columns[selection["selected_family_id"]]
                 ]
@@ -300,12 +304,27 @@ def build_a_share_statistics_tables(
                     ),
                     label_column=primary_label,
                 )
+                if mature.empty:
+                    rank = pd.DataFrame(
+                        [
+                            {
+                                "timestamp": timestamp,
+                                **dict.fromkeys(
+                                    (_PREDICTION_COLUMN, *prediction_columns), np.nan
+                                ),
+                            }
+                        ]
+                    )
                 rank_records.extend(rank.to_dict("records"))
                 daily = rank.iloc[0]
-                paired_rank, paired_count = _common_model_rank_ic(
-                    mature,
-                    family_ids=prediction_columns,
-                    label_column=primary_label,
+                paired_rank, paired_count = (
+                    (rank.loc[:, ["timestamp", *prediction_columns]], 0)
+                    if mature.empty
+                    else _common_model_rank_ic(
+                        mature,
+                        family_ids=prediction_columns,
+                        label_column=primary_label,
+                    )
                 )
                 comparison_records.extend(paired_rank.to_dict("records"))
                 common = bool(
@@ -662,7 +681,9 @@ def _factor_summary(
         part["defined_hypothesis_count"] = defined_count
         part["missing_hypothesis_count"] = len(diagnostics) - defined_count
         parts.append(part)
-    return pd.concat(parts, ignore_index=True)
+    result = pd.concat(parts, ignore_index=True)
+    result["input_date_count"] = len(rank_by_date)
+    return result
 
 
 def _prediction_summary(
@@ -697,6 +718,7 @@ def _prediction_summary(
         "bootstrap_block_size": block_size,
         "bootstrap_repetitions": repetitions,
         "bootstrap_seed": seed,
+        "input_date_count": len(rank_by_date),
     }
     if inference_blocker is not None or count < max(2, max_lags + 1):
         return pd.DataFrame([row])
@@ -959,7 +981,10 @@ def _model_comparison(
         ).iloc[:0]
         comparison_table.insert(0, "access_window", pd.Series(dtype="str"))
         comparison_table.insert(1, "benchmark_id", pd.Series(dtype="str"))
-    return (comparison_table, pd.DataFrame(test_rows), pd.DataFrame(robustness_rows))
+    tables = (comparison_table, pd.DataFrame(test_rows), pd.DataFrame(robustness_rows))
+    for table in tables:
+        table["input_date_count"] = len(rank_by_date)
+    return tables
 
 
 def _fama_macbeth_definitions(factors, core_factors):
@@ -1050,7 +1075,10 @@ def _fama_macbeth_summary(
     factors: tuple[str, ...],
     core_factors: tuple[str, ...],
     max_lags: int,
+    input_date_count: int | None = None,
 ) -> pd.DataFrame:
+    if input_date_count is None:
+        input_date_count = periods["timestamp"].nunique()
     rows: list[dict[str, object]] = []
     definitions = [
         (regression, coefficient)
@@ -1084,6 +1112,7 @@ def _fama_macbeth_summary(
             "ci_upper": np.nan,
             "white_defined_period_count": white_defined,
             "white_undefined_period_count": white_undefined,
+            "input_date_count": input_date_count,
         }
         if count >= max(2, max_lags + 1):
             try:
