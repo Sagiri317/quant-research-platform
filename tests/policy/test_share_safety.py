@@ -36,3 +36,27 @@ def test_evidence_still_rejects_credentials_and_local_paths(tmp_path, payload, r
             tmp_path / "report.json", {"schema_id": "synthetic-report", **payload}
         )
     assert not (tmp_path / "report.json").exists()
+
+
+def test_embedded_unc_path_is_rejected_by_both_evidence_writers(tmp_path):
+    from quant_research_platform.policy.share_safety import (
+        sanitize_shared_text,
+        unsafe_for_share_reason,
+    )
+
+    text = "read failed at //nas/private/report.csv"
+    assert unsafe_for_share_reason(text) == "local_path"
+    assert "//nas" not in sanitize_shared_text(text)
+    for writer, name, payload in (
+        (
+            write_json_evidence,
+            "report.json",
+            {"schema_id": "synthetic-report", "error": text},
+        ),
+        (write_markdown_evidence, "report.md", text),
+    ):
+        with pytest.raises(ValueError, match="unsafe_evidence: absolute_path"):
+            writer(tmp_path / name, payload)
+        assert not (tmp_path / name).exists()
+    safe = "https://nas/private/report.csv data/raw/demo rows=12 source_id=demo"
+    assert sanitize_shared_text(safe) == safe

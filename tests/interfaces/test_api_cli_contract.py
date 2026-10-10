@@ -744,3 +744,15 @@ def test_api_get_from_former_browser_origin_has_no_cors_grant():
             assert "access-control-allow-origin" not in origin.headers
 
     asyncio.run(request())
+
+
+def test_cli_failure_redacts_embedded_unc_path(monkeypatch):
+    def fail(*args, **kwargs):
+        raise ValueError("read failed at //nas/private/report.csv")
+
+    monkeypatch.setattr(
+        cli_commands.queries, "describe_research_dataset_requirements", fail
+    )
+    result = CliRunner().invoke(app, ["research-datasets", "requirements", "pv_all"])
+    assert result.exit_code == 2
+    assert "//nas" not in result.output and "private/report.csv" not in result.output

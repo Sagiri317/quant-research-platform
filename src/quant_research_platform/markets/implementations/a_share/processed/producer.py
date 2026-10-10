@@ -236,19 +236,25 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     calendar = (
         unified_trading_sessions(source["trading_calendar"]) if panel_source else None
     )
-    sessions, asset_types, market_history, asset_sessions, observed_sessions = (
-        _processed_axis(
-            reference,
-            panel_source=panel_source,
-            calendar=source["trading_calendar"] if panel_source else None,
-            stock_master=panels._canonical_stock_master(source["stock_master"])
-            if panel_source
-            else None,
-            validation_window=time_window if panel_source else None,
-            include_asset_sessions=spec.kind is ProcessedDataKind.LABEL
-            or spec.data_id == "execution_mask"
-            or spec.kind is ProcessedDataKind.FACTOR,
-        )
+    stocks = (
+        panels._canonical_stock_master(source["stock_master"]) if panel_source else None
+    )
+    (
+        sessions,
+        asset_types,
+        market_history,
+        asset_sessions,
+        observed_sessions,
+        _raw_axis,
+    ) = _processed_axis(
+        reference,
+        panel_source=panel_source,
+        calendar=source["trading_calendar"] if panel_source else None,
+        stock_master=stocks,
+        validation_window=time_window if panel_source else None,
+        include_asset_sessions=spec.kind is ProcessedDataKind.LABEL
+        or spec.data_id == "execution_mask"
+        or spec.kind is ProcessedDataKind.FACTOR,
     )
     lower, upper, closed = time_window_timestamp_interval(time_window)
     if panel_source:
@@ -291,6 +297,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
             market_history,
             _asset_sessions,
             _observed_sessions,
+            _raw_axis,
         ) = _processed_axis(
             source_sessions["market_bars_1d"],
             panel_source=True,
@@ -339,7 +346,7 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
     expectations = None
     financial_calculate = None
     if panel_source and first < stop:
-        source = _prepare_panel_source(source)
+        source = _prepare_panel_source(source, stocks)
     for start in range(first, stop, block_sessions):
         end = min(stop, start + block_sessions)
         core = sessions[start:end]
@@ -456,10 +463,15 @@ def _processed_frames(spec, *, time_window, source, source_sessions, dependencie
 
 
 def _benchmark_frames(source, session):
-    sessions, assets, _market_history, _asset_sessions, _observed_sessions = (
-        _processed_axis(
-            session, panel_source=False, asset_column="constituent_asset_id"
-        )
+    (
+        sessions,
+        assets,
+        _market_history,
+        _asset_sessions,
+        _observed_sessions,
+        _raw_axis,
+    ) = _processed_axis(
+        session, panel_source=False, asset_column="constituent_asset_id"
     )
     block_size = max(1, DEFAULT_BATCH_ROWS // max(1, 2 * len(assets)))
 
@@ -522,6 +534,7 @@ def _processed_axis(
 
     dates = set()
     assets = {}
+    raw_dates, raw_assets = set(), set()
     first_market_events = {}
     observed_market_sessions = {}
     asset_session_masks = {}
@@ -529,6 +542,8 @@ def _processed_axis(
     with closing_iterator(iter_dataset_chunks(view, batch_rows=65536)) as chunks:
         for frame in chunks:
             if panel_source:
+                raw_dates.update(frame.timestamp.unique())
+                raw_assets.update(frame[asset_column].unique())
                 frame["market_type"] = strict_integer_series(
                     frame["market_type"], error="invalid_market_type", allow_null=True
                 )
@@ -651,6 +666,14 @@ def _processed_axis(
         )
         for mask in set(asset_session_masks.values())
     }
+    raw_axis = (
+        (
+            tuple(sorted(pd.Timestamp(value) for value in raw_dates)),
+            frozenset(raw_assets),
+        )
+        if panel_source
+        else (sessions, frozenset(asset_types.index))
+    )
     return (
         sessions,
         asset_types,
@@ -660,12 +683,13 @@ def _processed_axis(
             market: pd.DatetimeIndex(sorted(dates))
             for market, dates in observed_market_sessions.items()
         },
+        raw_axis,
     )
 
 
-def _prepare_panel_source(source):
+def _prepare_panel_source(source, stocks):
     return _prepare_market_panel_inputs(
-        stock_master=source["stock_master"],
+        stocks=stocks,
         market_cap=source["market_cap"],
         trading_calendar=source["trading_calendar"],
         observed_market_sessions=source.get("observed_market_sessions"),
@@ -935,7 +959,7 @@ def _portfolio_session_evidence(
     panel = open_dataset_session(panel_root, columns=None, time_window=None)
     asset_sessions = {}
     if include_asset_sessions:
-        _, _, _, asset_sessions, _ = _processed_axis(
+        _, _, _, asset_sessions, _, _raw_axis = _processed_axis(
             panel, panel_source=False, include_asset_sessions=True
         )
     stocks = panels._canonical_stock_master(
@@ -947,18 +971,23 @@ def _portfolio_session_evidence(
             )
         )
     )
-    _, _, membership, _, _ = _processed_axis(
+    _, _, membership, _, _, raw_axis = _processed_axis(
         bars, panel_source=True, calendar=calendar, stock_master=stocks
     )
-    return bars, panel, membership, asset_sessions, stocks
+    return bars, panel, membership, asset_sessions, stocks, raw_axis
 
 
 def iter_portfolio_sessions(
     *, layout, panel_root, panel_columns, calendar, time_window, execution_root=None
 ):
     """Project proved closed-market marks without changing materialized inputs."""
-    bars, panel, membership, asset_sessions, stocks = _portfolio_session_evidence(
-        layout, panel_root, calendar, include_asset_sessions=execution_root is not None
+    bars, panel, membership, asset_sessions, stocks, raw_axis = (
+        _portfolio_session_evidence(
+            layout,
+            panel_root,
+            calendar,
+            include_asset_sessions=execution_root is not None,
+        )
     )
     sessions = unified_trading_sessions(calendar)
     calendar = calendar.set_index(["calendar_date", "source_market_type"])[
@@ -977,9 +1006,7 @@ def iter_portfolio_sessions(
     )
 
     def ordered_bars():
-        dates, assets, _, _, _ = _processed_axis(
-            bars, panel_source=False, asset_column="source_asset_id"
-        )
+        dates, assets = raw_axis
         block_size = max(1, DEFAULT_BATCH_ROWS // max(1, len(assets)))
         for start in range(0, len(dates), block_size):
             core = dates[start : start + block_size]

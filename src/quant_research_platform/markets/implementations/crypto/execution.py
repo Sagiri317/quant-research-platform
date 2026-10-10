@@ -293,13 +293,6 @@ class _PendingMarkouts:
             self._on_fill(fill)
 
 
-def _book_value(event: BookState) -> BookState:
-    value = event
-    if not isinstance(value, BookState):
-        raise TypeError("hft_execution_book_event_invalid")
-    return value
-
-
 def _checked_book_events(
     events: Iterable[BookState | BookBoundary],
 ) -> Iterator[BookState | BookBoundary]:
@@ -581,7 +574,7 @@ def simulate_taker(
                 pending.expire_all()
                 return
             previous_state = latest_state
-            state = _book_value(event)
+            state = event
             latest_state = state
             if _covered(
                 observed_coverage,
@@ -1662,7 +1655,7 @@ def replay_maker_calibration(
                             if order.remaining <= 0:
                                 sample["terminal_reason"] = "filled"
                     else:
-                        state = _book_value(event)
+                        state = event
                         if (
                             latest_state is not None
                             and state.segment_id != latest_state.segment_id
@@ -1988,7 +1981,7 @@ def simulate_maker(
                 pending.expire_all()
                 return
             previous = latest_state
-            state = _book_value(event)
+            state = event
             if previous is not None and previous.segment_id != state.segment_id:
                 cancel_all(state.observed_time_ns)
             latest_state = state

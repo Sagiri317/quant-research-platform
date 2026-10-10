@@ -21,12 +21,8 @@ from quant_research_platform.markets.implementations.crypto.execution import (
     TakerConfig,
     _Metrics,
     _PendingMarkouts,
-)
-from quant_research_platform.markets.implementations.crypto.execution import (
-    simulate_maker as _simulate_maker,
-)
-from quant_research_platform.markets.implementations.crypto.execution import (
-    simulate_taker as _simulate_taker,
+    simulate_maker,
+    simulate_taker,
 )
 from quant_research_platform.research.portfolios.diagnostics import (
     fixed_turnover_cost_sensitivity,
@@ -53,7 +49,7 @@ def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
         ],
         [0.0],
     )
-    result = _simulate_maker(
+    result = simulate_maker(
         [_state(stamp) for stamp in (0, 100, 200, 300, 400, 500, 600, 700)],
         [
             _trade(stamp, price="99.5", quantity=quantity, maker_buyer=True)
@@ -193,10 +189,6 @@ def _maker_config() -> MakerConfig:
     )
 
 
-simulate_taker = _simulate_taker
-simulate_maker = _simulate_maker
-
-
 @pytest.mark.parametrize(
     "wrong_identity", (None, "book_segment_id", "trade_observation_id")
 )
@@ -307,7 +299,7 @@ def test_failing_fill_observer_is_not_replayed_during_cleanup() -> None:
         raise KeyboardInterrupt("observer_primary")
 
     with pytest.raises(KeyboardInterrupt, match="observer_primary"):
-        _simulate_taker(
+        simulate_taker(
             [_state(0), _state(200)],
             [{"timestamp_ms": 0, "prediction": 0.02}],
             funding_forecasts=KNOWN_NO_FUNDING,
@@ -601,7 +593,7 @@ def test_taker_freezes_orders_across_overlapping_latency_and_future_book_changes
     for future_quantity in (2.0, 0.25):
         ledger = []
         fills = []
-        result = _simulate_taker(
+        result = simulate_taker(
             [_state(0), _state(25, ask_levels=((1100, future_quantity),)), _state(80)],
             [{"timestamp_ms": stamp, "prediction": 0.02} for stamp in (0, 10, 20)],
             funding_forecasts=KNOWN_NO_FUNDING,
@@ -756,7 +748,7 @@ def test_taker_rejects_nonpositive_forecast_and_preserves_primary():
             raise primary
 
     with pytest.raises(KeyboardInterrupt) as raised:
-        _simulate_taker(
+        simulate_taker(
             books(),
             [{"timestamp_ms": stamp, "prediction": 0.02} for stamp in (0, 10)],
             funding_forecasts=KNOWN_NO_FUNDING,
@@ -824,7 +816,7 @@ def test_observation_stop_does_not_rewrite_maker_decision_or_cancel_pending_quot
     results = []
     for stop in (400000000, 1000000000):
         batches, fills = ([], [])
-        result = _simulate_maker(
+        result = simulate_maker(
             [_state(stamp) for stamp in (0, 350, 390, 500, 900)],
             [],
             [_quote(350, book_segment_id="s1")],
@@ -881,7 +873,7 @@ def test_complete_observation_window_preserves_continuous_economic_batches(kind)
         )
         books = [_state(stamp) for stamp in (0, 350, 500, 900, 1000)]
         if kind == "maker":
-            _simulate_maker(
+            simulate_maker(
                 books,
                 [],
                 [_quote(350, book_segment_id="s1")],
@@ -890,7 +882,7 @@ def test_complete_observation_window_preserves_continuous_economic_batches(kind)
                 **common,
             )
         else:
-            _simulate_taker(
+            simulate_taker(
                 books,
                 [],
                 prediction_column="score",
@@ -1028,7 +1020,7 @@ def test_truncated_pending_cancels_survive_native_ledger_summary(tmp_path):
     results = []
 
     def produce(emit):
-        result = _simulate_maker(
+        result = simulate_maker(
             [_state(stamp) for stamp in (0, 100, 200, 240, 400)],
             [],
             [

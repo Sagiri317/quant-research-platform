@@ -271,7 +271,11 @@ def _filter_arrow_batch(
                 condition = pc.or_(condition, pc.equal(column_values, 0.0))
         else:
             column_values = batch.column(batch.schema.get_field_index(column))
-            scalar = value
+            scalar = (
+                _physical_filter_scalar(batch.schema.field(column), value)
+                if pa.types.is_integer(column_values.type)
+                else value
+            )
             if pa.types.is_timestamp(column_values.type) or pa.types.is_duration(
                 column_values.type
             ):
@@ -289,7 +293,7 @@ def _filter_arrow_batch(
 
 
 def _physical_filter_scalar(field: pa.Field, value: Any) -> pa.Scalar:
-    source_type = None
+    source_type = field.type if pa.types.is_integer(field.type) else None
     if pa.types.is_timestamp(field.type):
         source_type = pa.timestamp(
             value.unit if isinstance(value, pd.Timestamp) else "us", tz=field.type.tz

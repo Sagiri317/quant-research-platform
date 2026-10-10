@@ -34,6 +34,7 @@ _UNC_PATH_RE = re.compile(r"\\\\[^\r\n\t\"'<>|]+")
 _POSIX_LOCAL_PATH_RE = re.compile(
     r"(?i)(?<![\w:/])/(?!/)[^\r\n\t\"'<>|,\s]+"
     r"(?:/[^\r\n\t\"'<>|,\s]+)*|"
+    r"(?<![\w:/])//[^\r\n\t\"'<>|,\s]+(?:/[^\r\n\t\"'<>|,\s]+)*|"
     r"(?<!:)//(?:mnt/data|home|Users|workspace|workspaces|tmp|"
     r"var/tmp|private/tmp|etc|opt|srv)(?:/[^\r\n\t\"'<>|,\s]+)*"
 )

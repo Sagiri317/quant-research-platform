@@ -640,3 +640,34 @@ def test_portfolio_identity_binds_only_consumed_episode_owner(tmp_path):
     economic = package / "research/portfolios/production.py"
     economic.write_bytes(economic.read_bytes() + b"\n# A-share economics change.\n")
     assert identities()[0] != after_ledger[0]
+
+
+def test_software_payload_reuses_json_mapping_validation_and_independent_freeze():
+    from collections import UserDict
+
+    from quant_research_platform.contracts.json_codec import canonical_json_hash
+    from quant_research_platform.storage.software_identity import (
+        ProductionSoftwareIdentity,
+    )
+
+    versions = dict.fromkeys(NUMERICAL_MODEL_DISTRIBUTIONS, "1.0")
+    native = {"package_content_hash": "a" * 64, "dependency_versions": versions.copy()}
+    payload = UserDict(
+        {"package_content_hash": "a" * 64, "dependency_versions": UserDict(versions)}
+    )
+    actual = ProductionSoftwareIdentity(payload, canonical_json_hash(native))
+    payload["dependency_versions"]["numpy"] = "2.0"
+    exported = actual.payload
+    exported["dependency_versions"]["numpy"] = "3.0"
+    assert actual.payload == native
+    with pytest.raises(TypeError):
+        actual._payload["dependency_versions"]["numpy"] = "4.0"
+
+    class BadKey:
+        def __str__(self):
+            return "numpy"
+
+    payload["dependency_versions"].pop("numpy")
+    payload["dependency_versions"][BadKey()] = "1.0"
+    with pytest.raises(ValueError, match="qrp_json_non_string_key"):
+        ProductionSoftwareIdentity(payload, canonical_json_hash(native))

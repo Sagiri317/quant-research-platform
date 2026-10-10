@@ -7,6 +7,9 @@ from pathlib import Path
 
 import pytest
 
+from quant_research_platform.markets.implementations.a_share.processed.panels import (
+    _canonical_stock_master,
+)
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.sources.reference import interim
 from quant_research_platform.sources.reference.a_share_fees import (
@@ -401,7 +404,7 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     panel = panels.compute_market_panel(
         inputs["market_bars_1d"],
         **panels._prepare_market_panel_inputs(
-            stock_master=stocks,
+            stocks=_canonical_stock_master(stocks),
             market_cap=inputs["market_cap"],
             trading_calendar=inputs["trading_calendar"],
             industry_sets=dictionary,

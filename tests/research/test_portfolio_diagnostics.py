@@ -758,9 +758,11 @@ def test_five_ledger_interval_statistics_reconcile_fraction_oracle(
 
 
 @pytest.mark.parametrize("st_holding", (False, True))
+@pytest.mark.parametrize("relist_step", (None, 1, 2))
 def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
     tmp_path,
     st_holding,
+    relist_step,
 ):
     import numpy as np
 
@@ -811,6 +813,10 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
         turnover=0.01,
     )
     styles = RISK_STYLE_COLUMNS
+    if relist_step is not None:
+        changed = panel.asset_id.eq(assets[-2]) & panel.timestamp.ge(dates[relist_step])
+        panel.loc[changed, "listing_date"] = dates[relist_step]
+        panel.loc[changed, ["adj_open", "adj_close"]] *= 100
     if st_holding:
         panel.loc[panel.asset_id.eq(assets[0]), "is_st"] = True
     data = panel[["market_id", "timestamp", "asset_id"]].copy()
@@ -883,7 +889,9 @@ def test_holding_input_reader_freezes_decision_universe_over_holding_interval(
     with closing_iterator(source):
         first = next(source)
         assert first.reason is None and first.fitted is not None
-        assert len(first.fitted.asset_returns) == 104
+        assert len(first.fitted.asset_returns) == 104 - int(relist_step is not None)
+        if relist_step is not None:
+            assert assets[-2] not in first.fitted.exposures.index
         assert assets[-1] not in first.fitted.exposures.index
         assert (
             first.decision_at == dates[-4]

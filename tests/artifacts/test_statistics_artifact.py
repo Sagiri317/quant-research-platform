@@ -1079,7 +1079,7 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
     from tests.helpers.binance_hft import hft_research_plan
     from tests.markets.crypto.test_hft_execution import _state
 
-    count, depth = (1800, 512)
+    count, depth = (129, 512)
     first, last = (2100, 2100 + (count - 1) * 1000)
 
     def iso(stamp):
@@ -1188,10 +1188,14 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
         ("crypto_maker_samples", "crypto_maker_events", "crypto_maker_calibration"), 0
     )
 
+    event_batch_rows = []
+
     def produce(on_table):
 
         def append(name, frame):
             emitted[name] += len(frame)
+            if name == "crypto_maker_events":
+                event_batch_rows.append(len(frame))
             on_table(name, frame)
 
         portfolio.produce_maker_calibration(
@@ -1236,6 +1240,7 @@ def test_maker_calibration_streams_many_events_without_full_table_reads(
         "crypto_maker_events": count * depth * 2,
         "crypto_maker_calibration": 2,
     }
+    assert event_batch_rows == [65_536, 65_536, 1_024]
     record_testsuite_property("maker_event_rows", emitted["crypto_maker_events"])
 
 

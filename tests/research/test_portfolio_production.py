@@ -273,6 +273,7 @@ def _build_producer(
     shared_alpha_facts=None,
     shared_risk_fits=None,
     identity_overrides=None,
+    raw_bar_orders=None,
 ):
     final_calibrations = [] if final_calibrations is None else final_calibrations
     enhanced = candidate is not None and candidate.construction == "benchmark_enhanced"
@@ -347,24 +348,22 @@ def _build_producer(
         calls.append((target_id, mode, time_window))
         if mode is DatasetReadMode.CHUNKED:
             assert isinstance(time_window, TimeWindow)
-            selected = (
-                frames[target_id]
-                .loc[
-                    frames[target_id].timestamp.between(
-                        pd.Timestamp(time_window.start), pd.Timestamp(time_window.end)
-                    ),
-                    list(columns),
-                ]
-                .sort_values(
+            selected = frames[target_id].loc[
+                frames[target_id].timestamp.between(
+                    pd.Timestamp(time_window.start), pd.Timestamp(time_window.end)
+                ),
+                list(columns),
+            ]
+            if target_id == "market_bars_1d" and raw_bar_orders is not None:
+                raw_bar_orders.append(selected.timestamp.is_monotonic_increasing)
+            else:
+                selected = selected.sort_values(
                     [
                         "timestamp",
-                        "asset_id"
-                        if "asset_id" in frames[target_id]
-                        else "source_asset_id",
+                        "asset_id" if "asset_id" in selected else "source_asset_id",
                     ],
                     kind="mergesort",
                 )
-            )
             return iter((selected.copy(),))
         if target_id == "fee":
             assert columns is None
@@ -424,18 +423,10 @@ def _build_producer(
                 for asset, group in panel.groupby("asset_id", sort=False)
             },
             panels._canonical_stock_master(stocks),
-        )
-
-    def source_axis(session, *, panel_source, asset_column):
-        assert not panel_source and asset_column == "source_asset_id"
-        assert session.root == roots["market_bars_1d"]
-        frame = frames["market_bars_1d"]
-        return (
-            tuple(sorted(frame.timestamp.unique())),
-            pd.Series(0, index=frame.source_asset_id.unique()),
-            None,
-            {},
-            {},
+            (
+                tuple(sorted(frames["market_bars_1d"].timestamp.unique())),
+                frozenset(frames["market_bars_1d"].source_asset_id),
+            ),
         )
 
     def materialize_source(session):
@@ -449,7 +440,6 @@ def _build_producer(
             ignore_index=True,
         )
 
-    monkeypatch.setattr(market_sessions, "_processed_axis", source_axis)
     monkeypatch.setattr(
         market_sessions, "materialize_dataset_session", materialize_source
     )
@@ -1680,12 +1670,14 @@ def test_simple_producer_is_invariant_to_asset_major_input_permutation(
     tmp_path: Path, monkeypatch
 ) -> None:
     frames, fee_frame, output_window = _inputs()
+    raw_bar_orders = []
     first, _calls = _build_producer(
         tmp_path / "first",
         monkeypatch,
         frames=frames,
         fee_frame=fee_frame,
         output_window=output_window,
+        raw_bar_orders=raw_bar_orders,
     )
     left = [frame.reset_index(drop=True) for frame in first]
     permuted = {
@@ -1698,8 +1690,10 @@ def test_simple_producer_is_invariant_to_asset_major_input_permutation(
         frames=permuted,
         fee_frame=fee_frame.sample(frac=1.0, random_state=23).reset_index(drop=True),
         output_window=output_window,
+        raw_bar_orders=raw_bar_orders,
     )
     right = [frame.reset_index(drop=True) for frame in second]
+    assert raw_bar_orders and not all(raw_bar_orders)
     for expected, actual in zip(left, right, strict=True):
         pd.testing.assert_frame_equal(expected, actual)
 

@@ -417,3 +417,36 @@ def test_timestamp_membership_normalizes_naive_and_aware_values():
             type=field.type,
         )
     )
+
+
+@pytest.mark.parametrize("operator", ("==", "in"))
+@pytest.mark.parametrize("selected", (1, 2**63, 2**63 + 1, 2**63 + 2))
+def test_native_uint64_filters_preserve_unsigned_field_type(
+    tmp_path, operator, selected
+):
+    root = make_dataset_artifact_root(tmp_path, "unsigned_filter")
+    values = [1, 2**63, 2**63 + 1, 2**63 + 2, None]
+    frame = pd.DataFrame(
+        {
+            "market_id": "a_share",
+            "asset_id": [f"a{i}" for i in range(len(values))],
+            "timestamp": pd.Timestamp("2020-01-01"),
+            "value": pd.array(values, dtype="UInt64"),
+        }
+    )
+    write_dataset(root, frame, spec=make_processed_dataset_spec("unsigned_filter"))
+    value = selected if operator == "==" else (selected,)
+    session = dataset_reading.open_dataset_session(
+        root, columns=None, time_window=None, row_filters=(("value", operator, value),)
+    )
+    actual = dataset_reading.materialize_dataset_session(session)
+    assert actual.value.tolist() == [selected]
+    for invalid in (-1, 2**64, float(selected), True, None):
+        value = invalid if operator == "==" else (invalid,)
+        with pytest.raises(ValueError, match="invalid_dataset_physical_filter_value"):
+            dataset_reading.open_dataset_session(
+                root,
+                columns=None,
+                time_window=None,
+                row_filters=(("value", operator, value),),
+            )

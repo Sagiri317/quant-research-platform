@@ -432,7 +432,9 @@ def test_writer_rejects_persisted_category_outside_declared_domain(
         )
 
 
-def test_full_inspection_rejects_forged_persisted_date_summary(tmp_path: Path) -> None:
+def test_full_inspection_rejects_summary_outside_partition_dates(
+    tmp_path: Path,
+) -> None:
     root = make_dataset_artifact_root(tmp_path, "forged_dates")
     write_dataset(
         root,

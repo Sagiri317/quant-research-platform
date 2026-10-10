@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from dataclasses import dataclass
+from fractions import Fraction
 
 import numpy as np
 import pandas as pd
@@ -158,10 +159,7 @@ def optimize_portfolio(
 
     def risk(weights: np.ndarray) -> float:
         active = weights - benchmark
-        return float(
-            active @ exposure @ covariance @ exposure.T @ active
-            + np.sum(specific * active**2)
-        )
+        return sum(_risk_variances(active, exposure, covariance, specific))
 
     constraints = [
         {"type": "eq", "fun": lambda weights: float(weights.sum() - 1.0)},
@@ -227,8 +225,9 @@ def optimize_portfolio(
         assumptions=assumptions,
     )
     active = weights - benchmark
-    factor_variance = float(active @ exposure @ covariance @ exposure.T @ active)
-    specific_variance = float(np.sum(specific * active**2))
+    factor_variance, specific_variance = _risk_variances(
+        active, exposure, covariance, specific
+    )
     participation = np.abs(weights - current) * nav / adv
     return OptimizationResult(
         weights=pd.Series(weights, index=data["asset_id"], name="weight"),
@@ -239,6 +238,37 @@ def optimize_portfolio(
         expected_transaction_cost=float(expected_transaction_cost(weights)),
         maximum_adv_participation=float(participation.max(initial=0.0)),
     )
+
+
+def _risk_variances(active, exposure, covariance, specific) -> tuple[float, float]:
+    factor_active = active @ exposure
+    factor = float(factor_active @ covariance @ factor_active)
+    residual = float(np.sum(specific * active**2))
+    if not np.isfinite((factor, residual, factor + residual)).all():
+        raise ValueError("optimizer_risk_nonfinite")
+    if factor < 0:
+        # Distinguish dot-product roundoff from a genuinely negative admitted form.
+        exact_active = [
+            sum(
+                Fraction(float(a)) * Fraction(float(x))
+                for a, x in zip(active, column, strict=True)
+            )
+            for column in exposure.T
+        ]
+        exact = sum(
+            left * Fraction(float(value)) * right
+            for left, row in zip(exact_active, covariance, strict=True)
+            for value, right in zip(row, exact_active, strict=True)
+        )
+        if exact < 0:
+            raise ValueError("optimizer_risk_negative")
+        try:
+            factor = float(exact)
+        except OverflowError:
+            raise ValueError("optimizer_risk_nonfinite") from None
+        if not np.isfinite(factor + residual):
+            raise ValueError("optimizer_risk_nonfinite")
+    return factor, residual
 
 
 def _bounds(
@@ -292,10 +322,7 @@ def _verify_solution(
 ) -> None:
     tolerance = 1e-08
     active = weights - benchmark
-    risk = float(
-        active @ exposure @ covariance @ exposure.T @ active
-        + np.sum(specific * active**2)
-    )
+    risk = sum(_risk_variances(active, exposure, covariance, specific))
     if not np.isfinite(weights).all() or not np.isclose(
         weights.sum(), 1.0, atol=tolerance
     ):

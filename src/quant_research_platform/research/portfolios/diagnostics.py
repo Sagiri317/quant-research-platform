@@ -765,11 +765,21 @@ def iter_holding_factor_inputs(
                         cross, include_ineligible=True
                     )
                     decision_exposure_assets = frozenset(holding_cross.asset_id)
-                    real_pairs = set(
-                        panel_window[interval.entry_at].panel.asset_id
-                    ) & set(panel_window[interval.end_at].panel.asset_id)
+                    life_keys = ["asset_id", "listing_date"]
+                    real_pairs = pd.MultiIndex.from_frame(
+                        panel_window[interval.entry_at].panel[life_keys]
+                    ).intersection(
+                        pd.MultiIndex.from_frame(
+                            panel_window[interval.end_at].panel[life_keys]
+                        )
+                    )
+                    real_pairs = real_pairs.intersection(
+                        pd.MultiIndex.from_frame(cross[life_keys])
+                    )
                     holding_cross = holding_cross.loc[
-                        holding_cross.asset_id.isin(real_pairs)
+                        holding_cross.asset_id.isin(
+                            real_pairs.get_level_values("asset_id")
+                        )
                     ].copy()
                     holding_cross["asset_return"] = holding_cross.asset_id.map(
                         endpoint.div(entry) - 1.0

@@ -214,7 +214,7 @@ def _calculate_values(
             elif factor == "log_avg_amount_20d":
                 if total > 0:
                     mean = total / (size * unit)
-                    if mean:
+                    if mean > 5e-324 or total * (1 << 1074) >= size * unit:
                         result[index] = np.log(mean)
                     else:
                         with localcontext() as context:

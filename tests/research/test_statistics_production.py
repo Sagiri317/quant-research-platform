@@ -65,7 +65,7 @@ def _statistics_model_selection_fixture(spec, protocol, window):
             model_algorithm=item["model_algorithm"],
             input_factor_columns=(factor,),
             label_column=a_share.PRIMARY_LABEL_COLUMN,
-            hyperparameters=item["hyperparameters"],
+            hyperparameters=item.get("hyperparameters", {}),
         )
         for item in configuration["models"]
     )

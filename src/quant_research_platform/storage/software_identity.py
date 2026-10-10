@@ -14,7 +14,12 @@ from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from types import MappingProxyType
 
-from quant_research_platform.contracts.json_codec import canonical_json_hash
+from quant_research_platform.contracts.json_codec import (
+    canonical_json_hash,
+    freeze_json_value,
+    plain_json_value,
+    qrp_json_mapping_snapshot,
+)
 from quant_research_platform.policy.lifecycle import closing_iterator
 from quant_research_platform.storage.identity import (
     DatasetFileIdentity,
@@ -62,7 +67,7 @@ class ProductionSoftwareIdentity:
         self.__post_init__()
 
     def __post_init__(self) -> None:
-        payload = _plain_value(_freeze_value(self._payload))
+        payload = qrp_json_mapping_snapshot(self._payload)
         _validate_payload(payload)
         payload["dependency_versions"] = dict(
             sorted(payload["dependency_versions"].items())
@@ -71,11 +76,11 @@ class ProductionSoftwareIdentity:
             raise ValueError("software_identity_hash_invalid")
         if self.identity_hash != canonical_json_hash(payload):
             raise ValueError("software_identity_hash_mismatch")
-        object.__setattr__(self, "_payload", _freeze_value(payload))
+        object.__setattr__(self, "_payload", freeze_json_value(payload))
 
     @property
     def payload(self) -> dict[str, object]:
-        return _plain_value(self._payload)
+        return plain_json_value(self._payload)
 
 
 def production_software_identity(
@@ -430,21 +435,3 @@ def _validate_payload(value: object) -> None:
 
 def _is_hash(value: str) -> bool:
     return len(value) == 64 and all(character in _LOWER_HEX for character in value)
-
-
-def _freeze_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return MappingProxyType(
-            {key: _freeze_value(child) for key, child in value.items()}
-        )
-    if type(value) in {list, tuple}:
-        return tuple(_freeze_value(child) for child in value)
-    return value
-
-
-def _plain_value(value: object) -> object:
-    if isinstance(value, Mapping):
-        return {str(key): _plain_value(child) for key, child in value.items()}
-    if type(value) in {list, tuple}:
-        return [_plain_value(child) for child in value]
-    return value

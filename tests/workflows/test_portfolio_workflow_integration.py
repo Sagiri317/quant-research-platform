@@ -467,7 +467,9 @@ def _frames(dates: pd.DatetimeIndex | None = None) -> dict[str, pd.DataFrame]:
     }
 
 
-def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
+def _profile(
+    frames: dict[str, pd.DataFrame], *, observed_frames=None
+) -> ResearchProfile:
     base = research_profile()
     interim = _interim_specs()
     processed = _processed_specs()
@@ -569,6 +571,8 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
             invisible = output[availability] > pd.Timestamp(time_window.end)
             output.loc[invisible, label] = float("nan")
             output.loc[invisible, availability] = pd.NaT
+        if observed_frames is not None:
+            observed_frames.append(output.copy())
         write_dataset(root, output, spec=selected, instance_metadata=instance_metadata)
         return root
 
@@ -634,7 +638,7 @@ def _profile(frames: dict[str, pd.DataFrame]) -> ResearchProfile:
                     input_factor_columns=("x",),
                     label_column="label",
                     hyperparameters=next(
-                        item["hyperparameters"]
+                        item.get("hyperparameters", {})
                         for item in research_configuration(small_models=True)["models"]
                         if item["model_algorithm"] == algorithm
                     ),
@@ -885,7 +889,7 @@ def _build_holdout_development(tmp_path):
         for model in configuration["models"]
         if model["model_algorithm"] == "ridge_regression"
     )
-    submitted_base = dict(requested_ridge["hyperparameters"])
+    submitted_base = dict(requested_ridge.get("hyperparameters", {}))
     requested_ridge["hyperparameters"] = {
         "alpha": -1.0,
         "random_state": 999,
@@ -1414,7 +1418,12 @@ def test_holdout_reuse_survives_operational_and_future_data_changes(
     prediction_id = holdout_case.prediction_id
     prediction_root = holdout_case.prediction_root
     frames = {**frames, "pv_all": frames["pv_all"].copy()}
-    source_bindings = _profile(frames).producer_bindings
+    producer_inputs = []
+    source_bindings = _profile(
+        frames, observed_frames=producer_inputs
+    ).producer_bindings
+    profile = profile._configuration_source
+    assert profile is not None and profile._configuration_source is None
     profile = replace(
         profile,
         producer_bindings={
@@ -1486,10 +1495,31 @@ def test_holdout_reuse_survives_operational_and_future_data_changes(
     monkeypatch.setattr(
         research, "production_software_identity", lambda: corrected_software
     )
+    producer_inputs.clear()
     corrected = research.research_run(
         **{**request, "development_run_id": new_development["run_id"]}
     )
     assert corrected["status"] == "COMPLETE", corrected
+    assert producer_inputs
+    label_column = configuration["evaluation"]["primary_label"]
+    consumed = pd.concat(producer_inputs, ignore_index=True)
+    consumed = consumed.loc[
+        consumed.timestamp.ge("2019-09-02") & consumed[label_column].notna()
+    ]
+    assert not consumed.empty and consumed[label_column].ne(0).any()
+    keys = ["timestamp", "asset_id"]
+    expected = (
+        frames["pv_all"]
+        .set_index(keys)[label_column]
+        .reindex(pd.MultiIndex.from_frame(consumed[keys]))
+    )
+    pd.testing.assert_series_equal(consumed.set_index(keys)[label_column], expected)
+    original = (
+        holdout_case.frames["pv_all"]
+        .set_index(keys)[label_column]
+        .reindex(expected.index)
+    )
+    assert expected.ne(original).any()
     corrected_record = read_research_run_record(
         layout.research_run_path(corrected["run_id"])
     )

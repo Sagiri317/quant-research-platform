@@ -771,7 +771,7 @@ def iter_derivative_factor_frames(
                         states.clear()
                         liquidations.clear()
                         count = invalid = 0
-                        flow_start_ns = max(flow_start_ns, information_ns - 100_000_000)
+                        flow_start_ns = max(flow_start_ns, observed_ns)
                     active_epoch = epoch
                     if channel is None:
                         event = next(events, None)

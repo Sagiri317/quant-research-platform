@@ -246,7 +246,7 @@ basis 为无量纲比值减一。频道名 premiumIndex 不代表供应商存在
 forceOrder 仅代表供应商观测到的 proxy。每条发布快照以 z（累计已成交 base 数量）加权，
 BUY 为正、SELL 为负；不以订单数量 q 代替成交数量，不声称完整或去重后的全市场清算量。
 无观测或分母为零保持 NULL；断连 generation、grid gap 和 episode 边界重置窗口。
-执行 PANEL 的 segment/grid 边界只重置滚动窗口及预热；独立衍生品源的最新观测和观测时钟仍按自身 age 上限保留，只有该源 epoch 变化才失效。forceOrder elapsed 由同一最新观测时钟派生，窗口首个100ms只纳入该区间内的已观测成交。
+执行 PANEL 的 segment/grid 边界只重置滚动窗口及预热；独立衍生品源的最新观测和观测时钟仍按自身 age 上限保留，只有该源 epoch 变化才失效。来源换 epoch 后，forceOrder 的完整 5s/30s 窗口从真实 observed 边界重新预热，不能回锚到当前信息时点前一个格。forceOrder elapsed 由同一最新观测时钟派生，窗口首个100ms只纳入该区间内的已观测成交。
 双边深度和滚动流量比值在最终除法后舍入；请求的绝对 OFI 若确实超出 float64 表示范围仍明确失败，不改成零或缺失值。
 缺 state 归档只阻塞依赖它的分支，微观结构因子不引入该依赖。
 

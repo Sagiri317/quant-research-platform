@@ -530,3 +530,89 @@ def test_named_quantile_recipe_keeps_extreme_interpolation_order_and_nulls():
         result.to_numpy(), [-9.8e307, 9.8e307, np.nan, 1e308, 1e308], rtol=1e-15
     )
     assert result.dtype == "float64"
+
+
+def test_optimizer_blocks_genuinely_negative_risk_inside_psd_admission():
+    from quant_research_platform.contracts.portfolios import ExecutionAssumptions
+    from quant_research_platform.research.portfolios.optimizer import optimize_portfolio
+    from quant_research_platform.research.portfolios.risk import _covariance_is_psd
+
+    covariance = pd.DataFrame([[-1e-12]], index=["style"], columns=["style"])
+    assert _covariance_is_psd(covariance.to_numpy())
+    assets = pd.DataFrame(
+        {
+            "asset_id": ["a", "b"],
+            "expected_alpha": [1.0, -1.0],
+            "current_weight": [0.51, 0.49],
+            "benchmark_weight": [0.5, 0.5],
+            "specific_variance": 0.0,
+            "adv": 1e9,
+            "style": [1.0, -1.0],
+        }
+    )
+    with pytest.raises(ValueError, match="optimizer_risk_negative"):
+        optimize_portfolio(
+            assets,
+            factor_covariance=covariance,
+            style_columns=("style",),
+            expected_transaction_cost=lambda weights: 0.0,
+            nav=100.0,
+            assumptions=ExecutionAssumptions(100.0, 0.0, 0.0, 1.0, (1.0,)),
+        )
+
+
+def test_optimizer_risk_roundoff_uses_exact_form_and_rejects_nonfinite():
+    from quant_research_platform.research.portfolios.optimizer import _risk_variances
+
+    active = np.array([0.01, -0.01])
+    exposure = np.eye(2)
+    covariance = np.full((2, 2), 1e100)
+    factor, specific = _risk_variances(active, exposure, covariance, np.zeros(2))
+    assert np.isfinite(factor) and factor >= 0 and specific == 0
+    with np.errstate(over="ignore", invalid="ignore"):
+        with pytest.raises(ValueError, match="optimizer_risk_nonfinite"):
+            _risk_variances(
+                np.array([1e200, -1e200]), exposure, covariance, np.zeros(2)
+            )
+
+
+@pytest.mark.parametrize(
+    "values,negative",
+    (
+        ((-1.3267282928093849, 1.107768166657506), True),
+        ((-0.006926123563646536, 0.5015352951547885), False),
+    ),
+)
+def test_native_zero_shrinkage_distinguishes_negative_form_from_dot_roundoff(
+    values, negative
+):
+    from quant_research_platform.research.portfolios.optimizer import _risk_variances
+    from quant_research_platform.research.portfolios.risk import _covariance_is_psd
+
+    values = np.asarray(values)
+    covariance = _ewma_covariance(
+        np.array([values, -values]),
+        ages=np.array([1.0, 0.0]),
+        half_life=1.0,
+        diagonal_shrinkage=0.0,
+        annualization_factor=1.0,
+        columns=("a", "b"),
+    ).to_numpy()
+    assert _covariance_is_psd(covariance)
+    active = np.array([values[1], -values[0]])
+    exact = sum(
+        Fraction(float(active[j]))
+        * Fraction(float(covariance[j, k]))
+        * Fraction(float(active[k]))
+        for j in range(2)
+        for k in range(2)
+    )
+    assert (exact < 0) == negative
+    if negative:
+        with pytest.raises(ValueError, match="optimizer_risk_negative"):
+            _risk_variances(active, np.eye(2), covariance, np.zeros(2))
+    else:
+        rounded = float(active @ covariance @ active)
+        factor, residual = _risk_variances(active, np.eye(2), covariance, np.zeros(2))
+        assert factor >= 0 and np.isfinite(factor) and residual == 0
+        assert factor == (float(exact) if rounded < 0 else rounded)

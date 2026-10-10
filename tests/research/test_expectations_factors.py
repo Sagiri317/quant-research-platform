@@ -501,7 +501,9 @@ def test_bound_freshness_drives_native_source_window_and_processed_identity(
     panel = producer._compute_processed_frame(
         panel_spec,
         source={
-            **producer._prepare_panel_source(source),
+            **producer._prepare_panel_source(
+                source, producer.panels._canonical_stock_master(source["stock_master"])
+            ),
             "market_bars_1d": source["market_bars_1d"],
         },
         dependencies={},

@@ -29,10 +29,9 @@ FINANCIAL_INDUSTRY_LEVEL1_CODES = frozenset({"J"})
 
 
 def _prepare_market_panel_inputs(
-    *, stock_master, market_cap, industry_history=None, **inputs
+    *, stocks, market_cap, industry_history=None, **inputs
 ):
-    """Prepare request-wide facts for all slabs without retaining a cache."""
-    stocks = _canonical_stock_master(stock_master)
+    """Prepare request-wide facts after the caller has normalized stock lives."""
     caps = _canonical_market_cap(market_cap)
     industry = _prepare_industry_inputs(
         industry_history,
@@ -1116,14 +1115,22 @@ def _apply_suspension_semantics(panel: pd.DataFrame) -> pd.DataFrame:
             result.loc[positions, column] = result.loc[positions, column].where(
                 ~suspended, 0.0
             )
-        free_shares = result.loc[positions, "float_market_cap"].div(
-            result.loc[positions, "close"].where(result.loc[positions, "close"].gt(0.0))
+        cap = result.loc[positions, "float_market_cap"]
+        close = result.loc[positions, "close"]
+        volume = result.loc[positions, "volume"]
+        free_shares = cap.div(close.where(close.gt(0.0)))
+        turnover = volume.div(free_shares.where(free_shares.gt(0.0)))
+        unstable = (
+            cap.gt(0) & close.gt(0) & (~np.isfinite(free_shares) | free_shares.eq(0))
         )
-        result.loc[positions, "turnover"] = (
-            result.loc[positions, "volume"]
-            .div(free_shares.where(free_shares.gt(0.0)))
-            .astype("float64")
-        )
+        # Scale only the exceptional intermediate; keep ordinary row arithmetic.
+        if unstable.any():
+            vm, ve = np.frexp(volume.loc[unstable].to_numpy(dtype="float64"))
+            pm, pe = np.frexp(close.loc[unstable].to_numpy(dtype="float64"))
+            cm, ce = np.frexp(cap.loc[unstable].to_numpy(dtype="float64"))
+            with np.errstate(over="ignore", under="ignore", invalid="ignore"):
+                turnover.loc[unstable] = np.ldexp(vm * pm / cm, ve + pe - ce)
+        result.loc[positions, "turnover"] = turnover.astype("float64")
         result.loc[positions, "turnover"] = result.loc[positions, "turnover"].where(
             ~suspended, 0.0
         )

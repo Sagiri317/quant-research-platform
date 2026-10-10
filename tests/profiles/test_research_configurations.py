@@ -1401,7 +1401,7 @@ def test_formal_seed_normalizes_native_duplicate_before_derived_selection():
         if item["model_algorithm"] == "random_forest_regressor"
     )
     model["random_seed"] = 42
-    model["hyperparameters"]["random_state"] = 42
+    model.setdefault("hyperparameters", {})["random_state"] = 42
     for candidate in model.get("parameter_candidates", []):
         candidate["random_state"] = 42
     bound = bind_research_configuration(research_profile(), config)
@@ -1881,3 +1881,43 @@ def test_a_share_binding_preserves_supplied_processed_dependencies():
     )
     bound = bind_research_configuration(profile, research_configuration(name="pv25"))
     assert bound.processed.get(selected.data_id) == selected
+
+
+@pytest.mark.parametrize(
+    "name",
+    (
+        "core6",
+        "pv25",
+        "pv_expanded",
+        "pv_nf_expectations",
+        "fusion_nf_core",
+        "fusion_nf_expectations",
+    ),
+)
+def test_a_share_candidates_are_complete_without_shadow_base_parameters(name):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration(name=name)
+    shadow = copy.deepcopy(config)
+    covered = [model for model in config["models"] if model.get("parameter_candidates")]
+    assert len(covered) == 5 and all(
+        "hyperparameters" not in model for model in covered
+    )
+    for model in shadow["models"]:
+        if model.get("parameter_candidates"):
+            model["hyperparameters"] = {"unused_shadow_parameter": True}
+    base = bind_research_configuration(research_profile(), config)
+    altered = bind_research_configuration(research_profile(), shadow)
+    assert [model_spec_payload(item) for item in base.models.list()] == [
+        model_spec_payload(item) for item in altered.models.list()
+    ]
+    left, right = (
+        base.protocol(config["scenario_id"]),
+        altered.protocol(config["scenario_id"]),
+    )
+    for target in left.target_specs("research run"):
+        kind = base.producer_bindings[target.target_id].kind
+        if str(kind) != "REPORT":
+            assert left.target_manifest(
+                target.target_id, kind
+            ) == right.target_manifest(target.target_id, kind)

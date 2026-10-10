@@ -387,3 +387,62 @@ def test_native_force_windows_preserve_exact_mass_resets_and_early_close(tmp_pat
         else:
             assert not fail
         assert observations.gi_frame is None
+
+
+@pytest.mark.parametrize("input_delay_ms", (0, 50))
+@pytest.mark.parametrize("boundary_ms", (10000, 10050))
+@pytest.mark.parametrize("reset", (False, True))
+def test_force_order_epoch_rewarms_from_observed_boundary(
+    input_delay_ms, boundary_ms, reset
+):
+    panel = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": pd.date_range("2026-08-01", periods=405, freq="100ms"),
+            "segment_id": "independent",
+            "mid": 100.0,
+        }
+    )
+    origin = panel.timestamp.iloc[0].value
+    epoch = int(reset)
+    events = [
+        (origin, None, None, 0),
+        (origin + boundary_ms * 10**6, None, None, epoch),
+    ]
+    for milliseconds in (boundary_ms + 1, boundary_ms + 4900, boundary_ms + 29900):
+        events.append(
+            (
+                origin + milliseconds * 10**6,
+                "forceOrder",
+                {"E": origin // 10**6 + milliseconds, "o": {"S": "BUY", "z": "1"}},
+                epoch,
+            )
+        )
+
+    def calculate(batch):
+        return pd.concat(
+            iter_derivative_factor_frames(
+                (panel.iloc[i : i + batch] for i in range(0, len(panel), batch)),
+                observations=iter(events),
+                input_delay_ms=input_delay_ms,
+                max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 400000),
+            ),
+            ignore_index=True,
+        )
+
+    actual = calculate(len(panel))
+    pd.testing.assert_frame_equal(actual, calculate(17), check_exact=True)
+    information_ms = np.arange(len(panel)) * 100 - input_delay_ms
+    for seconds in (5, 30):
+        boundary = boundary_ms if reset else -100
+        first = int(np.flatnonzero(information_ms >= boundary + seconds * 1000)[0])
+        column = actual[f"observed_force_order_imbalance_{seconds}s"]
+        if reset:
+            assert column.iloc[first - 1] != column.iloc[first - 1]
+            assert column.iloc[first] == 1.0
+        else:
+            after_order = max(
+                first, int(np.flatnonzero(information_ms >= boundary_ms + 1)[0])
+            )
+            assert column.iloc[after_order] == 1.0

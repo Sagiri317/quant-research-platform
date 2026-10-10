@@ -326,7 +326,10 @@ def test_processed_blocks_preserve_full_history_math_and_release_failed_inputs(
             producer._compute_processed_frame(
                 spec,
                 source={
-                    **producer._prepare_panel_source(source),
+                    **producer._prepare_panel_source(
+                        source,
+                        producer.panels._canonical_stock_master(source["stock_master"]),
+                    ),
                     "market_bars_1d": source["market_bars_1d"],
                 }
                 if data_id == "market_panel_1d"
@@ -646,7 +649,9 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
     }
     compute = producer._compute_processed_frame
     raw_caps_before = decoded["market_cap"].copy(deep=True)
-    prepared = producer._prepare_panel_source(decoded)
+    prepared = producer._prepare_panel_source(
+        decoded, producer.panels._canonical_stock_master(decoded["stock_master"])
+    )
     caps_before = prepared["market_cap"].copy(deep=True)
     expected = compute(
         spec,
@@ -666,6 +671,20 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
         return compute(spec, **kwargs)
 
     monkeypatch.setattr(producer, "_compute_processed_frame", observed)
+    calls = {}
+    for name in (
+        "_canonical_stock_master",
+        "_canonical_market_cap",
+        "_prepare_industry_inputs",
+    ):
+        original = getattr(producer.panels, name)
+
+        def counted(*args, _name=name, _original=original, **kwargs):
+            calls[_name] = calls.get(_name, 0) + 1
+            return _original(*args, **kwargs)
+
+        monkeypatch.setattr(producer.panels, name, counted)
+    stocks_before = decoded["stock_master"].copy(deep=True)
     with producer.produce_a_share_processed_data(
         spec,
         layout=layout,
@@ -676,6 +695,14 @@ def test_unknown_quote_breaks_suspension_baseline_across_persisted_slabs(
         write_dataset(
             root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
         )
+    assert calls == {
+        "_canonical_stock_master": 1,
+        "_canonical_market_cap": 1,
+        "_prepare_industry_inputs": 1,
+    }
+    pd.testing.assert_frame_equal(
+        decoded["stock_master"], stocks_before, check_exact=True
+    )
     actual = read_dataset(root)
     pd.testing.assert_frame_equal(actual, expected, check_exact=True)
     assert len(slabs) > 1
@@ -730,7 +757,9 @@ def test_processed_narrow_output_uses_existing_panel_history(
     panel = producer._compute_processed_frame(
         panel_spec,
         source={
-            **producer._prepare_panel_source(source),
+            **producer._prepare_panel_source(
+                source, producer.panels._canonical_stock_master(source["stock_master"])
+            ),
             "market_bars_1d": source["market_bars_1d"],
         },
         dependencies={},
@@ -1082,7 +1111,9 @@ def test_own_market_all_label_horizons_preserve_unknown_and_suspended_sessions(
     panel = producer._compute_processed_frame(
         spec,
         source={
-            **producer._prepare_panel_source(source),
+            **producer._prepare_panel_source(
+                source, producer.panels._canonical_stock_master(source["stock_master"])
+            ),
             "market_bars_1d": source["market_bars_1d"],
         },
         dependencies={},
@@ -1268,7 +1299,9 @@ def test_factor_warmup_uses_own_sessions_across_closure_and_migration(
     panel = producer._compute_processed_frame(
         panel_spec,
         source={
-            **producer._prepare_panel_source(source),
+            **producer._prepare_panel_source(
+                source, producer.panels._canonical_stock_master(source["stock_master"])
+            ),
             "market_bars_1d": source["market_bars_1d"],
         },
         dependencies={},
@@ -1717,3 +1750,76 @@ def test_native_lifecycle_history_does_not_join_relisting(
     assert same_life == [
         {"timestamp": dates[288], "alpha_score": 1.0, "holding_return": 0.0}
     ]
+
+
+@pytest.mark.parametrize(
+    "cap,close,volume", ((1e308, 1e-308, 1e308), (1e-308, 1e308, 1e-308))
+)
+def test_native_panel_persists_finite_turnover_at_share_count_boundaries(
+    tmp_path, cap, close, volume
+):
+    from fractions import Fraction
+
+    dates = pd.bdate_range("2020-01-06", periods=3).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    bars = source["market_bars_1d"]
+    bars[["close", "open", "high", "low"]] = close
+    bars[["float_market_cap", "total_market_cap"]] = cap
+    bars["volume"] = volume
+    profile = research_profile()
+    spec = profile.processed.get("market_panel_1d")
+    layout = StorageLayout(tmp_path)
+    for data_id in spec.source_input_data_ids:
+        source_spec = profile.interim.get(data_id)
+        write_dataset(
+            layout.interim_data_root(source_spec.source_id, data_id),
+            source[data_id],
+            spec=source_spec,
+        )
+    root = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
+    with producer.produce_a_share_processed_data(
+        spec,
+        layout=layout,
+        time_window=TimeWindow(dates[0], dates[-1]),
+        processed_catalog=profile.processed,
+        source_catalog=profile.interim,
+    ) as (frames, metadata, verify):
+        write_dataset(
+            root, frames, spec=spec, instance_metadata=metadata, staged_validator=verify
+        )
+    actual = read_dataset(root)
+    expected = float(Fraction(volume) * Fraction(close) / Fraction(cap))
+    assert np.isfinite(actual.turnover).all()
+    np.testing.assert_allclose(actual.turnover, expected, rtol=1e-15, atol=0)
+
+
+def test_processed_axis_keeps_raw_dates_and_assets_before_membership_filter(tmp_path):
+    dates = pd.bdate_range("2020-01-06", periods=3).as_unit("ns")
+    source = _synthetic_interim_frames(dates)
+    extra_date = dates[-1] + pd.offsets.BDay()
+    extra = source["market_bars_1d"].iloc[:2].copy()
+    extra["timestamp"] = extra_date
+    extra.iloc[0, extra.columns.get_loc("source_asset_id")] = "999999"
+    extra.iloc[0, extra.columns.get_loc("market_type")] = 9
+    extra.iloc[1, extra.columns.get_loc("filling_flag")] = 2
+    bars = pd.concat((source["market_bars_1d"], extra), ignore_index=True)
+    closed = (
+        source["trading_calendar"]
+        .iloc[-1:]
+        .assign(calendar_date=extra_date, timestamp=extra_date, is_trading_day=False)
+    )
+    calendar = pd.concat((source["trading_calendar"], closed), ignore_index=True)
+    spec = research_profile().interim.get("market_bars_1d")
+    root = StorageLayout(tmp_path).interim_data_root(spec.source_id, spec.data_id)
+    write_dataset(root, bars, spec=spec)
+    session = open_dataset_session(root, columns=None, time_window=None)
+    stocks = producer.panels._canonical_stock_master(source["stock_master"])
+    panel_axis = producer._processed_axis(
+        session, panel_source=True, calendar=calendar, stock_master=stocks
+    )
+    raw = producer._processed_axis(
+        session, panel_source=False, asset_column="source_asset_id"
+    )
+    assert panel_axis[5] == (raw[0], frozenset(raw[1].index))
+    assert extra_date in panel_axis[5][0] and extra_date not in panel_axis[0]
+    assert "999999" in panel_axis[5][1] and "999999" not in set(panel_axis[2].asset_id)

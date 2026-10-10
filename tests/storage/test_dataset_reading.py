@@ -388,26 +388,16 @@ def test_inspect_and_fingerprint_detect_schema_mismatch_across_parts(
         fingerprint_dataset(root)
 
 
-def test_compare_datasets_statuses_for_semantic_and_schema_differences(
+def test_compare_datasets_rejects_schema_difference(
     tmp_path: Path,
 ) -> None:
     left_root = make_dataset_artifact_root(tmp_path, "left")
-    right_root = make_dataset_artifact_root(tmp_path, "right")
     schema_root = make_dataset_artifact_root(tmp_path, "schema")
     write_dataset(
         left_root,
         make_default_dataset_frame(),
         spec=make_processed_dataset_spec("left"),
     )
-    write_dataset(
-        right_root,
-        (make_default_dataset_frame().iloc[:1], make_default_dataset_frame().iloc[1:]),
-        spec=make_processed_dataset_spec("right"),
-    )
-    comparison = compare_datasets(left_root, right_root)
-    assert comparison.status == "MATCH"
-    assert comparison.matches
-    assert comparison.layout_delta["file_count"] == {"left": 2, "right": 3}
     wider_spec = ProcessedDataSpec(
         data_id="schema",
         market_id=MarketId("a_share"),

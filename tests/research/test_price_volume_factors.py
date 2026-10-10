@@ -1311,11 +1311,12 @@ def test_path_factors_complete_windows_zero_path_and_future_isolation():
 
 
 @pytest.mark.parametrize("scale", (1.0, np.nextafter(0.0, 1.0)))
-def test_shock_and_log_preserve_exact_positive_window_mean(scale):
+@pytest.mark.parametrize("positive_count", (10, 15, 20))
+def test_shock_and_log_preserve_exact_positive_window_mean(scale, positive_count):
     from decimal import Decimal, localcontext
     from fractions import Fraction
 
-    amounts = [scale] * 10 + [0.0] * 10 + [scale]
+    amounts = [scale] * positive_count + [0.0] * (20 - positive_count) + [scale]
     panel = pd.DataFrame(
         {
             "asset_id": "asset",

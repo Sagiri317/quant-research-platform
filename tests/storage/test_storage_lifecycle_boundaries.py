@@ -206,6 +206,21 @@ def test_dataset_write_read_long_path_preserves_existing_publication(
     )
 
 
+def _install_parquet_stubs(monkeypatch, handle, parquet):
+    metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4)
+    monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: handle)
+    monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
+    monkeypatch.setattr(
+        physical,
+        "dataset_file_identity",
+        lambda _path: identity.dataset_file_identity_from_stat(metadata),
+    )
+    monkeypatch.setattr(
+        identity, "dataset_file_identity", physical.dataset_file_identity
+    )
+    monkeypatch.setattr(physical.pq, "ParquetFile", lambda _handle, **_kwargs: parquet)
+
+
 def test_opened_parquet_close_preserves_generator_exit(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -239,25 +254,12 @@ def test_opened_parquet_close_preserves_generator_exit(
         def close(self) -> None:
             raise RuntimeError("close_failed")
 
-    metadata = type(
-        "Stat", (), {"st_dev": 1, "st_ino": 2, "st_size": 3, "st_mtime_ns": 4}
-    )()
-    monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: Handle())
-    monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
-    monkeypatch.setattr(
-        physical,
-        "dataset_file_identity",
-        lambda _path: identity.dataset_file_identity_from_stat(metadata),
-    )
-    monkeypatch.setattr(
-        identity, "dataset_file_identity", physical.dataset_file_identity
-    )
-    monkeypatch.setattr(
-        physical.pq, "ParquetFile", lambda _handle, **_kwargs: Parquet()
-    )
-    with pytest.raises(GeneratorExit):
+    _install_parquet_stubs(monkeypatch, Handle(), Parquet())
+    primary = GeneratorExit()
+    with pytest.raises(GeneratorExit) as caught:
         with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
-            raise GeneratorExit()
+            raise primary
+    assert caught.value is primary
 
 
 @pytest.mark.parametrize(
@@ -347,20 +349,7 @@ def test_opened_parquet_raw_handle_close_preserves_active_primary(
         def close(self) -> None:
             pass
 
-    metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4)
-    monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: Handle())
-    monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
-    monkeypatch.setattr(
-        physical,
-        "dataset_file_identity",
-        lambda _path: identity.dataset_file_identity_from_stat(metadata),
-    )
-    monkeypatch.setattr(
-        identity, "dataset_file_identity", physical.dataset_file_identity
-    )
-    monkeypatch.setattr(
-        physical.pq, "ParquetFile", lambda _handle, **_kwargs: Parquet()
-    )
+    _install_parquet_stubs(monkeypatch, Handle(), Parquet())
     with pytest.raises(primary_type) as raised:
         with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
             raise primary
@@ -403,20 +392,7 @@ def test_opened_parquet_raw_handle_close_propagates_without_primary(
         def close(self) -> None:
             pass
 
-    metadata = SimpleNamespace(st_dev=1, st_ino=2, st_size=3, st_mtime_ns=4)
-    monkeypatch.setattr(physical, "open_filesystem_file", lambda *_a, **_k: Handle())
-    monkeypatch.setattr(physical.os, "fstat", lambda _fd: metadata)
-    monkeypatch.setattr(
-        physical,
-        "dataset_file_identity",
-        lambda _path: identity.dataset_file_identity_from_stat(metadata),
-    )
-    monkeypatch.setattr(
-        identity, "dataset_file_identity", physical.dataset_file_identity
-    )
-    monkeypatch.setattr(
-        physical.pq, "ParquetFile", lambda _handle, **_kwargs: Parquet()
-    )
+    _install_parquet_stubs(monkeypatch, Handle(), Parquet())
     with pytest.raises(OSError, match="raw_close_failed"):
         with physical._opened_parquet(Path("part.parquet"), expected_identity=None):
             pass

@@ -15,12 +15,8 @@ from quant_research_platform.contracts.portfolios import PortfolioCapital
 from quant_research_platform.markets.implementations.crypto.execution import (
     MakerConfig,
     TakerConfig,
-)
-from quant_research_platform.markets.implementations.crypto.execution import (
-    simulate_maker as _simulate_maker,
-)
-from quant_research_platform.markets.implementations.crypto.execution import (
-    simulate_taker as _simulate_taker,
+    simulate_maker,
+    simulate_taker,
 )
 from quant_research_platform.markets.implementations.crypto.hft import (
     HFT_GRID_MS,
@@ -39,9 +35,6 @@ from tests.helpers.binance_hft import (
 )
 from tests.helpers.portfolio_ledger import capture_fill_rows
 from tests.helpers.research_configuration import research_configuration
-
-simulate_taker = _simulate_taker
-simulate_maker = _simulate_maker
 
 
 def _state(
@@ -740,7 +733,7 @@ def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
                 ),
             )
             if kind == "taker":
-                result = _simulate_taker(
+                result = simulate_taker(
                     books,
                     [{"timestamp_ms": 0, "prediction": 0.1}],
                     prediction_column="prediction",
@@ -749,7 +742,7 @@ def test_quiet_tail_matures_markout_at_reached_clock_and_persists(
                     **common,
                 )
             else:
-                result = _simulate_maker(
+                result = simulate_maker(
                     books,
                     [_trade(10, quantity=3)],
                     [_quote(0)],
@@ -816,7 +809,7 @@ def test_maker_visible_quantity_controls_persisted_fill_and_nav(
 
     def produce(emit):
         result.append(
-            _simulate_maker(
+            simulate_maker(
                 [_state(0), _state(200)],
                 [_trade(50, quantity=quantity, visible_quantity=visible)],
                 [_quote(0)],

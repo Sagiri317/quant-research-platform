@@ -159,7 +159,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
                 label_column="label",
                 random_seed=42,
                 hyperparameters=next(
-                    item["hyperparameters"]
+                    item.get("hyperparameters", {})
                     for item in small_configuration["models"]
                     if item["model_algorithm"] == algorithm
                 ),
@@ -2983,11 +2983,6 @@ def test_prediction_lineage_requires_exact_model_dependency_identity(
         research,
         "read_semantic_artifact_record",
         lambda *_args, **_kwargs: (envelope, {}),
-    )
-    monkeypatch.setattr(
-        research,
-        "validate_prediction_output_metadata_shape",
-        lambda _metadata: None,
     )
 
     def bundle(*_args, **_kwargs):  # noqa: ANN002, ANN003

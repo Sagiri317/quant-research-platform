@@ -280,7 +280,9 @@ def test_analyst_all_excluded_persists_zero_rows_and_counts(tmp_path):
     panel = producer._compute_processed_frame(
         panel_spec,
         source={
-            **producer._prepare_panel_source(facts),
+            **producer._prepare_panel_source(
+                facts, producer.panels._canonical_stock_master(facts["stock_master"])
+            ),
             "market_bars_1d": facts["market_bars_1d"],
         },
         dependencies={},

@@ -11,6 +11,7 @@ from quant_research_platform.markets.implementations.a_share.processed.panels im
     _apply_special_treatment,
     _apply_suspension_semantics,
     _asof_industry,
+    _canonical_stock_master,
     _industry_version_active_mask,
     _prepare_industry_inputs,
     _prepare_market_panel_inputs,
@@ -130,7 +131,9 @@ def test_market_panel_keeps_suspension_and_excludes_holiday_fill(
     result = compute_market_panel(
         bars,
         **_prepare_market_panel_inputs(
-            stock_master=stock_master, market_cap=market_cap, trading_calendar=calendar
+            stocks=_canonical_stock_master(stock_master),
+            market_cap=market_cap,
+            trading_calendar=calendar,
         ),
     )
 
@@ -206,7 +209,7 @@ def test_holiday_fill_on_open_session_fails_without_cross_asset_deletion() -> No
         compute_market_panel(
             bars,
             **_prepare_market_panel_inputs(
-                stock_master=stock_master,
+                stocks=_canonical_stock_master(stock_master),
                 market_cap=market_cap,
                 trading_calendar=calendar,
             ),
@@ -267,7 +270,9 @@ def test_market_panel_physical_order_is_time_major_without_changing_rows() -> No
     result = compute_market_panel(
         bars,
         **_prepare_market_panel_inputs(
-            stock_master=stock_master, market_cap=market_cap, trading_calendar=calendar
+            stocks=_canonical_stock_master(stock_master),
+            market_cap=market_cap,
+            trading_calendar=calendar,
         ),
     )
 
@@ -398,7 +403,7 @@ def test_no_limit_history_overrides_historical_limit_status() -> None:
     panel = compute_market_panel(
         bars,
         **_prepare_market_panel_inputs(
-            stock_master=stock_master,
+            stocks=_canonical_stock_master(stock_master),
             market_cap=market_cap,
             trading_calendar=calendar,
             no_limit_history=no_limit,
@@ -445,8 +450,10 @@ def test_missing_listing_lifecycle_does_not_enter_the_panel() -> None:
     result = compute_market_panel(
         bars,
         **_prepare_market_panel_inputs(
-            stock_master=pd.DataFrame(
-                columns=["source_asset_id", "listing_date", "delisting_date"]
+            stocks=_canonical_stock_master(
+                pd.DataFrame(
+                    columns=["source_asset_id", "listing_date", "delisting_date"]
+                )
             ),
             market_cap=pd.DataFrame(
                 {"source_asset_id": ["000001"], "timestamp": [sessions[0]]}
@@ -553,7 +560,7 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
     result = compute_market_panel(
         bars,
         **_prepare_market_panel_inputs(
-            stock_master=stock_master,
+            stocks=_canonical_stock_master(stock_master),
             market_cap=market_cap,
             trading_calendar=calendar,
             industry_history=history,
@@ -580,7 +587,7 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
     missing_transition = compute_market_panel(
         bars,
         **_prepare_market_panel_inputs(
-            stock_master=stock_master,
+            stocks=_canonical_stock_master(stock_master),
             market_cap=market_cap,
             trading_calendar=calendar,
             industry_history=history.iloc[[0]],
@@ -624,7 +631,7 @@ def test_industry_history_uses_effective_standard_and_set_hierarchy(tmp_path) ->
     abandoned = compute_market_panel(
         bars,
         **_prepare_market_panel_inputs(
-            stock_master=stock_master,
+            stocks=_canonical_stock_master(stock_master),
             market_cap=market_cap,
             trading_calendar=calendar,
             industry_history=history,
@@ -1282,7 +1289,10 @@ def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
         return producer._compute_processed_frame(
             spec,
             source={
-                **producer._prepare_panel_source(source),
+                **producer._prepare_panel_source(
+                    source,
+                    producer.panels._canonical_stock_master(source["stock_master"]),
+                ),
                 "market_bars_1d": source["market_bars_1d"],
             },
             dependencies={},
@@ -1563,3 +1573,37 @@ def test_conflicting_listing_lifecycles_are_rejected(delisting, error):
                 }
             )
         )
+
+
+@pytest.mark.parametrize(
+    "cap,close,volume", ((1e308, 1e-308, 1e308), (1e-308, 1e308, 1e-308))
+)
+def test_turnover_does_not_lose_finite_value_to_intermediate_share_count(
+    cap, close, volume
+):
+    from fractions import Fraction
+
+    frame = pd.DataFrame(
+        {
+            "asset_id": "asset",
+            "listing_date": pd.Timestamp("2000-01-01"),
+            "timestamp": pd.date_range("2020-01-01", periods=2),
+            "filling_flag": [0, 1],
+            "market_type": 1,
+            "close": close,
+            "open": close,
+            "high": close,
+            "low": close,
+            "adj_close": 10.0,
+            "adj_open": 10.0,
+            "period_return": 0.0,
+            "volume": volume,
+            "amount": 1000.0,
+            "float_market_cap": cap,
+        }
+    )
+    actual = _apply_suspension_semantics(frame)
+    expected = float(Fraction(volume) * Fraction(close) / Fraction(cap))
+    assert np.isfinite(actual.turnover.iloc[0])
+    assert actual.turnover.iloc[0] == pytest.approx(expected, rel=1e-15, abs=0)
+    assert actual.turnover.iloc[1] == 0.0

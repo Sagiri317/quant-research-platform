@@ -1511,7 +1511,7 @@ def test_full_scope_family_metadata_preserves_shards_and_native_model_state(
             input_factor_columns=tuple(item["input_factor_columns"]),
             input_feature_columns=tuple(item["input_feature_columns"]),
             label_column=item["label_column"],
-            hyperparameters=item["hyperparameters"],
+            hyperparameters=item.get("hyperparameters", {}),
         )
         for item in configuration["models"]
     )

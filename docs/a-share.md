@@ -1248,6 +1248,9 @@ EWMA先扣除当前有效观测的共同最小年龄再归一化；缺失最新s
 FactorRiskConfig唯一拥有风险窗口、半衰期、最小观测、diagonal shrinkage、annualization与weighting；
 OptimizerConfig唯一拥有active-name/TE/turnover/industry/style/SLSQP容差和迭代上限。
 protocol序列化同一配置，运行消费同一实例；ADV participation由ExecutionAssumptions唯一拥有。
+协方差保持既有 PSD 准入容差；这不允许成功优化结果含负方差或非有限跟踪误差。
+优化约束、解后检查与诊断共用风险计算。浮点二次型为负时，以输入二进制值的精确算术
+区分计算舍入与真实负值；前者恢复非负结果，后者明确阻断，不投影协方差或静默截断。
 
 #### 5.14.2 Ridge
 

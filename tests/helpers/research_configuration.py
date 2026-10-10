@@ -34,7 +34,7 @@ def research_configuration(
                 "random_forest_regressor",
             }:
                 for parameters in (
-                    model["hyperparameters"],
+                    model.setdefault("hyperparameters", {}),
                     *model.get("parameter_candidates", ()),
                 ):
                     parameters["n_estimators"] = 16

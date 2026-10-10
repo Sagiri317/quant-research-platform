@@ -12,7 +12,6 @@ SOURCE_IDENTIFIER_FIELDS = {
     "constituent_stock_code",
     "trade_date",
     "share_change_date",
-    "asset_record_date",
     "calendar_date",
     "base_date",
     "start_date",
