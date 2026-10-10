@@ -348,17 +348,46 @@ def test_research_entry_binds_main_and_auxiliary_sources_to_selected_raw_root(
         if explicit
         else layout.project_root / "data" / "raw"
     )
-    roots = []
+    from quant_research_platform.markets.implementations.crypto.ids import (
+        HFT_DERIVATIVE_DATA_ID,
+        HFT_EXTERNAL_DATA_IDS,
+        HFT_PANEL_DATA_ID,
+        HFT_SOL_PANEL_DATA_ID,
+        HFT_SPOT_PANEL_DATA_ID,
+    )
+    from quant_research_platform.markets.implementations.crypto.processed import (
+        producer as crypto_producer,
+    )
 
-    def plan_targets(*, profile, raw_root, **_):
-        assert raw_root == selected
-        for binding in profile.producer_bindings.values():
-            if binding.raw_root is not None:
-                assert binding.raw_root.is_relative_to(selected / "tardis")
-                roots.append(binding.raw_root)
-        return {"status": "COMPLETE"}
+    expected_roots = {HFT_PANEL_DATA_ID: selected / "tardis"}
+    auxiliary_ids = {
+        "derivatives_state": HFT_DERIVATIVE_DATA_ID,
+        "spot": HFT_SPOT_PANEL_DATA_ID,
+        "sol": HFT_SOL_PANEL_DATA_ID,
+    }
+    for name in config.get("auxiliary_sources", {}):
+        if name in auxiliary_ids:
+            expected_roots[auxiliary_ids[name]] = selected / "tardis"
+        elif name in HFT_EXTERNAL_DATA_IDS:
+            expected_roots[HFT_EXTERNAL_DATA_IDS[name]] = (
+                selected
+                / "tardis"
+                / crypto_producer.EXTERNAL_INSTRUMENTS[name]["exchange"]
+            )
+    observed = []
+    original = research._plan_targets
 
-    monkeypatch.setattr(research, "plan_targets", plan_targets)
+    def plan_targets(*, profile, raw_root, layout, **kwargs):
+        assert raw_root == (selected if explicit else None)
+        assert (raw_root or research._default_raw_root(layout)) == selected
+        for data_id, expected_root in expected_roots.items():
+            binding = profile.producer_bindings[data_id]
+            assert binding.raw_root == expected_root
+            assert callable(binding.source_identity)
+        observed.append(profile)
+        return original(profile=profile, raw_root=raw_root, layout=layout, **kwargs)
+
+    monkeypatch.setattr(research, "_plan_targets", plan_targets)
     result = research.research_run(
         profile=research_profile(config["profile_id"]),
         layout=layout,
@@ -366,5 +395,13 @@ def test_research_entry_binds_main_and_auxiliary_sources_to_selected_raw_root(
         raw_root=selected if explicit else None,
         plan=True,
     )
-    assert result["status"] == "COMPLETE"
-    assert roots
+    assert len(observed) == 1
+    assert result["status"] == "BLOCKED"
+    main = next(
+        target
+        for target in result["targets"]
+        if target["target_id"] == HFT_PANEL_DATA_ID
+    )
+    assert main["decision"] == "BLOCKED"
+    assert main["blocker"] == "raw_content_identity_unavailable"
+    assert not selected.exists()

@@ -401,7 +401,7 @@ def _execute_notebook(
             "for curve in available)\n"
             "assert all(axis.get_xlabel() == "
             "('Time (UTC)' if is_crypto else 'Trading date') "
-            "for axis in axes.flat if axis.get_visible())\n"
+            "for axis in figure.axes if axis.get_visible())\n"
             "print('NOTEBOOK_SYNTHETIC_CHECKS_PASSED')\n"
         )
     )

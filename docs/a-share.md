@@ -539,6 +539,7 @@ fusion_nf_expectations
 
 | 阶段或访问域 | 配置与产物责任 |
 |---|---|
+| `stage=dataset` | 可保留完整模型、组合及选择器声明以确定同一数据规格；只请求所选数据集，不拟合、不执行组合，不解锁留出 |
 | `stage=evaluation` | 显式选择因子与标签，`models` 和 `portfolios` 必须为空；只展开因子评估终端 |
 | `stage=research` | 显式选择模型及组合；按所选目标生成候选预测、选择、统计和执行账本 |
 | `access_window=holdout` | 须绑定完整开发窗口的同协议 COMPLETE 记录、对应终端集合和已验证冻结产物；评估子图完成不替代开发冻结资格 |

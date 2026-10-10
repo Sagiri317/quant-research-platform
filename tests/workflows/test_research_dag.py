@@ -3513,3 +3513,44 @@ def test_planner_reads_frozen_manifest_once_for_all_targets(tmp_path, monkeypatc
     assert len(actual["targets"]) > 2
     # One frozen-state read and one final public manifest.
     assert len(calls) == 2
+
+
+def test_dataset_run_keeps_declarations_but_has_no_model_preflight(
+    tmp_path, monkeypatch
+):
+    config = research_configuration("a_share", "core6")
+    config["stage"] = "dataset"
+    preflight_sizes = []
+    original = research.preflight_model_specs
+
+    def observed_preflight(specs):
+        preflight_sizes.append(len(specs))
+        return original(specs)
+
+    monkeypatch.setattr(research, "preflight_model_specs", observed_preflight)
+    layout = StorageLayout(tmp_path)
+    result = research.research_run(
+        profile=research_profile(), layout=layout, research_plan=config
+    )
+    assert preflight_sizes == [0]
+    assert result["status"] == "BLOCKED"
+    assert result["terminal_targets"] == [config["scenario_id"]]
+    assert all(
+        research._catalog_data_spec(research_profile(), target["target_id"]) is not None
+        for target in result["target_results"]
+    )
+    record = read_research_run_record(
+        layout.research_run_path(result["run_id"]),
+        expected_profile_id=config["profile_id"],
+    ).payload()
+    saved = record["protocol"]["research_configuration"]
+    assert saved["stage"] == "dataset"
+    assert len(saved["models"]) == len(config["models"])
+    assert saved["portfolios"] == config["portfolios"]
+    with pytest.raises(ValueError, match="holdout_requires_research_stage"):
+        research.research_run(
+            profile=research_profile(),
+            layout=layout,
+            research_plan=config,
+            holdout=True,
+        )

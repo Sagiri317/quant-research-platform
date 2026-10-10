@@ -91,6 +91,7 @@ class ExactPrimaryKeyIndex:
         value_column: str,
         selected=None,
         validation_column: str | None = None,
+        retain_values: bool = True,
     ) -> int:
         self._validate_comparison_table_grammar(
             table, namespace=namespace, value_columns=(value_column,)
@@ -103,17 +104,12 @@ class ExactPrimaryKeyIndex:
             for position, (_, key, _) in enumerate(
                 self._payload_rows(keys, namespace=namespace)
             ):
-                raw = _float_value_payload(validation[position])
                 keep = selected is None or selected[position].as_py()
-                value = (
-                    (
-                        raw
-                        if validation_column in (None, value_column)
-                        else _float_value_payload(values[position])
-                    )
-                    if keep
-                    else None
+                value = _float_value_payload(
+                    validation[position], retain=retain_values and keep
                 )
+                if keep and validation_column not in (None, value_column):
+                    value = _float_value_payload(values[position], retain=retain_values)
                 yield (namespace, key, value)
 
         return table.num_rows - self._insert_rows(rows())
@@ -319,11 +315,11 @@ class ExactPrimaryKeyIndex:
             yield (namespace, key_payload, value_payload)
 
 
-def _float_value_payload(scalar: pa.Scalar) -> bytes:
+def _float_value_payload(scalar: pa.Scalar, *, retain: bool) -> bytes | None:
     value = scalar.as_py()
     if value is None or not math.isfinite(float(value)):
         raise ValueError("invalid_exact_float_value")
-    return struct.pack(">d", float(value))
+    return struct.pack(">d", float(value)) if retain else None
 
 
 def _append_arrow_scalar_payload(

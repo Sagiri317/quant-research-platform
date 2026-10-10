@@ -1091,6 +1091,415 @@ def _persist_execution(tmp_path, capital, produce):
     return read_portfolio_ledger_artifact(root, expected_identity=root.name)
 
 
+@pytest.mark.parametrize("quantity,unit", [(1.0, "0.001"), (1e308, "1e-311")])
+def test_taker_weighted_diagnostics_survive_unit_scaling(tmp_path, quantity, unit):
+    import json
+    from decimal import Decimal
+    from fractions import Fraction
+
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.sources.binance.replay import (
+        DepthReconstructor,
+        ReconstructionStats,
+    )
+    from tests.helpers.research_configuration import research_configuration
+
+    configuration = research_configuration("crypto", "baseline")
+    plan = configuration["research_plan"]
+    plan["exposure_limits"]["btc_usdt"] = {
+        "max_order_quantity": quantity,
+        "max_position_quantity": quantity,
+    }
+    plan["execution"].update(taker_fee_bps=0.0, latency_ms=0, markout_horizon_ms=100)
+    bound = bind_research_configuration(
+        research_profile(configuration["profile_id"]), configuration
+    )
+    plan = bound.protocol(configuration["scenario_id"]).manifest()["research_plan"]
+    limits = plan["exposure_limits"]["btc_usdt"]
+    execution = plan["execution"]
+    config = TakerConfig(
+        order_quantity=limits["max_order_quantity"],
+        position_size=limits["max_position_quantity"],
+        latency_ms=execution["latency_ms"],
+        taker_fee_bps=execution["taker_fee_bps"],
+        markout_horizon_ms=execution["markout_horizon_ms"],
+    )
+    identity = {
+        "market_type": FUTURES_MARKET_TYPE,
+        "segment_id": "s1",
+        "observation_id": "connection-s1",
+    }
+    tick = Decimal(unit)
+    engine = DepthReconstructor(
+        FUTURES_MARKET_TYPE,
+        price_unit=unit,
+        snapshot_limit=10,
+        required_levels=10,
+        connection_close_ns=201_000_000,
+        stats=ReconstructionStats(),
+        output_levels=10,
+    )
+    engine.bootstrap(
+        {
+            **identity,
+            "payload": {
+                "lastUpdateId": 100,
+                "bids": [
+                    [str((995 - index) * tick), str(quantity if index == 0 else 1)]
+                    for index in range(10)
+                ],
+                "asks": [
+                    [str((1005 + index) * tick), str(quantity if index == 0 else 1)]
+                    for index in range(10)
+                ],
+            },
+        }
+    )
+    books = []
+    for sequence, timestamp in enumerate((0, 200), 1):
+        books.extend(
+            engine.feed(
+                {
+                    **identity,
+                    "source_sequence": sequence,
+                    "observed_time_ns": timestamp * 1_000_000,
+                    "receive_time": pd.Timestamp(
+                        timestamp, unit="ms", tz="UTC"
+                    ).isoformat(),
+                    "receive_monotonic_ns": sequence,
+                    "payload": {
+                        "U": 99 + sequence,
+                        "u": 100 + sequence,
+                        "pu": 99 + sequence,
+                        "E": timestamp,
+                        "T": timestamp,
+                        "b": [],
+                        "a": [],
+                    },
+                }
+            )
+        )
+    assert len(books) == 2 and all(isinstance(book, BookState) for book in books)
+    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+    results, fills = [], []
+
+    def produce(emit):
+        results.append(
+            simulate_taker(
+                books,
+                [{"timestamp_ms": 0, "prediction": 0.1}],
+                prediction_column="prediction",
+                prediction_horizon_ms=500,
+                config=config,
+                observed_coverage={"s1": _coverage(0, 201)},
+                capital=capital,
+                asset_id="btc_usdt",
+                funding_events=(),
+                funding_forecasts=KNOWN_NO_FUNDING,
+                on_ledger=capture_fill_rows(fills.append, emit),
+            )
+        )
+
+    saved = _persist_execution(tmp_path, capital, produce)
+    (fill,) = fills
+    price, mid = (Fraction(float(index * tick)) for index in (1005, 1000))
+    notional = Fraction(quantity) * price
+    pnl = Fraction(quantity) * (mid - price)
+    expected = {
+        "average_slippage_bps": float((price - mid) / mid * 10000),
+        "average_markout_bps": float((mid - price) / price * 10000),
+    }
+    assert fill["fill_qty"] == quantity
+    assert fill["notional"] == float(notional)
+    assert results[0]["gross_pnl"] == pytest.approx(float(pnl), rel=1e-12)
+    persisted = [
+        json.loads(row.text)
+        for batch in saved.iter_chunks()
+        for row in batch.diagnostics
+        if row.name == "execution_summary"
+    ]
+    assert len(persisted) == 1
+    for name, value in expected.items():
+        assert math.isfinite(value)
+        assert results[0][name] == pytest.approx(value, rel=1e-12)
+        assert persisted[0][name] == results[0][name]
+
+
+def test_taker_weighted_diagnostics_use_each_fill_quantity(tmp_path):
+    import json
+    from fractions import Fraction
+
+    books = [
+        _state(0, ask_levels=((1005, 3.0),)),
+        _state(50, bid_index=1005, ask_levels=((1015, 3.0),)),
+        _state(200, bid_index=1005, ask_levels=((1015, 3.0),)),
+    ]
+    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+    fills = []
+
+    def produce(emit):
+        simulate_taker(
+            books,
+            [{"timestamp_ms": stamp, "prediction": 0.1} for stamp in (0, 50)],
+            prediction_column="prediction",
+            prediction_horizon_ms=500,
+            config=replace(
+                _taker_config(order_quantity=2.0), position_size=3.0, taker_fee_bps=0.0
+            ),
+            observed_coverage={"s1": _coverage(0, 201)},
+            capital=capital,
+            asset_id="btc_usdt",
+            funding_events=(),
+            funding_forecasts=KNOWN_NO_FUNDING,
+            on_ledger=capture_fill_rows(fills.append, emit),
+        )
+
+    saved = _persist_execution(tmp_path, capital, produce)
+    assert [fill["fill_qty"] for fill in fills] == [2.0, 1.0]
+    summary = next(
+        json.loads(row.text)
+        for batch in saved.iter_chunks()
+        for row in batch.diagnostics
+        if row.name == "execution_summary"
+    )
+    for name, values in (
+        ("average_slippage_bps", (Fraction(1, 200), Fraction(1, 202))),
+        ("average_markout_bps", (Fraction(1, 201), Fraction(-1, 203))),
+    ):
+        expected = float((2 * values[0] + values[1]) / 3 * 10000)
+        assert summary[name] == pytest.approx(expected, rel=1e-12)
+
+
+@pytest.mark.parametrize(
+    "first_quantity,unit,offset",
+    [
+        (1.0, "1e-311", 1),
+        (1.0, "1e-311", -1),
+        (1e-20, "1e-293", 0),
+        (1e-15, "1e-293", 0),
+    ],
+)
+def test_taker_weighted_markout_preserves_small_quantity_contribution(
+    tmp_path, first_quantity, unit, offset
+):
+    import json
+    from decimal import Decimal
+    from fractions import Fraction
+
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.sources.binance.replay import (
+        DepthReconstructor,
+        ReconstructionStats,
+    )
+    from tests.helpers.research_configuration import research_configuration
+
+    quantity, scale, tick = 1e308, 10**304, Decimal(unit)
+    configuration = research_configuration("crypto", "baseline")
+    plan = configuration["research_plan"]
+    plan["exposure_limits"]["btc_usdt"] = {
+        "max_order_quantity": quantity,
+        "max_position_quantity": quantity,
+    }
+    plan["execution"].update(taker_fee_bps=0.0, latency_ms=0, markout_horizon_ms=40)
+    bound = bind_research_configuration(
+        research_profile(configuration["profile_id"]), configuration
+    )
+    plan = bound.protocol(configuration["scenario_id"]).manifest()["research_plan"]
+    limits, execution = plan["exposure_limits"]["btc_usdt"], plan["execution"]
+    config = TakerConfig(
+        order_quantity=limits["max_order_quantity"],
+        position_size=limits["max_position_quantity"],
+        latency_ms=execution["latency_ms"],
+        taker_fee_bps=execution["taker_fee_bps"],
+        markout_horizon_ms=execution["markout_horizon_ms"],
+    )
+    identity = {
+        "market_type": FUTURES_MARKET_TYPE,
+        "segment_id": "s1",
+        "observation_id": "connection-s1",
+    }
+    bids = {995 - index: 1e-308 for index in range(20)}
+    asks = {1005 + index: 1e-308 for index in range(10)}
+    asks[1005] = first_quantity
+    asks.update({(1005 + index) * scale: 1e-308 for index in range(10)})
+
+    def raw(levels):
+        return [[str(Decimal(index) * tick), str(q)] for index, q in levels.items()]
+
+    engine = DepthReconstructor(
+        FUTURES_MARKET_TYPE,
+        price_unit=unit,
+        snapshot_limit=20,
+        required_levels=10,
+        output_levels=10,
+        connection_close_ns=201_000_000,
+        stats=ReconstructionStats(),
+    )
+    engine.bootstrap(
+        {
+            **identity,
+            "payload": {"lastUpdateId": 100, "bids": raw(bids), "asks": raw(asks)},
+        }
+    )
+    changes = (
+        (0, {}, {}),
+        (
+            40,
+            {(995 - index) * scale: 1e-308 for index in range(10)},
+            {1005 + index: 0 for index in range(10)},
+        ),
+        (
+            80,
+            {(995 - index) * scale: 0 for index in range(10)},
+            {1005 + index: quantity if index == 0 else 1e-308 for index in range(10)},
+        ),
+        (
+            120,
+            {1000 + offset - index: 1e-308 for index in range(10)},
+            {
+                **{1005 + index: 0 for index in range(5 + offset)},
+                **{1015 + index: 1e-308 for index in range(5 + offset)},
+            },
+        ),
+        (200, {}, {}),
+    )
+    books = []
+    for sequence, (stamp, bid_updates, ask_updates) in enumerate(changes, 1):
+        books.extend(
+            engine.feed(
+                {
+                    **identity,
+                    "source_sequence": sequence,
+                    "observed_time_ns": stamp * 1_000_000,
+                    "receive_time": f"1970-01-01T00:00:00.{stamp:03d}000Z",
+                    "receive_monotonic_ns": sequence,
+                    "payload": {
+                        "U": 99 + sequence,
+                        "u": 100 + sequence,
+                        "pu": 99 + sequence,
+                        "E": stamp,
+                        "T": stamp,
+                        "b": raw(bid_updates),
+                        "a": raw(ask_updates),
+                    },
+                }
+            )
+        )
+    assert len(books) == 5 and all(isinstance(book, BookState) for book in books)
+    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+    results, fills = [], []
+
+    def produce(emit):
+        results.append(
+            simulate_taker(
+                books,
+                [{"timestamp_ms": stamp, "prediction": 0.1} for stamp in (0, 80)],
+                prediction_column="prediction",
+                prediction_horizon_ms=500,
+                config=config,
+                observed_coverage={"s1": _coverage(0, 201)},
+                capital=capital,
+                asset_id="btc_usdt",
+                funding_events=(),
+                funding_forecasts=KNOWN_NO_FUNDING,
+                on_ledger=capture_fill_rows(fills.append, emit),
+            )
+        )
+
+    saved = _persist_execution(tmp_path, capital, produce)
+    assert [fill["fill_qty"] for fill in fills] == [first_quantity, quantity]
+    price = Fraction(float(1005 * tick))
+    source_bps = [
+        (Fraction(float(index * tick)) - price) / price * 10000
+        for index in (1000 * scale, 1005 + offset)
+    ]
+    for fill, expected in zip(fills, source_bps, strict=True):
+        assert fill["markout_bps"] == pytest.approx(float(expected), rel=1e-12, abs=0)
+    weights = [Fraction(first_quantity), Fraction(quantity)]
+    source_oracle = sum(
+        weight * value for weight, value in zip(weights, source_bps, strict=True)
+    ) / sum(weights)
+    fill_oracle = sum(
+        weight * Fraction(fill["markout_bps"])
+        for weight, fill in zip(weights, fills, strict=True)
+    ) / sum(weights)
+    assert float(source_oracle) == pytest.approx(float(fill_oracle), rel=1e-12, abs=0)
+    summary = next(
+        json.loads(row.text)
+        for batch in saved.iter_chunks()
+        for row in batch.diagnostics
+        if row.name == "execution_summary"
+    )
+    actual = results[0]["average_markout_bps"]
+    assert actual == pytest.approx(float(source_oracle), rel=1e-12, abs=0)
+    assert actual == pytest.approx(float(fill_oracle), rel=1e-15, abs=0)
+    assert summary["average_markout_bps"] == actual
+
+
+@pytest.mark.parametrize("reverse", (False, True))
+@pytest.mark.parametrize("last_value", (9.0, -9.0))
+@pytest.mark.parametrize("first_value,quantity", ((9e307, 1e308), (9e16, 1e16)))
+def test_weighted_diagnostics_preserve_unequal_quantity_contributions(
+    reverse, last_value, first_value, quantity
+):
+    from fractions import Fraction
+
+    pairs = [(1.0, first_value), (quantity, last_value)]
+    if reverse:
+        pairs.reverse()
+    metrics = _Metrics()
+    for quantity, value in pairs:
+        fill = {
+            "fill_qty": quantity,
+            "notional": 0.0,
+            "slippage_bps": value,
+            "markout_per_unit": 0.0,
+            "markout_bps": value,
+            "markout_pnl": 0.0,
+            "adverse_selection_cost": 0.0,
+        }
+        metrics.observe_fill(fill)
+        metrics.finalize_markout(fill)
+    expected = float(
+        sum(Fraction(q) * Fraction(value) for q, value in pairs)
+        / sum(Fraction(q) for q, _ in pairs)
+    )
+    assert metrics.payload()["average_slippage_bps"] == pytest.approx(
+        expected, rel=1e-12
+    )
+    assert metrics.payload()["average_markout_bps"] == pytest.approx(
+        expected, rel=1e-12
+    )
+
+
+@pytest.mark.parametrize("values", [(1e308, -1e308), (1e308, 1e308)])
+def test_weighted_diagnostic_update_avoids_intermediate_overflow(values):
+    from fractions import Fraction
+
+    metrics = _Metrics()
+    for quantity, value in zip((1.0, 3.0), values, strict=True):
+        fill = {
+            "fill_qty": quantity,
+            "notional": 0.0,
+            "slippage_bps": value,
+            "markout_per_unit": 0.0,
+            "markout_bps": value,
+            "markout_pnl": 0.0,
+            "adverse_selection_cost": 0.0,
+        }
+        metrics.observe_fill(fill)
+        metrics.finalize_markout(fill)
+    expected = float((Fraction(values[0]) + 3 * Fraction(values[1])) / 4)
+    assert metrics.payload()["average_slippage_bps"] == expected
+    assert metrics.payload()["average_markout_bps"] == expected
+
+
 @pytest.mark.parametrize("sign", (1, -1))
 @pytest.mark.parametrize(
     "requested,depth",

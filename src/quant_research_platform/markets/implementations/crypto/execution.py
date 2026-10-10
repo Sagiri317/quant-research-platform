@@ -137,17 +137,35 @@ def _funding_consumer(events: Iterable[FundingEvent], economics: PortfolioEconom
     return consume
 
 
+def _weighted_mean(
+    mean: float, old_quantity: float, value: float, quantity: float
+) -> float:
+    total = old_quantity + quantity
+    old_weight, weight = old_quantity / total, quantity / total
+    minimum_normal = float.fromhex("0x1p-1022")
+    if (old_quantity and old_weight < minimum_normal) or weight < minimum_normal:
+        # A subnormal ratio can lose a finite weighted contribution before scaling.
+        old, new = Fraction(old_quantity), Fraction(quantity)
+        return float((old * Fraction(mean) + new * Fraction(value)) / (old + new))
+    if (mean < 0) == (value < 0):
+        # Update the larger weight so rounding the other ratio to one cannot cancel it.
+        if quantity > old_quantity:
+            return value + (mean - value) * old_weight
+        return mean + (value - mean) * weight
+    return mean * old_weight + value * weight
+
+
 @dataclass
 class _Metrics:
     fill_events: int = 0
     fill_quantity: float = 0.0
     turnover: float = 0.0
     slippage_quantity: float = 0.0
-    slippage_weighted: float = 0.0
+    slippage_mean: float = 0.0
     spread_capture_pnl: float = 0.0
     defined_markout_quantity: float = 0.0
     markout_weighted: float = 0.0
-    markout_weighted_bps: float = 0.0
+    markout_mean_bps: float = 0.0
     markout_pnl: float = 0.0
     adverse_selection_cost: float = 0.0
     undefined_markouts: int = 0
@@ -158,8 +176,13 @@ class _Metrics:
         self.fill_quantity += quantity
         self.turnover += float(fill["notional"])
         if "slippage_bps" in fill:
+            self.slippage_mean = _weighted_mean(
+                self.slippage_mean,
+                self.slippage_quantity,
+                float(fill["slippage_bps"]),
+                quantity,
+            )
             self.slippage_quantity += quantity
-            self.slippage_weighted += quantity * float(fill["slippage_bps"])
         if "spread_capture_per_unit" in fill:
             self.spread_capture_pnl += quantity * float(fill["spread_capture_per_unit"])
 
@@ -170,9 +193,14 @@ class _Metrics:
             self.undefined_markouts += 1
             return
         value = float(markout)
+        self.markout_mean_bps = _weighted_mean(
+            self.markout_mean_bps,
+            self.defined_markout_quantity,
+            float(fill["markout_bps"]),
+            quantity,
+        )
         self.defined_markout_quantity += quantity
         self.markout_weighted += quantity * value
-        self.markout_weighted_bps += quantity * float(fill["markout_bps"])
         self.markout_pnl += float(fill["markout_pnl"])
         self.adverse_selection_cost += float(fill["adverse_selection_cost"])
 
@@ -182,9 +210,7 @@ class _Metrics:
             "fill_quantity": self.fill_quantity,
             "turnover": self.turnover,
             "average_slippage_bps": (
-                self.slippage_weighted / self.slippage_quantity
-                if self.slippage_quantity
-                else None
+                self.slippage_mean if self.slippage_quantity else None
             ),
             "spread_capture_pnl": self.spread_capture_pnl,
             "average_markout_per_unit": (
@@ -193,9 +219,7 @@ class _Metrics:
                 else None
             ),
             "average_markout_bps": (
-                self.markout_weighted_bps / self.defined_markout_quantity
-                if self.defined_markout_quantity
-                else None
+                self.markout_mean_bps if self.defined_markout_quantity else None
             ),
             "markout_pnl": (
                 self.markout_pnl if self.defined_markout_quantity else None

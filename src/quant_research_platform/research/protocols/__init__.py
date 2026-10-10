@@ -163,9 +163,7 @@ def bind_research_selection(profile, library, configuration):
         raise ValueError("research_evaluation_label_invalid")
     if type(config["models"]) is not list or type(config["portfolios"]) is not list:
         raise ValueError("research_model_portfolio_selection_invalid")
-    if config["stage"] in {"dataset", "evaluation"} and (
-        config["models"] or config["portfolios"]
-    ):
+    if config["stage"] == "evaluation" and (config["models"] or config["portfolios"]):
         raise ValueError("evaluation_only_has_model_or_portfolio")
     if config["stage"] == "models" and config["portfolios"]:
         raise ValueError("model_stage_has_portfolios")
@@ -425,12 +423,9 @@ def bind_research_selection(profile, library, configuration):
     if len(set(ids)) != len(ids):
         raise ValueError("research_portfolio_duplicate")
     selected_model_ids = {model.model_id for model in models}
-    if (
-        config["stage"] in {"models", "research"}
-        and config["comparison_model_id"] not in selected_model_ids
-    ) or (
-        config["stage"] in {"dataset", "evaluation"}
-        and config["comparison_model_id"] is not None
+    comparison = config["comparison_model_id"]
+    if (comparison is None and config["stage"] in {"models", "research"}) or (
+        comparison is not None and comparison not in selected_model_ids
     ):
         raise ValueError("research_comparison_model_invalid")
     for candidate in candidates:

@@ -130,6 +130,11 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
             [times[1], times[1], times[2]],
             "duplicate_persisted_prediction_keys",
         ),
+        (
+            "timestamp",
+            [times[0], times[1], times[0]],
+            "duplicate_persisted_prediction_keys",
+        ),
         ("prediction_score", [float("nan"), 2.0, 3.0], "invalid_exact_float_value"),
     ):
         altered = original.set_column(
@@ -144,6 +149,80 @@ def test_prediction_bundle_validates_and_filters_nanosecond_bounds(
                 expected_output_id=spec.prediction_id,
                 time_window=TimeWindow(times[1], times[1]),
             )
+
+
+def test_prediction_validation_retains_values_only_for_lookup(tmp_path, monkeypatch):
+    import pyarrow as pa
+
+    from quant_research_platform.artifacts.outputs.prediction import (
+        write_prediction_outputs,
+    )
+    from quant_research_platform.storage.layout import StorageLayout
+
+    frame = make_price_volume_prediction_output_frame()
+    frame = frame.loc[frame.index.repeat(4096)].reset_index(drop=True)
+    frame["asset_id"] = [f"asset-{index}" for index in range(len(frame))]
+    frame["prediction_score"] = [index / 16 for index in range(len(frame))]
+    metadata = dict(frame.attrs["prediction_metadata"])
+    for name in (
+        "rows_input",
+        "rows_after_filter_mode",
+        "rows_after_input_dropna",
+        "prediction_rows",
+    ):
+        metadata[name] = len(frame)
+    spec = make_price_volume_prediction_spec()
+    root = write_prediction_outputs(
+        spec=spec,
+        output_spec=make_prediction_report_spec(),
+        layout=StorageLayout(tmp_path),
+        output_chunks=(frame,),
+        model_metadata=frame.attrs["model_metadata"],
+        prediction_metadata_factory=lambda: metadata,
+    )
+    indexes = []
+    calls = []
+    original = bundle_validation.ExactPrimaryKeyIndex
+
+    class ObservedIndex(original):
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+            indexes.append(self)
+
+        def add_float_value_table(self, table, **kwargs):
+            calls.append(table.num_rows)
+            return super().add_float_value_table(table, **kwargs)
+
+    monkeypatch.setattr(bundle_validation, "ExactPrimaryKeyIndex", ObservedIndex)
+    manifests = []
+    retained = []
+    for collect_lookup in (False, True):
+        manifest, lookup = bundle_validation._validate_prediction_output_bundle(
+            root, expected_output_id=spec.prediction_id, collect_lookup=collect_lookup
+        )
+        manifests.append(manifest)
+        payloads = indexes[-1]._namespaces["prediction"]
+        assert len(payloads) == len(frame)
+        retained.append(
+            (
+                sum(value is not None for value in payloads.values()),
+                sum(len(value) for value in payloads.values() if value is not None),
+            )
+        )
+        assert indexes[-1].add_table(
+            pa.Table.from_pandas(frame), namespace="prediction"
+        ) == len(frame)
+        if collect_lookup:
+            values, found = lookup.values_for_frame(frame, mark_matched=True)
+            assert list(found) == [1] * len(frame)
+            assert list(values) == frame["prediction_score"].tolist()
+            assert lookup.row_count == len(frame)
+            assert lookup.coverage_counts() == (0, 0)
+        else:
+            assert lookup is None
+    assert manifests[0] == manifests[1]
+    assert calls == [4096, 4096]
+    assert retained == [(0, 0), (4096, 32768)]
 
 
 def _write_bundle(root: Path) -> None:

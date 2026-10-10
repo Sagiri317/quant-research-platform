@@ -1927,3 +1927,69 @@ def test_a_share_candidates_are_complete_without_shadow_base_parameters(name):
             assert left.target_manifest(
                 target.target_id, kind
             ) == right.target_manifest(target.target_id, kind)
+
+
+@pytest.mark.parametrize("market", ["a_share", "crypto"])
+def test_dataset_stage_preserves_declared_data_contracts(market, tmp_path):
+    from quant_research_platform.storage.datasets.schema import data_spec_payload
+    from quant_research_platform.workflows import research
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration(
+        market, "pv_nf_expectations" if market == "a_share" else "cross_asset"
+    )
+    full = bind_research_configuration(
+        research_profile(config["profile_id"]), config, tardis_root=tmp_path
+    )
+    config["stage"] = "dataset"
+    staged = bind_research_configuration(
+        research_profile(config["profile_id"]), config, tardis_root=tmp_path
+    )
+    full_protocol = full.protocol(scenario_id=config["scenario_id"])
+    staged_protocol = staged.protocol(scenario_id=config["scenario_id"])
+    graph = research.resolve_target_graph(
+        research._target_specs(full, action="research run", protocol=full_protocol),
+        (config["scenario_id"],),
+    )
+    assert staged_protocol.terminal_targets("research run") == (config["scenario_id"],)
+    window = {**config["windows"]["development"], "access": "development"}
+    for target in graph:
+        left = research._catalog_data_spec(full, target.target_id)
+        right = research._catalog_data_spec(staged, target.target_id)
+        assert data_spec_payload(left) == data_spec_payload(right)
+        assert research._semantic_target_time_window(
+            "research run", full_protocol, target, left, window
+        ) == research._semantic_target_time_window(
+            "research run", staged_protocol, target, right, window
+        )
+    assert staged.models.list() == full.models.list()
+    assert (
+        staged_protocol.portfolio_candidates() == full_protocol.portfolio_candidates()
+    )
+    config["comparison_model_id"] = None
+    bind_research_configuration(
+        research_profile(config["profile_id"]), config, tardis_root=tmp_path
+    )
+    config["comparison_model_id"] = "not_declared"
+    with pytest.raises(ValueError, match="research_comparison_model_invalid"):
+        bind_research_configuration(
+            research_profile(config["profile_id"]), config, tardis_root=tmp_path
+        )
+
+
+@pytest.mark.parametrize("field", ["model", "portfolio", "primary", "evaluation"])
+def test_dataset_stage_keeps_declaration_validation(field):
+    from tests.helpers.research_configuration import research_configuration
+
+    config = research_configuration("a_share", "core6")
+    config["stage"] = "dataset"
+    if field == "model":
+        config["models"][0]["model_algorithm"] = "not_an_algorithm"
+    elif field == "portfolio":
+        config["portfolios"][0]["not_a_field"] = 1
+    elif field == "primary":
+        config["primary_portfolio_id"] = "not_declared"
+    else:
+        config["stage"] = "evaluation"
+    with pytest.raises((TypeError, ValueError)):
+        bind_research_configuration(research_profile(), config)

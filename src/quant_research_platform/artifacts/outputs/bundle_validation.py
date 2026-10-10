@@ -393,6 +393,7 @@ def _validate_prediction_output_bundle(
                             value_column=lookup_column,
                             validation_column=prediction_column,
                             selected=keep,
+                            retain_values=collect_lookup,
                         )
                         if duplicates:
                             raise ValueError("duplicate_persisted_prediction_keys")
