@@ -598,11 +598,21 @@ def _windowed_source_profile(frames, calls, *, reject_before=None, reject_at=Non
     )
 
 
-def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(tmp_path):
+def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(
+    tmp_path, monkeypatch
+):
     from quant_research_platform.markets.implementations.a_share.processed import (
         producer,
     )
 
+    opened = []
+    original_open = producer.open_dataset_session
+
+    def open_session(root, **kwargs):
+        opened.append((root, kwargs["time_window"]))
+        return original_open(root, **kwargs)
+
+    monkeypatch.setattr(producer, "open_dataset_session", open_session)
     dates = pd.bdate_range("2020-01-02", periods=425).as_unit("ns")
     requested = dates[410:420]
     frames = _synthetic_interim_frames(dates)
@@ -653,9 +663,11 @@ def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(tmp_
     )
     assert history_panel.timestamp.min() <= dates[0]
     prior = history_panel.loc[history_panel.timestamp.lt(dates[0])]
-    assert (
-        prior[["listing_date", "listing_age_trading_days", "close"]].isna().all().all()
-    )
+    assert prior.listing_date.eq(dates[0] - pd.Timedelta(days=400)).all()
+    assert prior[["listing_age_trading_days", "close"]].isna().all().all()
+    for data_id in ("stock_master", "stock_info_changes"):
+        windows = [window for root, window in opened if data_id in root.parts]
+        assert windows and all(window is None for window in windows)
     for target in targets[1:]:
         spec = profile.processed.get(target)
         root = layout.processed_data_root(spec.market_id, spec.kind, target)
@@ -729,11 +741,8 @@ def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(tmp_
     history_asset = history_panel.loc[history_panel.asset_id.eq("000001")].set_index(
         "timestamp"
     )
-    expected_reversal = -(
-        history_asset.loc[requested[0], "adj_close"]
-        / history_asset.loc[dates[405], "adj_close"]
-        - 1
-    )
+    entry = history_asset.loc[dates[405], "adj_close"]
+    expected_reversal = -(history_asset.loc[requested[0], "adj_close"] - entry) / entry
     assert first_asset.loc[requested[0], "reversal_5d"] == expected_reversal
     assert restored["forward_return_20d"].isna().all()
 
@@ -1465,7 +1474,7 @@ def test_optional_source_absence_is_bound_and_changes_identity_when_present(tmp_
         },
     )
 
-    def run(data_id):
+    def run(data_id, *, plan=False):
         return research.data_materialize(
             profile=profile,
             layout=layout,
@@ -1473,6 +1482,7 @@ def test_optional_source_absence_is_bound_and_changes_identity_when_present(tmp_
             start_date="2020-01-02",
             end_date="2020-01-08",
             data_ids=(data_id,),
+            plan=plan,
         )
 
     first = run("market_panel_1d")
@@ -1495,6 +1505,15 @@ def test_optional_source_absence_is_bound_and_changes_identity_when_present(tmp_
     second_targets = {x["target_id"]: x for x in second["target_results"]}
     assert second_targets["market_panel_1d"]["instance_identity"] != first_identity
     assert second_targets["industry_classification"]["status"] == "BUILT"
+    planned = run("market_panel_1d", plan=True)
+    panel_plan = next(
+        item for item in planned["targets"] if item["target_id"] == "market_panel_1d"
+    )
+    assert "industry_classification" in panel_plan["upstream_target_ids"]
+    assert (
+        panel_plan["upstream_identities"]["industry_classification"]
+        == (second_targets["industry_classification"]["instance_identity"])
+    )
     assert read_dataset(root).equals(restored)
 
 

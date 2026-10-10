@@ -94,7 +94,7 @@ def _reference_forward_labels(frame, *, horizons, sessions):
             ):
                 continue
             with np.errstate(over="ignore"):
-                value = exit_price / entry_price - 1.0
+                value = (exit_price - entry_price) / entry_price
             if not np.isfinite(value):
                 continue
             labels[position] = value

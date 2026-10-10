@@ -924,14 +924,15 @@ def test_declared_processed_dependencies_are_not_removed_from_the_plan(
     )
     assert panel["decision"] == "BLOCKED"
     assert panel["blocker"] == "dependency_blocked: market_bars_1d"
-    assert {
-        "industry_classification",
-        "industry_classification_sets",
-        "industry_classification_versions",
-        "stock_info_changes",
-        "trading_no_limit",
-        "special_treatment_changes",
-    }.issubset(panel["upstream_target_ids"])
+    optional = set(panel_spec.optional_source_input_data_ids)
+    required = set(panel_spec.source_input_data_ids) - optional
+    assert required.issubset(panel["upstream_target_ids"])
+    assert optional.isdisjoint(panel["upstream_target_ids"])
+    assert all(
+        panel["upstream_identities"][name]
+        == research.canonical_json_hash({"source_id": name, "presence": "ABSENT"})
+        for name in optional
+    )
 
 
 @pytest.mark.parametrize("deep_root", (False, True))
@@ -2849,7 +2850,7 @@ def test_formal_prediction_dispatch_preserves_planned_window_and_identity(
         return original_window(*args, **kwargs)
 
     def matching_prediction(**kwargs):
-        if reuse and kwargs["target_id"] in prediction_ids:
+        if reuse and kwargs["spec"].target_id in prediction_ids:
             return kwargs["requested_identity"], None
         return original_matching(**kwargs)
 

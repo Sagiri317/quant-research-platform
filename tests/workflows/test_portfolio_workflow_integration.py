@@ -1452,6 +1452,27 @@ def test_holdout_reuse_survives_operational_and_future_data_changes(
     )
     assert new_development["status"] == "COMPLETE", new_development
     assert new_development["run_id"] != development["run_id"]
+    new_development_record = read_research_run_record(
+        layout.research_run_path(new_development["run_id"])
+    )
+    assert all(
+        item.status.value == "REUSED" for item in new_development_record.target_results
+    )
+    assert {
+        item.target_id: item.instance_identity
+        for item in new_development_record.target_results
+    } == {
+        item.target_id: item.instance_identity
+        for item in holdout_case.development_record.target_results
+    }
+    rebound = research.research_run(
+        **{**request, "development_run_id": new_development["run_id"]}, plan=True
+    )
+    assert rebound["status"] == "COMPLETE"
+    assert all(item["decision"] == "REUSE" for item in rebound["targets"])
+    assert {
+        item["target_id"]: item["requested_identity"] for item in rebound["targets"]
+    } == {item.target_id: item.instance_identity for item in record.target_results}
     import shutil
 
     from quant_research_platform.storage.software_identity import (
@@ -2521,3 +2542,218 @@ def _linked_workflow_case(baseline, project):
     if hasattr(case, "request"):
         case.request = {**case.request, "layout": case.layout}
     return case
+
+
+@_holdout_windows()
+def test_holdout_plan_shares_native_model_and_all_trial_snapshots(
+    holdout_case, monkeypatch
+):
+    from collections import Counter
+
+    reads = Counter()
+    native_objects = {}
+    captured = []
+    native_reader = research.read_quarterly_model_artifact
+    native_plan = research._plan_targets
+
+    def read(root, *args, **kwargs):
+        reads[root] += 1
+        artifact = native_reader(root, *args, **kwargs)
+        native_objects[root] = artifact
+        return artifact
+
+    def plan(**kwargs):
+        result = native_plan(**kwargs)
+        captured.append(kwargs.get("reuse_sessions"))
+        return result
+
+    monkeypatch.setattr(research, "read_quarterly_model_artifact", read)
+    monkeypatch.setattr(research, "_plan_targets", plan)
+    result = research.research_run(**holdout_case.request, plan=True)
+    assert result["status"] == "COMPLETE"
+    assert reads == {holdout_case.model_root: 1}
+    (sessions,) = captured
+    model = sessions[holdout_case.model_root]
+    assert model[3] is native_objects[holdout_case.model_root]
+    assert model[2]
+    for target_id in holdout_case.prediction_ids:
+        target = next(
+            item for item in result["targets"] if item["target_id"] == target_id
+        )
+        assert target["decision"] == "REUSE"
+        root = holdout_case.layout.instance_root(
+            holdout_case.layout.semantic_artifact_root("a_share", target_id),
+            target["requested_identity"],
+        )
+        saved = sessions[root]
+        assert saved[1][holdout_case.model_root] is model[1][holdout_case.model_root]
+        assert saved[2] == model[2]
+        assert all(saved[2][root] is snapshot for root, snapshot in model[2].items())
+    assert {
+        item["target_id"]: item["requested_identity"] for item in result["targets"]
+    } == {
+        item.target_id: item.instance_identity
+        for item in holdout_case.record.target_results
+    }
+
+
+@pytest.mark.parametrize("mutation", ["model", "trial"])
+@_holdout_windows()
+def test_holdout_plan_rejects_changes_after_frozen_preflight(
+    holdout_case, monkeypatch, mutation
+):
+    native_plan = research._plan_targets
+    changed = []
+
+    def plan(**kwargs):
+        session = kwargs["reuse_sessions"][holdout_case.model_root]
+        if mutation == "model":
+            path = holdout_case.model_root / next(
+                name
+                for name in session[1][holdout_case.model_root][0]
+                if name != "manifest.json"
+            )
+        else:
+            assert session[2]
+            path = next(iter(session[2])) / "plan.json"
+        replacement = path.with_name(path.name + ".replacement")
+        replacement.write_bytes(path.read_bytes())
+        replacement.replace(path)
+        changed.append(path)
+        reason = (
+            "semantic_artifact_member_identity_changed"
+            if mutation == "model"
+            else "dataset_metadata_file_identity_changed"
+        )
+        with pytest.raises(ValueError, match=f"^{reason}$"):
+            research._verify_semantic_reuse(session)
+        return native_plan(**kwargs)
+
+    monkeypatch.setattr(research, "_plan_targets", plan)
+    result = research.research_run(**holdout_case.request, plan=True)
+    assert changed
+    assert result["status"] == "BLOCKED"
+    assert any(
+        item["reason"] == "persisted_instance_invalid" for item in result["blockers"]
+    )
+
+
+@pytest.mark.parametrize("enhanced", [False, True])
+@_holdout_windows()
+def test_holdout_alpha_source_identity_invalidates_only_its_consumers(
+    holdout_case, monkeypatch, enhanced
+):
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+    from quant_research_platform.policy.lifecycle import closing_iterator
+    from quant_research_platform.research.models import fitting
+    from quant_research_platform.research.portfolios import production
+
+    def forbidden(*args, **kwargs):
+        raise AssertionError("holdout attempted supervised learning")
+
+    monkeypatch.setattr(fitting, "_fit_model_result", forbidden)
+    monkeypatch.setattr(production, "calibrate_expected_alpha", forbidden)
+    case = holdout_case
+    candidates = case.profile.protocol("pv_all").portfolio_candidates()
+    candidate = next(
+        item
+        for item in candidates
+        if item.selection_group == "global"
+        and (item.construction == "benchmark_enhanced") == enhanced
+        and (not enhanced or item.rebalance_schedule == "monthly-last-trading-day")
+    )
+    target_id = f"pv_all_{candidate.candidate_id}_ledger"
+    source = next(
+        item
+        for item in case.development_record.target_results
+        if item.target_id == target_id
+    )
+    logical_root = case.layout.semantic_artifact_root("a_share", target_id)
+    artifact = read_portfolio_ledger_artifact(
+        case.layout.instance_root(logical_root, source.instance_identity),
+        expected_identity=source.instance_identity,
+    )
+    payload = {
+        key: value
+        for key, value in artifact.envelope.items()
+        if key not in {"instance_identity", "status"}
+    }
+    payload["software_identity"] = "e" * 64
+    envelope = build_business_manifest_envelope(**payload)
+    calibration = None
+    if enhanced:
+        calibration = {
+            **artifact.final_alpha_calibration,
+            "calibration": {
+                **artifact.final_alpha_calibration["calibration"],
+                "slope": artifact.final_alpha_calibration["calibration"]["slope"]
+                + 0.001,
+            },
+            "observations": artifact.operational_metadata["final_alpha_observations"],
+        }
+
+    def produce(emit):
+        with closing_iterator(artifact.iter_chunks()) as batches:
+            for batch in batches:
+                emit(batch)
+
+    root = write_portfolio_ledger_artifact(
+        logical_root,
+        envelope=envelope,
+        produce=produce,
+        final_calibration=(lambda: calibration) if enhanced else None,
+    )
+    assert root.name != source.instance_identity
+    changed = replace(
+        case.development_record,
+        run_id="run_changed_calibration_source",
+        trial_ledgers=(),
+        target_results=tuple(
+            replace(item, instance_identity=root.name)
+            if item.target_id == target_id
+            else item
+            for item in case.development_record.target_results
+        ),
+    )
+    research.write_research_run_record(
+        case.layout.research_run_path(changed.run_id), changed
+    )
+    request = {**case.request, "development_run_id": changed.run_id}
+    planned = research.research_run(**request, plan=True)
+    assert planned["status"] == "COMPLETE"
+    original = {
+        item.target_id: item.instance_identity for item in case.record.target_results
+    }
+    affected = {
+        item["target_id"]
+        for item in planned["targets"]
+        if item["requested_identity"] != original[item["target_id"]]
+    }
+    assert affected == (
+        {target_id, "pv_all_portfolio_statistics"} if enhanced else set()
+    )
+    assert all(
+        item["decision"] == ("BUILD" if item["target_id"] in affected else "REUSE")
+        for item in planned["targets"]
+    )
+    if enhanced:
+        result = research.research_run(**request)
+        assert result["status"] == "COMPLETE"
+        reference = next(
+            item for item in result["target_results"] if item["target_id"] == target_id
+        )
+        held = read_portfolio_ledger_artifact(
+            case.layout.instance_root(logical_root, reference["instance_identity"]),
+            expected_identity=reference["instance_identity"],
+        )
+        assert {
+            row.number
+            for batch in held.iter_chunks()
+            for row in batch.diagnostics
+            if row.name == "alpha_slope"
+        } == {calibration["calibration"]["slope"]}

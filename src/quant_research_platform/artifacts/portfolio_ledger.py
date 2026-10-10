@@ -11,6 +11,7 @@ from pathlib import Path
 import pandas as pd
 import pyarrow as pa
 
+from quant_research_platform.compute.portfolio_economics import _LedgerEconomics
 from quant_research_platform.contracts.business_manifest import BusinessManifestEnvelope
 from quant_research_platform.contracts.portfolios import (
     PORTFOLIO_CASH_ASSET_ID,
@@ -23,7 +24,6 @@ from quant_research_platform.contracts.portfolios import (
     validate_portfolio_transition,
 )
 from quant_research_platform.policy.lifecycle import closing_iterator
-from quant_research_platform.research.portfolios.accounting import _LedgerEconomics
 from quant_research_platform.runtime.resources import DEFAULT_BATCH_ROWS
 from quant_research_platform.storage.exact_keys import ExactPrimaryKeyIndex
 from quant_research_platform.storage.identity import (

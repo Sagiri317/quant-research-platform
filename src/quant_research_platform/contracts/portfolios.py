@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections import defaultdict
 from dataclasses import dataclass, replace
-from math import isclose, isfinite, ulp
+from math import fma, isclose, isfinite, ulp
 from typing import Literal
 
 import pandas as pd
@@ -221,17 +221,19 @@ class PortfolioLedgerBatch:
             phase: {row.asset_id: row for row in self.valuations if row.phase == phase}
             for phase in ("before", "after", "end")
         }
-        if sum(map(len, phases.values())) != len(self.valuations) or any(
-            row.mark_price < 0
-            or not isclose(
-                row.value,
-                row.quantity * row.mark_price - row.cost_basis,
-                rel_tol=ulp(1.0) * 512.0,
-                abs_tol=1e-12,
-            )
-            for row in self.valuations
-        ):
+        if sum(map(len, phases.values())) != len(self.valuations):
             raise ValueError("portfolio_ledger_valuation_invalid")
+        for row in self.valuations:
+            try:
+                expected = fma(row.quantity, row.mark_price, -row.cost_basis)
+            except OverflowError:
+                raise ValueError("portfolio_ledger_valuation_invalid") from None
+            # Cost and final values round independently; the product need not fit.
+            tolerance = ulp(row.cost_basis) + ulp(row.value) + ulp(expected)
+            if row.mark_price < 0 or not isclose(
+                row.value, expected, rel_tol=0.0, abs_tol=tolerance
+            ):
+                raise ValueError("portfolio_ledger_valuation_invalid")
         if any(PORTFOLIO_CASH_ASSET_ID not in phase for phase in phases.values()):
             raise ValueError("portfolio_ledger_cash_valuation_missing")
         before, after, end = (phases[phase] for phase in ("before", "after", "end"))

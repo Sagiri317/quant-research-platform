@@ -474,8 +474,20 @@ class AShareProtocol:
                 base["portfolio_candidates"] = full["portfolio_candidates"]
                 base["attribution_groups"] = full["attribution_groups"]
                 base["statistics"] = full["statistics"]
-            if self.frozen_development is not None:
-                base["frozen_development"] = self.frozen_development
+            if producer_kind == "PORTFOLIO" and self.frozen_development is not None:
+                candidate = next(
+                    item
+                    for item in self.portfolio_candidates()
+                    if target_id == f"{self.scenario_id}_{item.candidate_id}_ledger"
+                )
+                if candidate.construction == "benchmark_enhanced":
+                    base["frozen_alpha_source_identity"] = next(
+                        source["reference"]["instance_identity"]
+                        for source in self.frozen_development["alpha_sources"][
+                            candidate.selection_group
+                        ]
+                        if source["reference"]["target_id"] == target_id
+                    )
         if producer_kind == "STATISTIC":
             base["training_weighting"] = full["training_weighting"]
             base["feature_recipe"] = full["feature_recipe"]

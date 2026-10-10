@@ -1119,3 +1119,47 @@ def test_positive_mid_returns_preserve_adjacent_prices_and_chunk_state(steps, sc
     assert full.return_100ms.iloc[-1] == expected
     assert full.return_500ms.iloc[-1] == expected
     assert full.realized_volatility_1s.iloc[-1] == stdev([0.0] * 9 + [expected])
+
+
+@pytest.mark.parametrize(
+    "mid,future",
+    [
+        (3.0, math.nextafter(3.0, math.inf)),
+        (3.0, math.nextafter(math.nextafter(3.0, math.inf), math.inf)),
+        (100.0, 101.0),
+        (
+            -float.fromhex("0x1.fffffffffffffp+1023"),
+            float.fromhex("0x1.fffffffffffffp+1023"),
+        ),
+        (
+            float.fromhex("0x1.fffffffffffffp+1023"),
+            -float.fromhex("0x1.fffffffffffffp+1023"),
+        ),
+    ],
+)
+def test_label_relative_change_preserves_adjacent_and_signed_endpoints(mid, future):
+    from fractions import Fraction
+
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime([0, 100], unit="ms"),
+            "segment_id": ["s1", "s1"],
+            "mid": [mid, future],
+            "market_id": ["crypto", "crypto"],
+            "asset_id": ["btc_usdt", "btc_usdt"],
+        }
+    )
+    labels = pd.concat(
+        iter_label_frames((frame.iloc[:1], frame.iloc[1:]), horizons_ms=(100,)),
+        ignore_index=True,
+    )
+    expected = float((Fraction(future) - Fraction(mid)) / Fraction(mid))
+    assert labels.loc[0, "future_mid_return_100ms"] == expected
+    assert labels.loc[0, "future_mid_direction_100ms"] == (
+        1.0 if expected > 0 else -1.0
+    )
+    assert (
+        labels.loc[0, "future_mid_return_100ms_available_at"] == frame.timestamp.iloc[1]
+    )
+    assert pd.isna(labels.loc[1, "future_mid_return_100ms"])
+    assert pd.isna(labels.loc[1, "future_mid_return_100ms_available_at"])

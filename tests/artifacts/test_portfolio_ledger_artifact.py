@@ -1906,3 +1906,75 @@ def test_source_backed_reuse_binds_one_content_check_to_native_consumption(
         assert counts == planned_counts
         assert reuse().status.value == "REUSED"
         assert counts == planned_counts
+
+
+@pytest.mark.parametrize(
+    "quantity, entry, mark",
+    [(0.7, 30000.0, 30000.01), (0.7, 30000.0, 30001.0), (2.0, 8e307, 9e307)],
+)
+@pytest.mark.parametrize("direction", [1.0, -1.0])
+def test_perpetual_rounded_cost_preserves_exact_pnl(
+    tmp_path, quantity, entry, mark, direction
+):
+    from fractions import Fraction
+    from math import ulp
+
+    from quant_research_platform.research.portfolios.accounting import (
+        PortfolioEconomics,
+    )
+
+    quantity *= direction
+    expected = float(Fraction(quantity) * (Fraction(mark) - Fraction(entry)))
+    capital = PortfolioCapital("rounded_cost", 1000.0, "USDT", "linear_perpetual")
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id=capital.candidate_id,
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": "1970-01-01",
+            "end": "1970-01-02",
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+
+    def produce(emit):
+        account = PortfolioEconomics(capital, "asset", emit)
+        account.fill(
+            timestamp_ns=1,
+            order_id="open",
+            quantity=quantity,
+            price=entry,
+            mark_price=entry,
+            fee=0.0,
+        )
+        assert account.mark(2, mark)["net_pnl"] == expected
+
+    root = ledger_artifact.write_portfolio_ledger_artifact(
+        tmp_path / "ledger", envelope=envelope, produce=produce
+    )
+    artifact = read_portfolio_ledger_artifact(root, expected_identity=root.name)
+    batches = tuple(artifact.iter_chunks())
+    assert (
+        ledger_artifact.summarize_portfolio_ledger(artifact.capital, iter(batches))[
+            "net_pnl"
+        ]
+        == expected
+    )
+    last = batches[-1]
+    value = next(
+        row for row in last.valuations if row.asset_id == "asset" and row.phase == "end"
+    )
+    assert value.value == expected
+    corrupted = replace(
+        value, value=value.value + 16 * max(ulp(value.cost_basis), ulp(value.value))
+    )
+    with pytest.raises(ValueError, match="portfolio_ledger_valuation_invalid"):
+        replace(
+            last,
+            valuations=tuple(
+                corrupted if row is value else row for row in last.valuations
+            ),
+        )

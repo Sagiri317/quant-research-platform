@@ -212,9 +212,7 @@ def test_holdout_freezes_alpha_for_each_prediction_source():
             "upstream_identities": {},
             "calibration": asdict(calibrations[candidate.prediction_selector]),
         }
-        artifacts[target_id] = lambda payload=payload: SimpleNamespace(
-            final_alpha_calibration=payload
-        )
+        artifacts[target_id] = SimpleNamespace(final_alpha_calibration=payload)
     record = SimpleNamespace(research_window={"end": cutoff})
     frozen, blocker = protocol.freeze_development(record, references, {}, artifacts)
     assert blocker is None

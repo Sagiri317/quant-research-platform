@@ -821,9 +821,9 @@ def iter_derivative_factor_frames(
                         float(premium["indexPrice"]),
                         float(frame["mid"].iloc[row]),
                     )
-                    values["mark_mid_basis"][row] = mark / mid - 1
-                    values["mark_index_basis"][row] = mark / index - 1
-                    values["perp_index_basis"][row] = mid / index - 1
+                    values["mark_mid_basis"][row] = (mark - mid) / mid
+                    values["mark_index_basis"][row] = (mark - index) / index
+                    values["perp_index_basis"][row] = (mid - index) / index
                     values["funding_rate"][row] = float(premium["lastFundingRate"])
                     seconds = (
                         int(premium["nextFundingTime"]) * 1_000_000 - decision_ns
@@ -850,8 +850,8 @@ def iter_derivative_factor_frames(
                         and np.isfinite(oi_values[old])
                     ):
                         values["open_interest_change_" + suffix][row] = (
-                            oi / oi_values[old] - 1
-                        )
+                            oi - oi_values[old]
+                        ) / oi_values[old]
                 while (
                     liquidations
                     and liquidations[0][0] <= information_ns - 30_000_000_000
@@ -989,7 +989,7 @@ def iter_spot_perp_factor_frames(
                 )
                 if max(grid_age, book_age) <= max_age_ms:
                     row.update(
-                        spot_perp_basis=last["mid"] / point["mid"] - 1,
+                        spot_perp_basis=(last["mid"] - point["mid"]) / point["mid"],
                         spot_return_100ms=last["return_100ms"],
                         spot_return_500ms=last["return_500ms"],
                         spot_ofi_500ms=last["ofi_500ms"],
@@ -1245,7 +1245,7 @@ def iter_external_context_frames(
                     row.update(
                         mid_usdt=mid,
                         spread_usdt=ask - bid,
-                        price_difference=mid / binance_mid - 1,
+                        price_difference=(mid - binance_mid) / binance_mid,
                         relative_mid_dispersion=(
                             abs(mid - binance_mid) / (mid + binance_mid)
                             if max(mid, binance_mid) <= np.finfo(float).max / 2
@@ -1426,7 +1426,10 @@ def _label_frame(frame: pd.DataFrame, *, horizons: tuple[int, ...]) -> pd.DataFr
     grouped = mid.groupby(segment_groups, sort=False)
     for horizon in horizons:
         future = grouped.shift(-(horizon // HFT_GRID_MS))
-        values = future / mid - 1.0
+        same_sign = future.lt(0).eq(mid.lt(0))
+        values = (future.where(same_sign) - mid.where(same_sign)) / mid
+        # Opposite signs cannot cancel and their difference can overflow.
+        values.loc[~same_sign] = future.loc[~same_sign] / mid.loc[~same_sign] - 1.0
         output[f"future_mid_return_{horizon}ms"] = values
         output[f"future_mid_direction_{horizon}ms"] = np.sign(values)
         available = (

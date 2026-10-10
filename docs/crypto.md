@@ -118,8 +118,9 @@ reader 在收到真实快照并完成初始化后才报告就绪；实时连接�
 分段标识
 ```
 
-录制器使用有界 `websockets` 运行时连接公开数据流，
-使用 `httpx` 获取公开 REST 元数据/快照。它没有认证端点或下单 API。
+录制器使用 `websockets` 连接公开数据流并保留有限消息队列背压，
+使用 `httpx` 获取公开 REST 元数据/快照；两者不设任意响应或单消息总字节额度。
+网络超时、取消、语义验证与真实深度档位限制保持。它没有认证端点或下单 API。
 
 ### 历史归档与来源身份
 
@@ -239,9 +240,10 @@ FACTOR 直接消费该价差；relative_spread 和 top10_depth_per_spread 共用
 衍生品状态由独立 derivatives-state producer 消费 native state 与 Binance 100ms PANEL，
 在 producer 内按 observed_at <= decision_time 对齐，再交给精确主键 assembler。
 状态分别保留 event_at、observed_at、age_ms；age 上限显式写在配置并进入 processed 规格身份。
-OI 使用 base 数量，变化为当前 OI/窗口起点 OI-1，整个窗口须有效；
+OI 使用 base 数量，变化按（当前 OI-窗口起点 OI）/窗口起点 OI计算，整个窗口须有效；
 funding 为原始小数费率，time_to_next_funding 和 time_since_observed_force_order 为秒，
-basis 为无量纲比值减一。频道名 premiumIndex 不代表供应商存在同名经济字段。
+basis 保持原有分子、分母与方向，按（分子-分母）/分母计算无量纲相对差。
+频道名 premiumIndex 不代表供应商存在同名经济字段。
 
 forceOrder 仅代表供应商观测到的 proxy。每条发布快照以 z（累计已成交 base 数量）加权，
 BUY 为正、SELL 为负；不以订单数量 q 代替成交数量，不声称完整或去重后的全市场清算量。
@@ -254,7 +256,7 @@ BUY 为正、SELL 为负；不以订单数量 q 代替成交数量，不声称�
 
 Spot panel 复用同一个 native 回放与 panel producer，逐资产保留真实观测覆盖；
 Spot/Perp context producer 在执行 panel 的主键上输出，assembler 只做精确键连接。
-现货和永续共用微观结构数学核。Spot basis 为 spot_mid/perp_mid-1，收益为已成熟的
+现货和永续共用微观结构数学核。Spot basis 为 (spot_mid-perp_mid)/perp_mid，收益为已成熟的
 100/500ms 简单收益；OFI 以相同币种的 base 数量计，跨市场 OFI divergence 使用深度归一值。
 TFI 为有符号成交量/买卖成交量之和。lagged 字段取上一格连续 Spot 100ms 信息，
 不能跨 Spot segment/gap；上下游 frame 切分不改变结果。
@@ -315,6 +317,9 @@ maker报价期限由CryptoMakerPlan拥有；它与模型预测期限和markout�
 价格标签为100/500/1000/5000ms的future_mid_return和future_mid_direction；
 各模型显式选择标签；baseline.json 的价格模型选择500ms收益，另有 maker_bid_sell_pressure_proxy_500ms。
 每个标签有独立 available_at，短期限必须由实际事件分辨率和观测覆盖支持。
+同号有限非零价格端点按 (future-mid)/mid 计算，保留相邻浮点价格的不同回报；
+异号端点沿用 future/mid-1，避免中间差溢出而损失最终可表示回报。
+标签不以 epsilon 归零，原有 segment、成熟尾部 NULL 与最终不可表示域处理保持。
 
 ## 研究配置与模型
 
@@ -445,6 +450,9 @@ Crypto 研究计划的 `execution` 显式提供 `taker_fee_bps`、`latency_ms`�
 新增场景复用同一候选、执行目标、账本、统计与报告链，实际延迟进入各自持久化身份。
 净损益由成交、费用、资金费与估值变化的共同经济事实累积，再转换为展示用float；
 不能从大本金NAV的浮点差分反推微小损益。OOS与空档贡献直接按事件区间求和，不相减两个已舍入累计值。
+producer 与账本汇总共用 compute 层的精确经济累计器。估值合同以 FMA 计算 quantity×mark-cost_basis，
+仅在此恒等式容纳已发布成本及最终数值的独立舍入误差；预算为三个有限值各自一个 ULP 之和，
+不从可能溢出的中间乘积推导容差，也不降低 producer 的精确 PnL。
 Taker 按实际到达的各档 take 累计成交量和成交额，不从大请求量与剩余量相减反推成交；
 残量减法发生舍入损失时，仅该订单保留精确残量与末档 take，最终转为账本数值。
 Maker/Taker 费用在执行 owner 统一计算，保留有限有符号返佣；中间乘除超出浮点范围时

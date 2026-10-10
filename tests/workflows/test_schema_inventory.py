@@ -639,6 +639,7 @@ def test_inventory_uses_declared_time_and_closes_early_context(
     write_dataset(layout.interim_data_root("fixture", spec.data_id), frame, spec=spec)
     primary = KeyboardInterrupt("inventory_consumer_primary")
     items = None
+    caught = False
     try:
         try:
             with schema_inventory.iter_schema_inventory_items(tmp_path) as items:
@@ -648,6 +649,8 @@ def test_inventory_uses_declared_time_and_closes_early_context(
                     raise primary
         except KeyboardInterrupt as error:
             assert cancel and error is primary
+            caught = True
+        assert caught == cancel
         assert next(items, None) is None
     finally:
         if items is not None:

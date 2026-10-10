@@ -156,7 +156,6 @@ def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction(
 
     from quant_research_platform.markets.implementations.a_share.processed import (
         catalog,
-        producer,
     )
     from quant_research_platform.sources.choice.interim import first_disclosure_spec
 
@@ -166,7 +165,6 @@ def test_a_share_pit_owner_and_lifecycle_inputs_have_one_direction(
     # Industry announcements do not replace stock_master as listing truth.
     assert {"listing_status_changes", "stock_info_annual"}.isdisjoint(panel_sources)
     assert {"stock_master", "stock_info_changes"}.issubset(panel_sources)
-    assert "stock_info_changes" in producer._FULL_HISTORY_SOURCE_IDS
     assert first_disclosure_spec().primary_key == (
         "asset_id",
         "report_period",

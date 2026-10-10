@@ -316,3 +316,41 @@ def test_streaming_metric_failure_closes_source():
             expected_coverage=coverage,
         )
     assert closed == [True]
+
+
+def test_completed_trial_keeps_representable_icir_with_unrepresentable_std():
+    from quant_research_platform.contracts.models import (
+        validate_completed_model_trial_metrics,
+    )
+
+    tiny = float(np.nextafter(0.0, 1.0))
+    frame = pd.DataFrame(
+        {
+            "timestamp": pd.to_datetime(["2024-01-01"] * 4 + ["2024-01-02"] * 4),
+            "asset_id": list("abcd") * 2,
+            "label": [0.0, 0.0, 1.0, 1.0, tiny, -tiny, 1.0, 1.0],
+            "prediction": [1.0, -1.0, 1.0, -1.0] * 2,
+        }
+    )
+    metrics = evaluate_model_trial_metrics_from_chunks(
+        (frame,),
+        model_id="candidate",
+        label_column="label",
+        prediction_column="prediction",
+    )
+    assert metrics["validation_std_ic"] is None
+    assert metrics["validation_icir"] == 1.0
+    assert metrics["validation_valid_ic_count"] == 2
+    assert metrics["validation_icir_reason"] is None
+    metrics.pop("model_id")
+    metrics["n_train"] = 8
+    validate_completed_model_trial_metrics("candidate", metrics)
+    for changed in (
+        {"validation_std_ic": 0.0},
+        {"validation_std_ic": -1.0},
+        {"validation_valid_ic_count": 1},
+        {"validation_icir": float("inf")},
+        {"validation_icir_reason": "zero_variance"},
+    ):
+        with pytest.raises(ValueError, match="invalid_model_metadata"):
+            validate_completed_model_trial_metrics("candidate", metrics | changed)

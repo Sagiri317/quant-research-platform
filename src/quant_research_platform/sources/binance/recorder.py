@@ -68,9 +68,7 @@ from quant_research_platform.storage.identity import (
 
 SPOT_REST_BASE_URL = "https://data-api.binance.vision"
 FUTURES_REST_BASE_URL = "https://fapi.binance.com"
-MAX_WS_MESSAGE_BYTES = 4 * 1024 * 1024
 MAX_WS_QUEUE = 4
-MAX_REST_RESPONSE_BYTES = 4 * 1024 * 1024
 REST_REQUEST_TIMEOUT_SECONDS = 15.0
 SNAPSHOT_LIMITS = {SPOT_MARKET_TYPE: 5000, FUTURES_MARKET_TYPE: 1000}
 
@@ -755,7 +753,7 @@ class _StreamReader(threading.Thread):
                     self.stream.url,
                     open_timeout=self.config.connect_timeout_seconds,
                     close_timeout=2,
-                    max_size=MAX_WS_MESSAGE_BYTES,
+                    max_size=None,
                     max_queue=MAX_WS_QUEUE,
                     user_agent_header="qrp-binance-recorder/0.1",
                     create_connection=self._create_connection,
@@ -965,8 +963,6 @@ def _http_get_json(
             for chunk in response.iter_raw(chunk_size=64 * 1024):
                 if stop is not None and stop.is_set():
                     raise _ConnectionProblem()
-                if len(chunk) > MAX_REST_RESPONSE_BYTES - len(raw):
-                    raise ValueError("binance_recorder_rest_response_too_large")
                 raw.extend(chunk)
     except httpx.TimeoutException as exc:
         raise TimeoutError("binance_recorder_rest_timeout") from exc

@@ -144,8 +144,8 @@ def _native_inputs(tmp_path, *, fault=None, open_assets=6):
             "2023-01-02"
         )
     elif fault == "future_lifecycle":
-        stocks.loc[stocks.source_asset_id.eq("a0"), "timestamp"] = pd.Timestamp(
-            "2023-01-05"
+        stocks.loc[stocks.source_asset_id.eq("a0"), ["timestamp", "listing_date"]] = (
+            pd.Timestamp("2023-01-05")
         )
     elif fault == "missing_open_price":
         panel.loc[

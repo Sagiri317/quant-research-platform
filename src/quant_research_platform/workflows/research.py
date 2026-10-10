@@ -314,6 +314,15 @@ def plan_targets(
         research_window=window,
         software_identity=software,
     )
+    return _plan_payload(
+        profile, action, terminals, protocol, rebuild, software, window, instances
+    )
+
+
+def _plan_payload(
+    profile, action, terminals, protocol, rebuild, software, window, instances
+):
+    terminals = tuple(sorted(set(terminals)))
     plans = [plan for request, plan in instances if request.publish]
     blocked = [plan for _, plan in instances if plan.decision is PlanDecision.BLOCKED]
     return {
@@ -841,23 +850,6 @@ def research_run(
             ),
         )
         return {**result, "run_id": run_id}
-    if plan:
-        return plan_targets(
-            profile=profile,
-            action="research run",
-            terminal_targets=terminals,
-            layout=layout,
-            scenario_id=scenario_id,
-            rebuild=rebuild,
-            raw_root=raw_root or _default_raw_root(layout),
-            research_window=_research_window(
-                profile.protocol(scenario_id=scenario_id, access_window="development"),
-                None,
-                start_date=start_date,
-                end_date=end_date,
-            ),
-        )
-    run_id = f"run_{uuid4().hex}"
     window = _research_window(
         protocol,
         None,
@@ -865,6 +857,30 @@ def research_run(
         end_date=end_date,
     )
     software = production_software_identity()
+    if plan:
+        instances, _sessions = _plan_targets(
+            profile=profile,
+            action="research run",
+            terminal_targets=terminals,
+            layout=layout,
+            protocol=protocol,
+            rebuild=rebuild,
+            raw_root=raw_root,
+            research_window=window,
+            software_identity=software,
+            reuse_sessions=reuse_sessions,
+        )
+        return _plan_payload(
+            profile,
+            "research run",
+            terminals,
+            protocol,
+            rebuild,
+            software,
+            window,
+            instances,
+        )
+    run_id = f"run_{uuid4().hex}"
     result_sink: dict[str, TargetResult] = {}
     reference_sink: dict[str, TargetPlan] = {}
     operation_evidence = unmeasured_operation_evidence("operation_not_started")

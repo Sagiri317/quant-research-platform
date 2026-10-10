@@ -1871,7 +1871,13 @@ def test_a_share_binding_preserves_supplied_processed_dependencies():
     from tests.helpers.research_configuration import research_configuration
 
     base = research_profile()
-    selected = replace(base.processed.get("market_panel_1d"), source_input_data_ids=())
+    with pytest.raises(ValueError, match="optional_source_input_not_declared"):
+        replace(base.processed.get("market_panel_1d"), source_input_data_ids=())
+    selected = replace(
+        base.processed.get("market_panel_1d"),
+        source_input_data_ids=(),
+        optional_source_input_data_ids=(),
+    )
     profile = replace(
         base,
         processed=ProcessedDataCatalog(

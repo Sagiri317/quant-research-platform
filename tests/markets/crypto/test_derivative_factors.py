@@ -435,7 +435,7 @@ def test_force_order_epoch_rewarms_from_observed_boundary(
     pd.testing.assert_frame_equal(actual, calculate(17), check_exact=True)
     information_ms = np.arange(len(panel)) * 100 - input_delay_ms
     for seconds in (5, 30):
-        boundary = boundary_ms if reset else -100
+        boundary = boundary_ms if reset else 0
         first = int(np.flatnonzero(information_ms >= boundary + seconds * 1000)[0])
         column = actual[f"observed_force_order_imbalance_{seconds}s"]
         if reset:
@@ -446,3 +446,66 @@ def test_force_order_epoch_rewarms_from_observed_boundary(
                 first, int(np.flatnonzero(information_ms >= boundary_ms + 1)[0])
             )
             assert column.iloc[after_order] == 1.0
+
+
+@pytest.mark.parametrize("steps", [1, 2])
+@pytest.mark.parametrize("field", ["mark", "mid"])
+def test_derivative_relative_changes_keep_adjacent_prices_and_oi(steps, field):
+    from fractions import Fraction
+
+    price = 3.0
+    for _ in range(steps):
+        price = float(np.nextafter(price, np.inf))
+    panel = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": pd.date_range("2026-08-01", periods=301, freq="100ms"),
+            "segment_id": "a",
+            "mid": price if field == "mid" else 3.0,
+        }
+    )
+    origin = panel.timestamp.iloc[0].value
+    events = [
+        (
+            origin,
+            "premiumIndex",
+            {
+                "markPrice": str(price if field == "mark" else 3.0),
+                "indexPrice": "3.0",
+                "lastFundingRate": "0.0",
+                "nextFundingTime": origin // 1000000 + 3600000,
+                "time": origin // 1000000,
+            },
+            0,
+        ),
+        (origin, "openInterest", {"openInterest": "3.0", "time": origin // 1000000}, 0),
+        (
+            origin + 30000000000,
+            "openInterest",
+            {"openInterest": str(price), "time": origin // 1000000 + 30000},
+            0,
+        ),
+    ]
+    result = pd.concat(
+        iter_derivative_factor_frames(
+            (panel.iloc[:17], panel.iloc[17:]),
+            observations=iter(events),
+            max_age_ms=dict.fromkeys(HFT_DERIVATIVE_CHANNELS, 400000),
+        ),
+        ignore_index=True,
+    )
+    for name, numerator, denominator in (
+        (
+            "mark_mid_basis",
+            price if field == "mark" else 3.0,
+            price if field == "mid" else 3.0,
+        ),
+        ("mark_index_basis", price if field == "mark" else 3.0, 3.0),
+        ("perp_index_basis", price if field == "mid" else 3.0, 3.0),
+    ):
+        assert result[name].iloc[0] == float(
+            (Fraction(numerator) - Fraction(denominator)) / Fraction(denominator)
+        )
+    assert result.open_interest_change_30s.iloc[:300].isna().all()
+    assert result.open_interest_change_30s.iloc[300] == float((Fraction(price) - 3) / 3)

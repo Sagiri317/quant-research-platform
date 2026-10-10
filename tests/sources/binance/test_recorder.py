@@ -1458,3 +1458,102 @@ def test_recorder_hash_read_and_close_failure_aborts_native_atomic_publish(
     assert primary.__notes__ == ["iterator close also failed: RuntimeError"]
     assert handles and all(handle.native.closed for handle in handles)
     assert not tuple(tmp_path.iterdir())
+
+
+@pytest.mark.parametrize("padding", [0, 4 * 1024 * 1024])
+def test_metadata_rest_size_does_not_change_semantics(monkeypatch, padding):
+    from types import SimpleNamespace
+
+    import httpx
+
+    payload = {
+        "symbols": [
+            {
+                "symbol": symbol,
+                "filters": [{"filterType": "PRICE_FILTER", "tickSize": "0.1"}],
+            }
+            for symbol in ("BTCUSDT", "ETHUSDT")
+        ]
+    }
+    raw = b" " * padding + json.dumps(payload).encode()
+    client = httpx.Client
+    transport = httpx.MockTransport(
+        lambda request: httpx.Response(200, stream=httpx.ByteStream(raw))
+    )
+    monkeypatch.setattr(recorder.httpx, "Client", lambda: client(transport=transport))
+    writes = []
+    result = recorder._record_market_metadata(
+        SimpleNamespace(write=lambda **row: writes.append(row)),
+        market_types=(FUTURES_MARKET_TYPE,),
+        symbols=("BTCUSDT", "ETHUSDT"),
+    )
+    assert len(writes) == 2
+    assert result == {
+        symbol: {FUTURES_MARKET_TYPE: {"tick_size": "0.1", "snapshot_limit": 1000}}
+        for symbol in ("BTCUSDT", "ETHUSDT")
+    }
+
+
+def test_websocket_large_legal_message_and_stop_close():
+    from types import SimpleNamespace
+
+    from websockets.exceptions import ConnectionClosed
+    from websockets.sync.server import serve
+
+    stop = threading.Event()
+    closed = threading.Event()
+    writes = []
+    payload = {
+        "e": "aggTrade",
+        "E": 1700000000001,
+        "T": 1700000000000,
+        "s": "BTCUSDT",
+        "st": 1,
+        "a": 10,
+        "f": 20,
+        "l": 22,
+        "p": "100.1",
+        "q": "2.5",
+        "nq": "2.0",
+        "m": False,
+    }
+
+    def receive(**row):
+        writes.append(row)
+        stop.set()
+        return len(writes)
+
+    def handler(connection):
+        connection.send(" " * (4 * 1024 * 1024) + json.dumps(payload))
+        try:
+            connection.recv()
+        except ConnectionClosed:
+            closed.set()
+
+    with serve(handler, "127.0.0.1", 0) as server:
+        thread = threading.Thread(target=server.serve_forever)
+        thread.start()
+        stream = replace(
+            FUTURES_STREAMS[1],
+            url=f"ws://127.0.0.1:{server.socket.getsockname()[1]}/stream",
+        )
+        reader = recorder._StreamReader(
+            stream=stream,
+            writer=SimpleNamespace(write=receive),
+            stats=recorder._CaptureStats(),
+            stop=stop,
+            config=RecorderConfig(Path("unused"), 1),
+            tick_size="0.1",
+        )
+        try:
+            reader._read_connection(reconnect=False)
+            assert len(writes) == 1
+            assert writes[0]["payload"] == payload
+            assert reader._active_websocket is None
+            assert closed.wait(3)
+        finally:
+            stop.set()
+            reader.cancel()
+            server.shutdown()
+            thread.join(3)
+        assert not thread.is_alive()

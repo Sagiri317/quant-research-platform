@@ -55,8 +55,8 @@ def test_crypto_ledger_failure_preserves_primary_and_old_good(
     else:
         read = persisted.read_model_trial_ledger_reference
 
-        def fail_refit(layout, reference):
-            plan, records = read(layout, reference)
+        def fail_refit(layout, reference, *, snapshots=None):
+            plan, records = read(layout, reference, snapshots=snapshots)
             if plan.stage == "refit":
                 raise primary
             return (plan, records)

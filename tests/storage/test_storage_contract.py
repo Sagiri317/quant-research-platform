@@ -19,20 +19,20 @@ from tests.storage.low_level_fixtures import (
 )
 
 
-def test_dataset_writer_rejects_outside_local_only_root_before_iterating_chunks(
+def test_dataset_writer_rejects_invalid_processed_root_before_iterating_chunks(
     tmp_path: Path,
 ) -> None:
     class ForbiddenChunks:
         def __iter__(self):
-            raise AssertionError("input_iterated_before_local_only_boundary")
+            raise AssertionError("input_iterated_before_processed_root_validation")
 
-    with pytest.raises(ValueError, match="outside_local_only_boundary"):
+    with pytest.raises(ValueError, match="invalid_processed_dataset_root"):
         write_dataset(
-            tmp_path / "outside-local-only" / "x",
+            tmp_path / "invalid-processed" / "x",
             ForbiddenChunks(),
             spec=make_processed_dataset_spec(),
         )
-    assert not (tmp_path / "outside-local-only").exists()
+    assert not (tmp_path / "invalid-processed").exists()
 
 
 def test_public_dataset_writer_validates_concrete_sequence_elements(
