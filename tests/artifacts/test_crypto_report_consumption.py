@@ -11,6 +11,7 @@ from quant_research_platform.artifacts import crypto_hft, portfolio_ledger, rese
 from quant_research_platform.contracts.business_manifest import (
     build_business_manifest_envelope,
 )
+from quant_research_platform.contracts.portfolios import PortfolioDiagnostic
 from quant_research_platform.contracts.targets import ProducerKind, TargetStatus
 from quant_research_platform.research.portfolios.accounting import PortfolioEconomics
 from quant_research_platform.storage import semantic_artifacts
@@ -50,7 +51,13 @@ def test_crypto_report_uses_native_consumption_and_final_identity_check(
             mark_price=100.0,
             fee=0.0,
         )
-        account.mark(20_000_000, 110.0)
+        account.mark(
+            20_000_000,
+            110.0,
+            diagnostics=(
+                PortfolioDiagnostic("btc_usdt", None, "execution_summary", text="{}"),
+            ),
+        )
 
     if mode == "continuous":
         root = portfolio_ledger.write_portfolio_ledger_artifact(
@@ -92,11 +99,14 @@ def test_crypto_report_uses_native_consumption_and_final_identity_check(
         for name, count in native_counts.items()
     )
     counts.clear()
-    original_summary = research.summarize_portfolio_ledger
+    original_summary = research.summarize_crypto_ledger
+    hook_calls = []
+    mutations = []
 
-    def summarize_then_change(*args):
-        result = original_summary(*args)
-        assert result["net_pnl"] == 10.0
+    def summarize_then_change(*args, **kwargs):
+        result = original_summary(*args, **kwargs)
+        hook_calls.append(True)
+        assert result["economics"]["net_pnl"] == 10.0
         if mutation == "manifest":
             path = root / "manifest.json"
             path.write_bytes(path.read_bytes() + b"\n")
@@ -111,9 +121,11 @@ def test_crypto_report_uses_native_consumption_and_final_identity_check(
             replacement = tmp_path / "replacement"
             replacement.write_bytes(path.read_bytes())
             replacement.replace(path)
+        if mutation:
+            mutations.append(mutation)
         return result
 
-    monkeypatch.setattr(research, "summarize_portfolio_ledger", summarize_then_change)
+    monkeypatch.setattr(research, "summarize_crypto_ledger", summarize_then_change)
     monkeypatch.setattr(
         research, "build_crypto_research_report", lambda *, record, evidence: evidence
     )
@@ -130,6 +142,7 @@ def test_crypto_report_uses_native_consumption_and_final_identity_check(
         research_window={"access": "holdout"},
         payload=lambda: {"protocol": {"model_scopes": {}}},
         target_results=(reference,),
+        trial_ledgers=(),
     )
     target = SimpleNamespace(
         candidate=SimpleNamespace(candidate_id="fixture", asset_id="btc_usdt"),
@@ -149,6 +162,8 @@ def test_crypto_report_uses_native_consumption_and_final_identity_check(
         comparison_ids=(),
         execution_targets=(target,),
     )
+    assert hook_calls == [True]
+    assert mutations == ([mutation] if mutation else [])
     assert counts == native_counts
     (row,) = evidence["portfolios"]
     if mutation:

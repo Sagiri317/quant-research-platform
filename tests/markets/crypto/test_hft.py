@@ -1084,3 +1084,38 @@ def test_panel_exact_cancellation_survives_events_and_batches(batch_rows):
                 batch_rows=batch_rows,
             )
         )
+
+
+@pytest.mark.parametrize("steps", (0, 1, 2))
+@pytest.mark.parametrize("scale", (1.0, 2.0**500, 2.0**-500))
+def test_positive_mid_returns_preserve_adjacent_prices_and_chunk_state(steps, scale):
+    from fractions import Fraction
+    from statistics import stdev
+
+    import numpy as np
+
+    start = 3.0 * scale
+    end = start
+    for _ in range(steps):
+        end = np.nextafter(end, np.inf)
+    panel = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp_ms": np.arange(11) * 100,
+            "segment_id": "a",
+            "mid": [start] * 10 + [end],
+            "book_spread": scale,
+        }
+    )
+    columns = ("return_100ms", "return_500ms", "realized_volatility_1s")
+    full = pd.concat(iter_factor_frames([panel], columns=columns), ignore_index=True)
+    split = pd.concat(
+        iter_factor_frames([panel.iloc[:10], panel.iloc[10:]], columns=columns),
+        ignore_index=True,
+    )
+    pd.testing.assert_frame_equal(full, split, check_exact=True)
+    expected = float((Fraction(end) - Fraction(start)) / Fraction(start))
+    assert full.return_100ms.iloc[-1] == expected
+    assert full.return_500ms.iloc[-1] == expected
+    assert full.realized_volatility_1s.iloc[-1] == stdev([0.0] * 9 + [expected])

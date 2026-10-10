@@ -523,3 +523,53 @@ def test_external_price_expressions_match_complete_fraction(bid, ask, anchor):
     assert actual.bybit_relative_mid_dispersion == pytest.approx(
         dispersion, rel=1e-15, abs=0
     )
+
+
+@pytest.mark.parametrize("steps", (0, 1, 2))
+def test_external_adjacent_mid_returns_keep_order_and_chunk_state(steps):
+    from fractions import Fraction
+
+    import numpy as np
+
+    start, end = 3.0, 3.0
+    for _ in range(steps):
+        end = np.nextafter(end, np.inf)
+    time = pd.date_range("2026-08-01", periods=6, freq="100ms")
+    frame = pd.DataFrame(
+        {
+            "market_id": "crypto",
+            "asset_id": "btc_usdt",
+            "timestamp": time,
+            "segment_id": "a",
+            "mid": 3.0,
+        }
+    )
+    mids = [start] * 5 + [end]
+    quotes = [
+        {
+            "local_timestamp": stamp.value // 1000,
+            "timestamp": stamp.value // 1000,
+            "bid_price": np.nextafter(mid, -np.inf),
+            "ask_price": np.nextafter(mid, np.inf),
+        }
+        for stamp, mid in zip(time, mids, strict=True)
+    ]
+
+    def compute(frames):
+        return pd.concat(
+            iter_external_context_frames(
+                frames,
+                quotes=quotes,
+                trades=(),
+                venue="bybit",
+                base_units_per_amount=1.0,
+                max_age_ms=100,
+            ),
+            ignore_index=True,
+        )
+
+    full, split = compute([frame]), compute([frame.iloc[:5], frame.iloc[5:]])
+    pd.testing.assert_frame_equal(full, split, check_exact=True)
+    expected = float((Fraction(end) - Fraction(start)) / Fraction(start))
+    assert full.bybit_return_100ms.iloc[-1] == expected
+    assert full.bybit_return_500ms.iloc[-1] == expected

@@ -540,10 +540,10 @@ def iter_factor_frames(
         returns = np.full(len(frame), np.nan, dtype="float64")
         same_segment = ~boundaries
         returns[1:][same_segment[1:]] = (
-            mid[1:][same_segment[1:]] / mid[:-1][same_segment[1:]] - 1.0
-        )
+            mid[1:][same_segment[1:]] - mid[:-1][same_segment[1:]]
+        ) / mid[:-1][same_segment[1:]]
         if not boundaries[0] and previous_mid is not None:
-            returns[0] = mid[0] / previous_mid - 1.0
+            returns[0] = (mid[0] - previous_mid) / previous_mid
         volatility = np.full(len(frame), np.nan, dtype="float64")
         return_500ms = np.full(len(frame), np.nan, dtype="float64")
         for index, value in (
@@ -556,7 +556,7 @@ def iter_factor_frames(
                 mid_tail.clear()
             mid_tail.append(float(mid[index]))
             if len(mid_tail) == 6:
-                return_500ms[index] = mid[index] / mid_tail[0] - 1
+                return_500ms[index] = (mid[index] - mid_tail[0]) / mid_tail[0]
             if math.isfinite(value):
                 return_tail.append(float(value))
             else:
@@ -1254,9 +1254,9 @@ def iter_external_context_frames(
                         ),
                     )
                     if len(mids) >= 2:
-                        row["return_100ms"] = mid / mids[-2] - 1
+                        row["return_100ms"] = (mid - mids[-2]) / mids[-2]
                     if len(mids) == 6:
-                        row["return_500ms"] = mid / mids[0] - 1
+                        row["return_500ms"] = (mid - mids[0]) / mids[0]
                 else:
                     mids.clear()
                 if (count - 1) * 100 >= 500 + input_delay_ms:

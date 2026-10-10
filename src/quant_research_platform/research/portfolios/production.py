@@ -158,7 +158,7 @@ def _price_returns(start, end, assets, *, start_column, end_column):
     ):
         raise PortfolioTargetBlocked("portfolio_held_lifecycle_unproven")
     with np.errstate(over="ignore"):
-        result = prices[1] / prices[0] - 1.0
+        result = (prices[1] - prices[0]) / prices[0]
     if not np.isfinite(result).all():
         raise ValueError("portfolio_return_invalid")
     return result

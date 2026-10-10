@@ -373,6 +373,26 @@ def _resolve_observed_markouts(
         pending.expire_all()
 
 
+def _execution_fee(quantity, price, fee_bps):
+    """Keep exceptional fee intermediates exact until their economic boundary."""
+    if isinstance(quantity, Fraction):
+        return quantity * Fraction(price) * Fraction(fee_bps) / 10_000
+    notional = quantity * price
+    product = notional * fee_bps
+    fee = product / 10_000.0
+    if (
+        fee_bps
+        and quantity
+        and price
+        and any(
+            not math.isfinite(value) or abs(value) < float.fromhex("0x1p-1022")
+            for value in (notional, product, fee)
+        )
+    ):
+        fee = Fraction(quantity) * Fraction(price) * Fraction(fee_bps) / 10_000
+    return fee
+
+
 def _taker_order_quantity(
     state, *, prediction, config, buy_limit, sell_limit, funding_per_unit
 ):
@@ -663,23 +683,65 @@ def simulate_taker(
             ):
                 current_mid = _mid(latest_state)
                 levels = latest_state.asks if signed_quantity > 0 else latest_state.bids
-                notional = 0.0
-                levels_consumed = 0
+                takes = []
+                exact_remaining = False
                 for price_index, available in levels:
                     quantity = min(remaining, available)
                     if quantity <= 0:
                         continue
                     price = index_to_price(price_index, latest_state.price_unit)
-                    notional += quantity * price
-                    remaining -= quantity
-                    levels_consumed += 1
+                    takes.append((quantity, price))
+                    rest = remaining - quantity
+                    # FastTwoSum preserves lost residuals before consuming later depth.
+                    if not exact_remaining and (remaining - rest) - quantity != 0:
+                        rest = Fraction(remaining) - Fraction(quantity)
+                        exact_remaining = True
+                    remaining = rest
                     if remaining <= 0:
                         break
-                filled = requested - remaining
-                if filled > 0:
+                levels_consumed = len(takes)
+                if takes:
+                    amounts = [float(quantity) * price for quantity, price in takes]
+                    exact_totals = exact_remaining or any(
+                        not math.isfinite(amount)
+                        or abs(amount) < float.fromhex("0x1p-1022")
+                        for amount in amounts
+                    )
+                    if not exact_totals:
+                        filled = math.fsum(quantity for quantity, _ in takes)
+                        try:
+                            notional = math.fsum(amounts)
+                        except OverflowError:
+                            exact_totals = True
+                        else:
+                            fill_price = (
+                                takes[0][1] if len(takes) == 1 else notional / filled
+                            )
+                    if exact_totals:
+                        exact_filled = sum(Fraction(quantity) for quantity, _ in takes)
+                        exact_notional = sum(
+                            Fraction(quantity) * Fraction(price)
+                            for quantity, price in takes
+                        )
+                        try:
+                            filled = float(exact_filled)
+                            notional = float(exact_notional)
+                            fill_price = float(exact_notional / exact_filled)
+                        except OverflowError:
+                            raise ValueError(
+                                "portfolio_execution_fill_invalid"
+                            ) from None
                     filled_orders += 1
-                    fill_price = notional / filled
-                    fee = notional * config.taker_fee_bps / 10_000.0
+                    try:
+                        fee = float(
+                            _execution_fee(
+                                exact_notional if exact_totals else notional,
+                                1.0,
+                                config.taker_fee_bps,
+                            )
+                        )
+                    except OverflowError:
+                        raise ValueError("hft_execution_fee_unrepresentable") from None
                     signed = 1.0 if signed_quantity > 0 else -1.0
                     fill_id = economics.fill(
                         timestamp_ns=effective_time_ns,
@@ -717,7 +779,7 @@ def simulate_taker(
                     )
                     metrics.observe_fill(fill)
                     pending.add(fill)
-            unfilled_quantity += remaining
+            unfilled_quantity += float(remaining)
             marked = (
                 None
                 if current_mid is None
@@ -1441,13 +1503,16 @@ class MakerCalibration:
         mid = _mid(state)
         forecast = _positive(mid * (1.0 + prediction), "hft_prediction_price_invalid")
         limit = new_order.remaining
+        price = index_to_price(new_order.price_index, new_order.price_unit)
+        fee_per_unit = _execution_fee(1.0, price, fee_bps)
+        exact = isinstance(fee_per_unit, Fraction)
         keep_gain = cancel_gain = 0.0
         sample_count = 0
         # Nested source windows make the current unit divide the frozen unit.
         history_scale = (self.price_unit / Fraction(new_order.price_unit)).numerator
 
         def records():
-            nonlocal keep_gain, cancel_gain, sample_count
+            nonlocal keep_gain, cancel_gain, sample_count, exact
             for quantity in (0.0, limit):
                 choices.add(quantity)
             samples = self.samples(new_order.side)
@@ -1483,18 +1548,31 @@ class MakerCalibration:
                                 if elapsed < stamp:
                                     funded[index] = max(funded[index], cumulative)
                         else:
-                            gain = quantity * (
-                                sign * (forecast - price)
-                                - price * fee_bps / 10000.0
-                                + sign * mid * error
+                            fee = _execution_fee(1.0, price, fee_bps)
+                            cash = sum(
+                                cash for stamp, cash in funding if elapsed < stamp
                             )
-                            gain += (
-                                quantity
-                                * sign
-                                * sum(
-                                    (cash for stamp, cash in funding if elapsed < stamp)
+                            if exact or isinstance(fee, Fraction):
+                                exact = True
+                                gain = Fraction(quantity) * (
+                                    Fraction(sign)
+                                    * (
+                                        Fraction(forecast)
+                                        - Fraction(price)
+                                        + Fraction(mid) * Fraction(error)
+                                        + Fraction(cash)
+                                    )
+                                    - Fraction(fee)
                                 )
-                            )
+                                keep_gain, cancel_gain = (
+                                    Fraction(keep_gain),
+                                    Fraction(cancel_gain),
+                                )
+                            else:
+                                gain = quantity * (
+                                    sign * (forecast - price) - fee + sign * mid * error
+                                )
+                                gain += quantity * sign * cash
                             if replacement is None:
                                 keep_gain += gain
                             else:
@@ -1514,36 +1592,51 @@ class MakerCalibration:
         def curve(namespace):
             rows = sorted(curves.get(namespace, ()), key=lambda row: (row[0], row[1]))
             for quantity, group in groupby(rows, key=lambda row: row[0]):
-                count, error_sum = (0, 0.0)
+                count, error_sum = (0, Fraction() if exact else 0.0)
                 for _quantity, _sample_id, error in group:
                     count += 1
-                    error_sum += error
+                    error_sum += Fraction(error) if exact else error
                 yield (quantity, count, error_sum)
 
-        price = index_to_price(new_order.price_index, new_order.price_unit)
-        edge = sign * (forecast - price) - price * fee_bps / 10000.0
+        edge = (
+            Fraction(sign) * (Fraction(forecast) - Fraction(price))
+            - Fraction(fee_per_unit)
+            if exact
+            else sign * (forecast - price) - fee_per_unit
+        )
 
         def responses(namespace, *, with_error):
 
             def weight(count, error):
-                return count * edge + sign * mid * error if with_error else count
+                return (
+                    count * edge
+                    + (
+                        Fraction(sign) * Fraction(mid) * Fraction(error)
+                        if exact
+                        else sign * mid * error
+                    )
+                    if with_error
+                    else count
+                )
 
-            total = 0.0 if with_error else 0
+            total = Fraction() if exact else 0.0 if with_error else 0
             groups = tuple(curve(namespace))
             for _quantity, count, error in groups:
                 total += weight(count, error)
-            weighted = 0.0
-            prefix = 0.0 if with_error else 0
+            weighted = Fraction() if exact else 0.0
+            prefix = Fraction() if exact else 0.0 if with_error else 0
             groups = iter(groups)
             current = next(groups, None)
             for choice in choices:
                 while current is not None and current[0] <= choice:
                     quantity, count, error = current
                     value = weight(count, error)
-                    weighted += quantity * value
+                    weighted += (Fraction(quantity) if exact else quantity) * value
                     prefix += value
                     current = next(groups, None)
-                yield (weighted + choice * (total - prefix))
+                yield weighted + (Fraction(choice) if exact else choice) * (
+                    total - prefix
+                )
 
         streams = [
             responses("response", with_error=True),
@@ -1557,18 +1650,24 @@ class MakerCalibration:
         for choice, base, *funded in zip(choices, *streams, strict=True):
             gain = base
             for (_stamp, cash), value in zip(funding, funded, strict=True):
-                gain += sign * cash * value
-            gain = (gain + cancel_gain) / sample_count
+                gain += (
+                    Fraction(sign) * Fraction(cash) * value
+                    if exact
+                    else sign * cash * value
+                )
+            gain = (
+                gain + (Fraction(cancel_gain) if exact else cancel_gain)
+            ) / sample_count
             if gain > best_gain:
                 best_gain = gain
                 best_quantity = choice
         keep_gain /= sample_count
         keep = bool(active_order is not None or commands) and keep_gain >= best_gain
-        return (
-            keep,
-            0.0 if keep else float(best_quantity),
-            float(keep_gain) if keep else float(best_gain),
-        )
+        try:
+            gain = float(keep_gain) if keep else float(best_gain)
+        except OverflowError:
+            raise ValueError("hft_expected_gain_unrepresentable") from None
+        return keep, 0.0 if keep else float(best_quantity), gain
 
 
 def replay_maker_calibration(
@@ -2041,7 +2140,10 @@ def simulate_maker(
                     continue
                 price = index_to_price(order.price_index, order.price_unit)
                 sign = 1.0 if side == "buy" else -1.0
-                fee = quantity * price * config.maker_fee_bps / 10_000.0
+                try:
+                    fee = float(_execution_fee(quantity, price, config.maker_fee_bps))
+                except OverflowError:
+                    raise ValueError("hft_execution_fee_unrepresentable") from None
                 mid = _mid(latest_state)
                 fill = {
                     "order_id": order.order_id,

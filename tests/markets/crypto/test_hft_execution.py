@@ -1059,3 +1059,382 @@ def test_truncated_pending_cancels_survive_native_ledger_summary(tmp_path):
     assert diagnostics[0]["cancelled_orders"] == diagnostics[0]["filled_orders"] == 0
     assert summary["net_pnl"] == 0.0
     assert not any(batch.trades or batch.cashflows for batch in saved.iter_chunks())
+
+
+def _persist_execution(tmp_path, capital, produce):
+    from dataclasses import asdict
+
+    from quant_research_platform.artifacts.portfolio_ledger import (
+        read_portfolio_ledger_artifact,
+        write_portfolio_ledger_artifact,
+    )
+    from quant_research_platform.contracts.business_manifest import (
+        build_business_manifest_envelope,
+    )
+
+    envelope = build_business_manifest_envelope(
+        logical_artifact_id="fixture",
+        schema_identity="a" * 64,
+        protocol_or_spec_identity="b" * 64,
+        software_identity="c" * 64,
+        research_window={
+            "start": pd.Timestamp(0).isoformat(),
+            "end": pd.Timestamp(201_000_000).isoformat(),
+            "access": "development",
+        },
+        upstream_identities={},
+        semantic_metadata={"portfolio_capital": asdict(capital)},
+    )
+    root = write_portfolio_ledger_artifact(
+        tmp_path / "ledger", envelope=envelope, produce=produce
+    )
+    return read_portfolio_ledger_artifact(root, expected_identity=root.name)
+
+
+@pytest.mark.parametrize("sign", (1, -1))
+@pytest.mark.parametrize(
+    "requested,depth",
+    [
+        (1e16, (1.0,)),
+        (1e13, (0.001,)),
+        (1e16, (1.0, 1e16)),
+        (1e16, (3.0, 1e16)),
+        (1.0, (0.4, 0.6)),
+    ],
+)
+def test_taker_actual_depth_survives_large_frozen_order_and_roundtrip(
+    tmp_path, sign, requested, depth
+):
+    from fractions import Fraction
+
+    from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
+
+    tick = 1005 if sign > 0 else 995
+    levels = tuple((tick + sign * 5 * i, q) for i, q in enumerate(depth))
+    side = "ask_levels" if sign > 0 else "bid_levels"
+    books = [
+        _state(0, **{side: ((tick, requested),)}),
+        _state(5, **{side: levels}),
+        _state(200, **{side: levels}),
+    ]
+    capital = PortfolioCapital("fixture", 1e20, "USDT", "linear_perpetual")
+    config = replace(
+        _taker_config(latency_ms=10, order_quantity=requested),
+        position_size=requested,
+    )
+    fills = []
+    results = []
+
+    def produce(emit):
+        observer = capture_fill_rows(fills.append, emit)
+        results.append(
+            simulate_taker(
+                books,
+                [{"timestamp_ms": 0, "prediction": sign * 0.1}],
+                prediction_column="prediction",
+                prediction_horizon_ms=500,
+                config=config,
+                observed_coverage={"s1": _coverage(0, 201)},
+                capital=capital,
+                asset_id="btc_usdt",
+                funding_events=(),
+                funding_forecasts=KNOWN_NO_FUNDING,
+                on_ledger=observer,
+            )
+        )
+
+    artifact = _persist_execution(tmp_path, capital, produce)
+    remainder = Fraction(requested)
+    expected_takes = []
+    for index, available in levels:
+        take = min(remainder, Fraction(available))
+        assert 0 <= take <= Fraction(available)
+        expected_takes.append((take, Fraction(index, 10)))
+        remainder -= take
+    total = sum(q for q, _ in expected_takes)
+    notional = sum(q * price for q, price in expected_takes)
+    assert total <= Fraction(requested)
+    (fill,) = fills
+    assert fill["requested_quantity"] == requested
+    assert fill["fill_qty"] == float(total)
+    assert fill["notional"] == float(notional)
+    assert fill["fill_price"] == float(notional / total)
+    assert (
+        min(float(p) for _, p in expected_takes)
+        <= fill["fill_price"]
+        <= max(float(p) for _, p in expected_takes)
+    )
+    if len(levels) == 1:
+        assert fill["fill_price"] == float(expected_takes[0][1])
+    fee = float(notional * Fraction(config.taker_fee_bps) / 10000)
+    assert results[0]["unfilled_quantity"] == float(remainder)
+    batches = list(artifact.iter_chunks())
+    trades = [trade for batch in batches for trade in batch.trades]
+    assert len(trades) == 1
+    assert trades[0].quantity == sign * float(total)
+    cash = [
+        flow.amount
+        for batch in batches
+        for flow in batch.cashflows
+        if flow.kind == "commission_cost"
+    ]
+    assert cash == [-fee]
+    economics = summarize_crypto_ledger(artifact, artifact.iter_chunks())["economics"]
+    expected_pnl = float(
+        Fraction(sign * float(total)) * (Fraction(100.0) - Fraction(fill["fill_price"]))
+        - Fraction(fee)
+    )
+    assert economics["net_pnl"] == pytest.approx(expected_pnl, rel=2e-15, abs=1e-15)
+
+
+@pytest.mark.parametrize("fee_bps", (-1e308, -1.0, 1.0))
+def test_maker_fee_rebate_roundtrip_keeps_representable_result(tmp_path, fee_bps):
+    from fractions import Fraction
+
+    from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
+
+    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+    fills = []
+
+    def produce(emit):
+        simulate_maker(
+            [_state(0), _state(200)],
+            [_trade(50, price="99.5", quantity="3", maker_buyer=True)],
+            [_quote(0, book_segment_id="s1")],
+            config=replace(_maker_config(), maker_fee_bps=fee_bps),
+            observed_coverage={"s1": _coverage(0, 201)},
+            trade_coverage={"trade-connection-1": _coverage(0, 201)},
+            capital=capital,
+            asset_id="btc_usdt",
+            funding_events=(),
+            on_ledger=capture_fill_rows(fills.append, emit),
+        )
+
+    artifact = _persist_execution(tmp_path, capital, produce)
+    (fill,) = fills
+    expected_fee = float(Fraction(99.5) * Fraction(fee_bps) / 10000)
+    batches = list(artifact.iter_chunks())
+    assert [
+        f.amount for b in batches for f in b.cashflows if f.kind == "commission_cost"
+    ] == [-expected_fee]
+    economics = summarize_crypto_ledger(artifact, artifact.iter_chunks())["economics"]
+    assert economics["net_pnl"] == float(Fraction(0.5) - Fraction(expected_fee))
+
+
+@pytest.mark.parametrize(
+    "quantity,price,rate",
+    [(1.0, 1e300, 5e-324), (1e-200, 1e-200, 1e308), (1.0, 99.5, -1e308)],
+)
+def test_execution_fee_local_range_protection(quantity, price, rate):
+    from fractions import Fraction
+
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        _execution_fee,
+    )
+
+    expected = float(Fraction(quantity) * Fraction(price) * Fraction(rate) / 10000)
+    assert float(_execution_fee(quantity, price, rate)) == expected
+
+
+def test_execution_fee_rejects_truly_unrepresentable_result():
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        _execution_fee,
+    )
+
+    with pytest.raises(OverflowError):
+        float(_execution_fee(1e308, 100.0, 1e308))
+
+
+@pytest.mark.parametrize("quantity,scale", [(1.0, 1), (0.001, 1000)])
+@pytest.mark.parametrize("keep_existing", (False, True))
+def test_calibrated_maker_fee_keeps_complete_gain_representable(
+    quantity, scale, keep_existing
+):
+    from fractions import Fraction
+
+    from quant_research_platform.markets.implementations.crypto.execution import (
+        _maker_join,
+        _maker_new_order,
+    )
+    from tests.markets.crypto.calibration_test_support import calibration_from_paths
+
+    state = _state(
+        0,
+        bid_levels=((995 * scale, quantity), (990 * scale, 3 * quantity)),
+        ask_levels=((1005 * scale, quantity), (1010 * scale, 2 * quantity)),
+    )
+    trade = _trade(
+        100, price=str(99.5 * scale), quantity=str(2 * quantity), maker_buyer=True
+    )
+    model = calibration_from_paths([([state], [trade])], [0.0])
+    quote = _quote(0, book_segment_id="s1")
+    order = _maker_new_order(2, "buy", quantity, state, quote, 0)
+    active = (
+        _maker_new_order(1, "buy", quantity, state, quote, 0) if keep_existing else None
+    )
+    if active is not None:
+        assert (
+            _maker_join(
+                active,
+                state,
+                {"s1": _coverage(0, 2000)},
+                {"trade-connection-1": _coverage(0, 2000)},
+            )
+            is None
+        )
+    keep, selected, gain = model.select(
+        state=state,
+        decision_ns=0,
+        new_order=order,
+        active_order=active,
+        commands=(),
+        lifetime_ns=500_000_000,
+        prediction=0.0,
+        fee_bps=-1e308,
+        funding=[],
+    )
+    exact = Fraction(quantity) * (
+        Fraction(100 * scale)
+        - Fraction(99.5 * scale)
+        - Fraction(99.5 * scale) * Fraction(-1e308) / 10000
+    )
+    assert keep is keep_existing
+    assert selected == (0.0 if keep_existing else quantity)
+    assert gain == float(exact)
+
+
+@pytest.mark.parametrize("quantity,scale", [(1.0, 1), (0.001, 1000)])
+def test_calibrated_maker_extreme_fee_survives_native_ledger(tmp_path, quantity, scale):
+    from fractions import Fraction
+
+    from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
+    from tests.markets.crypto.calibration_test_support import calibration_from_paths
+
+    state = _state(
+        0,
+        bid_levels=((995 * scale, quantity), (990 * scale, 3 * quantity)),
+        ask_levels=((1005 * scale, quantity), (1010 * scale, 2 * quantity)),
+    )
+    trade = _trade(
+        100, price=str(99.5 * scale), quantity=str(2 * quantity), maker_buyer=True
+    )
+    model = calibration_from_paths([([state], [trade])], [0.0])
+    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+
+    def produce(emit):
+        simulate_maker(
+            [state, replace(state, observed_time_ns=200_000_000, source_sequence=201)],
+            [trade],
+            [
+                {
+                    **_quote(0, book_segment_id="s1"),
+                    "fold_id": "fold",
+                    "price_prediction": 0.0,
+                    "proxy_prediction": 1.0,
+                }
+            ],
+            config=replace(
+                _maker_config(),
+                maker_fee_bps=-1e308,
+                order_quantity=quantity,
+                max_position=2 * quantity,
+            ),
+            observed_coverage={"s1": _coverage(0, 201)},
+            trade_coverage={"trade-connection-1": _coverage(0, 201)},
+            capital=capital,
+            asset_id="btc_usdt",
+            funding_events=(),
+            funding_forecasts=KNOWN_NO_FUNDING,
+            calibrations={"fold": model},
+            on_ledger=emit,
+        )
+
+    artifact = _persist_execution(tmp_path, capital, produce)
+    expected_fee = float(
+        Fraction(quantity) * Fraction(99.5 * scale) * Fraction(-1e308) / 10000
+    )
+    batches = list(artifact.iter_chunks())
+    assert [trade.quantity for batch in batches for trade in batch.trades] == [quantity]
+    assert [
+        f.amount for b in batches for f in b.cashflows if f.kind == "commission_cost"
+    ] == [-expected_fee]
+    economics = summarize_crypto_ledger(artifact, artifact.iter_chunks())["economics"]
+    assert economics["net_pnl"] == float(
+        Fraction(quantity) * Fraction(0.5 * scale) - Fraction(expected_fee)
+    )
+
+
+def test_maker_final_unrepresentable_fee_fails_at_execution_boundary():
+    with pytest.raises(ValueError, match="hft_execution_fee_unrepresentable"):
+        simulate_maker(
+            [_state(0), _state(200)],
+            [_trade(50, price="99.0", quantity="1", maker_buyer=True)],
+            [_quote(0, book_segment_id="s1")],
+            config=replace(
+                _maker_config(),
+                order_quantity=1e308,
+                max_position=1e308,
+                maker_fee_bps=1e308,
+            ),
+            observed_coverage={"s1": _coverage(0, 201)},
+            trade_coverage={"trade-connection-1": _coverage(0, 201)},
+            capital=PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual"),
+            asset_id="btc_usdt",
+            funding_events=(),
+        )
+
+
+def test_taker_subnormal_notional_keeps_complete_fee_through_roundtrip(tmp_path):
+    from fractions import Fraction
+
+    from quant_research_platform.artifacts.crypto_hft import summarize_crypto_ledger
+
+    quantity, source_price, fee_bps = 1e-200, 1.005e-123, 1e308
+    books = [
+        replace(
+            _state(
+                stamp, bid_levels=((995, quantity),), ask_levels=((1005, quantity),)
+            ),
+            price_unit="1e-126",
+        )
+        for stamp in (0, 200)
+    ]
+    capital = PortfolioCapital("fixture", 1000.0, "USDT", "linear_perpetual")
+    fills = []
+
+    def produce(emit):
+        simulate_taker(
+            books,
+            [{"timestamp_ms": 0, "prediction": 1e308}],
+            prediction_column="prediction",
+            prediction_horizon_ms=500,
+            config=replace(
+                _taker_config(order_quantity=quantity),
+                position_size=quantity,
+                taker_fee_bps=fee_bps,
+            ),
+            observed_coverage={"s1": _coverage(0, 201)},
+            capital=capital,
+            asset_id="btc_usdt",
+            funding_events=(),
+            funding_forecasts=KNOWN_NO_FUNDING,
+            on_ledger=capture_fill_rows(fills.append, emit),
+        )
+
+    saved = _persist_execution(tmp_path, capital, produce)
+    (fill,) = fills
+    exact_notional = Fraction(quantity) * Fraction(source_price)
+    expected_fee = float(exact_notional * Fraction(fee_bps) / 10000)
+    assert fill["fill_qty"] == quantity
+    assert fill["notional"] == float(exact_notional)
+    assert 0 < fill["notional"] < float.fromhex("0x1p-1022")
+    assert expected_fee != float(Fraction(fill["notional"]) * Fraction(fee_bps) / 10000)
+    fees = [
+        flow.amount
+        for batch in saved.iter_chunks()
+        for flow in batch.cashflows
+        if flow.kind == "commission_cost"
+    ]
+    assert fees == [-expected_fee]
+    summary = summarize_crypto_ledger(saved, saved.iter_chunks())["economics"]
+    assert summary["net_pnl"] == -expected_fee

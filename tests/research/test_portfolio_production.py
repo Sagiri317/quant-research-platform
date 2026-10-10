@@ -3131,3 +3131,25 @@ def test_adv_history_restarts_for_new_listing_but_survives_same_life_closure():
     )
     assert set(history) == {("asset", new)}
     assert list(history[("asset", new)]) == [100.0]
+
+
+def test_positive_held_price_returns_distinguish_adjacent_endpoints():
+    from fractions import Fraction
+
+    import numpy as np
+
+    from quant_research_platform.research.portfolios.production import _price_returns
+
+    end_prices = [3.0, np.nextafter(3.0, np.inf)]
+    end_prices.append(np.nextafter(end_prices[-1], np.inf))
+    assets = pd.Index(["a", "b", "c"])
+    start = pd.DataFrame(
+        {"adj_open": 3.0, "listing_date": pd.Timestamp("2020-01-01")},
+        index=assets,
+    )
+    end = start.assign(adj_open=end_prices)
+    actual = _price_returns(
+        start, end, assets, start_column="adj_open", end_column="adj_open"
+    )
+    assert actual.tolist() == [float((Fraction(value) - 3) / 3) for value in end_prices]
+    assert actual.iloc[0] < actual.iloc[1] < actual.iloc[2]
