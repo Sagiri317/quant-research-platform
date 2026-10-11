@@ -88,3 +88,56 @@ def test_fmb_exact_identity_publishes_periods_and_summary(
             )
             for row in actual.itertuples(index=False)
         ]
+
+
+@pytest.mark.parametrize("factor_case", (True,))
+def test_core_fmb_mixed_signed_integer_coordinates_survive_publication(
+    tmp_path, tables, envelope, factor_case
+):
+    from scipy.linalg import hadamard
+
+    from quant_research_platform.research.statistics import fama_macbeth_period
+
+    factors = tuple(f"x{i}" for i in range(6))
+    values = hadamard(16)[:, 1:7].astype(float)
+    # Exact coordinates contain -2**63, 2**63 and 1 in each full-rank column.
+    values[0] = 2.0**-63
+    frame = pd.DataFrame(values, columns=factors)
+    frame["timestamp"] = pd.Timestamp("2023-01-02")
+    frame["asset_id"] = [str(i) for i in range(len(frame))]
+    frame["label"] = frame.x0
+    frame["total_market_cap"] = np.arange(1.0, len(frame) + 1.0)
+    for weight_column in (None, "total_market_cap"):
+        actual = fama_macbeth_period(
+            frame,
+            return_column="label",
+            factor_columns=factors,
+            weight_column=weight_column,
+        )
+        np.testing.assert_array_equal(actual.coefficients, [0, 1, 0, 0, 0, 0, 0])
+        assert actual.observation_count == 16
+        assert actual.white_reason == "white_test_undefined"
+
+    periods = pd.DataFrame(
+        _fama_macbeth_period_records(
+            frame, return_column="label", factors=(), core_factors=factors
+        )
+    )
+    periods["timestamp"] = periods.timestamp.astype("datetime64[ns]")
+    tables["fama_macbeth_periods"] = periods
+    tables["fama_macbeth"] = _fama_macbeth_summary(
+        periods, factors=(), core_factors=factors, max_lags=19
+    )
+    root = statistics.write_statistics_artifact(
+        tmp_path / "statistics", envelope=envelope, tables=tables, table_group="factor"
+    )
+    artifact = statistics.read_statistics_artifact(
+        root, expected_identity=envelope.instance_identity
+    )
+    with artifact.table("fama_macbeth_periods.parquet") as actual:
+        assert len(actual) == 14
+        assert actual.status.eq("DEFINED").all()
+        assert actual.observation_count.eq(16).all()
+        np.testing.assert_array_equal(
+            actual.value, actual.coefficient_id.eq("x0").astype(float)
+        )

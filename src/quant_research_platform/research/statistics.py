@@ -804,7 +804,7 @@ def _exact_period_regression(values, target, weights):
     columns, scales = zip(
         *(_integer_coordinates(column) for column in values.T), strict=True
     )
-    design = np.column_stack((np.ones(len(target), dtype=object), *columns))
+    design = np.array([[1] * len(target), *columns], dtype=object).T
     response, response_scale = _integer_coordinates(target)
     response = np.asarray(response, dtype=object)
     weight = (
