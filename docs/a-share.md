@@ -326,7 +326,8 @@ positive-denominator liquidity contribution such as Amihud = NaN  # 分母要求
 分类事件、公告、标准版本和层级；CSRC/CAPCO 官方公开快照通过独立
 `reference/a_share_industry_snapshots` 输入提供有来源证明的观察状态，不冒充 CSMAR 事件。
 
-行业状态保留 CSRC2012 或 CAPCO 标准身份。新制度的 ImplementDate 不自动提供每只股票
+PANEL 只纳入 CSRC2012 或 CAPCO 分类事件；其他分类体系的事件不参与状态选择或未知屏障。
+行业状态保留上述标准身份。新制度的 ImplementDate 不自动提供每只股票
 的新分类，也不自动清空已公开的旧状态。分类事件（快照为 observation_date）与当前观察日期
 必须处于该状态所属的同一且唯一有效版本区间 [ImplementDate, AbandonDate)；缺版本、
 空区间、同标准重叠版本及明确废弃均不合格。已采用的新状态废弃后不自动退回旧标准。

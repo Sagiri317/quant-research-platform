@@ -557,6 +557,9 @@ def _prepare_industry_inputs(
     history["industry_standard_id"] = _canonical_industry_standard(
         history["industry_standard_id"]
     )
+    history = history.loc[
+        history["industry_standard_id"].isin(INDUSTRY_STANDARD_BY_PROVIDER_ID.values())
+    ].copy()
     history["timestamp"] = strict_timestamp_series(
         history["timestamp"], error="invalid_industry_timestamp"
     ).dt.normalize()

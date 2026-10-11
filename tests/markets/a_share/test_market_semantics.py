@@ -1607,3 +1607,94 @@ def test_turnover_does_not_lose_finite_value_to_intermediate_share_count(
     assert np.isfinite(actual.turnover.iloc[0])
     assert actual.turnover.iloc[0] == pytest.approx(expected, rel=1e-15, abs=0)
     assert actual.turnover.iloc[1] == 0.0
+
+
+@pytest.mark.parametrize(
+    ("event_standard", "preserve_known"),
+    [
+        ("P0217", True),
+        ("P0218", True),
+        ("P0219", True),
+        ("P0207", False),
+        ("P0221", False),
+    ],
+)
+def test_industry_unknown_barrier_only_uses_supported_taxonomies(
+    event_standard, preserve_known
+):
+    panel = pd.DataFrame(
+        {
+            "asset_id": "synthetic",
+            "timestamp": pd.to_datetime(["2021-01-02", "2021-01-04"]).as_unit("ns"),
+        }
+    )
+    panel["asset_id"] = panel["asset_id"].astype("object")
+    industry_columns = (
+        "industry_standard_id",
+        "industry_level1_code",
+        "industry_level1_name",
+    )
+    for column in industry_columns:
+        panel[column] = pd.Series(pd.NA, index=panel.index, dtype="string")
+    panel["is_nonfinancial_industry"] = pd.Series(
+        pd.NA, index=panel.index, dtype="boolean"
+    )
+    history = pd.DataFrame(
+        {
+            "source_asset_id": ["synthetic"] * 2,
+            "timestamp": pd.to_datetime(["2021-01-01", "2021-01-03"]).as_unit("ns"),
+            "industry_standard_id": ["P0207", event_standard],
+            "industry_level1_code": ["A01", "B01"],
+            "industry_level1_name": ["old leaf", "new leaf"],
+        }
+    )
+    standards = list(dict.fromkeys(["P0207", event_standard]))
+    versions = pd.DataFrame(
+        {
+            "industry_standard_id": standards,
+            "implement_date": pd.Timestamp("2020-01-01"),
+            "abandon_date": pd.NaT,
+        }
+    )
+    changes = pd.DataFrame(
+        {
+            "source_asset_id": ["synthetic"],
+            "changed_item": ["P0207行业代码"],
+            "effective_date": pd.to_datetime(["2021-01-01"]).as_unit("ns"),
+            "announcement_date": pd.to_datetime(["2020-12-31"]).as_unit("ns"),
+            "value_after": ["old leaf"],
+        }
+    )
+    dictionary = pd.DataFrame(
+        {
+            "industry_standard_id": ["P0207", "P0207"],
+            "industry_code": ["A", "A01"],
+            "industry_name": ["old root", "old leaf"],
+            "parent_industry_code": ["", "A"],
+            "industry_level": ["1", "2"],
+        }
+    )
+    before = [frame.copy(deep=True) for frame in (history, versions, changes)]
+    result = _asof_industry(
+        panel,
+        **_prepare_industry_inputs(
+            history,
+            industry_sets=dictionary,
+            industry_versions=versions,
+            industry_changes=changes,
+        ),
+    )
+    assert result.industry_standard_id.iloc[0] == "CSRC2012"
+    assert result.industry_level1_code.iloc[0] == "A"
+    if preserve_known:
+        assert result.industry_standard_id.eq("CSRC2012").all()
+        assert result.industry_level1_code.eq("A").all()
+    else:
+        assert (
+            result.loc[1, [*industry_columns, "is_nonfinancial_industry"]].isna().all()
+        )
+    pd.testing.assert_frame_equal(
+        result[["asset_id", "timestamp"]], panel[["asset_id", "timestamp"]]
+    )
+    for actual, expected in zip((history, versions, changes), before, strict=True):
+        pd.testing.assert_frame_equal(actual, expected)
