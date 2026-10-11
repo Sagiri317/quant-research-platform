@@ -1321,11 +1321,7 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(
     assert prefixes["future_gap"] == prefixes["complete"]
 
 
-@pytest.mark.complete_chain
-@pytest.mark.parametrize("gap_kind", [None, "depth", "agg_trades"])
-def test_tardis_cross_midnight_development_and_frozen_holdout(
-    tmp_path, gap_kind, monkeypatch
-):
+def _tardis_cross_midnight_case(tmp_path, gap_kind):
     import gzip
 
     from quant_research_platform.profiles.research import (
@@ -1335,7 +1331,6 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
     from quant_research_platform.sources import open_market_source
     from quant_research_platform.sources.tardis.funding import import_funding_history
     from quant_research_platform.sources.tardis.raw import import_slices
-    from quant_research_platform.workflows import research
     from tests.helpers.binance_hft import write_binance_hft_run
 
     origin = pd.Timestamp("2026-09-01T23:59:55.500000Z")
@@ -1437,19 +1432,31 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
             ).isoformat()
     layout = StorageLayout(tmp_path / "project")
     profile = research_profile(CRYPTO_PROFILE_ID)
+    configuration = research_configuration(
+        "crypto",
+        "baseline",
+        development=(
+            plan["folds"][0]["validation"]["start"],
+            plan["folds"][-1]["validation"]["end"],
+        ),
+        plan=plan,
+    )
+    return raw, layout, profile, configuration
+
+
+@pytest.mark.complete_chain
+@pytest.mark.parametrize("gap_kind", [None, "depth", "agg_trades"])
+def test_tardis_cross_midnight_development_and_frozen_holdout(
+    tmp_path, gap_kind, monkeypatch
+):
+    raw, layout, profile, configuration = _tardis_cross_midnight_case(
+        tmp_path, gap_kind
+    )
     result = research.research_run(
         profile=profile,
         layout=layout,
         raw_root=raw,
-        research_plan=research_configuration(
-            "crypto",
-            "baseline",
-            development=(
-                plan["folds"][0]["validation"]["start"],
-                plan["folds"][-1]["validation"]["end"],
-            ),
-            plan=plan,
-        ),
+        research_plan=configuration,
     )
     targets = {target["target_id"]: target for target in result["target_results"]}
     assert result["status"] == "COMPLETE"

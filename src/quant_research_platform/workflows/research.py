@@ -112,6 +112,7 @@ from quant_research_platform.research.models.persisted import (
 from quant_research_platform.research.models.production import _crypto_model_chronology
 from quant_research_platform.research.models.supervised import preflight_model_specs
 from quant_research_platform.runtime.execution_metrics import record_run_observations
+from quant_research_platform.sources.tardis.replay import _tardis_request_session
 from quant_research_platform.storage.datasets.comparison import compare_datasets
 from quant_research_platform.storage.datasets.inspection import (
     inspect_dataset as inspect_physical_dataset,
@@ -1190,6 +1191,7 @@ def _execute_targets(
     candidate_workspace: RebuildCandidateWorkspace | None = None
     candidate_materialized = False
     with ExitStack() as operation:
+        operation.enter_context(_tardis_request_session(operation))
         for request, planned in instance_plans:
             spec = request.spec
             if observe is not None:

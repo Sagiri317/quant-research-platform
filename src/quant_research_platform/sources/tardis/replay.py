@@ -5,7 +5,8 @@ from __future__ import annotations
 import datetime as dt
 import pickle
 from contextlib import ExitStack, contextmanager
-from dataclasses import dataclass, field
+from contextvars import ContextVar
+from dataclasses import dataclass, field, replace
 from fractions import Fraction
 from functools import partial
 from pathlib import Path
@@ -45,6 +46,19 @@ from quant_research_platform.sources.tardis.raw import (
     iter_native_slice,
 )
 from quant_research_platform.storage.manifests import read_qrp_json_file
+
+_REQUEST_ARCHIVES = ContextVar("tardis_request_archives", default=None)
+
+
+@contextmanager
+def _tardis_request_session(resources):
+    """Attach native replay owners to the existing request resource stack."""
+    token = _REQUEST_ARCHIVES.set((resources, {}))
+    try:
+        yield
+    finally:
+        _REQUEST_ARCHIVES.reset(token)
+
 
 _MANIFEST_KEYS = {
     "schema_id",
@@ -242,6 +256,8 @@ class TardisArchive:
     source_identity: dict
     _coverage_index: ObservationCoverageIndex
     _replay_resources: ExitStack
+    _verify_source: object
+    _replay_error: Exception | None = field(default=None, init=False)
     _records_by_stream: dict = field(default_factory=dict)
     _native_records: object = field(init=False)
     _sequence_offset: int = 0
@@ -366,26 +382,33 @@ class TardisArchive:
         requested = symbol, data_kind
         position = 0
         while True:
-            buffered = self._records_by_stream.get(requested)
-            if buffered is not None and position < buffered.seek(0, 2):
-                buffered.seek(position)
-                start = position
-                record = pickle.load(buffered)
-            else:
-                item = next(self._native_records, None)
-                if item is None:
-                    return
-                key, record = item
-                buffered = self._records_by_stream.get(key)
-                if buffered is None:
-                    buffered = self._replay_resources.enter_context(
-                        closing_iterator(TemporaryFile())
-                    )
-                    self._records_by_stream[key] = buffered
-                start = buffered.seek(0, 2)
-                pickle.dump(record, buffered, protocol=pickle.HIGHEST_PROTOCOL)
-                if key != requested:
-                    continue
+            if self._replay_error is not None:
+                raise self._replay_error
+            try:
+                buffered = self._records_by_stream.get(requested)
+                if buffered is not None and position < buffered.seek(0, 2):
+                    buffered.seek(position)
+                    start = position
+                    record = pickle.load(buffered)
+                else:
+                    item = next(self._native_records, None)
+                    if item is None:
+                        return
+                    key, record = item
+                    buffered = self._records_by_stream.get(key)
+                    if buffered is None:
+                        buffered = self._replay_resources.enter_context(
+                            closing_iterator(TemporaryFile())
+                        )
+                        self._records_by_stream[key] = buffered
+                    start = buffered.seek(0, 2)
+                    pickle.dump(record, buffered, protocol=pickle.HIGHEST_PROTOCOL)
+                    if key != requested:
+                        continue
+            except Exception as error:
+                # A failed lazy decoder must never become a valid truncated EOF.
+                self._replay_error = error
+                raise
             position = buffered.tell()
             if (
                 end_ns is not None
@@ -522,7 +545,7 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
         identity = _capture_raw_file_identity(
             manifest_path, missing_is_file_not_found=False
         )
-        _raw = manifest = members = identities = _after_raw = after = run = None
+        _raw = manifest = members = identities = run = None
         _raw, manifest = read_qrp_json_file(manifest_path, expected_identity=identity)
         _validate_manifest(manifest)
         manifest_hash = canonical_json_hash(manifest)
@@ -550,7 +573,15 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
                 ):
                     raise ValueError("tardis_raw_identity_changed")
 
-        verify_files()
+        def verify_source():
+            verify_files()
+            _after_raw, after = read_qrp_json_file(
+                manifest_path, expected_identity=identity
+            )
+            if canonical_json_hash(after) != manifest_hash:
+                raise ValueError("tardis_manifest_identity_changed")
+
+        verify_source()
         index = ObservationCoverageIndex(
             root,
             manifest["observation_intervals"],
@@ -576,6 +607,7 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
             },
             index,
             replay_resources,
+            verify_source,
         )
         with replay_resources:
             primary = None
@@ -586,12 +618,7 @@ def _open_tardis_archive(root, *, expected_manifest_hash):
                 raise
             finally:
                 try:
-                    verify_files()
-                    _after_raw, after = read_qrp_json_file(
-                        manifest_path, expected_identity=identity
-                    )
-                    if canonical_json_hash(after) != manifest_hash:
-                        raise ValueError("tardis_manifest_identity_changed")
+                    verify_source()
                 except BaseException as error:
                     if primary is None:
                         raise
@@ -640,6 +667,8 @@ class _ArchiveCoverage:
 class _TardisArchives:
     archives: tuple[TardisArchive, ...]
     source_identity: dict
+    _cursor_resources: ExitStack
+    _verify_selection: object
 
     @property
     def _coverage_index(self):
@@ -674,6 +703,18 @@ class _TardisArchives:
         )
 
     def iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
+        return self._cursor_resources.enter_context(
+            closing_iterator(
+                self._iter_market_records(
+                    symbol=symbol,
+                    market_type=market_type,
+                    data_kinds=data_kinds,
+                    end_ns=end_ns,
+                )
+            )
+        )
+
+    def _iter_market_records(self, *, symbol, market_type, data_kinds, end_ns=None):
         price_unit = self.market_metadata(market_type, symbol)["price_unit"]
         for archive in self.archives:
             with closing_iterator(
@@ -692,6 +733,11 @@ class _TardisArchives:
                         return
 
     def iter_state_observations(self, *, symbol):
+        return self._cursor_resources.enter_context(
+            closing_iterator(self._iter_state_observations(symbol=symbol))
+        )
+
+    def _iter_state_observations(self, *, symbol):
         for archive in self.archives:
             with closing_iterator(
                 archive.iter_state_observations(symbol=symbol)
@@ -712,6 +758,53 @@ class _TardisArchives:
 
 @contextmanager
 def open_tardis_archive(root, *, archive_paths=None, time_window=None):
+    """Lease independent cursors over exact request-local archive buffers."""
+    archive_paths = None if archive_paths is None else tuple(archive_paths)
+    session = _REQUEST_ARCHIVES.get()
+    if session is None:
+        with _open_tardis_archives(
+            root, archive_paths=archive_paths, time_window=time_window
+        ) as source:
+            yield source
+        return
+    resources, sources = session
+    key = Path(root), archive_paths, time_window
+    if key not in sources:
+        sources[key] = resources.enter_context(
+            _open_tardis_archives(
+                root, archive_paths=archive_paths, time_window=time_window
+            )
+        )
+    source = sources[key]
+
+    def verify():
+        source._verify_selection()
+        for archive in source.archives:
+            archive._verify_source()
+            if archive._replay_error is not None:
+                raise archive._replay_error
+
+    verify()
+    primary = None
+    try:
+        with closing_iterator(ExitStack()) as cursors:
+            yield replace(source, _cursor_resources=cursors)
+    except BaseException as error:
+        primary = error
+        raise
+    finally:
+        try:
+            verify()
+        except BaseException as error:
+            if primary is None:
+                raise
+            primary.add_note(
+                "Tardis source verification also failed: " + type(error).__name__
+            )
+
+
+@contextmanager
+def _open_tardis_archives(root, *, archive_paths=None, time_window=None):
     """Read explicitly declared daily archives without joining their continuity."""
     root = Path(root)
     paths = (
@@ -723,6 +816,7 @@ def open_tardis_archive(root, *, archive_paths=None, time_window=None):
         raise ValueError("tardis_archive_set_invalid")
     with ExitStack() as readers:
         selected = []
+        manifests = []
         for path in paths:
             identity = _capture_raw_file_identity(path / "manifest.json")
             _raw = manifest = None
@@ -730,8 +824,19 @@ def open_tardis_archive(root, *, archive_paths=None, time_window=None):
                 path / "manifest.json", expected_identity=identity
             )
             _validate_manifest(manifest)
+            manifest_hash = canonical_json_hash(manifest)
+            manifests.append((path / "manifest.json", identity, manifest_hash))
             if _archive_intersects(manifest, time_window):
-                selected.append((path, canonical_json_hash(manifest)))
+                selected.append((path, manifest_hash))
+
+        def verify_selection():
+            for manifest_path, identity, expected_hash in manifests:
+                _, current = read_qrp_json_file(
+                    manifest_path, expected_identity=identity
+                )
+                if canonical_json_hash(current) != expected_hash:
+                    raise ValueError("tardis_archive_selection_identity_changed")
+
         if not selected:
             raise PortfolioTargetBlocked("tardis_archive_window_empty")
         archives = tuple(
@@ -773,6 +878,8 @@ def open_tardis_archive(root, *, archive_paths=None, time_window=None):
                     for archive in archives
                 ],
             },
+            readers,
+            verify_selection,
         )
 
 

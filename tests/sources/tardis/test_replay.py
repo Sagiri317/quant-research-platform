@@ -866,7 +866,9 @@ def test_cursor_spool_releases_payloads_with_native_decoder_replaced(
     tracemalloc.start()
     try:
         with ExitStack() as resources:
-            archive = replay.TardisArchive(tmp_path, {}, {}, None, resources)
+            archive = replay.TardisArchive(
+                tmp_path, {}, {}, None, resources, lambda: None
+            )
             assert (
                 sum(1 for _ in archive._stream_records("BTCUSDT", "agg_trades", None))
                 == 5000
@@ -907,7 +909,9 @@ def test_archive_buffer_close_keeps_native_decode_failure(tmp_path, monkeypatch)
     monkeypatch.setattr(replay.TardisArchive, "_iter_canonical_records", records)
     with pytest.raises(ValueError) as caught:
         with ExitStack() as resources:
-            archive = replay.TardisArchive(tmp_path, {}, {}, None, resources)
+            archive = replay.TardisArchive(
+                tmp_path, {}, {}, None, resources, lambda: None
+            )
             list(archive._stream_records("BTCUSDT", "agg_trades", None))
     assert caught.value is primary
     assert all(stream.closed for stream in buffers)
