@@ -36,7 +36,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 from tests.helpers.choice_raw import SDK, response, write_css
 from tests.helpers.research_configuration import research_configuration
 
@@ -518,7 +518,7 @@ def test_known_missing_coordinates_are_blocked_in_the_real_run_and_report(
             for branch in ("1", "3"):
                 _snapshot(session, layout, "2020-02-01", [110.0] * 14, branch=branch)
     profile = research_profile()
-    result = research.research_run(
+    result = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=research_configuration(
@@ -532,7 +532,9 @@ def test_known_missing_coordinates_are_blocked_in_the_real_run_and_report(
     for group in ("global", "quarterly"):
         ledger = targets[f"fusion_nf_core_{group}_champion_csi500_enhanced_ledger"]
         assert ledger.status.value == "BLOCKED"
-    report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
+    report = operations.report_build(
+        profile=profile, layout=layout, run_id=record.run_id
+    )
     assert report["status"] != "COMPLETE"
     assert reason in str(report["report"]["sections"]["readiness/blockers"])
 
@@ -943,7 +945,7 @@ def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path)
     del payload["metadata"]["request"]
     filesystem_write_text(sidecar, json.dumps(payload), encoding="utf-8")
     profile = research_profile()
-    result = research.research_run(
+    result = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=research_configuration(development=("2019-03-04", "2019-03-15")),
@@ -953,7 +955,9 @@ def test_invalid_choice_metadata_preserves_unrelated_target_and_report(tmp_path)
     assert targets["financial_first_disclosure"].status.value == "BLOCKED"
     assert targets["financial_first_disclosure"].reason == "source_identity_invalid"
     assert targets["a_share_fee_schedule"].status.value == "BUILT"
-    report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
+    report = operations.report_build(
+        profile=profile, layout=layout, run_id=record.run_id
+    )
     assert report["status"] != "COMPLETE"
     assert "source_identity_invalid" in str(
         report["report"]["sections"]["readiness/blockers"]
@@ -984,7 +988,7 @@ def test_choice_fatal_io_is_not_source_blocked(tmp_path, monkeypatch, error, bou
 
         monkeypatch.setattr(interim, "filesystem_scandir", scan)
     with pytest.raises(type(error)) as caught:
-        research.data_materialize(
+        operations.data_materialize(
             profile=research_profile(),
             layout=layout,
             raw_root=None,
@@ -1012,7 +1016,7 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
         start_date="2019-01-01",
         data_ids=("financial_balance", "financial_first_disclosure"),
     )
-    earlier = research.data_materialize(**arguments, end_date="2020-01-31")
+    earlier = operations.data_materialize(**arguments, end_date="2020-01-31")
     assert earlier["status"] == "COMPLETE"
     roots = {
         item["target_id"]: layout.instance_root(
@@ -1030,7 +1034,7 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
         pd.Timestamp("2020-01-30")
     ]
     old_hashes = {name: _file_hashes(root) for name, root in roots.items()}
-    later = research.data_materialize(**arguments, end_date="2020-02-02")
+    later = operations.data_materialize(**arguments, end_date="2020-02-02")
     results = {item["target_id"]: item for item in later["target_results"]}
     assert results["financial_balance"]["status"] == "BLOCKED"
     assert results["financial_balance"]["reason"] == "choice_revision_snapshot_missing"
@@ -1041,7 +1045,7 @@ def test_requested_knowledge_cutoff_excludes_future_disclosures_and_missing_revi
             _snapshot(
                 session, layout, "2020-02-01", [200.0] * len(FIELDS), branch=branch
             )
-    complete = research.data_materialize(**arguments, end_date="2020-02-02")
+    complete = operations.data_materialize(**arguments, end_date="2020-02-02")
     assert complete["status"] == "COMPLETE"
     identity = next(
         item["instance_identity"]

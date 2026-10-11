@@ -27,7 +27,7 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 from tests.markets.a_share.test_target_dag_chain import (
     _synthetic_financial_frames,
     _synthetic_interim_frames,
@@ -480,7 +480,7 @@ def test_processed_window_boundaries_preserve_publish_state(tmp_path, case):
     layout = StorageLayout(tmp_path)
 
     def build(*, plan=False):
-        return research.dataset_build(
+        return operations.dataset_build(
             profile=profile,
             layout=layout,
             dataset_id="pv_all",

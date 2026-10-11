@@ -19,6 +19,7 @@ from quant_research_platform.interfaces.cli.commands import app
 from quant_research_platform.interfaces.queries import list_factors
 from quant_research_platform.policy.share_safety import unsafe_for_share_reason
 from quant_research_platform.profiles.research import research_profile
+from quant_research_platform.workflows import operations
 
 
 def test_api_routes_are_current_and_exact() -> None:
@@ -284,14 +285,12 @@ async def test_read_only_status_never_plans_and_client_cannot_bind_a_project(
     def forbidden(*_args, **_kwargs):
         raise AssertionError("read_only_query_started_work")
 
-    for name in (
-        "plan_targets",
-        "preflight_model_specs",
-        "research_run",
-        "report_build",
-        "_default_raw_root",
+    for owner, names in (
+        (operations, ("plan_targets", "research_run", "report_build")),
+        (research, ("preflight_model_specs", "_default_raw_root")),
     ):
-        monkeypatch.setattr(research, name, forbidden)
+        for name in names:
+            monkeypatch.setattr(owner, name, forbidden)
     root = tmp_path / "bound"
     outside = tmp_path / "untrusted"
     outside.mkdir()
@@ -463,7 +462,7 @@ def test_cli_materialize_leaves_raw_root_resolution_to_project_layout(
         captured.update(kwargs)
         return {"status": status}
 
-    monkeypatch.setattr(cli_commands.research, "data_materialize", materialize)
+    monkeypatch.setattr(cli_commands.operations, "data_materialize", materialize)
     result = CliRunner().invoke(
         app,
         [
@@ -484,7 +483,6 @@ def test_cli_materialize_leaves_raw_root_resolution_to_project_layout(
 def test_research_cli_uses_only_the_configuration_for_scientific_selection(
     tmp_path, monkeypatch
 ):
-    from quant_research_platform.workflows import research
     from tests.helpers.research_configuration import research_configuration
 
     config = research_configuration()
@@ -493,7 +491,7 @@ def test_research_cli_uses_only_the_configuration_for_scientific_selection(
     path.write_text(json.dumps(config), encoding="utf-8")
     calls = []
     monkeypatch.setattr(
-        research,
+        operations,
         "research_run",
         lambda **kwargs: calls.append(kwargs) or {"status": "COMPLETE"},
     )

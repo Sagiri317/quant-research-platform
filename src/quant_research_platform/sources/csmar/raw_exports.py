@@ -433,18 +433,6 @@ def _looks_like_source_category_code(
     return stripped == "" or stripped in allowed_values
 
 
-def _validate_index_info_source_codes(frame: pd.DataFrame) -> None:
-    for column, allowed_values in zip(
-        INDEX_INFO_SOURCE_CODE_COLUMNS, INDEX_INFO_SOURCE_CODE_ENUMS, strict=True
-    ):
-        if column not in frame.columns:
-            continue
-        values = frame[column].astype("string")
-        valid = values.isna() | values.isin(allowed_values)
-        if not valid.all():
-            raise ValueError("invalid_csmar_index_info_source_code")
-
-
 def iter_private_export_chunks(
     path: str | Path,
     *,
@@ -491,8 +479,6 @@ def iter_private_export_chunks(
                 header = [header[i] for i in positions]
                 pending = [[row[i] for i in positions] for row in pending]
             frame = _raw_frame(pending, header)
-            if dataset == "index_info":
-                _validate_index_info_source_codes(frame)
             try:
                 yield frame
             except GeneratorExit:

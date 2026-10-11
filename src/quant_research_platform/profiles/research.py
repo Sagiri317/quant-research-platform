@@ -28,11 +28,6 @@ from quant_research_platform.research.statistics_production import (
     build_a_share_factor_statistics_tables,
     build_a_share_statistics_tables,
 )
-from quant_research_platform.sources import (
-    market_funding_identity,
-    market_source_identity,
-    open_market_source,
-)
 from quant_research_platform.sources.choice.interim import (
     interim_catalog as choice_interim_catalog,
 )
@@ -50,6 +45,11 @@ from quant_research_platform.sources.csmar.interim import (
 )
 from quant_research_platform.sources.csmar.interim import (
     source_content_identity as csmar_source_identity,
+)
+from quant_research_platform.sources.market import (
+    market_funding_identity,
+    market_source_identity,
+    open_market_source,
 )
 from quant_research_platform.sources.reference.interim import (
     interim_catalog as reference_interim_catalog,

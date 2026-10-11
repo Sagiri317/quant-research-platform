@@ -62,7 +62,7 @@ from quant_research_platform.storage.manifests import (
     read_dataset_manifest_evidence,
     read_manifest,
 )
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations, research
 from tests.helpers.research_configuration import (
     compact_a_share_configuration,
     compact_a_share_windows,
@@ -316,7 +316,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         "bind_research_configuration",
         lambda selected, configuration, **kwargs: selected,
     )
-    result = research.research_run(
+    result = operations.research_run(
         profile=profile,
         layout=StorageLayout(project_root=tmp_path),
         research_plan=configuration,
@@ -474,7 +474,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
     first_record = read_research_run_record(layout.research_run_path(result["run_id"]))
     assert first_record.trial_ledgers
     model_before = filesystem_read_bytes(model_root / "manifest.json")
-    reused = research.research_run(
+    reused = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=configuration,
@@ -489,7 +489,7 @@ def test_a_share_model_prediction_fixture_reports_formal_statistics_failure(
         )["status"]
         == "REUSED"
     )
-    rebuilt = research.research_run(
+    rebuilt = operations.research_run(
         profile=profile,
         layout=layout,
         rebuild=True,
@@ -588,7 +588,7 @@ def test_model_failure_blocks_real_semantic_descendant(
         lambda *_args, **_kwargs: target_specs,
     )
 
-    result = research._execute_action(  # noqa: SLF001
+    result = operations._execute_action(  # noqa: SLF001
         profile=profile,
         protocol=profile.protocol(
             scenario_id=research._default_scenario_id(profile),
@@ -716,7 +716,7 @@ def test_crypto_dataset_plan_reports_missing_raw_after_data_producers_are_bound(
     profile = research_profile(CRYPTO_PROFILE_ID)
     dataset_id = profile.research_datasets.list()[0].data_id
 
-    plan = research.plan_targets(
+    plan = operations.plan_targets(
         profile=profile,
         action="dataset build",
         terminal_targets=(dataset_id,),
@@ -893,7 +893,7 @@ def test_protocol_owns_formal_research_and_report_graphs() -> None:
 
 def test_generic_planner_rejects_retired_implicit_report_path(tmp_path: Path) -> None:
     with pytest.raises(ValueError, match="report_run_id_required"):
-        research.plan_targets(
+        operations.plan_targets(
             profile=research_profile(),
             action="report build",
             terminal_targets=("pv_all_report_artifact",),
@@ -913,7 +913,7 @@ def test_declared_processed_dependencies_are_not_removed_from_the_plan(
         panel_spec.data_id,
     )
     filesystem_mkdir(panel_root, parents=True)
-    plan = research.plan_targets(
+    plan = operations.plan_targets(
         profile=profile,
         action="dataset build",
         terminal_targets=("pv_all",),
@@ -985,7 +985,7 @@ def test_interim_binding_receives_one_requested_target(
             ),
         },
     )
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=StorageLayout(project_root=tmp_path),
         raw_root=tmp_path / "raw",
@@ -994,7 +994,7 @@ def test_interim_binding_receives_one_requested_target(
         data_ids=(data_id,),
     )
 
-    reused = research.data_materialize(
+    reused = operations.data_materialize(
         profile=profile,
         layout=StorageLayout(project_root=tmp_path),
         raw_root=tmp_path / "raw",
@@ -1066,7 +1066,7 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
         },
     )
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1075,7 +1075,7 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
         data_ids=(data_id,),
     )
     filesystem_write_bytes(marker, b"after")
-    second = research.data_materialize(
+    second = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1103,7 +1103,7 @@ def test_source_identity_mutation_builds_a_new_immutable_instance(
         return result
 
     monkeypatch.setattr(research, "_plan_targets", mutate_after_plan)
-    third = research.data_materialize(
+    third = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1149,14 +1149,14 @@ def test_data_target_identity_ignores_unrelated_protocol_factor_scope(
         producer_bindings={data_id: binding},
     )
 
-    core_plan = research.plan_targets(
+    core_plan = operations.plan_targets(
         profile=core_profile,
         action="data materialize",
         terminal_targets=(data_id,),
         layout=StorageLayout(project_root=tmp_path / "core"),
         raw_root=tmp_path / "raw",
     )
-    full_plan = research.plan_targets(
+    full_plan = operations.plan_targets(
         profile=full_profile,
         action="data materialize",
         terminal_targets=(data_id,),
@@ -1222,7 +1222,7 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
         },
     )
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1236,7 +1236,7 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
     )
     before = _old_good_snapshot(old_root)
 
-    rebuild_plan = research.data_materialize(
+    rebuild_plan = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1250,7 +1250,7 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
     assert planned_target["decision"] == "BUILD"
     assert planned_target["matching_instance_identity"] == old_root.name
     assert planned_target["requested_identity"] == old_root.name
-    normal_plan = research.data_materialize(
+    normal_plan = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1262,7 +1262,7 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
     assert normal_plan["targets"][0]["decision"] == "REUSE"
     assert normal_plan["targets"][0]["matching_instance_identity"] == old_root.name
 
-    rebuilt = research.data_materialize(
+    rebuilt = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1290,7 +1290,7 @@ def test_same_identity_rebuild_matches_and_preserves_old_good(
         )
 
     monkeypatch.setattr(research, "compare_datasets", mismatch)
-    failed = research.data_materialize(
+    failed = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1410,23 +1410,23 @@ def test_plan_reuse_requires_native_physical_members(tmp_path):
         end_date="2020-12-31",
         data_ids=(data_id,),
     )
-    built = research.data_materialize(**request)
+    built = operations.data_materialize(**request)
     root = layout.instance_root(
         layout.interim_data_root("csmar", data_id),
         built["target_results"][0]["instance_identity"],
     )
     manifest = root / "_manifest" / "manifest.json"
     before = filesystem_read_bytes(manifest)
-    qualified = research.data_materialize(**request, plan=True)
+    qualified = operations.data_materialize(**request, plan=True)
     assert qualified["status"] == "COMPLETE"
     assert qualified["targets"][0]["decision"] == "REUSE"
     (member,) = tuple(filesystem_glob(root / "data", "**/*.parquet"))
     filesystem_unlink(member)
-    rejected = research.data_materialize(**request, plan=True)
+    rejected = operations.data_materialize(**request, plan=True)
     assert rejected["status"] == "BLOCKED"
     assert rejected["targets"][0]["decision"] == "BLOCKED"
     assert rejected["targets"][0]["blocker"] == "persisted_instance_invalid"
-    executed = research.data_materialize(**request)
+    executed = operations.data_materialize(**request)
     assert executed["status"] == "BLOCKED"
     assert executed["target_results"][0]["reason"] == "persisted_instance_invalid"
     assert filesystem_read_bytes(manifest) == before
@@ -1450,7 +1450,7 @@ def test_reuse_retains_one_native_qualification_and_rejects_later_change(
         end_date="2020-12-31",
         data_ids=(data_id,),
     )
-    built = research.data_materialize(**request)
+    built = operations.data_materialize(**request)
     root = layout.instance_root(
         layout.interim_data_root("csmar", data_id),
         built["target_results"][0]["instance_identity"],
@@ -1463,7 +1463,7 @@ def test_reuse_retains_one_native_qualification_and_rejects_later_change(
         return inspect(session)
 
     monkeypatch.setattr(research, "inspect_dataset_session", inspect_native)
-    reused = research.data_materialize(**request)
+    reused = operations.data_materialize(**request)
     assert reused["status"] == "COMPLETE"
     assert reused["target_results"][0]["status"] == "REUSED"
     assert observed == [root]
@@ -1476,7 +1476,7 @@ def test_reuse_retains_one_native_qualification_and_rejects_later_change(
         return result
 
     monkeypatch.setattr(research, "_plan_targets", mutate_after_plan)
-    changed = research.data_materialize(**request)
+    changed = operations.data_materialize(**request)
     assert changed["status"] == "FAILED"
     assert changed["target_results"][0]["reason"] == (
         "interim_build_failed:dataset_file_identity_changed"
@@ -1507,7 +1507,7 @@ def test_rebuild_comparison_mismatch_families_preserve_old_good(
     filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile(variant, marker=marker)
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1521,7 +1521,7 @@ def test_rebuild_comparison_mismatch_families_preserve_old_good(
     )
     before = _old_good_snapshot(old_root)
 
-    rebuilt = research.data_materialize(
+    rebuilt = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1588,7 +1588,7 @@ def test_rebuild_corrupt_old_good_returns_inspection_failed(
     filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1602,7 +1602,7 @@ def test_rebuild_corrupt_old_good_returns_inspection_failed(
     )
     filesystem_unlink(old_root / "_manifest" / "manifest.json")
 
-    rebuilt = research.data_materialize(
+    rebuilt = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1633,7 +1633,7 @@ def test_rebuild_compare_primary_is_preserved_with_candidate_evidence(
     filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1657,7 +1657,7 @@ def test_rebuild_compare_primary_is_preserved_with_candidate_evidence(
 
     monkeypatch.setattr(research, "compare_datasets", raise_primary)
     with pytest.raises(PrimaryError) as caught:
-        research.data_materialize(
+        operations.data_materialize(
             profile=profile,
             layout=layout,
             raw_root=raw_root,
@@ -1692,7 +1692,7 @@ def test_rebuild_producer_primary_is_preserved_with_candidate_evidence(
         failure=primary,
     )
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1706,7 +1706,7 @@ def test_rebuild_producer_primary_is_preserved_with_candidate_evidence(
     )
 
     with pytest.raises(PrimaryError) as caught:
-        research.data_materialize(
+        operations.data_materialize(
             profile=profile,
             layout=layout,
             raw_root=raw_root,
@@ -1752,7 +1752,7 @@ def test_rebuild_validation_failure_reports_failed_without_empty_candidate(
         failure=primary,
     )
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1765,7 +1765,7 @@ def test_rebuild_validation_failure_reports_failed_without_empty_candidate(
         first["target_results"][0]["instance_identity"],
     )
 
-    failed = research.data_materialize(
+    failed = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1806,7 +1806,7 @@ def test_rebuild_producer_control_base_exception_preserves_candidate(
         failure=primary,
     )
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1820,7 +1820,7 @@ def test_rebuild_producer_control_base_exception_preserves_candidate(
     )
 
     with pytest.raises(exception_type) as caught:
-        research.data_materialize(
+        operations.data_materialize(
             profile=profile,
             layout=layout,
             raw_root=raw_root,
@@ -1847,7 +1847,7 @@ def test_rebuild_raw_mutation_before_candidate_build_blocks_without_empty_scratc
     filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1865,7 +1865,7 @@ def test_rebuild_raw_mutation_before_candidate_build_blocks_without_empty_scratc
         return result
 
     monkeypatch.setattr(research, "_plan_targets", mutate_after_plan)
-    rebuilt = research.data_materialize(
+    rebuilt = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1900,7 +1900,7 @@ def test_rebuild_without_old_good_is_a_normal_immutable_build(
     filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
 
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=StorageLayout(project_root=tmp_path),
         raw_root=raw_root,
@@ -1927,7 +1927,7 @@ def test_rebuild_blocked_before_materialization_cleans_empty_candidate(
     filesystem_write_bytes(marker, b"stable")
     profile, data_id, calls = _calendar_rebuild_profile("value", marker=marker)
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -1954,7 +1954,7 @@ def test_rebuild_blocked_before_materialization_cleans_empty_candidate(
             )
         },
     )
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=blocked_profile,
         layout=layout,
         raw_root=raw_root,
@@ -2061,7 +2061,7 @@ def test_rebuild_reuses_published_upstream_unless_explicitly_requested(
 
     monkeypatch.setattr(research, "_target_specs", target_specs)
     layout = StorageLayout(project_root=tmp_path)
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -2087,7 +2087,7 @@ def test_rebuild_reuses_published_upstream_unless_explicitly_requested(
         )
         filesystem_write_bytes(manifest, b"{}")
 
-    failed = research.data_materialize(
+    failed = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -2149,7 +2149,7 @@ def test_csmar_dataset_action_discovers_nested_single_root(
         encoding="utf-8",
     )
 
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -2166,7 +2166,7 @@ def test_csmar_dataset_action_missing_target_is_blocked(tmp_path: Path) -> None:
     profile = research_profile()
     layout = StorageLayout(project_root=tmp_path)
     raw_root = tmp_path / "data" / "raw"
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -2190,7 +2190,7 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     profile = research_profile()
     layout = StorageLayout(project_root=tmp_path)
 
-    research_plan = research.research_run(
+    research_plan = operations.research_run(
         profile=profile,
         layout=layout,
         plan=True,
@@ -2200,13 +2200,13 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     assert not filesystem_exists(tmp_path / "data" / "runs")
     assert all(target["decision"] != "REUSE" for target in research_plan["targets"])
 
-    research_result = research.research_run(
+    research_result = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
     )
     run_id = research_result["run_id"]
-    report_plan = research.report_build(
+    report_plan = operations.report_build(
         profile=profile,
         layout=layout,
         run_id=run_id,
@@ -2215,7 +2215,7 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     assert research_result["status"] == "BLOCKED"
     assert report_plan["status"] == "BLOCKED"
     assert report_plan["target"]["decision"] == "BUILD"
-    report_result = research.report_build(
+    report_result = operations.report_build(
         profile=profile,
         layout=layout,
         run_id=run_id,
@@ -2231,12 +2231,12 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
         dataset_id="pv_all_report_artifact",
         run_id=run_id,
     )
-    other_run = research.research_run(
+    other_run = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
     )
-    other_report = research.report_build(
+    other_report = operations.report_build(
         profile=profile, layout=layout, run_id=other_run["run_id"]
     )
     other_root = layout.instance_root(
@@ -2266,19 +2266,19 @@ def test_research_and_report_terminals_are_honestly_blocked(tmp_path: Path) -> N
     assert record.status.value == "BLOCKED"
     assert record.run_id == run_id
     with pytest.raises(ValueError, match="research_run_profile_mismatch"):
-        research.report_build(
+        operations.report_build(
             profile=replace(profile, profile_id="different_profile"),
             layout=layout,
             run_id=run_id,
         )
     with pytest.raises(ValueError, match="invalid_run_id"):
-        research.report_build(
+        operations.report_build(
             profile=profile,
             layout=layout,
             run_id="../outside",
         )
 
-    rebuild = research.dataset_build(
+    rebuild = operations.dataset_build(
         profile=profile,
         layout=layout,
         dataset_id="pv_all",
@@ -2309,7 +2309,7 @@ def test_research_run_records_unexpected_failure_without_masking_primary(
 
     monkeypatch.setattr(research, "_plan_targets", interrupt)
     with pytest.raises(RuntimeError) as raised:
-        research.research_run(
+        operations.research_run(
             profile=profile,
             layout=layout,
             research_plan=research_configuration(
@@ -2330,12 +2330,12 @@ def test_research_run_records_unexpected_failure_without_masking_primary(
     monkeypatch.setattr(observations, "perf_counter", actual_clock)
 
     monkeypatch.setattr(
-        research,
+        operations,
         "write_research_run_record",
         lambda *_args, **_kwargs: (_ for _ in ()).throw(RuntimeError("secondary")),
     )
     with pytest.raises(RuntimeError) as secondary_raised:
-        research.research_run(
+        operations.research_run(
             profile=profile,
             layout=StorageLayout(project_root=tmp_path / "secondary"),
             research_plan=research_configuration(
@@ -2405,7 +2405,7 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
     profile = research_profile(CRYPTO_PROFILE_ID)
     request = dict(profile=profile, layout=StorageLayout(tmp_path), plan=True)
     with pytest.raises(TypeError, match="research_plan"):
-        research.research_run(**request)
+        operations.research_run(**request)
 
     configuration = research_configuration(
         "crypto",
@@ -2432,27 +2432,27 @@ def test_crypto_research_plan_is_explicit_immutable_and_holdout_locked(tmp_path)
         del bad[field]
         configuration["research_plan"] = bad
         with pytest.raises(ValueError, match="crypto_research_plan_fields_invalid"):
-            research.research_run(**request, research_plan=configuration)
+            operations.research_run(**request, research_plan=configuration)
     bad = _crypto_plan_payload()
     bad["folds"][0]["development_test"] = dict(bad["folds"][0]["validation"])
     configuration["research_plan"] = bad
     with pytest.raises(ValueError, match="crypto_research_plan_fold_invalid"):
-        research.research_run(**request, research_plan=configuration)
+        operations.research_run(**request, research_plan=configuration)
     bad = _crypto_plan_payload()
     bad["raw_root"] = "private/provider"
     configuration["research_plan"] = bad
     with pytest.raises(ValueError, match="crypto_research_plan_fields_invalid"):
-        research.research_run(**request, research_plan=configuration)
+        operations.research_run(**request, research_plan=configuration)
     bad = _crypto_plan_payload()
     bad["folds"][0]["validation"]["end"] = "1970-01-01T00:00:04.200000"
     configuration["research_plan"] = bad
     configuration["windows"]["development"] = dict(bad["folds"][0]["validation"])
     with pytest.raises(ValueError, match="crypto_research_plan_label_window_too_short"):
-        research.research_run(**request, research_plan=configuration)
+        operations.research_run(**request, research_plan=configuration)
     configuration["research_plan"] = _crypto_plan_payload()
     configuration["windows"]["development"] = dict(frozen["development_window"])
     with pytest.raises(PermissionError, match="holdout_frozen"):
-        research.research_run(**request, research_plan=configuration, holdout=True)
+        operations.research_run(**request, research_plan=configuration, holdout=True)
     valid = _crypto_plan_payload()
     for fold in valid["folds"]:
         for role in ("train", "validation"):
@@ -2640,7 +2640,7 @@ def test_target_local_validation_preserves_independent_production(
     )
     if phase == "reuse":
         priming = True
-        initial = research.data_materialize(**{**kwargs, "data_ids": (a,)})
+        initial = operations.data_materialize(**{**kwargs, "data_ids": (a,)})
         assert initial["status"] == "COMPLETE"
         priming = False
         calls.clear()
@@ -2651,7 +2651,7 @@ def test_target_local_validation_preserves_independent_production(
             content = bytearray(filesystem_read_bytes(part))
             content[4] ^= 1
             filesystem_write_bytes(part, bytes(content))
-        planned = research.data_materialize(**kwargs, plan=True)
+        planned = operations.data_materialize(**kwargs, plan=True)
         planned_target = next(
             item for item in planned["targets"] if item["target_id"] == a
         )
@@ -2669,11 +2669,11 @@ def test_target_local_validation_preserves_independent_production(
         monkeypatch.setattr(research, "inspect_dataset_session", inspect)
     if primary is not None:
         with pytest.raises(type(primary)) as raised:
-            research.data_materialize(**kwargs)
+            operations.data_materialize(**kwargs)
         assert raised.value is primary
         assert calls == [a]
         return
-    result = research.data_materialize(**kwargs)
+    result = operations.data_materialize(**kwargs)
     results = {item["target_id"]: item for item in result["target_results"]}
     assert result["status"] == ("FAILED" if phase == "build" else "BLOCKED")
     assert calls == ([a, c] if phase == "build" else [c])
@@ -2732,7 +2732,7 @@ def test_source_hash_failure_keeps_run_failure_semantics(
         research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
     )
     if failure == "missing":
-        result = research.research_run(**kwargs)
+        result = operations.research_run(**kwargs)
         calendar = next(
             item
             for item in result["target_results"]
@@ -2742,7 +2742,7 @@ def test_source_hash_failure_keeps_run_failure_semantics(
         assert calendar["reason"] == "source_identity_invalid"
     else:
         with pytest.raises(type(primary)) as caught:
-            research.research_run(**kwargs)
+            operations.research_run(**kwargs)
         assert caught.value is primary
     records = tuple(filesystem_glob(tmp_path / "data/runs/research", "*.json"))
     assert len(records) == 1
@@ -2773,7 +2773,7 @@ def test_partial_development_blocks_global_selection_without_blocking_shared_mod
         },
     )
     protocol = profile.protocol("pv_all")
-    plan = research.plan_targets(
+    plan = operations.plan_targets(
         profile=profile,
         action="research run",
         terminal_targets=protocol.terminal_targets("research run"),
@@ -2824,7 +2824,7 @@ def test_formal_prediction_dispatch_preserves_planned_window_and_identity(
     )
     config = research_configuration(development=(start, "2023-12-31"))
     layout = StorageLayout(project_root=tmp_path)
-    public_plan = research.research_run(
+    public_plan = operations.research_run(
         profile=base,
         layout=layout,
         research_plan=config,
@@ -2922,7 +2922,7 @@ def test_formal_prediction_dispatch_preserves_planned_window_and_identity(
     monkeypatch.setattr(
         research, "_validate_semantic_target_root", stop_at_reuse_reader
     )
-    result = research._execute_action(
+    result = operations._execute_action(
         profile=bound,
         protocol=protocol,
         action="research run",
@@ -3249,7 +3249,7 @@ def test_materialize_single_endpoint_matches_public_plan_and_execute(
     )
     native_frames = []
     for plan in (True, False):
-        result = research.data_materialize(**arguments, plan=plan)
+        result = operations.data_materialize(**arguments, plan=plan)
         assert result["status"] == "COMPLETE"
         if plan:
             assert result["research_window"] == expected
@@ -3307,7 +3307,7 @@ def test_materialize_rejects_invalid_single_endpoint_before_sources(
 ):
     for plan in (True, False):
         with pytest.raises(ValueError):
-            research.data_materialize(
+            operations.data_materialize(
                 profile=research_profile(),
                 layout=StorageLayout(tmp_path),
                 raw_root=tmp_path / "missing-raw",
@@ -3506,9 +3506,9 @@ def test_planner_reads_frozen_manifest_once_for_all_targets(tmp_path, monkeypatc
         terminal_targets=("pv_all",),
         layout=StorageLayout(tmp_path),
     )
-    expected = research.plan_targets(**arguments)
+    expected = operations.plan_targets(**arguments)
     monkeypatch.setattr(protocol_type, "manifest", observed)
-    actual = research.plan_targets(**arguments)
+    actual = operations.plan_targets(**arguments)
     assert actual == expected
     assert len(actual["targets"]) > 2
     # One frozen-state read and one final public manifest.
@@ -3529,7 +3529,7 @@ def test_dataset_run_keeps_declarations_but_has_no_model_preflight(
 
     monkeypatch.setattr(research, "preflight_model_specs", observed_preflight)
     layout = StorageLayout(tmp_path)
-    result = research.research_run(
+    result = operations.research_run(
         profile=research_profile(), layout=layout, research_plan=config
     )
     assert preflight_sizes == [0]
@@ -3548,7 +3548,7 @@ def test_dataset_run_keeps_declarations_but_has_no_model_preflight(
     assert len(saved["models"]) == len(config["models"])
     assert saved["portfolios"] == config["portfolios"]
     with pytest.raises(ValueError, match="holdout_requires_research_stage"):
-        research.research_run(
+        operations.research_run(
             profile=research_profile(),
             layout=layout,
             research_plan=config,

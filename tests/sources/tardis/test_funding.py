@@ -7,8 +7,11 @@ import pytest
 
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.sources import market_funding_identity, open_market_source
 from quant_research_platform.sources.binance.funding import read_funding_observations
+from quant_research_platform.sources.market import (
+    market_funding_identity,
+    open_market_source,
+)
 from quant_research_platform.sources.tardis.funding import import_funding_history
 from quant_research_platform.sources.tardis.raw import import_slices
 from quant_research_platform.sources.tardis.replay import open_tardis_archive

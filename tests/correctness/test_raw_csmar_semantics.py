@@ -22,6 +22,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
+from quant_research_platform.workflows import operations
 
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
@@ -827,7 +828,6 @@ def test_csmar_materialization_binds_inspected_content_to_plan(
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.layout import StorageLayout
     from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
-    from quant_research_platform.workflows import research
 
     layout = StorageLayout(tmp_path)
     source = tmp_path / "raw" / "csmar"
@@ -841,7 +841,7 @@ def test_csmar_materialization_binds_inspected_content_to_plan(
             original.splitlines()[0] + "\n",
             encoding="utf-8",
         )
-    built = research.data_materialize(
+    built = operations.data_materialize(
         profile=research_profile(),
         layout=layout,
         raw_root=source.parent,
@@ -1166,9 +1166,13 @@ def test_dirty_index_info_csv_preserves_semantics(tmp_path: Path) -> None:
         )
     ),
 )
-def test_index_info_unknown_enum_rejects_and_preserves_published(
-    tmp_path, column, maximum
+@pytest.mark.parametrize("chunksize", (1, 100))
+@pytest.mark.parametrize("all_unsupported", (False, True))
+def test_index_info_retains_supported_rows_and_discloses_exclusions(
+    tmp_path, column, maximum, chunksize, all_unsupported
 ):
+    import json
+
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.layout import StorageLayout
     from tests.helpers.a_share_raw import _write_csmar
@@ -1190,42 +1194,179 @@ def test_index_info_unknown_enum_rejects_and_preserves_published(
         Idxinfo09="5",
         Idxinfo10="formula",
     )
-    rows = [
+    supported = [
         dict(row, Indexcd=f"{number:06d}", **{column: value})
         for number, value in enumerate(["", *map(str, range(1, maximum + 1))])
     ]
-    extra = (
-        "Idxinfo03",
-        "Idxinfo04",
-        "Idxinfo05",
-        "Idxinfo06",
-        "Idxinfo07",
-        "Idxinfo08",
-        "Idxinfo09",
-        "Idxinfo10",
+    unsupported = [
+        dict(row, Indexcd=f"{100 + number:06d}", **{column: value})
+        for number, value in enumerate((str(maximum + 1), "unknown", "-9666", "1;2"))
+    ]
+    other_column = "Idxinfo06" if column == "Idxinfo05" else "Idxinfo05"
+    unsupported[0][other_column] = "unknown"
+    rows = (
+        unsupported
+        if all_unsupported
+        else [unsupported[0], *supported, *unsupported[1:], supported[0]]
+    )
+    extra = tuple(
+        name
+        for name in row
+        if name not in raw_exports.RAW_TABLE_CONTRACTS["index_info"].required_columns
     )
     _write_csmar(raw, "index_info", rows, extra_columns=extra)
+    raw_path = next(filesystem_glob(raw, "*.csv"))
+    original = filesystem_read_bytes(raw_path)
+    assert len(_collect_raw_export(raw_path, "index_info", chunksize=chunksize)) == len(
+        rows
+    )
+    if all_unsupported:
+        from quant_research_platform.workflows.research import _semantic_failure_code
+
+        with pytest.raises(
+            ValueError,
+            match="^no_supported_csmar_index_info_rows:raw_4:excluded_4:retained_0$",
+        ) as failure:
+            interim.materialize_interim_data(
+                layout=layout, data_ids=("index_info",), chunksize=chunksize
+            )
+        assert _semantic_failure_code(failure.value) == str(failure.value)
+        assert not filesystem_exists(layout.interim_data_root("csmar", "index_info"))
+        assert not tuple(filesystem_glob(tmp_path, "**/.a-*"))
+        assert filesystem_read_bytes(raw_path) == original
+        return
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=("index_info",), chunksize=chunksize
+    )
+    assert not result.skipped
+    root = result.artifact_roots["index_info"]
+    saved = read_dataset(root)
+    assert tuple(saved.columns) == interim.INDEX_INFO_INTERIM_COLUMNS
+    assert set(saved.source_asset_id) == {item["Indexcd"] for item in supported}
+    assert len(saved) == len(supported)
+    manifest = json.loads(
+        filesystem_read_text(root / "_manifest/manifest.json", encoding="utf-8")
+    )
+    retained = len(supported) + 1
+    assert manifest["producer_diagnostics"]["source_row_counts"] == {
+        "raw_rows": len(rows),
+        **{
+            f"unsupported_{name}_rows": 4
+            if name == column
+            else int(name == other_column)
+            for name in raw_exports.INDEX_INFO_SOURCE_CODE_COLUMNS
+        },
+        "excluded_unsupported_source_code_rows": 4,
+        "retained_before_date_filter_rows": retained,
+        "retained_after_date_filter_rows": retained,
+        "excluded_date_range_rows": 0,
+    }
+    assert manifest["producer_diagnostics"]["exact_duplicate_count"] == 1
+    assert filesystem_read_bytes(raw_path) == original
+
+
+@pytest.mark.parametrize("malformed", (False, True))
+def test_index_info_qualification_keeps_atomic_failure_and_old_good(
+    tmp_path, malformed
+):
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw, parents=True)
+    good = dict(
+        Indexcd="000905",
+        Idxinfo01="benchmark",
+        Idxinfo11="2014-01-02",
+        Idxinfo02="2013-12-31",
+        Idxinfo05="1",
+    )
+    _write_csmar(raw, "index_info", [good], extra_columns=("Idxinfo05",))
     result = interim.materialize_interim_data(layout=layout, data_ids=("index_info",))
     root = result.artifact_roots["index_info"]
     before = _file_bytes(root)
-    assert len(read_dataset(root)) == maximum + 1
-    for invalid in (str(maximum + 1), "unknown"):
-        _write_csmar(
-            raw, "index_info", [dict(row, **{column: invalid})], extra_columns=extra
+    _write_csmar(
+        raw,
+        "index_info",
+        [
+            good,
+            dict(good, Indexcd="000852", Idxinfo05="unknown", Idxinfo11="invalid-date"),
+        ],
+        extra_columns=("Idxinfo05",),
+    )
+    if malformed:
+        raw_path = next(filesystem_glob(raw, "*.csv"))
+        with raw_path.open("a", encoding="utf-8") as stream:
+            stream.write("broken,row\n")
+    candidate = StorageLayout(tmp_path / "candidate")
+    error = (
+        "malformed_csmar_csv_row" if malformed else "invalid_index_info_date:start_date"
+    )
+    with pytest.raises(ValueError, match=error):
+        interim.materialize_interim_data(
+            layout=candidate,
+            raw_root=raw,
+            data_ids=("index_info",),
+            chunksize=100 if malformed else 1,
         )
-        with pytest.raises(ValueError, match="^invalid_csmar_index_info_source_code$"):
-            interim.materialize_interim_data(
-                layout=StorageLayout(tmp_path / "candidate"),
-                raw_root=raw,
-                data_ids=("index_info",),
-            )
-        assert _file_bytes(root) == before
-        assert not filesystem_exists(
-            StorageLayout(tmp_path / "candidate").interim_data_root(
-                "csmar", "index_info"
+    assert _file_bytes(root) == before
+    assert len(read_dataset(root)) == 1
+    assert not filesystem_exists(candidate.interim_data_root("csmar", "index_info"))
+    assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
+
+
+@pytest.mark.parametrize("excluded_code", ("000905", "000852"))
+def test_index_info_excluded_required_benchmark_remains_blocked(
+    tmp_path, excluded_code
+):
+    from quant_research_platform.markets.implementations.a_share.benchmark import (
+        iter_benchmark_weight_snapshots,
+    )
+    from quant_research_platform.markets.implementations.a_share.ids import (
+        FORMAL_BENCHMARKS,
+    )
+    from quant_research_platform.storage.datasets.reading import read_dataset
+    from quant_research_platform.storage.layout import StorageLayout
+    from tests.helpers.a_share_raw import _write_csmar
+
+    layout = StorageLayout(tmp_path)
+    raw = layout.raw_source_root("csmar")
+    filesystem_mkdir(raw, parents=True)
+    rows = [
+        dict(
+            Indexcd=code,
+            Idxinfo01=name,
+            Idxinfo11="2014-01-02",
+            Idxinfo02="2013-12-31",
+            Idxinfo05="5" if code == excluded_code else "1",
+        )
+        for code, (_, name) in FORMAL_BENCHMARKS.items()
+    ]
+    _write_csmar(raw, "index_info", rows, extra_columns=("Idxinfo05",))
+    result = interim.materialize_interim_data(
+        layout=layout, data_ids=("index_info",), chunksize=1
+    )
+    saved = read_dataset(result.artifact_roots["index_info"])
+    assert set(saved.source_asset_id) == set(FORMAL_BENCHMARKS) - {excluded_code}
+    for code in FORMAL_BENCHMARKS:
+        weights = pd.DataFrame(
+            dict(
+                source_asset_id=[code],
+                constituent_asset_id=["000001"],
+                effective_date=["2020-01-02"],
+                weight=[1.0],
             )
         )
-        assert not tuple(filesystem_glob(tmp_path / "candidate", "**/.a-*"))
+        if code == excluded_code:
+            with pytest.raises(
+                ValueError, match="^a_share_benchmark_index_identity_invalid$"
+            ):
+                list(iter_benchmark_weight_snapshots(saved, [weights]))
+        else:
+            actual = pd.concat(iter_benchmark_weight_snapshots(saved, [weights]))
+            assert set(actual.benchmark_id) == {FORMAL_BENCHMARKS[code][0]}
 
 
 @pytest.mark.parametrize(
@@ -1714,7 +1855,6 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
 ):
     from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.workflows import research
 
     raw = tmp_path / "raw/csmar"
     filesystem_mkdir(raw, parents=True)
@@ -1731,7 +1871,7 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
     )
     normal_layout = StorageLayout(tmp_path / "normal")
     failed_layout = StorageLayout(tmp_path / "failed")
-    result = research.data_materialize(layout=normal_layout, **arguments)
+    result = operations.data_materialize(layout=normal_layout, **arguments)
     assert result["status"] == "COMPLETE"
     originals = _file_bytes(normal_layout.project_root)
     primary = failure_type("parent_failure")
@@ -1759,14 +1899,14 @@ def test_csmar_parent_failure_keeps_workflow_semantics(
         patch.setattr(interim, "require_unaliased_path", checked)
         patch.setattr(interim, "filesystem_stat", failed_stat)
         if failure_type in (FileNotFoundError, NotADirectoryError):
-            failed = research.data_materialize(layout=failed_layout, **arguments)
+            failed = operations.data_materialize(layout=failed_layout, **arguments)
             assert failed["status"] == "FAILED"
             assert failed["target_results"][0]["reason"] == (
                 "interim_build_failed:csmar_interim_source_parent_invalid"
             )
         else:
             with pytest.raises(failure_type) as caught:
-                research.data_materialize(layout=failed_layout, **arguments)
+                operations.data_materialize(layout=failed_layout, **arguments)
             assert caught.value is primary
     assert calls == [raw]
     assert _file_bytes(normal_layout.project_root) == originals
@@ -1998,7 +2138,6 @@ def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
     from quant_research_platform.profiles.research import research_profile
     from quant_research_platform.sources.csmar.field_mappings import COLUMN_MAPPINGS
     from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.workflows import research
     from tests.helpers.a_share_raw import _write_csmar
     from tests.helpers.research_configuration import research_configuration
 
@@ -2018,7 +2157,7 @@ def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
         ],
     )
     profile = research_profile()
-    result = research.research_run(
+    result = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=research_configuration(development=("2019-01-01", "2019-12-31")),
@@ -2035,7 +2174,7 @@ def test_csmar_date_reason_survives_research_run_record_and_report(tmp_path):
     )
     assert record.status.value == saved.status.value == "FAILED"
     assert saved.reason == expected
-    report = research.report_build(
+    report = operations.report_build(
         profile=profile, layout=layout, run_id=result["run_id"]
     )
     assert report["source_run_status"] == "FAILED"

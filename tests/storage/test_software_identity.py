@@ -169,7 +169,14 @@ def test_research_node_software_scope_preserves_upstreams_and_tracks_helpers(
             ),
         )
 
-    _, before_queries = identities()
+    before_package, before_queries = identities()
+    operations = package / "workflows/operations.py"
+    operations.write_bytes(
+        operations.read_bytes() + b"\n# Request observation and cleanup change.\n"
+    )
+    after_package, after_operations = identities()
+    assert after_package != before_package
+    assert after_operations == before_queries
     query = package / "interfaces/queries.py"
     query.write_bytes(query.read_bytes() + b"\n# Read-only projection change.\n")
     assert identities()[1] == before_queries
@@ -671,3 +678,97 @@ def test_software_payload_reuses_json_mapping_validation_and_independent_freeze(
     payload["dependency_versions"][BadKey()] = "1.0"
     with pytest.raises(ValueError, match="qrp_json_non_string_key"):
         ProductionSoftwareIdentity(payload, canonical_json_hash(native))
+
+
+@pytest.mark.parametrize(
+    ("source_relative", "changed_market"),
+    (
+        ("sources/csmar/interim.py", "a_share"),
+        ("sources/tardis/replay.py", "crypto"),
+        ("sources/market.py", "crypto"),
+    ),
+)
+def test_source_change_invalidates_only_consuming_market(
+    tmp_path, source_relative, changed_market
+):
+    import shutil
+
+    from quant_research_platform.profiles.research import (
+        bind_research_configuration,
+        research_profile,
+    )
+    from quant_research_platform.workflows import research
+    from tests.helpers.research_configuration import research_configuration
+
+    package = tmp_path / "package"
+    shutil.copytree(
+        Path(research.__file__).resolve().parents[1],
+        package,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    bindings = {}
+    for market in ("a_share", "crypto"):
+        config = research_configuration(
+            market, "core6" if market == "a_share" else "baseline"
+        )
+        profile = bind_research_configuration(
+            research_profile(config["profile_id"]),
+            config,
+            tardis_root=tmp_path / "tardis",
+        )
+        bindings[market] = tuple(profile.producer_bindings.values())
+
+    def identities():
+        software = _identity(package)
+        return {
+            market: tuple(
+                research._target_software_identity(binding, software)
+                for binding in selected
+            )
+            for market, selected in bindings.items()
+        }
+
+    before = identities()
+    changed = package / source_relative
+    changed.write_bytes(changed.read_bytes() + b"\n# Source decoding change.\n")
+    after = identities()
+    other = "crypto" if changed_market == "a_share" else "a_share"
+    assert after[changed_market] != before[changed_market]
+    assert after[other] == before[other]
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    (
+        (
+            'if holdout and research_plan["stage"] != "research":',
+            "if holdout:",
+        ),
+        (
+            "and not is_datetime_window(requested_window)",
+            "and is_datetime_window(requested_window)",
+        ),
+        ("data_ids=(spec.target_id,),", "data_ids=(),"),
+    ),
+)
+def test_scientific_preparation_and_production_remain_in_artifact_identity(
+    tmp_path, before, after
+):
+    import shutil
+
+    from quant_research_platform.profiles.research import research_profile
+    from quant_research_platform.workflows import research
+
+    package = tmp_path / "package"
+    shutil.copytree(
+        Path(research.__file__).resolve().parents[1],
+        package,
+        ignore=shutil.ignore_patterns("__pycache__", "*.pyc"),
+    )
+    binding = research_profile().producer_bindings["stock_master"]
+    original = research._target_software_identity(binding, _identity(package))
+    scientific = package / "workflows/research.py"
+    content = scientific.read_text(encoding="utf-8")
+    assert before in content
+    scientific.write_text(content.replace(before, after, 1), encoding="utf-8")
+    assert research._target_software_identity(binding, _identity(package)) != original

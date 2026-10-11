@@ -38,6 +38,8 @@ from quant_research_platform.sources.csmar.field_mappings import (
 from quant_research_platform.sources.csmar.fields import field_role
 from quant_research_platform.sources.csmar.ids import SOURCE_ID, market_bars_data_id
 from quant_research_platform.sources.csmar.raw_exports import (
+    INDEX_INFO_SOURCE_CODE_COLUMNS,
+    INDEX_INFO_SOURCE_CODE_ENUMS,
     _iter_dataset_file_identities,
     _verify_csmar_member_set,
     dataset_files_with_identity_by_id,
@@ -654,8 +656,25 @@ def normalize_raw_frame(
         if result["timestamp"].isna().any():
             raise ValueError("missing_index_info_effective_timestamp")
         result["source_asset_id"] = result["index_code"]
+        excluded = pd.Series(False, index=frame.index)
+        counts = {"raw_rows": len(frame)}
+        for column, allowed_values in zip(
+            INDEX_INFO_SOURCE_CODE_COLUMNS, INDEX_INFO_SOURCE_CODE_ENUMS, strict=True
+        ):
+            unsupported = pd.Series(False, index=frame.index)
+            if column in frame:
+                values = frame[column].astype("string")
+                unsupported = (
+                    values.notna() & values.ne("") & ~values.isin(allowed_values)
+                )
+            counts[f"unsupported_{column}_rows"] = int(unsupported.sum())
+            excluded |= unsupported
+        counts["excluded_unsupported_source_code_rows"] = int(excluded.sum())
+        counts["retained_before_date_filter_rows"] = int((~excluded).sum())
+        result = result.loc[~excluded].copy()
         result.sort_values(["source_asset_id", "timestamp"], inplace=True)
         result.reset_index(drop=True, inplace=True)
+        result.attrs["source_row_counts"] = counts
         return result
     if data_id == "index_market":
         result = mapped
@@ -1076,7 +1095,7 @@ def materialize_interim_data(
             diagnostics["exact_duplicate_count"] = 0
             metadata["producer_diagnostics"] = diagnostics
             source_row_counts = None
-            if data_id == "analyst_forecast":
+            if data_id in {"analyst_forecast", "index_info"}:
                 source_row_counts = {}
                 diagnostics["source_row_counts"] = source_row_counts
             frames = _iter_interim_frames(
@@ -1124,6 +1143,8 @@ def _iter_normalized_interim_frames(
     source_row_counts: dict[str, int] | None = None,
 ) -> Iterator[object]:
     primary_key = interim_catalog().get(data_id).primary_key
+    if source_row_counts is None:
+        source_row_counts = {}
     exact_duplicate_count = 0
     for input in input_files:
         input_file, expected_identity = (
@@ -1177,17 +1198,24 @@ def _iter_normalized_interim_frames(
                         pruned = pruned.iloc[positions].reset_index(drop=True)
                     del positions
                 if counts is not None:
-                    if source_row_counts is not None:
-                        for key, count in counts.items():
-                            source_row_counts[key] = (
-                                source_row_counts.get(key, 0) + count
-                            )
+                    for key, count in counts.items():
+                        source_row_counts[key] = source_row_counts.get(key, 0) + count
                 if skip_duplicate or pruned.empty and data_id != "analyst_forecast":
                     continue
                 try:
                     yield pruned
                 except GeneratorExit:
                     return
+    if (
+        data_id == "index_info"
+        and source_row_counts
+        and source_row_counts["retained_before_date_filter_rows"] == 0
+    ):
+        count = source_row_counts["raw_rows"]
+        raise ValueError(
+            f"no_supported_csmar_index_info_rows:raw_{count}:"
+            f"excluded_{count}:retained_0"
+        )
 
 
 def _transform_interim_chunk(

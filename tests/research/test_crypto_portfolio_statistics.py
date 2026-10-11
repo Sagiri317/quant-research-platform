@@ -576,7 +576,7 @@ def test_independent_statistics_keep_returns_per_episode_and_reject_combined_nav
         unmeasured_operation_evidence,
     )
     from quant_research_platform.interfaces.queries import portfolio_curve
-    from quant_research_platform.workflows.research import report_build
+    from quant_research_platform.workflows.operations import report_build
 
     plan = _statistics_plan()
     plan["execution"]["backtest_modes"] = ["continuous", "independent_segments"]

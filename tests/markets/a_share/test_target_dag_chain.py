@@ -20,7 +20,7 @@ from quant_research_platform.sources.csmar.interim import (
 from quant_research_platform.storage.datasets import read_dataset
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations, research
 
 
 @pytest.mark.parametrize("scenario", ["pv_all", "pv_expanded"])
@@ -66,7 +66,7 @@ def test_a_share_target_dag_builds_market_labels_and_eligible_dataset(
     }
     profile = replace(base, producer_bindings={**base.producer_bindings, **bindings})
     layout = StorageLayout(project_root=tmp_path)
-    result = research.dataset_build(
+    result = operations.dataset_build(
         profile=profile,
         layout=layout,
         dataset_id=scenario,
@@ -141,7 +141,7 @@ def test_fundamental_pit_and_factors_reach_the_same_target_dag(tmp_path: Path) -
         for data_id in frames
     }
     profile = replace(base, producer_bindings={**base.producer_bindings, **bindings})
-    result = research.dataset_build(
+    result = operations.dataset_build(
         profile=profile,
         layout=StorageLayout(project_root=tmp_path),
         dataset_id="fusion_nf_core",
@@ -220,7 +220,7 @@ def test_negative_source_capex_propagates_through_native_pit_and_factor_revision
     profile = _windowed_source_profile(frames, [])
     layout = StorageLayout(tmp_path)
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", 6)
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=tmp_path / "synthetic-raw",
@@ -631,13 +631,13 @@ def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(
         end_date=str(requested[-1].date()),
         data_ids=targets,
     )
-    plan = research.data_materialize(**arguments, plan=True)
+    plan = operations.data_materialize(**arguments, plan=True)
     assert plan["status"] == "COMPLETE"
     assert len({entry["target_id"] for entry in plan["targets"]}) == len(
         plan["targets"]
     )
     assert not calls and (not tuple(tmp_path.rglob("manifest.json")))
-    first = research.data_materialize(**arguments)
+    first = operations.data_materialize(**arguments)
     assert first["status"] == "COMPLETE", first["blockers"]
     result = {entry["target_id"]: entry for entry in first["target_results"]}
     assert len(result) == len(first["target_results"])
@@ -707,7 +707,7 @@ def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(
         assert actual.timestamp.min() == requested[0]
         assert actual.timestamp.max() == requested[-1]
     before_reuse = tuple(calls)
-    second = research.data_materialize(**arguments)
+    second = operations.data_materialize(**arguments)
     assert second["status"] == "COMPLETE"
     assert all(entry["status"] == "REUSED" for entry in second["target_results"])
     assert tuple(calls) == before_reuse
@@ -715,7 +715,7 @@ def test_public_narrow_build_keeps_mixed_terminal_windows_lineage_and_reuse(
         entry["target_id"]: entry["instance_identity"]
         for entry in second["target_results"]
     } == {key: entry["instance_identity"] for key, entry in result.items()}
-    dataset = research.dataset_build(
+    dataset = operations.dataset_build(
         profile=profile,
         layout=layout,
         dataset_id="pv_all",
@@ -773,7 +773,7 @@ def test_internal_history_failure_blocks_exact_dependent_without_hiding_failure(
             "market_panel_1d": replace(binding, producer=produce_panel),
         },
     )
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=StorageLayout(tmp_path),
         raw_root=tmp_path / "raw",
@@ -817,9 +817,9 @@ def test_mixed_window_rebuild_reports_each_instance_and_preserves_old_good(
         end_date=str(requested[-1].date()),
         data_ids=("market_panel_1d", "price_volume_facts"),
     )
-    initial = research.data_materialize(**arguments)
+    initial = operations.data_materialize(**arguments)
     assert initial["status"] == "COMPLETE"
-    plan = research.data_materialize(**arguments, plan=True)
+    plan = operations.data_materialize(**arguments, plan=True)
     targets = {entry["target_id"]: entry for entry in plan["targets"]}
     core_identity = targets["market_panel_1d"]["requested_identity"]
     history_identity = targets["price_volume_facts"]["upstream_identities"][
@@ -867,7 +867,7 @@ def test_mixed_window_rebuild_reports_each_instance_and_preserves_old_good(
 
     monkeypatch.setattr(research, "_build_target", altered_build)
     monkeypatch.setattr(producer, "_compute_processed_frame", altered_compute)
-    rebuilt = research.data_materialize(**arguments, rebuild=True)
+    rebuilt = operations.data_materialize(**arguments, rebuild=True)
     assert rebuilt["status"] == "FAILED"
     evidence = [
         entry
@@ -901,7 +901,7 @@ def test_mixed_window_interruption_preserves_completed_public_result_sink(
     monkeypatch.setattr(research, "_build_target", interrupt_factor)
     sink = {}
     with pytest.raises(KeyboardInterrupt) as caught:
-        research._execute_action(
+        operations._execute_action(
             profile=profile,
             protocol=profile.protocol(
                 scenario_id=research._default_scenario_id(profile),
@@ -969,7 +969,7 @@ def test_public_narrow_panel_retains_preceding_suspension_state(tmp_path, barrie
     layout = StorageLayout(tmp_path)
     outputs = []
     for start in (dates[0], dates[3]):
-        result = research.data_materialize(
+        result = operations.data_materialize(
             profile=profile,
             layout=layout,
             raw_root=tmp_path / "raw",
@@ -1027,7 +1027,7 @@ def test_public_panel_keeps_calendar_endpoints_without_market_bars(
         bars.loc[bars.timestamp.eq(dates[1]), "filling_flag"] = 2
     profile = _windowed_source_profile(frames, [])
     layout = StorageLayout(tmp_path)
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=tmp_path / "raw",
@@ -1101,7 +1101,7 @@ def test_market_model_keeps_only_known_closed_history_and_aligned_returns(
     profile = _windowed_source_profile(frames, [])
     layout = StorageLayout(tmp_path)
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=tmp_path / "raw",
@@ -1227,7 +1227,7 @@ def test_listing_age_keeps_prior_market_sessions_in_native_narrow_panel(
     profile = _windowed_source_profile(frames, [])
     layout = StorageLayout(tmp_path)
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=tmp_path / "raw",
@@ -1286,7 +1286,7 @@ def test_closed_source_market_event_survives_native_projection_and_unknown_barri
     profile = _windowed_source_profile(frames, [])
     layout = StorageLayout(tmp_path)
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=tmp_path / "raw",
@@ -1348,7 +1348,7 @@ def test_public_panel_keeps_market_changes_across_closed_and_missing_slabs(
     profile = _windowed_source_profile(frames, [])
     layout = StorageLayout(tmp_path)
     monkeypatch.setattr(producer, "DEFAULT_BATCH_ROWS", block_rows)
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=tmp_path / "raw",
@@ -1397,7 +1397,7 @@ def test_public_expectations_window_preserves_fresh_preceding_forecasts(tmp_path
     layout = StorageLayout(tmp_path)
     outputs = []
     for start in (dates[0], dates[2]):
-        result = research.data_materialize(
+        result = operations.data_materialize(
             profile=profile,
             layout=layout,
             raw_root=tmp_path / "raw",
@@ -1475,7 +1475,7 @@ def test_optional_source_absence_is_bound_and_changes_identity_when_present(tmp_
     )
 
     def run(data_id, *, plan=False):
-        return research.data_materialize(
+        return operations.data_materialize(
             profile=profile,
             layout=layout,
             raw_root=tmp_path / "raw",
@@ -1538,7 +1538,7 @@ def test_optional_source_only_absence_is_qualified(tmp_path, failure):
     profile = replace(
         profile, producer_bindings={**profile.producer_bindings, key: binding}
     )
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=StorageLayout(tmp_path),
         raw_root=tmp_path / "raw",

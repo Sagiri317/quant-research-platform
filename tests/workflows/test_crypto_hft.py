@@ -57,7 +57,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations, research
 from tests.helpers.binance_hft import hft_research_plan
 from tests.helpers.research_acceptance import run_crypto_acceptance
 from tests.helpers.research_configuration import research_configuration
@@ -306,7 +306,6 @@ def crypto_baseline(tmp_path_factory):
         research_profile,
     )
     from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.workflows import research
 
     layout = StorageLayout(tmp_path_factory.mktemp("crypto-baseline") / "project")
     raw = layout.project_root / "raw/recorder"
@@ -471,7 +470,7 @@ def _no_crypto_fit(*args, **kwargs):
 def _reuse_crypto_run(case, monkeypatch):
     with monkeypatch.context() as patch:
         patch.setattr(fitting, "_fit_model_result", _no_crypto_fit)
-        return research.research_run(
+        return operations.research_run(
             profile=case.profile,
             layout=case.layout,
             raw_root=case.raw,
@@ -614,7 +613,7 @@ def test_crypto_frozen_reuse_never_refits(crypto_case, monkeypatch):
 
     with monkeypatch.context() as patch:
         patch.setattr(fitting, "_fit_model_result", _no_crypto_fit)
-        reused = research.research_run(
+        reused = operations.research_run(
             profile=case.profile,
             layout=case.layout,
             raw_root=case.raw,
@@ -676,14 +675,14 @@ def test_crypto_execution_mode_and_fee_identities(crypto_case, monkeypatch):
     ]
     with monkeypatch.context() as patch:
         patch.setattr(fitting, "_fit_model_result", _no_crypto_fit)
-        mode_development = research.research_run(
+        mode_development = operations.research_run(
             profile=case.profile,
             layout=case.layout,
             raw_root=case.raw,
             research_plan=mode_configuration,
         )
         assert mode_development["status"] == "COMPLETE"
-        mode_run = research.research_run(
+        mode_run = operations.research_run(
             profile=case.profile,
             layout=case.layout,
             raw_root=case.raw,
@@ -782,7 +781,7 @@ def test_crypto_missing_execution_preserves_outputs(tmp_path):
     plan = hft_research_plan()
     before = _project_bytes(tmp_path)
     with pytest.raises(PortfolioTargetBlocked, match="^crypto_execution_plan_missing$"):
-        research.research_run(
+        operations.research_run(
             profile=research_profile(CRYPTO_PROFILE_ID),
             layout=layout,
             raw_root=tmp_path / "raw",
@@ -808,7 +807,7 @@ def test_crypto_funding_qualification_is_asset_scoped(crypto_case, monkeypatch):
     try:
         with monkeypatch.context() as patch:
             patch.setattr(fitting, "_fit_model_result", _no_crypto_fit)
-            missing_eth = research.research_run(
+            missing_eth = operations.research_run(
                 profile=case.profile,
                 layout=case.layout,
                 raw_root=case.raw,
@@ -867,7 +866,7 @@ def incomplete_funding_case(crypto_case, monkeypatch):
     try:
         with monkeypatch.context() as patch:
             patch.setattr(fitting, "_fit_model_result", _no_crypto_fit)
-            incomplete_run = research.research_run(
+            incomplete_run = operations.research_run(
                 profile=case.profile,
                 layout=case.layout,
                 raw_root=case.raw,
@@ -1033,7 +1032,7 @@ def test_crypto_insufficient_maker_calibration_is_scoped(crypto_case, monkeypatc
         },
     }
     before_insufficient_trials = _trial_records(case.layout.project_root)
-    insufficient_development = research.research_run(
+    insufficient_development = operations.research_run(
         profile=case.profile,
         layout=case.layout,
         raw_root=case.raw,
@@ -1046,7 +1045,7 @@ def test_crypto_insufficient_maker_calibration_is_scoped(crypto_case, monkeypatc
         ),
     )
     assert insufficient_development["status"] == "COMPLETE"
-    insufficient = research.research_run(
+    insufficient = operations.research_run(
         profile=case.profile,
         layout=case.layout,
         raw_root=case.raw,
@@ -1111,7 +1110,6 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(
         CRYPTO_PROFILE_ID,
         research_profile,
     )
-    from quant_research_platform.workflows import research
     from tests.helpers.binance_hft import (
         write_binance_hft_run,
         write_hft_funding_fixture,
@@ -1197,14 +1195,14 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(
             }:
                 portfolios.append(item)
         configuration["portfolios"] = portfolios
-        development = research.research_run(
+        development = operations.research_run(
             profile=profile,
             layout=layout,
             raw_root=raw,
             research_plan=configuration,
         )
         assert development["status"] == "COMPLETE"
-        result = research.research_run(
+        result = operations.research_run(
             profile=profile,
             layout=layout,
             raw_root=raw,
@@ -1226,7 +1224,7 @@ def test_future_source_gap_preserves_maker_prefix_through_research_and_report(
 
         with monkeypatch.context() as check:
             check.setattr(portfolio_ledger, "_iter_batches", count_batches)
-            report = research.report_build(
+            report = operations.report_build(
                 profile=profile, layout=layout, run_id=result["run_id"]
             )
         assert scanned and len(scanned) == len(set(scanned))
@@ -1328,7 +1326,7 @@ def _tardis_cross_midnight_case(tmp_path, gap_kind):
         CRYPTO_PROFILE_ID,
         research_profile,
     )
-    from quant_research_platform.sources import open_market_source
+    from quant_research_platform.sources.market import open_market_source
     from quant_research_platform.sources.tardis.funding import import_funding_history
     from quant_research_platform.sources.tardis.raw import import_slices
     from tests.helpers.binance_hft import write_binance_hft_run
@@ -1452,7 +1450,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
     raw, layout, profile, configuration = _tardis_cross_midnight_case(
         tmp_path, gap_kind
     )
-    result = research.research_run(
+    result = operations.research_run(
         profile=profile,
         layout=layout,
         raw_root=raw,
@@ -1463,7 +1461,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
     assert all(target["status"] == "BUILT" for target in targets.values())
     assert f"{HFT_RESEARCH_DATASET_ID}_predictions" not in targets
     assert not any(key.endswith("_ledger") for key in targets)
-    report = research.report_build(
+    report = operations.report_build(
         profile=profile, layout=layout, run_id=result["run_id"]
     )
     assert report["target_result"]["status"] == "BUILT"
@@ -1481,7 +1479,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
         for path in _trial_records(layout.project_root)
     }
     development = read_research_run_record(layout.research_run_path(result["run_id"]))
-    held = research.research_run(
+    held = operations.research_run(
         profile=profile,
         layout=layout,
         raw_root=raw,
@@ -1523,7 +1521,7 @@ def test_tardis_cross_midnight_development_and_frozen_holdout(
         assert (
             held_targets[f"{HFT_RESEARCH_DATASET_ID}_predictions"]["status"] == "BUILT"
         )
-    held_report = research.report_build(
+    held_report = operations.report_build(
         profile=profile, layout=layout, run_id=held["run_id"]
     )
     assert held_report["target_result"]["status"] == "BUILT"

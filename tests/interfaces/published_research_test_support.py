@@ -47,14 +47,16 @@ from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact,
     write_semantic_artifact,
 )
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations, research
 
-_FORBIDDEN_ACTIONS = (
-    "plan_targets",
+_FORBIDDEN_SCIENTIFIC_ACTIONS = (
     "_plan_targets",
-    "_execute_action",
     "preflight_model_specs",
     "_default_raw_root",
+)
+_FORBIDDEN_OPERATIONS = (
+    "plan_targets",
+    "_execute_action",
     "data_materialize",
     "dataset_build",
     "research_run",
@@ -140,8 +142,12 @@ def check_published_evidence_views(
     original_profile = api_module.research_profile
 
     with monkeypatch.context() as patch:
-        for name in _FORBIDDEN_ACTIONS:
-            patch.setattr(research, name, _forbidden)
+        for owner, names in (
+            (research, _FORBIDDEN_SCIENTIFIC_ACTIONS),
+            (operations, _FORBIDDEN_OPERATIONS),
+        ):
+            for name in names:
+                patch.setattr(owner, name, _forbidden)
         patch.setattr(report_artifact, "render_research_report", _forbidden)
         patch.setattr(
             api_module,
@@ -370,13 +376,16 @@ def _execute_notebook(
         "import sys\nfrom pathlib import Path\nfrom dataclasses import replace\n"
         "from unittest.mock import patch\n"
         "from quant_research_platform.workflows import research as guarded_workflow\n"
+        "from quant_research_platform.workflows import operations as guarded_ops\n"
         "from quant_research_platform.artifacts import research as guarded_report\n"
         "from quant_research_platform.profiles import research as guarded_profiles\n"
         "def forbidden(*args, **kwargs):\n"
         "    raise AssertionError('notebook_started_work')\n"
         f"assert Path(sys.executable).resolve() == Path({sys.executable!r}).resolve()\n"
         "guards = [patch.object(guarded_workflow, name, forbidden) "
-        f"for name in {_FORBIDDEN_ACTIONS!r}]\n"
+        f"for name in {_FORBIDDEN_SCIENTIFIC_ACTIONS!r}]\n"
+        "guards.extend(patch.object(guarded_ops, name, forbidden) "
+        f"for name in {_FORBIDDEN_OPERATIONS!r})\n"
         "guards.append(patch.object(guarded_report, "
         "'render_research_report', forbidden))\n"
         "for guard in guards:\n    guard.start()\n"

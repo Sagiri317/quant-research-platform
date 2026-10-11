@@ -60,14 +60,14 @@ def test_query_owner_has_no_workflow_or_source_traversal(import_edges):
 
 def test_public_action_reference_check_accepts_import_aliases():
     expected = {
-        "quant_research_platform.workflows.research.data_materialize",
+        "quant_research_platform.workflows.operations.data_materialize",
         "quant_research_platform.interfaces.queries.status",
     }
     for source in (
-        "from quant_research_platform.workflows import research\n"
+        "from quant_research_platform.workflows import operations\n"
         "from quant_research_platform.interfaces import queries\n"
-        "research.data_materialize()\nqueries.status()",
-        "from quant_research_platform.workflows.research "
+        "operations.data_materialize()\nqueries.status()",
+        "from quant_research_platform.workflows.operations "
         "import data_materialize as build\n"
         "from quant_research_platform.interfaces import queries as read\n"
         "build()\nread.status()",

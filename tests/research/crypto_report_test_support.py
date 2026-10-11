@@ -16,7 +16,7 @@ from quant_research_platform.storage.identity import (
     filesystem_write_bytes,
     filesystem_write_text,
 )
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 
 
 def check_crypto_report_lifecycle(
@@ -32,13 +32,13 @@ def check_crypto_report_lifecycle(
 
     report_target = f"{HFT_RESEARCH_DATASET_ID}_report_artifact"
     logical = layout.semantic_artifact_root("crypto", report_target)
-    report = research.report_build(
+    report = operations.report_build(
         profile=profile, layout=layout, run_id=reused_run["run_id"]
     )
     assert (
         report["status"] == "COMPLETE" and report["target_result"]["status"] == "BUILT"
     )
-    again = research.report_build(
+    again = operations.report_build(
         profile=profile, layout=layout, run_id=reused_run["run_id"]
     )
     assert again["target_result"]["status"] == "REUSED"
@@ -59,7 +59,7 @@ def check_crypto_report_lifecycle(
     with monkeypatch.context() as failure:
         failure.setattr(report_artifact, "write_json_evidence", evidence)
         with pytest.raises(KeyboardInterrupt) as raised:
-            research.report_build(
+            operations.report_build(
                 profile=profile, layout=layout, run_id=blocked_run["run_id"]
             )
         assert raised.value is primary
@@ -67,7 +67,7 @@ def check_crypto_report_lifecycle(
         path.name for path in filesystem_iterdir(logical / "instances")
     } == instances
     assert files(old_root) == before
-    partial = research.report_build(
+    partial = operations.report_build(
         profile=profile, layout=layout, run_id=blocked_run["run_id"]
     )
     assert (
@@ -89,7 +89,7 @@ def check_crypto_report_lifecycle(
     changed.pop("producer_diagnostics")
     filesystem_write_text(metadata, json.dumps(changed), encoding="utf-8")
     try:
-        failed = research.report_build(
+        failed = operations.report_build(
             profile=profile, layout=layout, run_id=complete_run["run_id"]
         )
         assert (

@@ -18,6 +18,7 @@ from quant_research_platform.artifacts.portfolio_ledger import (
 from quant_research_platform.artifacts.research import (
     read_research_report_artifact,
     read_research_run_record,
+    write_research_run_record,
 )
 from quant_research_platform.artifacts.statistics import read_statistics_artifact
 from quant_research_platform.catalog.datasets import ResearchDatasetCatalog
@@ -74,7 +75,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations, research
 from tests.helpers.portfolio_ledger import CONTINUOUS_EXECUTION_COLUMNS, session_frame
 from tests.helpers.research_configuration import (
     A_SHARE_MODEL_ALGORITHMS,
@@ -870,7 +871,7 @@ def _build_holdout_development(tmp_path):
         )
         filesystem_mkdir(marker.parent, parents=True, exist_ok=True)
         filesystem_write_bytes(marker, spec.data_id.encode())
-    development = research.research_run(
+    development = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=configuration,
@@ -1004,7 +1005,7 @@ def _build_holdout_baseline(case, monkeypatch):
         holdout=True,
         development_run_id=development["run_id"],
     )
-    planned = research.research_run(**request, plan=True)
+    planned = operations.research_run(**request, plan=True)
     model_plan = next(
         item
         for item in planned["targets"]
@@ -1013,7 +1014,7 @@ def _build_holdout_baseline(case, monkeypatch):
     assert model_plan["decision"] == "REUSE"
     assert model_plan["upstream_target_ids"] == []
     assert model_plan["requested_identity"] == source_model.instance_identity
-    holdout = research.research_run(**request)
+    holdout = operations.research_run(**request)
     assert holdout["status"] == "COMPLETE", holdout
     assert len(loaded_sources) == 2 * model_count
     assert len(set(loaded_sources)) == len(loaded_sources)
@@ -1168,19 +1169,19 @@ def test_holdout_preflight_rejects_invalid_frozen_development(
     )
     changed_ridge["parameter_candidates"][0]["regularization_strength"] = 0.2
     with pytest.raises(ValueError, match="holdout_development_run_invalid"):
-        research.research_run(
+        operations.research_run(
             **{**request, "research_plan": actual_candidate_change}, plan=True
         )
     with pytest.raises(
         PermissionError, match="holdout_frozen_development_identity_unavailable"
     ):
-        research.research_run(**{**request, "development_run_id": None}, plan=True)
+        operations.research_run(**{**request, "development_run_id": None}, plan=True)
     with pytest.raises(ValueError, match="dataset_metadata_file_invalid"):
-        research.research_run(
+        operations.research_run(
             **{**request, "development_run_id": "run_missing"}, plan=True
         )
     with pytest.raises(ValueError, match="holdout_development_run_invalid"):
-        research.research_run(
+        operations.research_run(
             **{
                 **request,
                 "research_plan": compact_a_share_configuration(name="fusion_nf_core"),
@@ -1193,11 +1194,9 @@ def test_holdout_preflight_rejects_invalid_frozen_development(
         trial_ledgers=(),
         terminal_targets=development_record.terminal_targets[:1],
     )
-    research.write_research_run_record(
-        layout.research_run_path(incomplete.run_id), incomplete
-    )
+    write_research_run_record(layout.research_run_path(incomplete.run_id), incomplete)
     with pytest.raises(ValueError, match="holdout_development_run_invalid"):
-        research.research_run(
+        operations.research_run(
             **{**request, "development_run_id": incomplete.run_id}, plan=True
         )
     wrong_reference = replace(
@@ -1211,11 +1210,11 @@ def test_holdout_preflight_rejects_invalid_frozen_development(
             for item in development_record.target_results
         ),
     )
-    research.write_research_run_record(
+    write_research_run_record(
         layout.research_run_path(wrong_reference.run_id), wrong_reference
     )
     with pytest.raises(ValueError, match="research_run_target_reference_invalid"):
-        research.research_run(
+        operations.research_run(
             **{**request, "development_run_id": wrong_reference.run_id}, plan=True
         )
     from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
@@ -1227,10 +1226,10 @@ def test_holdout_preflight_rejects_invalid_frozen_development(
         from quant_research_platform.research.portfolios import production
 
         preflight.setattr(accounting, "frozen_alpha_calibration", unavailable_alpha)
-        preflight.setattr(research, "_execute_action", forbidden)
-        planned_block = research.research_run(**request, plan=True)
+        preflight.setattr(operations, "_execute_action", forbidden)
+        planned_block = operations.research_run(**request, plan=True)
         assert planned_block["status"] == "BLOCKED" and "run_id" not in planned_block
-        blocked = research.research_run(**request)
+        blocked = operations.research_run(**request)
     blocked_record = read_research_run_record(
         layout.research_run_path(blocked["run_id"])
     )
@@ -1386,7 +1385,9 @@ def test_holdout_frozen_alpha_schedules_and_report(holdout_case, tmp_path, monke
             > by_schedule["monthly-last-trading-day"][0]
             >= 6
         )
-    report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
+    report = operations.report_build(
+        profile=profile, layout=layout, run_id=record.run_id
+    )
     assert (
         report["report"]["sections"]["development vs holdout"]["requested_access"]
         == "holdout"
@@ -1439,13 +1440,13 @@ def test_holdout_reuse_survives_operational_and_future_data_changes(
         },
     )
     request = {**request, "profile": profile}
-    reused = research.research_run(**request)
+    reused = operations.research_run(**request)
     assert reused["status"] == "COMPLETE", reused
     reused_record = read_research_run_record(layout.research_run_path(reused["run_id"]))
     assert {
         item.target_id: item.instance_identity for item in reused_record.target_results
     } == {item.target_id: item.instance_identity for item in record.target_results}
-    new_development = research.research_run(
+    new_development = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=configuration,
@@ -1465,7 +1466,7 @@ def test_holdout_reuse_survives_operational_and_future_data_changes(
         item.target_id: item.instance_identity
         for item in holdout_case.development_record.target_results
     }
-    rebound = research.research_run(
+    rebound = operations.research_run(
         **{**request, "development_run_id": new_development["run_id"]}, plan=True
     )
     assert rebound["status"] == "COMPLETE"
@@ -1493,7 +1494,7 @@ def test_holdout_reuse_survives_operational_and_future_data_changes(
     monkeypatch.setattr(
         research, "production_software_identity", lambda: operational_software
     )
-    operational = research.research_run(**request)
+    operational = operations.research_run(**request)
     assert operational["status"] == "COMPLETE", operational
     operational_record = read_research_run_record(
         layout.research_run_path(operational["run_id"])
@@ -1517,7 +1518,7 @@ def test_holdout_reuse_survives_operational_and_future_data_changes(
         research, "production_software_identity", lambda: corrected_software
     )
     producer_inputs.clear()
-    corrected = research.research_run(
+    corrected = operations.research_run(
         **{**request, "development_run_id": new_development["run_id"]}
     )
     assert corrected["status"] == "COMPLETE", corrected
@@ -1566,7 +1567,7 @@ def test_holdout_reuse_survives_operational_and_future_data_changes(
         ),
         check_exact=True,
     )
-    corrected_report = research.report_build(
+    corrected_report = operations.report_build(
         profile=profile, layout=layout, run_id=corrected_record.run_id
     )
     assert (
@@ -1687,7 +1688,7 @@ def _build_both_groups_baseline(tmp_path, monkeypatch):
         "bind_research_configuration",
         lambda selected, configuration, **kwargs: selected,
     )
-    planned = research.plan_targets(
+    planned = operations.plan_targets(
         profile=profile,
         action="research run",
         terminal_targets=profile.protocol("pv_all").terminal_targets("research run"),
@@ -1695,7 +1696,7 @@ def _build_both_groups_baseline(tmp_path, monkeypatch):
         scenario_id="pv_all",
         research_window=request,
     )
-    result = research.research_run(
+    result = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=configuration,
@@ -2211,7 +2212,7 @@ def test_both_groups_reuse_and_changed_plan_identity(
     protocol = both_groups_case.protocol
     prediction_id = both_groups_case.prediction_id
     portfolio_ids = both_groups_case.portfolio_ids
-    reused = research.research_run(
+    reused = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=configuration,
@@ -2233,7 +2234,7 @@ def test_both_groups_reuse_and_changed_plan_identity(
         item["target_id"]: item["instance_identity"]
         for item in reused["target_results"]
     }
-    changed = research.plan_targets(
+    changed = operations.plan_targets(
         profile=profile,
         action="research run",
         terminal_targets=protocol.terminal_targets("research run"),
@@ -2354,7 +2355,7 @@ def test_native_ledger_report_and_published_views(
                 AssertionError("report read raw")
             ),
         )
-        report_result = research.report_build(
+        report_result = operations.report_build(
             profile=profile,
             layout=layout,
             run_id=result["run_id"],
@@ -2472,7 +2473,7 @@ def test_native_ledger_report_and_published_views(
     ) = None
 
     other_record = replace(record, run_id="run_published_views", trial_ledgers=())
-    research.write_research_run_record(
+    write_research_run_record(
         layout.research_run_path(other_record.run_id), other_record
     )
     from tests.interfaces.published_research_test_support import (
@@ -2492,7 +2493,7 @@ def test_native_ledger_report_and_published_views(
     saved_statistics_manifest = statistics_root / "manifest.saved"
     filesystem_rename(statistics_manifest, saved_statistics_manifest)
     try:
-        damaged_report = research.report_build(
+        damaged_report = operations.report_build(
             profile=profile,
             layout=layout,
             run_id=other_record.run_id,
@@ -2569,7 +2570,7 @@ def test_holdout_plan_shares_native_model_and_all_trial_snapshots(
 
     monkeypatch.setattr(research, "read_quarterly_model_artifact", read)
     monkeypatch.setattr(research, "_plan_targets", plan)
-    result = research.research_run(**holdout_case.request, plan=True)
+    result = operations.research_run(**holdout_case.request, plan=True)
     assert result["status"] == "COMPLETE"
     assert reads == {holdout_case.model_root: 1}
     (sessions,) = captured
@@ -2630,7 +2631,7 @@ def test_holdout_plan_rejects_changes_after_frozen_preflight(
         return native_plan(**kwargs)
 
     monkeypatch.setattr(research, "_plan_targets", plan)
-    result = research.research_run(**holdout_case.request, plan=True)
+    result = operations.research_run(**holdout_case.request, plan=True)
     assert changed
     assert result["status"] == "BLOCKED"
     assert any(
@@ -2720,11 +2721,9 @@ def test_holdout_alpha_source_identity_invalidates_only_its_consumers(
             for item in case.development_record.target_results
         ),
     )
-    research.write_research_run_record(
-        case.layout.research_run_path(changed.run_id), changed
-    )
+    write_research_run_record(case.layout.research_run_path(changed.run_id), changed)
     request = {**case.request, "development_run_id": changed.run_id}
-    planned = research.research_run(**request, plan=True)
+    planned = operations.research_run(**request, plan=True)
     assert planned["status"] == "COMPLETE"
     original = {
         item.target_id: item.instance_identity for item in case.record.target_results
@@ -2742,7 +2741,7 @@ def test_holdout_alpha_source_identity_invalidates_only_its_consumers(
         for item in planned["targets"]
     )
     if enhanced:
-        result = research.research_run(**request)
+        result = operations.research_run(**request)
         assert result["status"] == "COMPLETE"
         reference = next(
             item for item in result["target_results"] if item["target_id"] == target_id

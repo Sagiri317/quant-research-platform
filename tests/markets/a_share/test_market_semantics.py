@@ -19,6 +19,7 @@ from quant_research_platform.markets.implementations.a_share.processed.panels im
 )
 from quant_research_platform.research.labels.engine import calculate_labels_for_panel
 from quant_research_platform.research.protocols.a_share import label_definitions
+from quant_research_platform.workflows import operations
 
 
 @pytest.mark.parametrize("has_raw_history", [False, True])
@@ -1336,7 +1337,6 @@ def test_industry_mapping_gap_preserves_panel_but_rejects_structural_damage(
 def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
     from quant_research_platform.storage.datasets import read_dataset
     from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.workflows import research
     from tests.markets.a_share.test_target_dag_chain import (
         _synthetic_interim_frames,
         _windowed_source_profile,
@@ -1354,7 +1354,7 @@ def test_public_suspension_placeholders_keep_fixed_horizon_returns(tmp_path):
     bars.loc[asset & bars.timestamp.ge(dates[5]), prices] = 120.0
     profile = _windowed_source_profile(frames, [])
     layout = StorageLayout(tmp_path)
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=tmp_path / "raw",

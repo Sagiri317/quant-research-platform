@@ -15,7 +15,7 @@ from quant_research_platform.storage.semantic_artifacts import (
     read_semantic_artifact,
     read_semantic_artifact_record,
 )
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 from tests.helpers.research_configuration import research_configuration
 
 
@@ -163,7 +163,7 @@ def check_crypto_evaluation_old_good(
     with pytest.MonkeyPatch.context() as patch:
         patch.setattr(profiles, "bind_research_configuration", bind_with_interruption)
         with pytest.raises(KeyboardInterrupt) as caught:
-            research.research_run(
+            operations.research_run(
                 profile=profile,
                 layout=layout,
                 raw_root=raw,

@@ -48,6 +48,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
     open_filesystem_file,
 )
+from quant_research_platform.workflows import operations
 
 
 def _raw(
@@ -1874,7 +1875,7 @@ def test_partial_connection_overlap_has_one_panel_and_execution_domain(
 def test_manifest_race_is_bounded_and_rejected_before_decode(
     tmp_path, monkeypatch, change
 ):
-    from quant_research_platform.sources import open_market_source
+    from quant_research_platform.sources.market import open_market_source
     from quant_research_platform.storage.identity import filesystem_replace
 
     root = tmp_path / "run"
@@ -2001,7 +2002,6 @@ def test_manifest_growth_blocks_materialization_and_preserves_old_good(
     )
     from quant_research_platform.storage.identity import filesystem_walk
     from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.workflows import research
     from tests.helpers.binance_hft import write_binance_hft_run
 
     raw_root = tmp_path / "raw"
@@ -2016,7 +2016,7 @@ def test_manifest_growth_blocks_materialization_and_preserves_old_good(
         start_date="1970-01-01T00:00:00",
         end_date="1970-01-01T00:00:06",
     )
-    result = research.data_materialize(**kwargs)
+    result = operations.data_materialize(**kwargs)
     assert result["status"] == "COMPLETE"
     spec = profile.processed.get(HFT_PANEL_DATA_ID)
     instances = layout.processed_data_root(spec.market_id, spec.kind, spec.data_id)
@@ -2042,7 +2042,7 @@ def test_manifest_growth_blocks_materialization_and_preserves_old_good(
         return read_manifest(path, **options)
 
     monkeypatch.setattr(replay, "read_qrp_json_file", grow_after_admission)
-    rejected = research.data_materialize(**kwargs, rebuild=True)
+    rejected = operations.data_materialize(**kwargs, rebuild=True)
     assert rejected["status"] == "BLOCKED"
     assert rejected["target_results"][0]["reason"] == "source_identity_invalid"
     assert attempts and attempts[0] == len(original)

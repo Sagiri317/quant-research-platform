@@ -176,7 +176,14 @@ TrialRecord.metrics 统一承载阶段实际指标；selection 保留验证指�
 研究运行记录保留整个生产包及九个数值/模型后端版本的精确软件身份；
 各市场的产物身份绑定实际 producer、source callback 和所用 writer/reader 的代码依赖，
 从真实 callable/partial 展开包内静态模块导入闭包（含父包、函数内导入），不维护另一份文件注册表。
-模块内容按完整模块保守失效；workflow 与 profile 组合根单独绑定完整内容，不递归聚合入口的所有导入。
+模块内容按完整模块保守失效；workflows/research.py 科学 owner 与 profile 组合根单独绑定
+完整内容，不递归聚合入口的所有导入。同一科学模块内仍保守失效其消费者，不自动判断任意
+代码行是否数学等价。workflows/operations.py 统一 plan/data/dataset/research/report 操作入口，
+只负责请求寿命、观测和运行记录；来源、输入资格、模型预检、冻结、窗口、目标与 producer
+绑定均由 research.py 准备，实际生产、持久化和复用验证也留在该科学 owner。
+科学 owner 不反向导入操作外壳，不保留旧入口转发；操作外壳变化只进入全包运行 provenance。
+来源父包只作轻量初始化；Crypto 原生格式选择由普通模块 sources/market.py 承接，
+A 股来源导入父包时不会隐式绑定未消费的 Binance/Tardis 代码。
 `runtime.resources` 与 `runtime.execution_metrics` 仅提供性能批次默认值、实际 CPU 容量与操作观测，
 其代码变更保留在运行 provenance，不使科学产物失效；科学公式不得放入这两个 owner。
 分帧、来源解码、数值计算、合同、存储与校验代码仍进入产物依赖。

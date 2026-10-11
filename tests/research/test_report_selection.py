@@ -13,6 +13,7 @@ from quant_research_platform.contracts.targets import (
 )
 from quant_research_platform.reports.a_share import build_a_share_report
 from quant_research_platform.reports.crypto_hft import build_crypto_research_report
+from quant_research_platform.workflows import operations
 
 
 def record():
@@ -294,7 +295,7 @@ def test_report_rebuild_uses_run_configuration_instead_of_current_selection(
         workflow, "read_research_run_record", lambda *args, **kwargs: record
     )
     with pytest.raises(RuntimeError, match="frozen_report_selection_verified"):
-        workflow.report_build(
+        operations.report_build(
             profile=profile, layout=StorageLayout(tmp_path), run_id="frozen", plan=True
         )
     assert len(calls) == 1

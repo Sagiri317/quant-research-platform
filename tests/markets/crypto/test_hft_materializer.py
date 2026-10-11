@@ -18,6 +18,7 @@ from quant_research_platform.storage.datasets.reading import (
     read_dataset,
 )
 from quant_research_platform.storage.layout import StorageLayout
+from quant_research_platform.workflows import operations
 from tests.helpers.binance_hft import write_binance_hft_run
 
 
@@ -168,7 +169,7 @@ def test_panel_batch_cap_preserves_persisted_rows(tmp_path, monkeypatch):
         with patch.object(
             producer, "iter_panel_frames", wraps=producer.iter_panel_frames
         ) as symbol_frames:
-            result = research.data_materialize(
+            result = operations.data_materialize(
                 profile=profile,
                 layout=layout,
                 raw_root=raw_root,
@@ -202,14 +203,13 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
         research_profile,
     )
     from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
-    from quant_research_platform.workflows import research
 
     raw_root = tmp_path / "raw"
     write_binance_hft_run(raw_root)
     layout = StorageLayout(tmp_path / "project")
     profile = research_profile(CRYPTO_PROFILE_ID)
     window = dict(start_date="1970-01-01T00:00:00", end_date="1970-01-01T00:00:06")
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile, layout=layout, raw_root=raw_root, **window
     )
     assert result["status"] == "COMPLETE", result["target_results"]
@@ -237,11 +237,11 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
         value["emitted_states"] == 61
         for value in manifest["producer_diagnostics"]["reconstruction"].values()
     )
-    again = research.data_materialize(
+    again = operations.data_materialize(
         profile=profile, layout=layout, raw_root=raw_root, **window
     )
     assert all(row["status"] == "REUSED" for row in again["target_results"])
-    fractional = research.data_materialize(
+    fractional = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -272,7 +272,7 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
         == "common_btc_eth_observed_timestamps"
     )
     sampled = None
-    built = research.dataset_build(
+    built = operations.dataset_build(
         profile=profile,
         layout=layout,
         dataset_id=HFT_RESEARCH_DATASET_ID,
@@ -330,7 +330,7 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
         "start": "1970-01-01T08:00:04+08:00",
         "end": "1970-01-01T08:00:06+08:00",
     }
-    first = research.research_run(**request, research_plan=offset_configuration)
+    first = operations.research_run(**request, research_plan=offset_configuration)
     assert first["status"] == "COMPLETE"
     first_record = read_research_run_record(layout.research_run_path(first["run_id"]))
     changed = deepcopy(configuration)
@@ -340,7 +340,7 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
         "end": "1970-01-01T00:00:09",
     }
     changed["windows"]["holdout"] = changed["research_plan"]["test"].copy()
-    second = research.research_run(**request, research_plan=changed)
+    second = operations.research_run(**request, research_plan=changed)
     second_record = read_research_run_record(layout.research_run_path(second["run_id"]))
     assert first_record.protocol_identity != second_record.protocol_identity
     for run in (first, second):
@@ -381,7 +381,7 @@ def test_generic_hft_data_nodes_materialize_reuse_and_build_dataset(tmp_path):
         },
     )
     with pytest.raises(KeyboardInterrupt):
-        research.data_materialize(
+        operations.data_materialize(
             profile=failure_profile,
             layout=layout,
             raw_root=raw_root,

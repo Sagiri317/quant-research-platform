@@ -38,7 +38,7 @@ from quant_research_platform.storage.identity import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_dataset_manifest_evidence
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 
 
 def _file_bytes(root: Path) -> dict[Path, bytes]:
@@ -115,7 +115,7 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
     ).source_identity
     layout = StorageLayout(project_root=tmp_path)
     profile = research_profile()
-    plan = research.plan_targets(
+    plan = operations.plan_targets(
         profile=profile,
         action="data materialize",
         terminal_targets=(A_SHARE_FEE_SCHEDULE_DATA_ID,),
@@ -125,7 +125,7 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
     planned = plan["targets"][0]
     assert planned["decision"] == "BUILD"
     assert planned["requested_identity"]
-    first = research.data_materialize(
+    first = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -162,7 +162,7 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
         "included_in_ledger",
         "included_in",
     )
-    second = research.data_materialize(
+    second = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -179,7 +179,7 @@ def test_fee_interim_target_routes_build_reuse_and_identity_invalidation(
     filesystem_write_text(
         sidecar_path, json.dumps(sidecar, ensure_ascii=False), encoding="utf-8"
     )
-    third = research.data_materialize(
+    third = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -201,7 +201,7 @@ def test_fee_source_identity_race_preserves_old_good(
 ):
     raw_root = _write_reference_root(tmp_path / "raw")
     layout = StorageLayout(project_root=tmp_path)
-    built = research.data_materialize(
+    built = operations.data_materialize(
         profile=research_profile(),
         layout=layout,
         raw_root=raw_root,
@@ -362,7 +362,7 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     layout = StorageLayout(tmp_path)
     data_id = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     profile = research_profile()
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -424,7 +424,7 @@ def test_public_industry_source_reaches_interim_and_real_panel(tmp_path):
     assert (
         panel.loc[~panel["asset_id"].eq("000001"), "industry_level1_code"].isna().all()
     )
-    again = research.data_materialize(
+    again = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw_root,
@@ -639,7 +639,7 @@ def test_malformed_fee_csv_is_source_local_and_preserves_old_good(
     target = interim.A_SHARE_INDUSTRY_SNAPSHOTS_DATA_ID
     profile = research_profile()
     requested = (A_SHARE_FEE_SCHEDULE_DATA_ID, target)
-    plan = research.plan_targets(
+    plan = operations.plan_targets(
         profile=profile,
         action="data materialize",
         terminal_targets=requested,
@@ -650,7 +650,7 @@ def test_malformed_fee_csv_is_source_local_and_preserves_old_good(
     assert planned[A_SHARE_FEE_SCHEDULE_DATA_ID]["decision"] == "BLOCKED"
     assert planned[A_SHARE_FEE_SCHEDULE_DATA_ID]["blocker"] == "source_identity_invalid"
     assert planned[target]["decision"] == "BUILD"
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw,

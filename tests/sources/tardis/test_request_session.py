@@ -8,8 +8,8 @@ import pytest
 
 from quant_research_platform.contracts.portfolios import PortfolioTargetBlocked
 from quant_research_platform.contracts.time import TimeWindow
-from quant_research_platform.sources import open_market_source
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
+from quant_research_platform.sources.market import open_market_source
 from quant_research_platform.sources.tardis import replay
 from quant_research_platform.sources.tardis.raw import import_slices
 from tests.helpers.tardis import _line, _slices

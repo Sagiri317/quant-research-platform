@@ -115,7 +115,7 @@ def test_native_epoch_invalidates_all_assets_only_after_known_clock(tmp_path, mo
     import json
 
     from quant_research_platform.markets.implementations.crypto.processed import catalog
-    from quant_research_platform.sources import open_market_source
+    from quant_research_platform.sources.market import open_market_source
     from quant_research_platform.sources.tardis.raw import STATE_CHANNELS, import_slices
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset
@@ -261,7 +261,7 @@ def test_native_force_windows_preserve_exact_mass_resets_and_early_close(tmp_pat
 
     from quant_research_platform.markets.implementations.crypto.processed import catalog
     from quant_research_platform.policy.lifecycle import closing_iterator
-    from quant_research_platform.sources import open_market_source
+    from quant_research_platform.sources.market import open_market_source
     from quant_research_platform.sources.tardis.raw import STATE_CHANNELS, import_slices
     from quant_research_platform.storage.datasets.reading import read_dataset
     from quant_research_platform.storage.datasets.writing import write_dataset

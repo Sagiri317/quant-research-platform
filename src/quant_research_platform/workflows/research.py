@@ -1,15 +1,14 @@
-"""The single target-DAG resolver and public research workflow owner."""
+"""Scientific request preparation, target-DAG execution, and qualification."""
 
 from __future__ import annotations
 
 import re
 from collections.abc import Iterable, Mapping
-from contextlib import ExitStack, nullcontext
+from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from functools import partial
 from pathlib import Path
 from typing import Any
-from uuid import uuid4
 
 import pandas as pd
 
@@ -38,10 +37,8 @@ from quant_research_platform.artifacts.research import (
 )
 from quant_research_platform.artifacts.research import (
     _validate_reference_envelope,
-    build_report_from_run,
     read_research_run_record,
     read_validated_reference,
-    write_research_run_record,
 )
 from quant_research_platform.artifacts.statistics import (
     STATISTICS_TABLE_COLUMNS,
@@ -83,14 +80,11 @@ from quant_research_platform.contracts.predictions import (
 from quant_research_platform.contracts.targets import (
     PlanDecision,
     ProducerKind,
-    ResearchRunRecord,
-    ResearchRunTargetResult,
     RunStatus,
     TargetPlan,
     TargetResult,
     TargetSpec,
     TargetStatus,
-    unmeasured_operation_evidence,
 )
 from quant_research_platform.contracts.time import (
     TimeWindow,
@@ -111,8 +105,6 @@ from quant_research_platform.research.models.persisted import (
 )
 from quant_research_platform.research.models.production import _crypto_model_chronology
 from quant_research_platform.research.models.supervised import preflight_model_specs
-from quant_research_platform.runtime.execution_metrics import record_run_observations
-from quant_research_platform.sources.tardis.replay import _tardis_request_session
 from quant_research_platform.storage.datasets.comparison import compare_datasets
 from quant_research_platform.storage.datasets.inspection import (
     inspect_dataset as inspect_physical_dataset,
@@ -130,7 +122,6 @@ from quant_research_platform.storage.datasets.schema import (
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.experiments import (
-    research_run_trial_references,
     verify_trial_ledger_snapshot,
 )
 from quant_research_platform.storage.identity import (
@@ -281,7 +272,7 @@ def _target_requests(profile, action, protocol, ordered, terminals, window):
     )
 
 
-def plan_targets(
+def _prepare_plan(
     *,
     profile: ResearchProfile,
     action: str,
@@ -304,7 +295,7 @@ def plan_targets(
     protocol = profile.protocol(scenario_id=scenario, access_window="development")
     software = software_identity or production_software_identity()
     window = _research_window(protocol, research_window)
-    instances, _sessions = _plan_targets(
+    return dict(
         profile=profile,
         action=action,
         terminal_targets=terminals,
@@ -315,35 +306,6 @@ def plan_targets(
         research_window=window,
         software_identity=software,
     )
-    return _plan_payload(
-        profile, action, terminals, protocol, rebuild, software, window, instances
-    )
-
-
-def _plan_payload(
-    profile, action, terminals, protocol, rebuild, software, window, instances
-):
-    terminals = tuple(sorted(set(terminals)))
-    plans = [plan for request, plan in instances if request.publish]
-    blocked = [plan for _, plan in instances if plan.decision is PlanDecision.BLOCKED]
-    return {
-        "stage": action,
-        "plan": True,
-        "profile_id": profile.profile_id,
-        "rebuild": rebuild,
-        "terminal_targets": list(terminals),
-        "transitive_dependencies": [
-            plan.target_id for plan in plans if plan.target_id not in terminals
-        ],
-        "targets": [plan.payload() for plan in plans],
-        "status": RunStatus.BLOCKED.value if blocked else RunStatus.COMPLETE.value,
-        "blockers": [
-            {"target_id": plan.target_id, "reason": plan.blocker} for plan in blocked
-        ],
-        "protocol": protocol.manifest(),
-        "software_identity": software.identity_hash,
-        "research_window": window,
-    }
 
 
 def _plan_targets(
@@ -615,7 +577,7 @@ def _plan_targets(
     ), reuse_sessions
 
 
-def data_materialize(
+def _prepare_materialization(
     *,
     profile: ResearchProfile,
     layout: StorageLayout,
@@ -623,7 +585,6 @@ def data_materialize(
     start_date: str | None,
     end_date: str | None,
     data_ids: tuple[str, ...] | None = None,
-    plan: bool = False,
     rebuild: bool = False,
 ) -> dict[str, object]:
     protocol = profile.protocol(
@@ -635,62 +596,42 @@ def data_materialize(
         or (spec.data_id for spec in profile.interim.list())
     )
     window = _research_window(protocol, None, start_date=start_date, end_date=end_date)
-    if plan:
-        return plan_targets(
-            profile=profile,
-            action="data materialize",
-            terminal_targets=selected,
-            layout=layout,
-            raw_root=raw_root,
-            rebuild=rebuild,
-            research_window=window,
-        )
-    return _execute_action(
+    return dict(
         profile=profile,
-        protocol=protocol,
         action="data materialize",
         terminal_targets=selected,
         layout=layout,
-        raw_root=raw_root,
+        protocol=protocol,
         rebuild=rebuild,
+        raw_root=raw_root,
         research_window=window,
+        software_identity=production_software_identity(),
     )
 
 
-def dataset_build(
+def _prepare_dataset(
     *,
     profile: ResearchProfile,
     layout: StorageLayout,
     dataset_id: str,
     start_date: str,
     end_date: str,
-    plan: bool = False,
     rebuild: bool = False,
     raw_root: Path | None = None,
 ) -> dict[str, object]:
     protocol = profile.protocol(scenario_id=dataset_id, access_window="development")
     window = _research_window(protocol, None, start_date=start_date, end_date=end_date)
     source = raw_root or _default_raw_root(layout)
-    if plan:
-        return plan_targets(
-            profile=profile,
-            action="dataset build",
-            terminal_targets=(dataset_id,),
-            layout=layout,
-            scenario_id=dataset_id,
-            rebuild=rebuild,
-            raw_root=source,
-            research_window=window,
-        )
-    return _execute_action(
+    return dict(
         profile=profile,
-        protocol=protocol,
         action="dataset build",
         terminal_targets=(dataset_id,),
         layout=layout,
+        protocol=protocol,
         rebuild=rebuild,
         raw_root=source,
         research_window=window,
+        software_identity=production_software_identity(),
     )
 
 
@@ -730,7 +671,7 @@ def _validate_stage_selection(profile, layout, protocol):
         read_validated_reference(layout, reference)
 
 
-def research_run(
+def _prepare_research(
     *,
     profile: ResearchProfile,
     layout: StorageLayout,
@@ -740,7 +681,7 @@ def research_run(
     development_run_id: str | None = None,
     plan: bool = False,
     rebuild: bool = False,
-) -> dict[str, object]:
+) -> tuple[dict[str, Any], str | None]:
     from quant_research_platform.profiles.research import bind_research_configuration
 
     profile = bind_research_configuration(
@@ -813,130 +754,20 @@ def research_run(
             raise ValueError("development_run_id_requires_holdout")
         _require_development_window(protocol, start_date, end_date)
     terminals = tuple(protocol.terminal_targets("research run"))
-    if preflight_blocker is not None:
-        result = {
-            "stage": "research run",
-            "plan": plan,
-            "status": "BLOCKED",
-            "blockers": [
-                {"target_id": target, "reason": preflight_blocker}
-                for target in terminals
-            ],
-        }
-        if plan:
-            return result
-        run_id = f"run_{uuid4().hex}"
-        _write_research_run_record(
-            layout=layout,
-            run_id=run_id,
-            profile=profile,
-            protocol=protocol,
-            research_window=_research_window(
-                protocol, None, start_date=start_date, end_date=end_date
-            ),
-            software_identity=production_software_identity(),
-            terminal_targets=terminals,
-            target_results=tuple(
-                TargetResult(
-                    target_id=target,
-                    status=TargetStatus.BLOCKED,
-                    reason=preflight_blocker,
-                )
-                for target in terminals
-            ),
-            target_references={},
-            status=RunStatus.BLOCKED,
-            operation_evidence=unmeasured_operation_evidence(
-                "holdout_preflight_blocked"
-            ),
-        )
-        return {**result, "run_id": run_id}
-    window = _research_window(
-        protocol,
-        None,
-        start_date=start_date,
-        end_date=end_date,
-    )
-    software = production_software_identity()
-    if plan:
-        instances, _sessions = _plan_targets(
-            profile=profile,
-            action="research run",
-            terminal_targets=terminals,
-            layout=layout,
-            protocol=protocol,
-            rebuild=rebuild,
-            raw_root=raw_root,
-            research_window=window,
-            software_identity=software,
-            reuse_sessions=reuse_sessions,
-        )
-        return _plan_payload(
-            profile,
-            "research run",
-            terminals,
-            protocol,
-            rebuild,
-            software,
-            window,
-            instances,
-        )
-    run_id = f"run_{uuid4().hex}"
-    result_sink: dict[str, TargetResult] = {}
-    reference_sink: dict[str, TargetPlan] = {}
-    operation_evidence = unmeasured_operation_evidence("operation_not_started")
-    try:
-        result = _execute_action(
-            run_id=run_id,
-            profile=profile,
-            protocol=protocol,
-            action="research run",
-            terminal_targets=terminals,
-            layout=layout,
-            rebuild=rebuild,
-            raw_root=raw_root or _default_raw_root(layout),
-            research_window=window,
-            software_identity=software,
-            result_sink=result_sink,
-            reference_sink=reference_sink,
-            operation_evidence_sink=operation_evidence,
-            reuse_sessions=reuse_sessions,
-        )
-    except BaseException as primary:
-        try:
-            _write_research_run_record(
-                layout=layout,
-                run_id=run_id,
-                profile=profile,
-                protocol=protocol,
-                research_window=window,
-                software_identity=software,
-                terminal_targets=terminals,
-                target_results=tuple(result_sink.values()),
-                target_references=reference_sink,
-                status=RunStatus.FAILED,
-                failure_reason=f"research_run_failed:{type(primary).__name__.lower()}",
-                operation_evidence=operation_evidence,
-            )
-        except BaseException as record_error:
-            primary.add_note(
-                f"research run record write also failed: {type(record_error).__name__}"
-            )
-        raise
-    _write_research_run_record(
-        layout=layout,
-        run_id=run_id,
+    return dict(
         profile=profile,
-        protocol=protocol,
-        research_window=window,
-        software_identity=software,
+        action="research run",
         terminal_targets=terminals,
-        target_results=tuple(result_sink.values()),
-        target_references=reference_sink,
-        status=RunStatus(result["status"]),
-        operation_evidence=operation_evidence,
-    )
-    return {**result, "run_id": run_id}
+        layout=layout,
+        protocol=protocol,
+        rebuild=rebuild,
+        raw_root=raw_root,
+        research_window=_research_window(
+            protocol, None, start_date=start_date, end_date=end_date
+        ),
+        software_identity=production_software_identity(),
+        reuse_sessions=reuse_sessions,
+    ), preflight_blocker
 
 
 def _frozen_holdout_protocol(
@@ -1062,12 +893,11 @@ def _require_development_window(protocol: Any, start_date: str, end_date: str) -
         raise PermissionError("holdout_frozen_development_identity_unavailable")
 
 
-def report_build(
+def _prepare_report(
     *,
     profile: ResearchProfile,
     layout: StorageLayout,
     run_id: str,
-    plan: bool = False,
 ) -> dict[str, object]:
     record = read_research_run_record(
         layout.research_run_path(run_id), expected_profile_id=profile.profile_id
@@ -1083,10 +913,9 @@ def report_build(
     binding = profile.producer_bindings.get(f"{record.scenario_id}_report_artifact")
     if binding is None or binding.kind is not ProducerKind.REPORT:
         raise ValueError("report_producer_binding_missing")
-    return build_report_from_run(
+    return dict(
         layout=layout,
         record=record,
-        plan=plan,
         market_id=profile.market_id,
         produce_report=binding.producer,
         software_identity=_target_software_identity(
@@ -1096,46 +925,6 @@ def report_build(
         if str(profile.market_id) == "crypto"
         else (),
     )
-
-
-def _execute_action(
-    *,
-    profile: ResearchProfile,
-    protocol: Any,
-    action: str,
-    terminal_targets: tuple[str, ...],
-    layout: StorageLayout,
-    raw_root: Path | None,
-    rebuild: bool = False,
-    research_window: Mapping[str, object],
-    software_identity: ProductionSoftwareIdentity | None = None,
-    result_sink: dict[str, TargetResult] | None = None,
-    reference_sink: dict[str, TargetPlan] | None = None,
-    run_id: str | None = None,
-    operation_evidence_sink: dict[str, object] | None = None,
-    reuse_sessions=None,
-) -> dict[str, object]:
-    with (
-        record_run_observations(operation_evidence_sink)
-        if operation_evidence_sink is not None
-        else nullcontext(None) as observe
-    ):
-        return _execute_targets(
-            run_id=run_id,
-            profile=profile,
-            protocol=protocol,
-            action=action,
-            terminal_targets=terminal_targets,
-            layout=layout,
-            raw_root=raw_root,
-            rebuild=rebuild,
-            research_window=research_window,
-            software_identity=software_identity,
-            result_sink=result_sink,
-            reference_sink=reference_sink,
-            observe=observe,
-            reuse_sessions=reuse_sessions,
-        )
 
 
 def _execute_targets(
@@ -1191,7 +980,6 @@ def _execute_targets(
     candidate_workspace: RebuildCandidateWorkspace | None = None
     candidate_materialized = False
     with ExitStack() as operation:
-        operation.enter_context(_tardis_request_session(operation))
         for request, planned in instance_plans:
             spec = request.spec
             if observe is not None:
@@ -2137,67 +1925,6 @@ def _output_spec_for_target(
         run_id=f"run_{target_id}",
         market_id=market_id,
     )
-
-
-def _write_research_run_record(
-    *,
-    run_id: str,
-    layout: StorageLayout,
-    profile: ResearchProfile,
-    protocol: Any,
-    research_window: Mapping[str, object],
-    software_identity: ProductionSoftwareIdentity,
-    terminal_targets: tuple[str, ...],
-    target_results: tuple[TargetResult, ...],
-    target_references: Mapping[str, TargetPlan],
-    status: RunStatus,
-    operation_evidence: Mapping[str, object],
-    failure_reason: str | None = None,
-) -> None:
-    references: list[ResearchRunTargetResult] = []
-    for result in target_results:
-        planned = target_references.get(result.target_id)
-        producer_kind = planned.producer_kind if planned is not None else None
-        schema_identity = (
-            planned.schema_identity
-            if result.instance_identity is not None and planned is not None
-            else None
-        )
-        artifact_root = (
-            planned.artifact_root
-            if result.instance_identity is not None and planned is not None
-            else None
-        )
-        references.append(
-            ResearchRunTargetResult(
-                target_id=result.target_id,
-                producer_kind=producer_kind,
-                status=result.status,
-                reason=result.reason,
-                instance_identity=result.instance_identity,
-                schema_identity=schema_identity,
-                artifact_root=artifact_root,
-            )
-        )
-    protocol_snapshot = protocol.manifest()
-    trial_ledgers = research_run_trial_references(layout, run_id)
-    values = dict(
-        run_id=run_id,
-        trial_ledgers=trial_ledgers,
-        profile_id=profile.profile_id,
-        scenario_id=protocol.scenario_id,
-        protocol=protocol_snapshot,
-        protocol_identity=canonical_json_hash(protocol_snapshot),
-        research_window=research_window,
-        software_identity=software_identity.identity_hash,
-        terminal_targets=terminal_targets,
-        target_results=tuple(references),
-        status=status,
-        operation_evidence=operation_evidence,
-        failure_reason=failure_reason,
-    )
-    record = ResearchRunRecord(**values)
-    write_research_run_record(layout.research_run_path(run_id), record)
 
 
 def _semantic_failure_code(exc: BaseException) -> str:

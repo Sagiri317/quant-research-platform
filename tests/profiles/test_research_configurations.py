@@ -1609,7 +1609,7 @@ def test_configuration_stage_types_reject_at_binding_and_research_plan_boundary(
     tmp_path, market, bad
 ):
     from quant_research_platform.storage.layout import StorageLayout
-    from quant_research_platform.workflows.research import research_run
+    from quant_research_platform.workflows.operations import research_run
     from tests.helpers.research_configuration import research_configuration
 
     config = research_configuration(

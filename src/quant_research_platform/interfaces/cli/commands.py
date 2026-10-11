@@ -15,7 +15,7 @@ from quant_research_platform.profiles.research import (
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.manifests import read_qrp_json_file
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 
 app = typer.Typer(add_completion=False)
 catalog_app = typer.Typer(add_completion=False, help="Catalog query commands.")
@@ -80,7 +80,7 @@ def data_materialize(
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
-    result = research.data_materialize(
+    result = operations.data_materialize(
         profile=research_profile(profile),
         layout=StorageLayout(project_root=project_root),
         raw_root=raw_root,
@@ -104,7 +104,7 @@ def dataset_build(
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
     rebuild: bool = typer.Option(False, "--rebuild"),  # noqa: B008
 ) -> None:
-    result = research.dataset_build(
+    result = operations.dataset_build(
         profile=research_profile(profile),
         layout=StorageLayout(project_root=project_root),
         dataset_id=dataset_id,
@@ -136,7 +136,7 @@ def research_run(
             selected_profile = research_profile(profile_id)
         except KeyError:
             raise ValueError("research_configuration_profile_invalid") from None
-        result = research.research_run(
+        result = operations.research_run(
             profile=selected_profile,
             research_plan=configuration,
             raw_root=raw_root,
@@ -160,7 +160,7 @@ def report_build(
     plan: bool = typer.Option(False, "--plan"),  # noqa: B008
 ) -> None:
     selected_profile = research_profile(profile)
-    result = research.report_build(
+    result = operations.report_build(
         profile=selected_profile,
         layout=StorageLayout(project_root=project_root),
         run_id=run_id,

@@ -6,12 +6,12 @@ import pandas as pd
 import pytest
 
 from quant_research_platform.contracts.order_book import BookState
-from quant_research_platform.sources import open_market_source
 from quant_research_platform.sources.binance.ids import FUTURES_MARKET_TYPE
 from quant_research_platform.sources.binance.replay import (
     ReconstructionStats,
     iter_reconstructed_depth,
 )
+from quant_research_platform.sources.market import open_market_source
 from quant_research_platform.sources.tardis.raw import import_slices
 from tests.helpers.tardis import _line, _slices
 
@@ -367,7 +367,7 @@ def test_tardis_identity_preserves_shared_owner_io_failure(
     import errno
 
     import quant_research_platform.sources.binance.replay as binance_replay
-    from quant_research_platform.sources import market_source_identity
+    from quant_research_platform.sources.market import market_source_identity
     from tests.helpers.tardis import _snapshot
 
     root = tmp_path / "published"

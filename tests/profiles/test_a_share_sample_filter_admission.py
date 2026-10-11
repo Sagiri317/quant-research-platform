@@ -27,7 +27,7 @@ from quant_research_platform.research.predictions.outputs import (
 )
 from quant_research_platform.research.protocols import a_share
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows.research import research_run
+from quant_research_platform.workflows.operations import research_run
 from tests.helpers.research_configuration import research_configuration
 
 ALGORITHMS = (

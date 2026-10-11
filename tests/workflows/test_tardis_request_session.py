@@ -9,7 +9,7 @@ import pytest
 from quant_research_platform.artifacts.research import read_research_run_record
 from quant_research_platform.sources.tardis import replay
 from quant_research_platform.storage.datasets.reading import read_dataset
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 from tests.workflows.test_crypto_hft import _tardis_cross_midnight_case
 
 
@@ -29,7 +29,7 @@ def test_native_request_shares_panel_and_thirty_takers_and_records_cleanup_failu
         for index, candidate in enumerate(candidates)
         for latency in (0, 100, 200)
     ]
-    developed = research.research_run(
+    developed = operations.research_run(
         profile=profile, layout=layout, raw_root=raw, research_plan=configuration
     )
     assert developed["status"] == "COMPLETE"
@@ -101,11 +101,11 @@ def test_native_request_shares_panel_and_thirty_takers_and_records_cleanup_failu
         development_run_id=developed["run_id"],
     )
     if failure is None:
-        result = research.research_run(**kwargs)
+        result = operations.research_run(**kwargs)
         assert result["status"] == "COMPLETE"
     else:
         with pytest.raises(OSError) as caught:
-            research.research_run(**kwargs)
+            operations.research_run(**kwargs)
         assert caught.value is (primary if failure == "body_and_close" else cleanup)
     new_runs = set(run_parent.glob("*.json")) - before_runs
     assert len(new_runs) == 1

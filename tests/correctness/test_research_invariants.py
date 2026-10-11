@@ -49,7 +49,7 @@ from quant_research_platform.research.protocols.a_share import (
     protocol,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 from tests.helpers.research_configuration import CORE6_FACTORS, PV25_FACTORS
 
 
@@ -1243,7 +1243,7 @@ def test_missing_raw_identity_blocks_dataset_build(tmp_path) -> None:
     from quant_research_platform.profiles.research import research_profile
 
     layout = StorageLayout(project_root=tmp_path)
-    result = research.dataset_build(
+    result = operations.dataset_build(
         profile=research_profile(),
         layout=layout,
         dataset_id="pv_all",

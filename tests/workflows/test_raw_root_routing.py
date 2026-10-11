@@ -14,7 +14,7 @@ from quant_research_platform.contracts.time import TimeWindow
 from quant_research_platform.profiles.research import research_profile
 from quant_research_platform.storage.identity import content_hash_for_files
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations, research
 
 
 def test_interim_identity_receives_common_root_joined_with_source_id(
@@ -46,7 +46,7 @@ def test_interim_identity_receives_common_root_joined_with_source_id(
             ),
         },
     )
-    result = research.plan_targets(
+    result = operations.plan_targets(
         profile=profile,
         action="data materialize",
         terminal_targets=(data_id,),
@@ -133,7 +133,7 @@ def test_crypto_plan_preserves_source_system_io_failure(tmp_path, monkeypatch):
 
     monkeypatch.setattr(binance_replay, "filesystem_stat", fail)
     with pytest.raises(OSError) as caught:
-        research.plan_targets(
+        operations.plan_targets(
             profile=research_profile(CRYPTO_PROFILE_ID),
             action="data materialize",
             terminal_targets=(HFT_PANEL_DATA_ID,),
@@ -157,7 +157,7 @@ def test_plan_preserves_persisted_instance_system_io_failure(tmp_path, monkeypat
     layout = StorageLayout(tmp_path)
     profile = research_profile()
     data_id = "a_share_fee_schedule"
-    built = research.data_materialize(
+    built = operations.data_materialize(
         profile=profile,
         layout=layout,
         raw_root=raw,
@@ -173,7 +173,7 @@ def test_plan_preserves_persisted_instance_system_io_failure(tmp_path, monkeypat
         layout=layout,
         raw_root=raw,
     )
-    planned = research.plan_targets(**arguments)
+    planned = operations.plan_targets(**arguments)
     assert planned["targets"][0]["decision"] == "REUSE"
     target = layout.instance_root(
         layout.interim_data_root("reference", data_id),
@@ -189,7 +189,7 @@ def test_plan_preserves_persisted_instance_system_io_failure(tmp_path, monkeypat
 
     monkeypatch.setattr(research, "filesystem_stat", stat)
     with pytest.raises(OSError) as caught:
-        research.plan_targets(**arguments)
+        operations.plan_targets(**arguments)
     assert caught.value is primary
 
 
@@ -388,7 +388,7 @@ def test_research_entry_binds_main_and_auxiliary_sources_to_selected_raw_root(
         return original(profile=profile, raw_root=raw_root, layout=layout, **kwargs)
 
     monkeypatch.setattr(research, "_plan_targets", plan_targets)
-    result = research.research_run(
+    result = operations.research_run(
         profile=research_profile(config["profile_id"]),
         layout=layout,
         research_plan=config,

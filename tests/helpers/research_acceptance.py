@@ -45,7 +45,7 @@ from quant_research_platform.storage.identity import (
     native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 from tests.helpers.a_share_raw import write_a_share_raw_fixture
 from tests.helpers.binance_hft import (
     hft_research_plan,
@@ -127,7 +127,7 @@ def run_a_share_acceptance(project_root: Path):
             configuration["scenario_id"]
         ).manifest()["benchmark_total_return_indices"],
     )
-    result = research.research_run(
+    result = operations.research_run(
         profile=profile,
         layout=layout,
         research_plan=configuration,
@@ -195,11 +195,11 @@ def run_a_share_acceptance(project_root: Path):
         if filesystem_is_file(path)
     }
     assert trial_before and record.trial_ledgers
-    development_report = research.report_build(
+    development_report = operations.report_build(
         profile=profile, layout=layout, run_id=record.run_id
     )
     assert development_report["status"] == "COMPLETE"
-    result = research.research_run(
+    result = operations.research_run(
         profile=research_profile(),
         layout=layout,
         research_plan=configuration,
@@ -259,7 +259,9 @@ def run_a_share_acceptance(project_root: Path):
     for group in ("global", "quarterly"):
         assert targets[f"pv_all_{group}_persisted_predictions"].status.value == "BUILT"
         assert targets[f"pv_all_{group}_statistics"].status.value == "BUILT"
-    report = research.report_build(profile=profile, layout=layout, run_id=record.run_id)
+    report = operations.report_build(
+        profile=profile, layout=layout, run_id=record.run_id
+    )
     assert report["target_result"]["status"] == "BUILT"
     assert report["status"] == "COMPLETE", report["report"]["sections"][
         "readiness/blockers"
@@ -281,7 +283,7 @@ def run_crypto_acceptance(project_root: Path):
         plan=hft_research_plan(),
         development=("1970-01-01T00:00:04", "1970-01-01T00:00:08.500000"),
     )
-    development = research.research_run(
+    development = operations.research_run(
         profile=profile, layout=layout, raw_root=raw, research_plan=configuration
     )
     assert development["status"] == "COMPLETE", development["target_results"]
@@ -294,7 +296,7 @@ def run_crypto_acceptance(project_root: Path):
         item["target_id"].endswith(("_ledger", "_episodes", "_continuous_statistics"))
         for item in development["target_results"]
     )
-    development_report = research.report_build(
+    development_report = operations.report_build(
         profile=profile, layout=layout, run_id=development["run_id"]
     )
     assert development_report["status"] == "COMPLETE"
@@ -303,7 +305,7 @@ def run_crypto_acceptance(project_root: Path):
             development_report["report"]["sections"][section]["reason"]
             == "not_requested"
         )
-    result = research.research_run(
+    result = operations.research_run(
         profile=profile,
         layout=layout,
         raw_root=raw,
@@ -347,7 +349,7 @@ def run_crypto_acceptance(project_root: Path):
         targets[target.statistics_target_id]["status"] == "BUILT"
         for target in execution_targets.values()
     )
-    report = research.report_build(
+    report = operations.report_build(
         profile=profile, layout=layout, run_id=result["run_id"]
     )
     assert report["status"] == "COMPLETE"

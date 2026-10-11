@@ -111,7 +111,7 @@ def test_native_consumed_digest_is_verified_on_every_exit(
 def test_archive_duration_and_source_identity_are_not_limited_to_one_day(
     tmp_path, count
 ):
-    from quant_research_platform.sources import open_market_source
+    from quant_research_platform.sources.market import open_market_source
 
     slices = _slices(tmp_path / "native", count=count)
     manifest = import_slices(
@@ -522,7 +522,7 @@ def test_download_response_close_preserves_primary_and_published_archive(
 def test_declared_native_member_missing_is_invalid_not_unacquired(
     tmp_path, member_kind, during_read
 ):
-    from quant_research_platform.sources import (
+    from quant_research_platform.sources.market import (
         market_source_identity,
         open_market_source,
     )
@@ -570,7 +570,7 @@ def test_native_manifest_removed_after_selection_is_identity_failure(
     tmp_path, monkeypatch
 ):
     import quant_research_platform.sources.tardis.replay as replay
-    from quant_research_platform.sources import market_source_identity
+    from quant_research_platform.sources.market import market_source_identity
 
     root = tmp_path / "published"
     import_slices(

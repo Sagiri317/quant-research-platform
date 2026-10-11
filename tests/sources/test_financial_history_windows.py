@@ -19,7 +19,7 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.datasets.writing import write_dataset
 from quant_research_platform.storage.layout import StorageLayout
-from quant_research_platform.workflows import research
+from quant_research_platform.workflows import operations
 from tests.helpers.choice_raw import SDK, response, write_css
 from tests.markets.a_share.test_target_dag_chain import _synthetic_interim_frames
 
@@ -132,9 +132,9 @@ def test_public_financial_windows_keep_choice_history_and_output_identity(
             end_date="2020-05-08",
         )
         result = (
-            research.data_materialize(**request, data_ids=("fundamental_pit",))
+            operations.data_materialize(**request, data_ids=("fundamental_pit",))
             if action == "data materialize"
-            else research.dataset_build(**request, dataset_id="fusion_nf_core")
+            else operations.dataset_build(**request, dataset_id="fusion_nf_core")
         )
         assert result["status"] == "COMPLETE", result["status"]
         targets = {item["target_id"]: item for item in result["target_results"]}
