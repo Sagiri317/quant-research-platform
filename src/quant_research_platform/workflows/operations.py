@@ -25,7 +25,10 @@ from quant_research_platform.contracts.targets import (
 )
 from quant_research_platform.profiles.research import ResearchProfile
 from quant_research_platform.runtime.execution_metrics import record_run_observations
-from quant_research_platform.sources.tardis.replay import _tardis_request_session
+from quant_research_platform.sources.tardis.replay import (
+    _REQUEST_ARCHIVES,
+    _tardis_request_session,
+)
 from quant_research_platform.storage.experiments import research_run_trial_references
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.software_identity import ProductionSoftwareIdentity
@@ -287,7 +290,8 @@ def _execute_action(
         ) as observe,
         ExitStack() as operation,
     ):
-        operation.enter_context(_tardis_request_session(operation))
+        if _REQUEST_ARCHIVES.get() is None:
+            operation.enter_context(_tardis_request_session(operation))
         return research._execute_targets(
             run_id=run_id,
             profile=profile,
