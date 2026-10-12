@@ -850,6 +850,53 @@ def test_archive_tail_shares_native_scan_and_preserves_replay(tmp_path, monkeypa
     assert handles and all(handle.closed for handle in handles)
 
 
+def test_cursor_spool_batches_native_appends(tmp_path, monkeypatch):
+    import io
+    from collections import Counter
+    from contextlib import ExitStack
+
+    import quant_research_platform.sources.tardis.replay as replay
+
+    calls = Counter()
+    streams = []
+
+    class CountedFile(io.FileIO):
+        def write(self, value):
+            calls["write"] += 1
+            return super().write(value)
+
+        def seek(self, offset, whence=0):
+            calls["seek"] += 1
+            return super().seek(offset, whence)
+
+    def temporary_file():
+        stream = io.BufferedRandom(CountedFile(tmp_path / "buffer", "w+"))
+        streams.append(stream)
+        return stream
+
+    def records(self):
+        for number in range(5000):
+            yield (
+                ("BTCUSDT", "agg_trades"),
+                {
+                    "sequence": number,
+                    "payload": "x" * 256,
+                },
+            )
+
+    monkeypatch.setattr(replay, "TemporaryFile", temporary_file)
+    monkeypatch.setattr(replay.TardisArchive, "_iter_canonical_records", records)
+    with ExitStack() as resources:
+        archive = replay.TardisArchive(tmp_path, {}, {}, None, resources, lambda: None)
+        for number, (_start, record) in enumerate(
+            archive._stream_records("BTCUSDT", "agg_trades", None)
+        ):
+            assert record == {"sequence": number, "payload": "x" * 256}
+        assert number == 4999
+    assert streams and all(stream.closed for stream in streams)
+    assert calls["write"] < 500 and calls["seek"] < 500
+
+
 def test_cursor_spool_releases_payloads_with_native_decoder_replaced(
     tmp_path, monkeypatch
 ):
@@ -876,7 +923,7 @@ def test_cursor_spool_releases_payloads_with_native_decoder_replaced(
             retained, _peak = tracemalloc.get_traced_memory()
             assert retained < 1024**2
             buffers = tuple(archive._records_by_stream.values())
-        assert all(stream.closed for stream in buffers)
+        assert all(stream.closed for stream, _end in buffers)
     finally:
         tracemalloc.stop()
 

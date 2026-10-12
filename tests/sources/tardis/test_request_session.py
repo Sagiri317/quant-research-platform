@@ -82,13 +82,13 @@ def test_request_reuses_scan_and_closes_each_lease_cursor(archive, monkeypatch, 
             assert error is primary
         assert slow.gi_frame is None
         assert owner._records_by_stream
-        assert all(not f.closed for f in owner._records_by_stream.values())
+        assert all(not f.closed for f, _end in owner._records_by_stream.values())
         with open_market_source(archive) as second:
             assert second is not first
             assert second.archives[0] is owner
             assert list(_records(second)) == expected
         assert len(calls) == 1
-    assert all(f.closed for f in owner._records_by_stream.values())
+    assert all(f.closed for f, _end in owner._records_by_stream.values())
     assert replay._REQUEST_ARCHIVES.get() is None
     with _request():
         with open_market_source(archive) as third:
@@ -149,7 +149,9 @@ def test_simultaneous_requests_have_separate_buffers(archive):
         left, right = list(threads.map(consume, range(2)))
     assert left[0] is not right[0] and left[1] == right[1]
     assert all(
-        f.closed for item in (left, right) for f in item[0]._records_by_stream.values()
+        f.closed
+        for item in (left, right)
+        for f, _end in item[0]._records_by_stream.values()
     )
     assert replay._REQUEST_ARCHIVES.get() is None
 

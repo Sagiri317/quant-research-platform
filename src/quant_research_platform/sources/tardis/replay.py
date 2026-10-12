@@ -385,8 +385,8 @@ class TardisArchive:
             if self._replay_error is not None:
                 raise self._replay_error
             try:
-                buffered = self._records_by_stream.get(requested)
-                if buffered is not None and position < buffered.seek(0, 2):
+                buffered, end = self._records_by_stream.get(requested, (None, 0))
+                if position < end:
                     buffered.seek(position)
                     start = position
                     record = pickle.load(buffered)
@@ -395,14 +395,17 @@ class TardisArchive:
                     if item is None:
                         return
                     key, record = item
-                    buffered = self._records_by_stream.get(key)
+                    buffered, end = self._records_by_stream.get(key, (None, 0))
                     if buffered is None:
                         buffered = self._replay_resources.enter_context(
                             closing_iterator(TemporaryFile())
                         )
-                        self._records_by_stream[key] = buffered
-                    start = buffered.seek(0, 2)
+                    if buffered.tell() != end:
+                        buffered.seek(end)
+                    start = end
                     pickle.dump(record, buffered, protocol=pickle.HIGHEST_PROTOCOL)
+                    # Only appends advance the tail; readers may move the file cursor.
+                    self._records_by_stream[key] = buffered, buffered.tell()
                     if key != requested:
                         continue
             except Exception as error:
@@ -517,7 +520,7 @@ class TardisArchive:
                         return
                     prefix_position = prefix_start
                     while prefix_position is not None and prefix_position < start:
-                        buffered = self._records_by_stream[(symbol, "depth")]
+                        buffered, _end = self._records_by_stream[(symbol, "depth")]
                         buffered.seek(prefix_position)
                         bootstrap = pickle.load(buffered)
                         prefix_position = buffered.tell()
