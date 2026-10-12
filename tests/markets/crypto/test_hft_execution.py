@@ -32,6 +32,301 @@ from tests.helpers.binance_hft import KNOWN_NO_FUNDING, _coverage, _quote
 from tests.helpers.portfolio_ledger import capture_fill_rows
 
 
+def _native_taker_projection_case(tmp_path, monkeypatch, *, count=300):
+    import json
+    from contextlib import contextmanager
+    from dataclasses import asdict
+    from types import SimpleNamespace
+
+    from quant_research_platform.contracts.portfolios import (
+        FundingEvent,
+        PortfolioTargetBlocked,
+    )
+    from quant_research_platform.contracts.time import TimeWindow
+    from quant_research_platform.markets.implementations.crypto import portfolio
+    from quant_research_platform.sources.binance.replay import (
+        ReconstructionStats,
+        iter_reconstructed_depth,
+    )
+    from quant_research_platform.sources.market import open_market_source
+    from quant_research_platform.sources.tardis.raw import import_slices
+    from tests.helpers.tardis import _slices
+
+    start = pd.Timestamp("2026-09-01T00:00:00Z")
+    end = start + pd.Timedelta(milliseconds=count * 10)
+    lines = []
+    for index in range(count + 1):
+        stamp = start + pd.Timedelta(milliseconds=index * 10)
+        payload = (
+            {
+                "lastUpdateId": 100,
+                "bids": [[str(10000 - level), "1"] for level in range(1000)],
+                "asks": [[str(10002 + level), "1"] for level in range(1000)],
+            }
+            if index == 0
+            else {
+                "e": "depthUpdate",
+                "E": stamp.value // 1_000_000,
+                "T": stamp.value // 1_000_000,
+                "s": "BTCUSDT",
+                "st": 1,
+                "ps": "BTCUSDT",
+                "U": 99 + index,
+                "u": 100 + index,
+                "pu": 99 + index,
+                "b": [[str(10000 - level), "1"] for level in range(20)],
+                "a": [[str(10002 + level), "1"] for level in range(20)],
+            }
+        )
+        record = {
+            "stream": "btcusdt@depthSnapshot" if index == 0 else "btcusdt@depth@0ms",
+            "data": payload,
+        }
+        if index == 0:
+            record["generated"] = True
+        lines.append(
+            (
+                stamp.strftime("%Y-%m-%dT%H:%M:%S.%fZ")
+                + " "
+                + json.dumps(record)
+                + "\n"
+            ).encode()
+        )
+    root = tmp_path / "archive"
+    import_slices(
+        root,
+        date="2026-09-01",
+        slices=_slices(tmp_path / "native", b"".join(lines)),
+    )
+    initial = ReconstructionStats()
+    with open_market_source(root) as source:
+        source_identity = source.source_identity
+        for _event in iter_reconstructed_depth(
+            source, FUTURES_MARKET_TYPE, symbol="BTCUSDT", stats=initial
+        ):
+            pass
+    coverage = initial.coverage_segments
+    window = TimeWindow(
+        (start + pd.Timedelta(milliseconds=100)).isoformat(), end.isoformat()
+    )
+    candidate = SimpleNamespace(
+        candidate_id="fixture", model_id="model", asset_id="btc_usdt"
+    )
+    monkeypatch.setattr(
+        portfolio,
+        "_panel",
+        lambda *_args: {
+            "source_artifact_identity": source_identity,
+            "producer_diagnostics": {
+                "reconstruction": {"BTCUSDT": {"coverage_segments": coverage}}
+            },
+        },
+    )
+    monkeypatch.setattr(
+        portfolio,
+        "_prediction_rows",
+        lambda **_kwargs: iter(
+            {
+                "timestamp_ms": start.value // 1_000_000 + offset,
+                "prediction_score": 0.1 if offset % 200 else -0.1,
+            }
+            for offset in range(100, count * 10 - 300, 100)
+        ),
+    )
+
+    def execute(*, latency, horizon, mode, projection="native", fault=None):
+        closed = []
+        stats = ReconstructionStats()
+        emitted_levels = []
+        summaries, batches = [], []
+
+        @contextmanager
+        def open_run(_root):
+            with open_market_source(root) as source:
+                try:
+                    yield SimpleNamespace(
+                        source_identity=source.source_identity,
+                        market_metadata=source.market_metadata,
+                        iter_market_records=source.iter_market_records,
+                        _coverage_index=source._coverage_index,
+                        funding_roots=lambda *_args, **_kwargs: (),
+                        observation_coverage=lambda **_kwargs: SimpleNamespace(
+                            intervals=lambda: iter(((start.value, end.value + 1),)),
+                            covering=lambda *_args: ("synthetic-trade-coverage",),
+                        ),
+                    )
+                finally:
+                    closed.append("source")
+
+        @contextmanager
+        def funding(*_args, **_kwargs):
+            cuts = (
+                tuple(
+                    FundingEvent(start.value + offset * 1_000_000, None, None)
+                    for offset in (750, 1500, 2250)
+                )
+                if mode == "independent_segments"
+                else ()
+            )
+            try:
+                yield SimpleNamespace(
+                    identity="f" * 64,
+                    coverage=((start.value, end.value + 1),),
+                    settlement_qualification={"source": "synthetic"},
+                    events=cuts,
+                    forecasts=(
+                        FundingForecast(start.value, end.value + 1_000_000_000, ()),
+                    ),
+                )
+            finally:
+                closed.append("funding")
+
+        def reconstruct(source, *, output_levels=None, **kwargs):
+            if projection != "native":
+                output_levels = None if projection == "full" else 1
+            if fault is not None:
+                records = source.iter_market_records
+
+                def unordered(**kwargs):
+                    for index, row in enumerate(records(**kwargs)):
+                        if index == 20:
+                            if fault == "time_order":
+                                row = {
+                                    **row,
+                                    "observed_time_ns": start.value,
+                                    "receive_time": start.isoformat(),
+                                }
+                            else:
+                                row = {
+                                    **row,
+                                    "payload": {
+                                        **row["payload"],
+                                        "b": [
+                                            [str(10000 - level), "0"]
+                                            for level in range(1, 1000)
+                                        ],
+                                    },
+                                }
+                        yield row
+
+                source.iter_market_records = unordered
+            events = iter_reconstructed_depth(
+                source,
+                FUTURES_MARKET_TYPE,
+                output_levels=output_levels,
+                required_levels=20,
+                stats=stats,
+                **kwargs,
+            )
+            try:
+                for event in events:
+                    if isinstance(event, BookState):
+                        emitted_levels.append((len(event.bids), len(event.asks)))
+                    yield event
+            finally:
+                events.close()
+                closed.append("books")
+
+        def episode(**kwargs):
+            result = kwargs.pop("produce")(batches.append)
+            summaries.append((kwargs, result))
+
+        manifest = {
+            "scenario_id": "fixture",
+            "access_window": "holdout",
+            "research_plan": {
+                "execution": {
+                    "latency_ms": latency,
+                    "taker_fee_bps": 2.0,
+                    "markout_horizon_ms": 100,
+                },
+                "exposure_limits": {
+                    "btc_usdt": {
+                        "max_order_quantity": 3.0,
+                        "max_position_quantity": 6.0,
+                    }
+                },
+                "initial_capital": 1e6,
+                "valuation_currency": "USDT",
+                "test": {"start": start.isoformat(), "end": end.isoformat()},
+                "folds": [{"fold_id": "fold"}],
+            },
+            "model_scopes": {"model": {"label_horizon_ms": horizon}},
+        }
+        try:
+            result = portfolio.produce_taker_ledger(
+                layout=None,
+                candidate=candidate,
+                protocol_manifest=manifest,
+                dataset_catalog=SimpleNamespace(get=lambda _key: None),
+                output_window=window,
+                upstream_identities={},
+                expected_funding_identity="f" * 64,
+                raw_root=root,
+                execution_mode=mode,
+                on_ledger=batches.append,
+                on_episode=episode,
+                symbol="BTCUSDT",
+                open_run=open_run,
+                reconstruct_depth=reconstruct,
+                read_funding=funding,
+                read_prediction_bundle=None,
+            )
+        except (ValueError, PortfolioTargetBlocked) as error:
+            result = (type(error).__name__, str(error))
+        assert sorted(closed) == ["books", "funding", "source"]
+        return (result, summaries, batches, asdict(stats)), emitted_levels
+
+    return execute
+
+
+@pytest.mark.parametrize("mode", ("continuous", "independent_segments"))
+@pytest.mark.parametrize(
+    "latency,horizon", ((0, 100), (100, 100), (200, 100), (100, 500))
+)
+def test_taker_native_projection_preserves_complete_ledger(
+    tmp_path, monkeypatch, latency, horizon, mode
+):
+    execute = _native_taker_projection_case(tmp_path, monkeypatch)
+    full, full_levels = execute(
+        latency=latency, horizon=horizon, mode=mode, projection="full"
+    )
+    projected, levels = execute(latency=latency, horizon=horizon, mode=mode)
+    assert full == projected
+    assert len(levels) == len(full_levels) == 300
+    expected = 1 if latency >= horizon else 1000
+    assert set(levels) == {(expected, expected)}
+    summaries = (
+        [row[1] for row in full[1]] if mode == "independent_segments" else [full[0]]
+    )
+    assert len(summaries) == (4 if mode == "independent_segments" else 1)
+    if latency >= horizon:
+        assert all(summary["created_orders"] == 0 for summary in summaries)
+        assert all(summary["selection_status"] == "UNDEFINED" for summary in summaries)
+    else:
+        assert all(summary["created_orders"] > 0 for summary in summaries)
+        assert any(abs(fill.quantity) > 1 for batch in full[2] for fill in batch.trades)
+
+
+@pytest.mark.parametrize("fault", ("depth", "time_order"))
+def test_taker_projection_keeps_native_reconstruction_failures(
+    tmp_path, monkeypatch, fault
+):
+    execute = _native_taker_projection_case(tmp_path, monkeypatch)
+    full, _levels = execute(
+        latency=100, horizon=100, mode="continuous", projection="full", fault=fault
+    )
+    projected, _levels = execute(
+        latency=100, horizon=100, mode="continuous", fault=fault
+    )
+    assert full == projected
+    if fault == "depth":
+        assert full[3]["unsupported_coverage"] > 0
+        assert full[3]["emitted_states"] == 19
+    else:
+        assert full[0] == ("ValueError", "binance_replay_observed_time_non_monotonic")
+
+
 @pytest.mark.usefixtures("coordinate_scale")
 def test_zero_latency_maker_replacement_releases_old_reservation() -> None:
     from tests.markets.crypto.calibration_test_support import calibration_from_paths

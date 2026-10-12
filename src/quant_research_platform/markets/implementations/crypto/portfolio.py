@@ -532,6 +532,12 @@ def produce_taker_ledger(
         taker_fee_bps=execution["taker_fee_bps"],
         markout_horizon_ms=execution["markout_horizon_ms"],
     )
+    prediction_horizon_ms = protocol_manifest["model_scopes"][candidate.model_id][
+        "label_horizon_ms"
+    ]
+    if config.latency_ms >= prediction_horizon_ms:
+        # Expired signals cannot create orders; every event still marks the ledger.
+        reconstruct_depth = partial(reconstruct_depth, output_levels=1)
     windows = crypto_execution_windows(
         plan, output_window, access_window=protocol_manifest["access_window"]
     )
@@ -577,9 +583,7 @@ def produce_taker_ledger(
         execute = partial(
             simulate_taker,
             prediction_column="prediction_score",
-            prediction_horizon_ms=protocol_manifest["model_scopes"][candidate.model_id][
-                "label_horizon_ms"
-            ],
+            prediction_horizon_ms=prediction_horizon_ms,
             config=config,
             observed_coverage=coverage,
             capital=PortfolioCapital(
