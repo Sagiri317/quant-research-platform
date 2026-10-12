@@ -8,11 +8,15 @@ import re
 from contextlib import ExitStack
 from dataclasses import dataclass, replace
 from pathlib import Path
+from shutil import copyfileobj
 
 import numpy as np
 import pandas as pd
 import pyarrow as pa
 
+from quant_research_platform.contracts.business_manifest import (
+    build_business_manifest_envelope,
+)
 from quant_research_platform.contracts.experiments import label_maturity_mask
 from quant_research_platform.contracts.json_codec import (
     canonical_identity_bytes,
@@ -58,6 +62,7 @@ from quant_research_platform.storage.datasets.reading import (
 )
 from quant_research_platform.storage.experiments import (
     read_model_trial_ledger_reference,
+    verify_trial_ledger_snapshot,
 )
 from quant_research_platform.storage.identity import (
     filesystem_mkdir,
@@ -75,6 +80,7 @@ from quant_research_platform.storage.parquet import (
 )
 from quant_research_platform.storage.semantic_artifacts import (
     _member_record,
+    discover_semantic_artifact_instances,
     semantic_artifact_read_session,
     verify_semantic_artifact_member,
     write_semantic_artifact,
@@ -102,6 +108,7 @@ _A_SHARE_VALIDATION_SCHEMA = pa.schema(
         ("score_eligible", pa.bool_()),
     )
 )
+_A_SHARE_MODEL_QUARTER_SCHEMA_ID = "qrp-a-share-model-quarter"
 
 
 @dataclass(frozen=True)
@@ -241,6 +248,103 @@ def _persisted_model_metadata(
     return metadata
 
 
+def _model_quarter_envelope(envelope, quarter):
+    return build_business_manifest_envelope(
+        logical_artifact_id=envelope.logical_artifact_id,
+        schema_identity=canonical_json_hash(
+            {
+                "schema_id": _A_SHARE_MODEL_QUARTER_SCHEMA_ID,
+                "model_schema_identity": envelope.schema_identity,
+            }
+        ),
+        protocol_or_spec_identity=envelope.protocol_or_spec_identity,
+        software_identity=envelope.software_identity,
+        research_window=envelope.research_window,
+        upstream_identities=envelope.upstream_identities,
+        semantic_metadata={
+            **envelope.payload()["semantic_metadata"],
+            "model_instance_identity": envelope.instance_identity,
+            "quarter_id": quarter,
+        },
+    )
+
+
+def _copy_model_members(source, destination, members, member_identities):
+    for member in members:
+        relative = member["path"]
+        target = destination / relative
+        filesystem_mkdir(target.parent, parents=True, exist_ok=True)
+        with closing_iterator(open_filesystem_file(source / relative)) as reader:
+            with verified_file_handle(
+                source / relative,
+                reader,
+                expected_identity=member_identities[relative],
+                error="semantic_artifact_member_identity_changed",
+            ):
+                with closing_iterator(open_filesystem_file(target, "xb")) as writer:
+                    copyfileobj(reader, writer, length=1024 * 1024)
+
+
+def _validate_model_quarter(
+    root,
+    envelope,
+    quarter,
+    members,
+    references,
+    trial_layout,
+    *,
+    verify_science,
+    trial_snapshots,
+    member_identities=None,
+):
+    if member_identities is None:
+        member_identities = {
+            member["path"]: verify_semantic_artifact_member(
+                root, relative_path=member["path"], expected=member
+            )
+            for member in members
+        }
+    if "quarter.json" not in member_identities:
+        raise ValueError("model_quarter_manifest_invalid")
+    payload = read_qrp_json_file(
+        root / "quarter.json", expected_identity=member_identities["quarter.json"]
+    )[1]
+    if (
+        set(payload)
+        != {
+            "schema_id",
+            "model_instance_identity",
+            "quarter_id",
+            "candidate_models",
+            "selection",
+        }
+        or payload["schema_id"] != _A_SHARE_MODEL_QUARTER_SCHEMA_ID
+        or payload["model_instance_identity"] != envelope.instance_identity
+        or payload["quarter_id"] != quarter
+        or type(payload["candidate_models"]) is not list
+        or type(references) is not list
+    ):
+        raise ValueError("model_quarter_manifest_invalid")
+    required = {"quarter.json"}
+    member_records = {member["path"]: member for member in members}
+    by_identity, used, _folds, completed = _validate_a_share_candidate_quarters(
+        root,
+        envelope.payload(),
+        payload["candidate_models"],
+        (quarter,),
+        references,
+        trial_layout,
+        verify_science=verify_science,
+        member_records=member_records,
+        member_identities=member_identities,
+        required=required,
+        trial_snapshots=trial_snapshots,
+    )
+    if used != set(by_identity) or required != set(member_records):
+        raise ValueError("model_artifact_members_invalid")
+    return payload, completed[quarter]
+
+
 def write_quarterly_model_artifact(
     logical_root, *, model_id, envelope, model_results, trial_layout, verify_source
 ):
@@ -345,7 +449,207 @@ def write_quarterly_model_artifact(
                     entry["trial_semantic_identity"] = reference["semantic_identity"]
             operational["model_trial_ledgers"].append(dict(reference))
 
+        def validate_quarter_selection(fold, decision, *, verify_science):
+            quarter = quarter_id_for_fold(fold)
+            contract = envelope.payload()["semantic_metadata"]["target_contract"]
+            protocol = contract["protocol"]
+            windows = model_selection_windows(
+                ((quarter, fold.train.end, fold.validation.start),),
+                chronology=protocol["model_chronology"],
+                development_window=protocol["development_window"],
+                complete=False,
+            )
+            if not windows:
+                if decision is not None:
+                    raise ValueError("model_selection_decisions_invalid")
+                return
+            group, key, cutoff, window = windows[0]
+            _validate_a_share_selection_decision(
+                staging,
+                candidate_models,
+                contract,
+                decision,
+                group=group,
+                key=key,
+                decision_cutoff=cutoff,
+                window=window,
+                member_identities=candidate_files,
+                dataset_identity=envelope.upstream_identities[protocol["scenario_id"]],
+                verify_science=verify_science,
+            )
+
+        def quarter_location(quarter):
+            unit = _model_quarter_envelope(envelope, quarter)
+            root = (
+                Path(logical_root) / "quarters" / envelope.instance_identity / quarter
+            )
+            return root, unit
+
+        def reuse_quarter(fold):
+            quarter = quarter_id_for_fold(fold)
+            root, unit = quarter_location(quarter)
+            instances = discover_semantic_artifact_instances(
+                root, manifest_scope=lambda _envelope: True
+            )
+            if not instances:
+                return None
+            expected = root / "instances" / unit.instance_identity
+            if instances != (expected,):
+                raise ValueError("model_quarter_identity_mismatch")
+            member_identities = {}
+            unit_operational = {}
+            trial_snapshots = {}
+            with semantic_artifact_read_session(
+                expected,
+                expected_identity=unit.instance_identity,
+                member_identities=member_identities,
+                operational_metadata=unit_operational,
+            ) as (_envelope, members):
+                references = unit_operational.get("model_trial_ledgers")
+                payload, completed = _validate_model_quarter(
+                    expected,
+                    envelope,
+                    quarter,
+                    members,
+                    references,
+                    trial_layout,
+                    verify_science=False,
+                    member_identities=member_identities,
+                    trial_snapshots=trial_snapshots,
+                )
+                if any(plan.folds != (fold,) for plan, _count in completed.values()):
+                    raise ValueError("model_trial_fold_binding_invalid")
+                prediction_members = tuple(
+                    entry["validation_prediction"]
+                    for entry in payload["candidate_models"]
+                )
+                _copy_model_members(
+                    expected, staging, prediction_members, member_identities
+                )
+                candidate_models.extend(payload["candidate_models"])
+                for member in prediction_members:
+                    candidate_files[member["path"]] = dataset_file_identity(
+                        staging / member["path"]
+                    )
+                validate_quarter_selection(
+                    fold, payload["selection"], verify_science=False
+                )
+                if payload["selection"] is not None:
+                    selections["quarterly"][quarter] = payload["selection"]
+                operational["model_trial_ledgers"].extend(references)
+                costs = unit_operational["model_phase_observations"]
+                for phase in costs["phases"]:
+                    observation = phase["observations"]
+                    environment = observation["environment"]
+                    record_observation(
+                        {
+                            **phase,
+                            "observations": {
+                                **observation,
+                                "environment": {
+                                    **costs["environments"][environment["context"]],
+                                    "created_at_utc": environment["created_at_utc"],
+                                },
+                            },
+                        }
+                    )
+                verify_source()
+                for ledger_root, snapshot in trial_snapshots.items():
+                    verify_trial_ledger_snapshot(ledger_root, snapshot)
+            return completed
+
+        def publish_quarter(fold):
+            quarter = quarter_id_for_fold(fold)
+            root, unit = quarter_location(quarter)
+            candidates = [
+                entry for entry in candidate_models if entry["quarter_id"] == quarter
+            ]
+            trial_ids = {entry["trial_semantic_identity"] for entry in candidates}
+            references = [
+                reference
+                for reference in operational["model_trial_ledgers"]
+                if reference["semantic_identity"] in trial_ids
+            ]
+            decision = selections["quarterly"].get(quarter)
+            costs = operational["model_phase_observations"]
+            phases = [
+                phase for phase in costs["phases"] if phase["quarter_id"] == quarter
+            ]
+            contexts = tuple(
+                dict.fromkeys(
+                    phase["observations"]["environment"]["context"] for phase in phases
+                )
+            )
+            unit_operational = {
+                "model_trial_ledgers": references,
+                "model_phase_observations": {
+                    "environments": [
+                        costs["environments"][index] for index in contexts
+                    ],
+                    "phases": [
+                        {
+                            **phase,
+                            "observations": {
+                                **phase["observations"],
+                                "environment": {
+                                    **phase["observations"]["environment"],
+                                    "context": contexts.index(
+                                        phase["observations"]["environment"]["context"]
+                                    ),
+                                },
+                            },
+                        }
+                        for phase in phases
+                    ],
+                },
+            }
+
+            def write_quarter(destination):
+                _copy_model_members(
+                    staging,
+                    destination,
+                    tuple(entry["validation_prediction"] for entry in candidates),
+                    candidate_files,
+                )
+                write_internal_artifact_manifest(
+                    destination / "quarter.json",
+                    {
+                        "schema_id": _A_SHARE_MODEL_QUARTER_SCHEMA_ID,
+                        "model_instance_identity": envelope.instance_identity,
+                        "quarter_id": quarter,
+                        "candidate_models": candidates,
+                        "selection": decision,
+                    },
+                )
+
+            def validate_quarter(destination, members):
+                trial_snapshots = {}
+                _validate_model_quarter(
+                    destination,
+                    envelope,
+                    quarter,
+                    members,
+                    references,
+                    trial_layout,
+                    verify_science=True,
+                    trial_snapshots=trial_snapshots,
+                )
+                validate_quarter_selection(fold, decision, verify_science=True)
+                verify_source()
+                for ledger_root, snapshot in trial_snapshots.items():
+                    verify_trial_ledger_snapshot(ledger_root, snapshot)
+
+            write_semantic_artifact(
+                root,
+                unit,
+                write_quarter,
+                operational_metadata=unit_operational,
+                staged_validator=validate_quarter,
+            )
+
         def select_models(group, decision_id, cutoff, scoring_window):
+            if decision_id in selections[group]:
+                return selections[group][decision_id]
             observation = {}
             with record_run_observations(observation):
                 value = _select_a_share_models(
@@ -385,6 +689,8 @@ def write_quarterly_model_artifact(
                         on_trial=write_trial,
                         select_models=select_models,
                         on_observation=record_observation,
+                        reuse_quarter=reuse_quarter,
+                        on_quarter=publish_quarter,
                     )
                 )
             ) as source:
@@ -835,23 +1141,8 @@ def _validate_a_share_model_payload(
     protocol = contract["protocol"]
     protocol_identity = canonical_json_hash(protocol)
     dataset_identity = envelope["upstream_identities"][protocol["scenario_id"]]
-    specs = {
-        item["model_id"]: ModelSpec(
-            **{
-                **item,
-                "input_factor_columns": tuple(item["input_factor_columns"]),
-                "input_feature_columns": tuple(item["input_feature_columns"]),
-            }
-        )
-        for item in contract["model_specs"]
-    }
-    configurations = {
-        item["model_id"]: item for item in protocol["research_configuration"]["models"]
-    }
-    if tuple(specs) != tuple(configurations):
-        raise ValueError("model_trial_family_coverage_mismatch")
+    specs, configurations, candidate_orders = _a_share_model_configuration(contract)
     family_ids = tuple(specs)
-    _validate_a_share_model_family_ids(family_ids)
     quarters = tuple(
         str(period)
         for period in pd.period_range(
@@ -860,22 +1151,6 @@ def _validate_a_share_model_payload(
             freq="Q",
         )
     )
-    expected_keys = []
-    candidate_orders = {}
-    for family_id, configuration in configurations.items():
-        parameters = configuration.get(
-            "parameter_candidates", [configuration["hyperparameters"]]
-        )
-        candidate_orders[family_id] = tuple(
-            family_id if len(parameters) == 1 else f"{family_id}__config_{index}"
-            for index in range(len(parameters))
-        )
-    for quarter in quarters:
-        for family_id in family_ids:
-            expected_keys.extend(
-                (quarter, family_id, candidate_id)
-                for candidate_id in candidate_orders[family_id]
-            )
     if payload["validation_quarters"] != list(quarters):
         raise ValueError("model_candidate_matrix_incomplete")
     required = {"model.json"}
@@ -933,195 +1208,21 @@ def _validate_a_share_model_payload(
         ):
             raise ValueError("model_final_shard_invalid")
         final_models.extend(shard["final_models"])
-    if tuple(
-        (entry.get("quarter_id"), entry.get("family_id"), entry.get("model_id"))
-        for entry in candidates
-    ) != tuple(expected_keys):
-        raise ValueError("model_candidate_matrix_incomplete")
-    by_identity = {
-        reference["semantic_identity"]: reference for reference in references
-    }
-    if len(by_identity) != len(references):
-        raise ValueError("model_trial_references_duplicate")
-    used_references = set()
-    folds = {}
-    for quarter in quarters:
-        for family_id in family_ids:
-            entries = [
-                entry
-                for entry in candidates
-                if entry["quarter_id"] == quarter and entry["family_id"] == family_id
-            ]
-            identities = {entry["trial_semantic_identity"] for entry in entries}
-            if len(identities) != 1:
-                raise ValueError("model_trial_reference_semantics_invalid")
-            identity = next(iter(identities))
-            if identity not in by_identity or identity in used_references:
-                raise ValueError("model_trial_references_missing")
-            used_references.add(identity)
-            plan, records = read_model_trial_ledger_reference(
-                trial_layout, by_identity[identity], snapshots=trial_snapshots
-            )
-            if (
-                plan.stage != "selection"
-                or plan.market_id != "a_share"
-                or plan.research_dataset_id != protocol["scenario_id"]
-                or (plan.data_snapshot_id != dataset_identity)
-                or (plan.input_lineage != (dataset_identity,))
-                or (plan.target_id != envelope["logical_artifact_id"])
-                or (plan.research_protocol_identity != protocol_identity)
-                or (plan.candidate_family_id != family_id)
-                or (len(plan.folds) != 1)
-                or (plan.candidate_ids != candidate_orders[family_id])
-                or (plan.tie_break_order != plan.candidate_ids)
-                or (plan.trial_budget != len(plan.candidate_ids))
-                or (plan.selection_metric != "validation_rankic")
-                or (plan.selection_direction != "maximize")
-                or (_window_payload(plan.test) != protocol["holdout_window"])
-                or (
-                    tuple(record.candidate_id for record in records)
-                    != plan.candidate_ids
-                )
-                or any(record.status != "completed" for record in records)
-            ):
-                raise ValueError("model_trial_artifact_binding_invalid")
-            fold = plan.folds[0]
-            if (
-                quarter_id_for_fold(fold) != quarter
-                or pd.Timestamp(fold.validation.end)
-                > pd.Timestamp(envelope["research_window"]["end"])
-                or str(pd.Period(fold.validation.start, freq="Q")) != quarter
-                or str(pd.Period(fold.validation.end, freq="Q")) != quarter
-                or (
-                    pd.Timestamp(fold.train.start).year
-                    != pd.Timestamp(protocol["formal_dataset_window"]["start"]).year
-                )
-                or (
-                    quarter in folds
-                    and (
-                        folds[quarter]["training_window"] != _window_payload(fold.train)
-                        or folds[quarter]["validation_window"]
-                        != _window_payload(fold.validation)
-                    )
-                )
-            ):
-                raise ValueError("model_trial_fold_binding_invalid")
-            folds[quarter] = entries[0]
-            configuration = configurations[family_id]
-            parameters = configuration.get(
-                "parameter_candidates", [configuration["hyperparameters"]]
-            )
-            for entry, record in zip(entries, records, strict=True):
-                if set(entry) != {
-                    "quarter_id",
-                    "family_id",
-                    "model_id",
-                    "training_window",
-                    "validation_window",
-                    "model_metadata",
-                    "validation_prediction",
-                    "trial_semantic_identity",
-                }:
-                    raise ValueError("model_candidate_metadata_invalid")
-                metadata = validate_model_metadata_core(entry["model_metadata"])
-                expected_spec = _selection_model_specs(
-                    specs[family_id],
-                    parameters,
-                    n_train=record.metrics["n_train"],
-                    root_seed=protocol["root_seed"],
-                    quarter_id=quarter,
-                )[plan.candidate_ids.index(record.candidate_id)]
-                expected_parameters = model_spec_payload(expected_spec)
-                if (
-                    canonical_identity_bytes(record.payload()["normalized_parameters"])
-                    != canonical_identity_bytes(expected_parameters)
-                    or canonical_identity_bytes(
-                        plan.protocol_payload()["candidate_parameters"][
-                            record.candidate_id
-                        ]
-                    )
-                    != canonical_identity_bytes(expected_parameters)
-                    or record.metrics["n_train"]
-                    != metadata["rows_after_input_label_dropna"]
-                    or (entry["training_window"] != _window_payload(fold.train))
-                    or (entry["validation_window"] != _window_payload(fold.validation))
-                    or (
-                        pd.Timestamp(metadata["train_start"])
-                        < pd.Timestamp(fold.train.start)
-                    )
-                    or (
-                        pd.Timestamp(metadata["train_end"])
-                        > pd.Timestamp(fold.train.end)
-                    )
-                ):
-                    raise ValueError("model_trial_parameters_misaligned")
-                _validate_model_parameters(
-                    metadata,
-                    expected_parameters,
-                    error="model_trial_parameters_misaligned",
-                )
-                member = entry["validation_prediction"]
-                path = f"models/{quarter}/{family_id}/{entry['model_id']}.parquet"
-                if member.get("path") != path or member != member_records.get(path):
-                    raise ValueError("model_validation_member_invalid")
-                required.add(path)
-                if verify_science:
-                    expected_coverage = ModelSampleCoverage(
-                        model_validation_coverage_scope(
-                            dataset_identity, fold, tuple(specs.values())
-                        )
-                    )
-
-                    def scoring_frames(
-                        entry=entry, fold=fold, coverage=expected_coverage
-                    ):
-                        with closing_iterator(
-                            _a_share_validation_chunks(
-                                root,
-                                entry,
-                                member_identities=member_identities,
-                                development_end=envelope["research_window"]["end"],
-                            )
-                        ) as frames:
-                            for frame in frames:
-                                mature = frame.loc[
-                                    label_maturity_mask(
-                                        frame,
-                                        fitting_cutoff=fold.validation.end,
-                                        availability_column="label_available_at",
-                                        target_column="label",
-                                    )
-                                    & frame["score_eligible"]
-                                ]
-                                coverage.add(mature)
-                                try:
-                                    yield mature
-                                except GeneratorExit:
-                                    return
-
-                    metrics = evaluate_model_trial_metrics_from_chunks(
-                        scoring_frames(),
-                        model_id=entry["model_id"],
-                        label_column="label",
-                        prediction_column="prediction_score",
-                        expected_coverage=None,
-                    )
-                    terminal = {
-                        key: None
-                        if isinstance(value, float) and np.isnan(value)
-                        else value.item()
-                        if isinstance(value, np.generic)
-                        else value
-                        for key, value in metrics.items()
-                        if key != "model_id"
-                    }
-                    terminal["n_train"] = metadata["rows_after_input_label_dropna"]
-                    if (
-                        dict(record.metrics) != terminal
-                        or record.common_coverage_id
-                        != expected_coverage.semantic_identity
-                    ):
-                        raise ValueError("model_validation_trial_mismatch")
+    by_identity, used_references, folds, _completed = (
+        _validate_a_share_candidate_quarters(
+            root,
+            envelope,
+            candidates,
+            quarters,
+            references,
+            trial_layout,
+            verify_science=verify_science,
+            member_records=member_records,
+            member_identities=member_identities,
+            required=required,
+            trial_snapshots=trial_snapshots,
+        )
+    )
     cutoff = pd.Timestamp(protocol["development_window"]["end"])
     complete = pd.Timestamp(envelope["research_window"]["end"]) >= cutoff
     expected_decisions = model_selection_windows(
@@ -1142,48 +1243,19 @@ def _validate_a_share_model_payload(
     } != {(group, key) for group, key, _cutoff, _window in expected_decisions}:
         raise ValueError("model_selection_decisions_incomplete")
     for group, key, decision_cutoff, window in expected_decisions:
-        decision = selections[group][key]
-        validate_a_share_model_selection_metadata(decision)
-        eligible = _eligible_a_share_predictions(candidates, decision_cutoff, window)
-        if (
-            decision["selection_group"] != group
-            or decision["decision_id"] != key
-            or decision["cutoff"]
-            != time_value_isoformat(pd.Timestamp(decision_cutoff), date_only=True)
-            or decision["validation_start"]
-            != time_value_isoformat(window.start, date_only=True)
-            or decision["validation_end"]
-            != time_value_isoformat(window.end, date_only=True)
-            or decision["candidate_family_ids"] != list(family_ids)
-            or decision["label_dataset_identity"] != dataset_identity
-            or decision["prediction_members"]
-            != sorted(
-                (entry["validation_prediction"] for entry in eligible),
-                key=lambda item: item["path"],
-            )
-            or decision["selection_ledger_semantic_identities"]
-            != sorted({entry["trial_semantic_identity"] for entry in eligible})
-            or any(
-                family["config_tie_break_order"]
-                != list(candidate_orders[family["family_id"]])
-                for family in decision["families"]
-            )
-        ):
-            raise ValueError("model_selection_decision_mismatch")
-        if verify_science:
-            expected = _select_a_share_models(
-                root,
-                candidates,
-                contract,
-                group=group,
-                decision_id=key,
-                cutoff=decision_cutoff,
-                scoring_window=window,
-                member_identities=member_identities,
-                dataset_identity=dataset_identity,
-            )
-            if selections[group][key] != expected:
-                raise ValueError("model_selection_decision_mismatch")
+        _validate_a_share_selection_decision(
+            root,
+            candidates,
+            contract,
+            selections[group][key],
+            group=group,
+            key=key,
+            decision_cutoff=decision_cutoff,
+            window=window,
+            member_identities=member_identities,
+            dataset_identity=dataset_identity,
+            verify_science=verify_science,
+        )
     expected_final = (
         tuple(
             (group, family)
@@ -1337,6 +1409,319 @@ def _validate_a_share_model_payload(
         operational_metadata,
         directory_identities,
     )
+
+
+def _validate_a_share_selection_decision(
+    root,
+    candidates,
+    contract,
+    decision,
+    *,
+    group,
+    key,
+    decision_cutoff,
+    window,
+    member_identities,
+    dataset_identity,
+    verify_science,
+):
+    specs, _configurations, candidate_orders = _a_share_model_configuration(contract)
+    family_ids = tuple(specs)
+    validate_a_share_model_selection_metadata(decision)
+    eligible = _eligible_a_share_predictions(candidates, decision_cutoff, window)
+    if (
+        decision["selection_group"] != group
+        or decision["decision_id"] != key
+        or decision["cutoff"]
+        != time_value_isoformat(pd.Timestamp(decision_cutoff), date_only=True)
+        or decision["validation_start"]
+        != time_value_isoformat(window.start, date_only=True)
+        or decision["validation_end"]
+        != time_value_isoformat(window.end, date_only=True)
+        or decision["candidate_family_ids"] != list(family_ids)
+        or decision["label_dataset_identity"] != dataset_identity
+        or decision["prediction_members"]
+        != sorted(
+            (entry["validation_prediction"] for entry in eligible),
+            key=lambda item: item["path"],
+        )
+        or decision["selection_ledger_semantic_identities"]
+        != sorted({entry["trial_semantic_identity"] for entry in eligible})
+        or any(
+            family["config_tie_break_order"]
+            != list(candidate_orders[family["family_id"]])
+            for family in decision["families"]
+        )
+    ):
+        raise ValueError("model_selection_decision_mismatch")
+    if verify_science:
+        expected = _select_a_share_models(
+            root,
+            candidates,
+            contract,
+            group=group,
+            decision_id=key,
+            cutoff=decision_cutoff,
+            scoring_window=window,
+            member_identities=member_identities,
+            dataset_identity=dataset_identity,
+        )
+        if decision != expected:
+            raise ValueError("model_selection_decision_mismatch")
+
+
+def _a_share_model_configuration(contract):
+    protocol = contract["protocol"]
+    specs = {
+        item["model_id"]: ModelSpec(
+            **{
+                **item,
+                "input_factor_columns": tuple(item["input_factor_columns"]),
+                "input_feature_columns": tuple(item["input_feature_columns"]),
+            }
+        )
+        for item in contract["model_specs"]
+    }
+    configurations = {
+        item["model_id"]: item for item in protocol["research_configuration"]["models"]
+    }
+    if tuple(specs) != tuple(configurations):
+        raise ValueError("model_trial_family_coverage_mismatch")
+    _validate_a_share_model_family_ids(tuple(specs))
+    candidate_orders = {}
+    for family_id, configuration in configurations.items():
+        parameters = configuration.get(
+            "parameter_candidates", [configuration["hyperparameters"]]
+        )
+        candidate_orders[family_id] = tuple(
+            family_id if len(parameters) == 1 else f"{family_id}__config_{index}"
+            for index in range(len(parameters))
+        )
+    return specs, configurations, candidate_orders
+
+
+def _validate_a_share_candidate_quarters(
+    root,
+    envelope,
+    candidates,
+    quarters,
+    references,
+    trial_layout,
+    *,
+    verify_science,
+    member_records,
+    member_identities,
+    required,
+    trial_snapshots=None,
+):
+    contract = envelope["semantic_metadata"]["target_contract"]
+    protocol = contract["protocol"]
+    protocol_identity = canonical_json_hash(protocol)
+    dataset_identity = envelope["upstream_identities"][protocol["scenario_id"]]
+    specs, configurations, candidate_orders = _a_share_model_configuration(contract)
+    family_ids = tuple(specs)
+    expected_keys = tuple(
+        (quarter, family_id, candidate_id)
+        for quarter in quarters
+        for family_id in family_ids
+        for candidate_id in candidate_orders[family_id]
+    )
+    if (
+        tuple(
+            (entry.get("quarter_id"), entry.get("family_id"), entry.get("model_id"))
+            for entry in candidates
+        )
+        != expected_keys
+    ):
+        raise ValueError("model_candidate_matrix_incomplete")
+    by_identity = {
+        reference["semantic_identity"]: reference for reference in references
+    }
+    if len(by_identity) != len(references):
+        raise ValueError("model_trial_references_duplicate")
+    used_references = set()
+    folds = {}
+    completed = {}
+    for quarter in quarters:
+        completed[quarter] = {}
+        for family_id in family_ids:
+            entries = [
+                entry
+                for entry in candidates
+                if entry["quarter_id"] == quarter and entry["family_id"] == family_id
+            ]
+            identities = {entry["trial_semantic_identity"] for entry in entries}
+            if len(identities) != 1:
+                raise ValueError("model_trial_reference_semantics_invalid")
+            identity = next(iter(identities))
+            if identity not in by_identity or identity in used_references:
+                raise ValueError("model_trial_references_missing")
+            used_references.add(identity)
+            plan, records = read_model_trial_ledger_reference(
+                trial_layout, by_identity[identity], snapshots=trial_snapshots
+            )
+            if (
+                plan.stage != "selection"
+                or plan.market_id != "a_share"
+                or plan.research_dataset_id != protocol["scenario_id"]
+                or (plan.data_snapshot_id != dataset_identity)
+                or (plan.input_lineage != (dataset_identity,))
+                or (plan.target_id != envelope["logical_artifact_id"])
+                or (plan.research_protocol_identity != protocol_identity)
+                or (plan.candidate_family_id != family_id)
+                or (len(plan.folds) != 1)
+                or (plan.candidate_ids != candidate_orders[family_id])
+                or (plan.tie_break_order != plan.candidate_ids)
+                or (plan.trial_budget != len(plan.candidate_ids))
+                or (plan.selection_metric != "validation_rankic")
+                or (plan.selection_direction != "maximize")
+                or (_window_payload(plan.test) != protocol["holdout_window"])
+                or (
+                    tuple(record.candidate_id for record in records)
+                    != plan.candidate_ids
+                )
+                or any(record.status != "completed" for record in records)
+            ):
+                raise ValueError("model_trial_artifact_binding_invalid")
+            fold = plan.folds[0]
+            if (
+                quarter_id_for_fold(fold) != quarter
+                or pd.Timestamp(fold.validation.end)
+                > pd.Timestamp(envelope["research_window"]["end"])
+                or str(pd.Period(fold.validation.start, freq="Q")) != quarter
+                or str(pd.Period(fold.validation.end, freq="Q")) != quarter
+                or (
+                    pd.Timestamp(fold.train.start).year
+                    != pd.Timestamp(protocol["formal_dataset_window"]["start"]).year
+                )
+                or (
+                    quarter in folds
+                    and (
+                        folds[quarter]["training_window"] != _window_payload(fold.train)
+                        or folds[quarter]["validation_window"]
+                        != _window_payload(fold.validation)
+                    )
+                )
+            ):
+                raise ValueError("model_trial_fold_binding_invalid")
+            folds[quarter] = entries[0]
+            completed[quarter][family_id] = (plan, records[0].metrics["n_train"])
+            configuration = configurations[family_id]
+            parameters = configuration.get(
+                "parameter_candidates", [configuration["hyperparameters"]]
+            )
+            for entry, record in zip(entries, records, strict=True):
+                if set(entry) != {
+                    "quarter_id",
+                    "family_id",
+                    "model_id",
+                    "training_window",
+                    "validation_window",
+                    "model_metadata",
+                    "validation_prediction",
+                    "trial_semantic_identity",
+                }:
+                    raise ValueError("model_candidate_metadata_invalid")
+                metadata = validate_model_metadata_core(entry["model_metadata"])
+                expected_spec = _selection_model_specs(
+                    specs[family_id],
+                    parameters,
+                    n_train=record.metrics["n_train"],
+                    root_seed=protocol["root_seed"],
+                    quarter_id=quarter,
+                )[plan.candidate_ids.index(record.candidate_id)]
+                expected_parameters = model_spec_payload(expected_spec)
+                if (
+                    canonical_identity_bytes(record.payload()["normalized_parameters"])
+                    != canonical_identity_bytes(expected_parameters)
+                    or canonical_identity_bytes(
+                        plan.protocol_payload()["candidate_parameters"][
+                            record.candidate_id
+                        ]
+                    )
+                    != canonical_identity_bytes(expected_parameters)
+                    or record.metrics["n_train"]
+                    != metadata["rows_after_input_label_dropna"]
+                    or (entry["training_window"] != _window_payload(fold.train))
+                    or (entry["validation_window"] != _window_payload(fold.validation))
+                    or (
+                        pd.Timestamp(metadata["train_start"])
+                        < pd.Timestamp(fold.train.start)
+                    )
+                    or (
+                        pd.Timestamp(metadata["train_end"])
+                        > pd.Timestamp(fold.train.end)
+                    )
+                ):
+                    raise ValueError("model_trial_parameters_misaligned")
+                _validate_model_parameters(
+                    metadata,
+                    expected_parameters,
+                    error="model_trial_parameters_misaligned",
+                )
+                member = entry["validation_prediction"]
+                path = f"models/{quarter}/{family_id}/{entry['model_id']}.parquet"
+                if member.get("path") != path or member != member_records.get(path):
+                    raise ValueError("model_validation_member_invalid")
+                required.add(path)
+                if verify_science:
+                    expected_coverage = ModelSampleCoverage(
+                        model_validation_coverage_scope(
+                            dataset_identity, fold, tuple(specs.values())
+                        )
+                    )
+
+                    def scoring_frames(
+                        entry=entry, fold=fold, coverage=expected_coverage
+                    ):
+                        with closing_iterator(
+                            _a_share_validation_chunks(
+                                root,
+                                entry,
+                                member_identities=member_identities,
+                                development_end=envelope["research_window"]["end"],
+                            )
+                        ) as frames:
+                            for frame in frames:
+                                mature = frame.loc[
+                                    label_maturity_mask(
+                                        frame,
+                                        fitting_cutoff=fold.validation.end,
+                                        availability_column="label_available_at",
+                                        target_column="label",
+                                    )
+                                    & frame["score_eligible"]
+                                ]
+                                coverage.add(mature)
+                                try:
+                                    yield mature
+                                except GeneratorExit:
+                                    return
+
+                    metrics = evaluate_model_trial_metrics_from_chunks(
+                        scoring_frames(),
+                        model_id=entry["model_id"],
+                        label_column="label",
+                        prediction_column="prediction_score",
+                        expected_coverage=None,
+                    )
+                    terminal = {
+                        key: None
+                        if isinstance(value, float) and np.isnan(value)
+                        else value.item()
+                        if isinstance(value, np.generic)
+                        else value
+                        for key, value in metrics.items()
+                        if key != "model_id"
+                    }
+                    terminal["n_train"] = metadata["rows_after_input_label_dropna"]
+                    if (
+                        dict(record.metrics) != terminal
+                        or record.common_coverage_id
+                        != expected_coverage.semantic_identity
+                    ):
+                        raise ValueError("model_validation_trial_mismatch")
+    return by_identity, used_references, folds, completed
 
 
 def _validate_model_parameters(metadata, parameters, *, error):

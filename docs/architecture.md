@@ -136,6 +136,14 @@ CLI 先输出原有结构化结果，再将顶层 `COMPLETE`、`FAILED`、`BLOCK
 模型拟合前先在现有 trial ledger 发布 attempted 事件，结束后追加同 attempt 的不可变终态事件；
 读取者核对不变身份后投影当前状态。硬退出留下 attempted，不能宣称从未开始或已完成；
 不自动重试、不改写旧事件，也不因此解锁 HOLDOUT_LOCKED。
+A 股模型 owner 在每季全部家族和配置完成原生科学、参数、trial、PK 与覆盖验收，
+且上游读取快照通过核对后，使用同一 semantic artifact/原子目录机制发布季度分片。
+分片绑定完整 MODEL 请求的精确身份，只由该 owner 接续同一身份的后续请求；
+已完成 trial、日志和未发布 `.a-*` 目录不能替代分片验收。新请求保留旧分片原来的
+run_id/experiment_id 引用，仅为实际新增拟合写入新 trial，不建立第二份账本。
+恢复只流式读取已发布预测成员和元数据，不保存训练矩阵；分片与完整 MODEL 各自保留
+不可变预测成员。完整季度矩阵、全部选择与最终 refit 通过既有完整验收后才发布 MODEL，
+季度分片不成为 DAG 的完整 MODEL，也不单独授予预测、统计或留出资格。
 ExperimentPlan.stage 是 selection/refit 阶段的唯一事实，TrialRecord 通过 plan/protocol_hash 绑定。
 数据角色统一为 train、validation、test；development 是访问阶段，不是第四角色。
 同一请求、同一折或最终 refit 阶段内，相同截止、输入列、标签成熟域、资格过滤、行数控制、

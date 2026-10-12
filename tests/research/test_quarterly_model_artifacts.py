@@ -2,7 +2,11 @@ from __future__ import annotations
 
 import json
 import pickle
+import shutil
+import subprocess
+import sys
 import warnings
+import weakref
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -40,6 +44,7 @@ from quant_research_platform.research.protocols import a_share
 from quant_research_platform.research.randomness import derive_seed
 from quant_research_platform.storage.experiments import (
     read_model_trial_ledger_reference,
+    research_run_trial_references,
 )
 from quant_research_platform.storage.identity import (
     filesystem_exists,
@@ -48,6 +53,7 @@ from quant_research_platform.storage.identity import (
     filesystem_read_bytes,
     filesystem_walk,
     filesystem_write_bytes,
+    native_filesystem_path,
 )
 from quant_research_platform.storage.layout import StorageLayout
 from quant_research_platform.storage.semantic_artifacts import (
@@ -71,6 +77,402 @@ def _file_bytes(root: Path) -> dict[Path, bytes]:
         for parent, _directories, files in filesystem_walk(root)
         for name in files
     }
+
+
+def _model_request(run_id, *, stop_after=None):
+    def wrap(results):
+        def run(**callbacks):
+            publish = callbacks["on_quarter"]
+
+            def complete(fold):
+                publish(fold)
+                if a_share.quarter_id_for_fold(fold) == stop_after:
+                    raise RuntimeError("quarter_publication_interrupt")
+
+            return results(run_id=run_id, **{**callbacks, "on_quarter": complete})
+
+        return run
+
+    return wrap
+
+
+@pytest.fixture(scope="module")
+def interrupted_quarter_models(tmp_path_factory):
+    root = tmp_path_factory.mktemp("quarter_resume")
+    specs = (
+        ModelSpec(
+            model_id="linear_regression",
+            model_algorithm="linear_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+        ),
+        ModelSpec(
+            model_id="ridge",
+            model_algorithm="ridge_regression",
+            input_factor_columns=("x",),
+            label_column="label",
+        ),
+    )
+    protocol = shared_model_protocol(
+        specs,
+        configurations=[
+            {"model_id": "linear_regression", "hyperparameters": {}},
+            {
+                "model_id": "ridge",
+                "hyperparameters": {},
+                "parameter_candidates": [
+                    {"regularization_strength": 0.1},
+                    {"regularization_strength": 1.0},
+                ],
+            },
+        ],
+    )
+    with pytest.raises(RuntimeError, match="quarter_publication_interrupt"):
+        shared_model_case(
+            root,
+            specs=specs,
+            protocol=protocol,
+            model_results_wrapper=_model_request("first_request", stop_after="2019Q1"),
+        )
+    units = tuple(filesystem_glob(root / "models/quarters", "*/*/instances/*"))
+    assert len(units) == 5
+    assert not tuple(filesystem_glob(root / "models/instances", "*"))
+    assert not tuple(filesystem_glob(root / "models", "**/.a-*"))
+    return SimpleNamespace(root=root, specs=specs, protocol=protocol)
+
+
+def test_quarter_resume_preserves_trials_selections_refits_and_predictions(
+    tmp_path, monkeypatch, interrupted_quarter_models
+):
+    from quant_research_platform.storage import semantic_artifacts
+
+    partial = interrupted_quarter_models
+    root = tmp_path / "resumed"
+    shutil.copytree(native_filesystem_path(partial.root), native_filesystem_path(root))
+    ledger_before = _file_bytes(root / "data/runs/trials/first_request")
+    baseline = shared_model_case(
+        tmp_path / "baseline", specs=partial.specs, protocol=partial.protocol
+    )
+    original_fit = fitting._fit_model_result
+    fitted = []
+    source_reads = {
+        parent / name: 0
+        for parent, _directories, files in filesystem_walk(root / "models/quarters")
+        for name in files
+        if name != "manifest.json"
+    }
+    original_record = semantic_artifacts._member_record
+
+    def record(relative, path, **kwargs):
+        if path in source_reads:
+            source_reads[path] += 1
+        return original_record(relative, path, **kwargs)
+
+    def fit(training, spec, **kwargs):
+        fitted.append((spec.model_id, spec.random_seed))
+        return original_fit(training, spec, **kwargs)
+
+    monkeypatch.setattr(fitting, "_fit_model_result", fit)
+    monkeypatch.setattr(semantic_artifacts, "_member_record", record)
+    resumed = shared_model_case(
+        root,
+        specs=partial.specs,
+        protocol=partial.protocol,
+        model_results_wrapper=_model_request("resumed_request"),
+    )
+    unique_refits = {
+        entry["refit_trial_semantic_identity"]
+        for entry in resumed.artifact.final_models
+    }
+    assert len(fitted) == 3 + len(unique_refits)
+    assert source_reads and set(source_reads.values()) == {1}
+    assert _file_bytes(root / "data/runs/trials/first_request") == ledger_before
+    assert resumed.artifact.member_records == baseline.artifact.member_records
+    assert resumed.artifact.selections == baseline.artifact.selections
+    assert resumed.artifact.final_models == baseline.artifact.final_models
+    for reference in resumed.artifact.trial_ledgers:
+        plan, records = read_model_trial_ledger_reference(resumed.layout, reference)
+        old = plan.stage == "selection" and plan.folds[0].validation.end < pd.Timestamp(
+            "2019-04-01"
+        )
+        assert reference["run_id"] == ("first_request" if old else "resumed_request")
+        assert all(record.status == "completed" for record in records)
+    for group in ("global", "quarterly"):
+        with _prediction_result(baseline, group=group) as expected:
+            before = pd.concat(list(expected.output_chunks), ignore_index=True)
+        with _prediction_result(resumed, group=group) as actual:
+            after = pd.concat(list(actual.output_chunks), ignore_index=True)
+        pd.testing.assert_frame_equal(before, after)
+    costs = resumed.artifact.operational_metadata["model_phase_observations"]
+    assert sum(phase["fit_count"] for phase in costs["phases"]) == 18 + len(
+        unique_refits
+    )
+
+
+@pytest.mark.parametrize(
+    "mutation", ("matrix", "seed", "trial", "selection", "prediction", "ledger")
+)
+def test_quarter_resume_rejects_invalid_published_units_without_retraining(
+    tmp_path, monkeypatch, interrupted_quarter_models, mutation
+):
+    partial = interrupted_quarter_models
+    root = tmp_path / "candidate"
+    shutil.copytree(native_filesystem_path(partial.root), native_filesystem_path(root))
+    unit = next(filesystem_glob(root / "models/quarters", "*/2019Q1/instances/*"))
+    payload = json.loads(filesystem_read_bytes(unit / "quarter.json"))
+    if mutation == "prediction":
+        prediction = (
+            unit / payload["candidate_models"][0]["validation_prediction"]["path"]
+        )
+        filesystem_write_bytes(prediction, filesystem_read_bytes(prediction) + b" ")
+    elif mutation == "ledger":
+        manifest = json.loads(filesystem_read_bytes(unit / "manifest.json"))
+        reference = manifest["operational_metadata"]["model_trial_ledgers"][0]
+        ledger = StorageLayout(root).trial_ledger_root(
+            reference["run_id"], reference["experiment_id"]
+        )
+        terminal = next(filesystem_glob(ledger / "records", "*-terminal.json"))
+        record = json.loads(filesystem_read_bytes(terminal))
+        record["metrics"]["n_train"] += 1
+        filesystem_write_bytes(terminal, json.dumps(record).encode())
+    else:
+        if mutation == "matrix":
+            payload["candidate_models"].pop()
+        elif mutation == "seed":
+            payload["candidate_models"][0]["model_metadata"]["random_seed"] += 1
+        elif mutation == "trial":
+            payload["candidate_models"][0]["trial_semantic_identity"] = "e" * 64
+        else:
+            payload["selection"]["cutoff"] = "2024-01-01"
+        filesystem_write_bytes(unit / "quarter.json", json.dumps(payload).encode())
+        manifest = json.loads(filesystem_read_bytes(unit / "manifest.json"))
+        manifest["members"] = [
+            persisted._member_record(member["path"], unit / member["path"])
+            for member in manifest["members"]
+        ]
+        filesystem_write_bytes(unit / "manifest.json", json.dumps(manifest).encode())
+    before = _file_bytes(root / "models/quarters")
+    monkeypatch.setattr(
+        fitting,
+        "_fit_model_result",
+        lambda *_args, **_kwargs: pytest.fail("invalid quarter reached fitting"),
+    )
+    with pytest.raises(ValueError):
+        shared_model_case(
+            root,
+            specs=partial.specs,
+            protocol=partial.protocol,
+            model_results_wrapper=_model_request("resumed_request"),
+        )
+    assert _file_bytes(root / "models/quarters") == before
+    assert not tuple(filesystem_glob(root / "models/instances", "*"))
+    assert not tuple(filesystem_glob(root / "models", "**/.a-*"))
+
+
+def test_quarter_reuse_source_failure_preserves_primary_and_existing_units(
+    tmp_path, monkeypatch, interrupted_quarter_models
+):
+    partial = interrupted_quarter_models
+    root = tmp_path / "candidate"
+    shutil.copytree(native_filesystem_path(partial.root), native_filesystem_path(root))
+    before = _file_bytes(root / "models/quarters")
+    primary = RuntimeError("source_snapshot_changed")
+
+    def verify():
+        raise primary
+
+    monkeypatch.setattr(
+        fitting,
+        "_fit_model_result",
+        lambda *_args, **_kwargs: pytest.fail("source failure reached fitting"),
+    )
+    with pytest.raises(RuntimeError) as caught:
+        shared_model_case(
+            root,
+            specs=partial.specs,
+            protocol=partial.protocol,
+            verify_source=verify,
+            model_results_wrapper=_model_request("resumed_request"),
+        )
+    assert caught.value is primary
+    assert _file_bytes(root / "models/quarters") == before
+    assert not tuple(filesystem_glob(root / "models", "**/.a-*"))
+
+
+def test_quarter_artifact_is_not_a_complete_model(interrupted_quarter_models):
+    partial = interrupted_quarter_models
+    unit = next(filesystem_glob(partial.root / "models/quarters", "*/*/instances/*"))
+    with pytest.raises(KeyError, match="model.json"):
+        read_quarterly_model_artifact(unit, trial_layout=StorageLayout(partial.root))
+
+
+@pytest.mark.parametrize("changed", ("software", "window", "protocol"))
+def test_quarter_resume_requires_the_same_full_model_identity(
+    tmp_path, monkeypatch, interrupted_quarter_models, changed
+):
+    partial = interrupted_quarter_models
+    root = tmp_path / "candidate"
+    shutil.copytree(native_filesystem_path(partial.root), native_filesystem_path(root))
+    before = _file_bytes(root / "models/quarters")
+    protocol = dict(partial.protocol)
+    kwargs = {}
+    if changed == "software":
+        kwargs["software_identity"] = "d" * 64
+    elif changed == "window":
+        kwargs["requested_end"] = "2019-03-31"
+    else:
+        protocol["root_seed"] += 1
+    primary = RuntimeError("new_identity_requires_fitting")
+
+    def fit(*_args, **_kwargs):
+        raise primary
+
+    monkeypatch.setattr(fitting, "_fit_model_result", fit)
+    with pytest.raises(RuntimeError) as caught:
+        shared_model_case(
+            root,
+            specs=partial.specs,
+            protocol=protocol,
+            model_results_wrapper=_model_request("changed_request"),
+            **kwargs,
+        )
+    assert caught.value is primary
+    assert _file_bytes(root / "models/quarters") == before
+
+
+def test_quarter_resume_after_hard_process_exit_ignores_unpublished_work(
+    tmp_path, monkeypatch
+):
+    code = """
+import os
+import sys
+from pathlib import Path
+sys.path.insert(0, "src")
+from tests.research.workflow_test_support import shared_model_case
+
+def wrap(results):
+    def run(**callbacks):
+        publish = callbacks["on_quarter"]
+        def stop(fold):
+            publish(fold)
+            os._exit(71)
+        return results(run_id="hard_exit", **{**callbacks, "on_quarter": stop})
+    return run
+
+shared_model_case(Path(sys.argv[1]), model_results_wrapper=wrap)
+"""
+    child = subprocess.run(
+        [sys.executable, "-B", "-c", code, str(tmp_path)],
+        cwd=Path(__file__).resolve().parents[2],
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    assert child.returncode == 71, child.stderr
+    old_staging = tuple(filesystem_glob(tmp_path / "models/instances", ".a-*"))
+    assert len(old_staging) == 1
+    before = _file_bytes(old_staging[0])
+    assert (
+        len(tuple(filesystem_glob(tmp_path / "models/quarters", "*/*/instances/*")))
+        == 1
+    )
+    original_fit = fitting._fit_model_result
+    fitted = []
+
+    def fit(training, spec, **kwargs):
+        fitted.append(spec.random_seed)
+        return original_fit(training, spec, **kwargs)
+
+    monkeypatch.setattr(fitting, "_fit_model_result", fit)
+    result = shared_model_case(
+        tmp_path, model_results_wrapper=_model_request("after_hard_exit")
+    )
+    assert len(fitted) == 6
+    assert _file_bytes(old_staging[0]) == before
+    assert {reference["run_id"] for reference in result.artifact.trial_ledgers} == {
+        "hard_exit",
+        "after_hard_exit",
+    }
+
+
+def test_quarter_publication_releases_completed_training_domains(tmp_path, monkeypatch):
+    from quant_research_platform.research.models import production
+
+    prepare = production._prepare_training
+    training = []
+    quarters = []
+
+    def prepared(*args, **kwargs):
+        result = prepare(*args, **kwargs)
+        training.append(weakref.ref(result))
+        return result
+
+    def wrap(results):
+        def run(**callbacks):
+            publish = callbacks["on_quarter"]
+
+            def complete(fold):
+                assert training and all(reference() is None for reference in training)
+                quarters.append(a_share.quarter_id_for_fold(fold))
+                publish(fold)
+
+            return results(**{**callbacks, "on_quarter": complete})
+
+        return run
+
+    monkeypatch.setattr(production, "_prepare_training", prepared)
+    shared_model_case(
+        tmp_path,
+        requested_end="2018-06-30",
+        model_results_wrapper=wrap,
+    )
+    assert quarters == ["2018Q1", "2018Q2"]
+
+
+@pytest.mark.parametrize(
+    "mutation", ("prediction", "duplicate_pk", "missing_candidate")
+)
+def test_quarter_publication_requires_native_science_and_candidate_matrix(
+    tmp_path, mutation
+):
+    def wrap(results):
+        def run(**callbacks):
+            validation = callbacks["on_validation"]
+            candidate = callbacks["on_candidate"]
+
+            def write_validation(fold, family, spec, frame):
+                if mutation == "prediction":
+                    frame = frame.assign(prediction_score=frame.prediction_score + 1)
+                validation(fold, family, spec, frame)
+                if mutation == "duplicate_pk":
+                    validation(fold, family, spec, frame)
+
+            def write_candidate(fold, family, spec, result):
+                if mutation == "missing_candidate":
+                    return
+                candidate(fold, family, spec, result)
+
+            return results(
+                **{
+                    **callbacks,
+                    "on_validation": write_validation,
+                    "on_candidate": write_candidate,
+                }
+            )
+
+        return run
+
+    with pytest.raises(ValueError):
+        shared_model_case(tmp_path, model_results_wrapper=wrap)
+    assert not tuple(filesystem_glob(tmp_path / "models/quarters", "*/*/instances/*"))
+    assert not tuple(filesystem_glob(tmp_path / "models/instances", "*"))
+    assert not tuple(filesystem_glob(tmp_path / "models", "**/.a-*"))
+    layout = StorageLayout(tmp_path)
+    references = research_run_trial_references(layout, "run_fixture")
+    assert references
+    for reference in references:
+        _plan, records = read_model_trial_ledger_reference(layout, reference)
+        assert all(record.status == "completed" for record in records)
 
 
 @pytest.mark.parametrize("with_candidates", (False, True))
@@ -1378,6 +1780,8 @@ def test_model_selection_reuses_snapshot_and_rejects_between_scan_mutations(
             on_trial=lambda *_args: pytest.fail("unexpected_trial"),
             select_models=lambda *_args: pytest.fail("unexpected_selection"),
             on_observation=lambda *_args: pytest.fail("unexpected_observation"),
+            reuse_quarter=lambda *_args: pytest.fail("unexpected_quarter_reuse"),
+            on_quarter=lambda *_args: pytest.fail("unexpected_quarter_publication"),
         )
 
     if mutation in {"cancel", "staged"}:

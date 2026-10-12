@@ -122,6 +122,8 @@ def build_model_selection_result(
     on_trial,
     select_models,
     on_observation,
+    reuse_quarter,
+    on_quarter,
 ) -> Iterable[FinalModelResult]:
     if not model_ids:
         raise ValueError("model_selection_model_ids_invalid")
@@ -203,6 +205,8 @@ def build_model_selection_result(
         on_trial=on_trial,
         select_models=select_models,
         on_observation=on_observation,
+        reuse_quarter=reuse_quarter,
+        on_quarter=on_quarter,
     )
 
 
@@ -231,6 +235,8 @@ def _build_a_share_models(
     on_trial,
     select_models,
     on_observation,
+    reuse_quarter,
+    on_quarter,
 ):
     _validate_a_share_model_family_ids(model_ids)
     requested_end = pd.Timestamp(time_window.end)
@@ -287,10 +293,26 @@ def _build_a_share_models(
     for fold in folds:
         prepared_domains.clear()
         quarter_id = quarter_id_for_fold(fold)
+        completed = reuse_quarter(fold)
         if ("quarterly", quarter_id) in selection_windows:
             select_models(
                 "quarterly", quarter_id, *selection_windows[("quarterly", quarter_id)]
             )
+        if completed is not None:
+            for family_id, (plan, n_train) in completed.items():
+                configuration = configurations[family_id]
+                parameters = configuration.get(
+                    "parameter_candidates", [configuration["hyperparameters"]]
+                )
+                last_recorders[family_id] = TrialRecorder(layout, run_id, plan)
+                last_specs[family_id] = _selection_model_specs(
+                    model_catalog.get(family_id),
+                    parameters,
+                    n_train=n_train,
+                    root_seed=root_seed,
+                    quarter_id=quarter_id,
+                )
+            continue
         coverage = ModelSampleCoverage(
             model_validation_coverage_scope(dataset_identity, fold, family_specs)
         )
@@ -401,6 +423,9 @@ def _build_a_share_models(
             on_trial(fold, family_id, recorder.reference())
             last_recorders[family_id] = recorder
             last_specs[family_id] = candidates
+        prepared_domains.clear()
+        del prepared_training
+        on_quarter(fold)
     cutoff = pd.Timestamp(development_window["end"])
     if pd.Timestamp(time_window.end) < cutoff:
         return
